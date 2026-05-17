@@ -52,10 +52,15 @@ ParsedFrame parse_frame(const uint8_t* data, size_t len) {
   // Expected total = 1(Start) + 1(Length) + Length_field + 2(CRC) = Length_field + 4
   uint8_t length_field = data[1];
   size_t expected_total = static_cast<size_t>(length_field) + 4;
-  if (len != expected_total) {
-    ESP_LOGV(TAG, "Length mismatch: header says %zu total, got %zu bytes", expected_total, len);
-    // Mark valid but note the inconsistency — don't reject outright since
-    // the caller may have provided extra trailing bytes.
+  if (len < expected_total) {
+    // Insufficient bytes — the frame is truncated and cannot be trusted.
+    ESP_LOGV(TAG, "Frame too short: header says %zu total, got %zu bytes", expected_total, len);
+    result.valid = false;
+    return result;
+  }
+  if (len > expected_total) {
+    // Extra trailing bytes — tolerate but note the inconsistency.
+    ESP_LOGV(TAG, "Frame has trailing bytes: header says %zu total, got %zu bytes", expected_total, len);
   }
 
   // Validate CRC

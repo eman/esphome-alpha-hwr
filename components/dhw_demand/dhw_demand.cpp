@@ -13,7 +13,7 @@ void DhwDemandComponent::setup() {
   for (int i = 0; i < DROPLET_BUF_SIZE; i++) {
     flow_buf_[i] = NAN;
   }
-  prev_tick_ms_ = millis();
+  // Per-sensor derivative timestamps are initialized to 0 (first-call sentinel).
 
   // Register callback so head_rate_peak_ is updated at notification rate (~1–2 Hz).
   // Using the peak within each 10s window ensures transients aren't missed at tick time.
@@ -72,18 +72,26 @@ float DhwDemandComponent::read_sensor_(sensor::Sensor *s) {
 }
 
 float DhwDemandComponent::compute_deriv_(float current, float &prev,
-                                          float dt_s) {
+                                          uint32_t &prev_ms, uint32_t now) {
   if (std::isnan(current)) {
-    // Don't overwrite prev — preserve last valid sample so the next
-    // valid reading still produces a usable derivative.
+    // Don't overwrite prev or prev_ms — preserve last valid sample so the
+    // next valid reading computes the derivative over the true elapsed time.
     return NAN;
   }
-  if (std::isnan(prev) || dt_s <= 0.0f) {
+  if (std::isnan(prev) || prev_ms == 0) {
     prev = current;
+    prev_ms = now;
+    return NAN;
+  }
+  float dt_s = (float)(now - prev_ms) / 1000.0f;
+  if (dt_s <= 0.0f) {
+    prev = current;
+    prev_ms = now;
     return NAN;
   }
   float deriv = (current - prev) / dt_s;
   prev = current;
+  prev_ms = now;
   return deriv;
 }
 
@@ -334,10 +342,6 @@ void DhwDemandComponent::update_session_(bool demand) {
 
 void DhwDemandComponent::update() {
   uint32_t now = millis();
-  float dt_s = (prev_tick_ms_ == 0)
-                   ? 10.0f
-                   : (float)(now - prev_tick_ms_) / 1000.0f;
-  prev_tick_ms_ = now;
 
   // ── 1. Read current sensor values ─────────────────────────────────────────
   float motor_speed = read_sensor_(motor_speed_);
@@ -352,13 +356,13 @@ void DhwDemandComponent::update() {
   bool prev_flow_present =
       !std::isnan(prev_flow_) && prev_flow_ > flow_threshold_;
 
-  // ── 2. Compute derivatives ────────────────────────────────────────────────
-  float inlet_deriv = compute_deriv_(inlet_psi, prev_inlet_pressure_, dt_s);
+  // ── 2. Compute derivatives (per-sensor dt tracks NAN gaps correctly) ──────
+  float inlet_deriv = compute_deriv_(inlet_psi, prev_inlet_pressure_, prev_inlet_pressure_ms_, now);
   float current_deriv =
-      compute_deriv_(motor_current, prev_motor_current_, dt_s);
-  float temp_deriv = compute_deriv_(tank_temp, prev_tank_lower_temp_, dt_s);
-  float charge_deriv = compute_deriv_(dhw_charge, prev_dhw_charge_, dt_s);
-  float power_deriv = compute_deriv_(pump_power, prev_pump_power_, dt_s);
+      compute_deriv_(motor_current, prev_motor_current_, prev_motor_current_ms_, now);
+  float temp_deriv = compute_deriv_(tank_temp, prev_tank_lower_temp_, prev_tank_lower_temp_ms_, now);
+  float charge_deriv = compute_deriv_(dhw_charge, prev_dhw_charge_, prev_dhw_charge_ms_, now);
+  float power_deriv = compute_deriv_(pump_power, prev_pump_power_, prev_pump_power_ms_, now);
 
   // ── 3. Push Droplet flow into circular buffer ─────────────────────────────
   flow_buf_[flow_buf_head_] = flow;

@@ -77,7 +77,8 @@ class DhwDemandComponent : public PollingComponent {
  protected:
   // ── Detection helpers ──────────────────────────────────────────────────────
   float read_sensor_(sensor::Sensor *s);
-  float compute_deriv_(float current, float &prev, float dt_s);
+  float compute_deriv_(float current, float &prev, uint32_t &prev_ms,
+                      uint32_t now);
   bool flow_latch_active_();
   bool detect_pump_on_(float motor_speed, float motor_current);
 
@@ -147,6 +148,13 @@ class DhwDemandComponent : public PollingComponent {
   float prev_dhw_charge_{NAN};
   float prev_pump_power_{NAN};
 
+  // Per-sensor timestamps for accurate derivative dt across NAN gaps
+  uint32_t prev_inlet_pressure_ms_{0};
+  uint32_t prev_motor_current_ms_{0};
+  uint32_t prev_tank_lower_temp_ms_{0};
+  uint32_t prev_dhw_charge_ms_{0};
+  uint32_t prev_pump_power_ms_{0};
+
   // ── Pump state tracking ───────────────────────────────────────────────────
   // When both motor sensors are NaN (BLE disconnect), forward-fill the last
   // known pump state instead of defaulting to "off".  Matches Python's
@@ -166,7 +174,7 @@ class DhwDemandComponent : public PollingComponent {
   uint32_t pump_on_started_ms_{0}; // Start time for startup-transient suppression
 
   // ── Tick timing ───────────────────────────────────────────────────────────
-  uint32_t prev_tick_ms_{0};
+  // (per-sensor timestamps are used for derivative dt; see prev_*_ms_ above)
 
   // ── Session state ─────────────────────────────────────────────────────────
   bool session_active_{false};

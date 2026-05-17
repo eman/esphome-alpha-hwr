@@ -671,10 +671,12 @@ bool ScheduleService::write_entries_async(
   return true;
 }
 
-bool ScheduleService::clear_entry(const std::string &day, uint8_t layer) {
+void ScheduleService::clear_entry(const std::string &day, uint8_t layer,
+                                   std::function<void(bool)> on_complete) {
   if (!this->session_.is_ready()) {
     ESP_LOGE(TAG, "Cannot clear schedule entry: session not ready");
-    return false;
+    if (on_complete) on_complete(false);
+    return;
   }
 
   // Validate day
@@ -687,24 +689,26 @@ bool ScheduleService::clear_entry(const std::string &day, uint8_t layer) {
   }
   if (!valid_day) {
     ESP_LOGE(TAG, "Invalid day name: %s", day.c_str());
-    return false;
+    if (on_complete) on_complete(false);
+    return;
   }
 
   // Validate layer
   if (layer > 4) {
     ESP_LOGE(TAG, "Invalid layer: %d. Must be 0-4.", layer);
-    return false;
+    if (on_complete) on_complete(false);
+    return;
   }
 
   ESP_LOGI(TAG, "Clearing schedule entry for %s on layer %d...", day.c_str(),
            layer);
 
-  // Use async read + filter + write to avoid the sync/async mismatch:
-  // read_entries() queues an async BLE command and returns immediately.
+  // Fully async: read → filter → write, with completion propagation.
   this->read_entries_async(layer,
-    [this, day, layer](bool success, const std::vector<ScheduleEntry> &entries) {
+    [this, day, layer, on_complete](bool success, const std::vector<ScheduleEntry> &entries) {
       if (!success) {
         ESP_LOGE(TAG, "Failed to read current schedule for layer %d", layer);
+        if (on_complete) on_complete(false);
         return;
       }
 
@@ -716,11 +720,17 @@ bool ScheduleService::clear_entry(const std::string &day, uint8_t layer) {
         }
       }
 
-      // Write back the filtered entries
-      this->write_entries(filtered_entries, layer);
+      // Write back the filtered entries asynchronously
+      this->write_entries_async(filtered_entries, layer,
+        [on_complete, day, layer](bool write_success) {
+          if (write_success) {
+            ESP_LOGI(TAG, "Cleared schedule entry for %s on layer %d", day.c_str(), layer);
+          } else {
+            ESP_LOGE(TAG, "Failed to write filtered schedule for layer %d", layer);
+          }
+          if (on_complete) on_complete(write_success);
+        });
     });
-
-  return true;
 }
 
 // -------------------------------------------------------------------------

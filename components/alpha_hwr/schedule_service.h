@@ -344,19 +344,22 @@ public:
                            std::function<void(bool success)> on_complete);
 
   /**
-   * Clear (disable) a schedule entry for a specific day.
+   * Clear (disable) a schedule entry for a specific day (async).
    *
    * This disables the schedule for a specific day on the specified layer,
    * but does not affect other days or layers.
    *
    * Implementation: Reads current schedule for layer, removes entry for
-   * specified day, and writes back the filtered schedule.
+   * specified day, and writes back the filtered schedule asynchronously.
    *
    * @param day Day name (Monday-Sunday)
    * @param layer Schedule layer (0-4)
-   * @return True if successfully cleared, false otherwise
+   * @param on_complete Optional callback invoked with success/failure when
+   *                    the full read-filter-write sequence completes.
+   *                    If nullptr, failures are logged but not propagated.
    */
-  bool clear_entry(const std::string &day, uint8_t layer = 0);
+  void clear_entry(const std::string &day, uint8_t layer = 0,
+                   std::function<void(bool)> on_complete = nullptr);
 
   // -------------------------------------------------------------------------
   // Single Event Operations (One-Time Schedules)

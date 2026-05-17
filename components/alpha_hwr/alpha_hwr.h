@@ -393,8 +393,9 @@ public:
                                     std::function<void(bool)> on_complete) {
     return schedule_service_.write_entries_async(entries, layer, on_complete);
   }
-  bool clear_schedule_entry(const std::string &day, uint8_t layer = 0) {
-    return schedule_service_.clear_entry(day, layer);
+  void clear_schedule_entry(const std::string &day, uint8_t layer = 0,
+                            std::function<void(bool)> on_complete = nullptr) {
+    schedule_service_.clear_entry(day, layer, on_complete);
   }
   bool get_schedule_display_string(const std::vector<ScheduleEntry> &entries,
                                    std::string *result) {
