@@ -104,10 +104,10 @@ void Authentication::stage3_extensions() {
   
   ESP_LOGD(TAG, "Stage 3: Sending extension packets");
   
-  // Python sends EXTEND_2 then EXTEND_1 (note the order)
-  // See authentication.py lines 344-351
-  send_packet(AUTH_EXT_2, sizeof(AUTH_EXT_2));
+  // Send EXT_1 (Class 0x05) then EXT_2 (Class 0x0B)
+  // Order per protocol/connection.md Step C
   send_packet(AUTH_EXT_1, sizeof(AUTH_EXT_1));
+  send_packet(AUTH_EXT_2, sizeof(AUTH_EXT_2));
   
   // Wait 500ms for final stabilization (Python uses 0.5s)
   if (scheduler_callback_) {

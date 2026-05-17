@@ -25,8 +25,9 @@ class Transport;
  *   - Packet: Class 10 DataObject SET operation
  *   - SubID: 0x5600, ObjID: 0x0006
  * 
- * Stage 3: Extension Packets (2 packets in parallel)
+ * Stage 3: Extension Packets (2 packets, sequential)
  *   - Purpose: Session establishment and capability negotiation
+ *   - EXT_1 (Class 0x05) first, then EXT_2 (Class 0x0B)
  *   - Extends authentication timeout and seals the handshake
  * 
  * Timing Requirements:
@@ -168,22 +169,23 @@ static const uint8_t AUTH_LEGACY[] = {0x27, 0x07, 0xE7, 0xF8, 0x02, 0x03, 0x94, 
 static const uint8_t AUTH_CLASS10[] = {0x27, 0x07, 0xE7, 0xF8, 0x0A, 0x03, 0x56, 0x00, 0x06, 0xC5, 0x5A};
 
 /**
- * @brief Extension Packet 1 (Class 0x0B)
- * 
- * Frame: 27 05 E7 F8 0B C1 0F D0 C3
- * 
- * Purpose: Extend authentication session (Part 1)
- */
-static const uint8_t AUTH_EXT_1[] = {0x27, 0x05, 0xE7, 0xF8, 0x0B, 0xC1, 0x0F, 0xD0, 0xC3};
-
-/**
- * @brief Extension Packet 2 (Class 0x05)
+ * @brief Extension Packet 1 (Class 0x05)
  * 
  * Frame: 27 05 E7 F8 05 C1 4B C3 82
  * 
- * Purpose: Extend authentication session (Part 2)
+ * Purpose: Extend authentication session (Part 1). Must be sent first.
+ * Order documented in protocol/connection.md Step C.
  */
-static const uint8_t AUTH_EXT_2[] = {0x27, 0x05, 0xE7, 0xF8, 0x05, 0xC1, 0x4B, 0xC3, 0x82};
+static const uint8_t AUTH_EXT_1[] = {0x27, 0x05, 0xE7, 0xF8, 0x05, 0xC1, 0x4B, 0xC3, 0x82};
+
+/**
+ * @brief Extension Packet 2 (Class 0x0B)
+ * 
+ * Frame: 27 05 E7 F8 0B C1 0F D0 C3
+ * 
+ * Purpose: Extend authentication session (Part 2). Sent after EXT_1.
+ */
+static const uint8_t AUTH_EXT_2[] = {0x27, 0x05, 0xE7, 0xF8, 0x0B, 0xC1, 0x0F, 0xD0, 0xC3};
 
 }  // namespace core
 }  // namespace alpha_hwr
