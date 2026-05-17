@@ -39,6 +39,12 @@ size_t build_data_object_set(uint16_t sub_id, uint16_t obj_id,
   // Length = ServiceID + Source + Class + OpSpec + SubID (2) + ObjID (2) + Data
   size_t length = 1 + 1 + 1 + 1 + 2 + 2 + data_len;
   
+  // Validate: OpSpec bits 5-0 encode (length - 4), which must fit in 6 bits (max 63).
+  // That limits data_len to 59 bytes (63 - 4 for SubID + ObjID).
+  if (data_len > 59) {
+    return 0;  // Payload too large for single-frame SET
+  }
+  
   // Calculate OpSpec (bit 7 set = SET, bits 6-0 = data length including IDs)
   // op_bits = length - 4 (subtract ServiceID, Source, Class, OpSpec)
   uint8_t op_bits = (length - 4) & 0x3F;
@@ -143,6 +149,11 @@ size_t build_geni_packet(uint8_t service_id, uint8_t source,
                           uint8_t *packet_out) {
   // Calculate frame length: ServiceID (1) + Source (1) + APDU
   size_t length = 1 + 1 + apdu_len;
+
+  // Validate: length field must fit in a single byte (max 255)
+  if (length > 255) {
+    return 0;  // APDU too large for single GENI frame
+  }
   
   // Build frame header
   packet_out[0] = FRAME_START;  // 0x27

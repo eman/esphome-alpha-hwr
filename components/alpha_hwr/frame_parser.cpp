@@ -48,6 +48,16 @@ ParsedFrame parse_frame(const uint8_t* data, size_t len) {
   // Frame is structurally valid
   result.valid = true;
 
+  // Validate embedded length byte against actual data length.
+  // Expected total = 1(Start) + 1(Length) + Length_field + 2(CRC) = Length_field + 4
+  uint8_t length_field = data[1];
+  size_t expected_total = static_cast<size_t>(length_field) + 4;
+  if (len != expected_total) {
+    ESP_LOGV(TAG, "Length mismatch: header says %zu total, got %zu bytes", expected_total, len);
+    // Mark valid but note the inconsistency — don't reject outright since
+    // the caller may have provided extra trailing bytes.
+  }
+
   // Validate CRC
   // CRC covers from Length byte (offset 1) to end of APDU (len - 3), excluding Start and CRC itself
   uint16_t calculated_crc = calc_crc16_read(data + 1, len - 3);

@@ -36,6 +36,7 @@ bool DeviceInfoService::read_device_info_async(std::function<void(bool)> on_comp
   
   // Reset state
   pending_reads_ = 5;
+  failed_reads_ = 0;
   completion_callback_ = on_complete;
   
   // Queue all 5 string reads
@@ -53,6 +54,7 @@ bool DeviceInfoService::read_device_info_async(std::function<void(bool)> on_comp
         ESP_LOGD(TAG, "Product name: %s", product_name_.c_str());
       } else {
         ESP_LOGW(TAG, "Failed to read product name");
+        failed_reads_++;
       }
       on_string_read_complete();
     });
@@ -69,6 +71,7 @@ bool DeviceInfoService::read_device_info_async(std::function<void(bool)> on_comp
         ESP_LOGD(TAG, "Serial number: %s", serial_number_.c_str());
       } else {
         ESP_LOGW(TAG, "Failed to read serial number");
+        failed_reads_++;
       }
       on_string_read_complete();
     });
@@ -81,6 +84,7 @@ bool DeviceInfoService::read_device_info_async(std::function<void(bool)> on_comp
         ESP_LOGD(TAG, "Software version: %s", software_version_.c_str());
       } else {
         ESP_LOGW(TAG, "Failed to read software version");
+        failed_reads_++;
       }
       on_string_read_complete();
     });
@@ -93,6 +97,7 @@ bool DeviceInfoService::read_device_info_async(std::function<void(bool)> on_comp
         ESP_LOGD(TAG, "Hardware version: %s", hardware_version_.c_str());
       } else {
         ESP_LOGW(TAG, "Failed to read hardware version");
+        failed_reads_++;
       }
       on_string_read_complete();
     });
@@ -105,6 +110,7 @@ bool DeviceInfoService::read_device_info_async(std::function<void(bool)> on_comp
         ESP_LOGD(TAG, "BLE version: %s", ble_version_.c_str());
       } else {
         ESP_LOGW(TAG, "Failed to read BLE version");
+        failed_reads_++;
       }
       on_string_read_complete();
     });
@@ -191,8 +197,13 @@ void DeviceInfoService::on_string_read_complete() {
   ESP_LOGV(TAG, "String read complete, %d remaining", pending_reads_);
   
   if (pending_reads_ == 0 && completion_callback_) {
-    ESP_LOGI(TAG, "All device info strings read successfully");
-    completion_callback_(true);
+    bool all_ok = (failed_reads_ == 0);
+    if (all_ok) {
+      ESP_LOGI(TAG, "All device info strings read successfully");
+    } else {
+      ESP_LOGW(TAG, "Device info read completed with %d failure(s)", failed_reads_);
+    }
+    completion_callback_(all_ok);
     completion_callback_ = nullptr;
   }
 }

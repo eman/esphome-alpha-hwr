@@ -80,7 +80,8 @@ inline void build_class10_read_packet(uint32_t register_addr, uint8_t *packet_ou
 inline float read_float_be(const uint8_t *data, size_t offset) {
   if (offset + 4 > 255) return 0.0f;
   
-  // Extract 4 bytes in big-endian order
+  // Extract 4 bytes in big-endian order — use static_cast to avoid
+  // signed-int promotion UB when bit 7 is set (matches production codec.cpp).
   uint32_t temp = (static_cast<uint32_t>(data[offset]) << 24) | 
                   (static_cast<uint32_t>(data[offset + 1]) << 16) | 
                   (static_cast<uint32_t>(data[offset + 2]) << 8) | 
@@ -90,6 +91,20 @@ inline float read_float_be(const uint8_t *data, size_t offset) {
   float val;
   memcpy(&val, &temp, 4);
   return val;
+}
+
+// Read a big-endian uint16 from a byte array at the given offset
+inline uint16_t read_uint16_be(const uint8_t *data, size_t offset) {
+  return (static_cast<uint16_t>(data[offset]) << 8) |
+         static_cast<uint16_t>(data[offset + 1]);
+}
+
+// Read a big-endian uint32 from a byte array at the given offset
+inline uint32_t read_uint32_be(const uint8_t *data, size_t offset) {
+  return (static_cast<uint32_t>(data[offset]) << 24) |
+         (static_cast<uint32_t>(data[offset + 1]) << 16) |
+         (static_cast<uint32_t>(data[offset + 2]) << 8) |
+         static_cast<uint32_t>(data[offset + 3]);
 }
 
 } // namespace geni_protocol

@@ -121,14 +121,14 @@ sensor:
     name: "WiFi Signal"
   
   - platform: template
-    name: "Flow (GPM)"
+    name: "Custom Sensor"
     lambda: |-
-      // Convert m³/h to gallons per minute
-      if (id(hwr_pump_client).is_connected()) {
-        return id(flow_rate).state * 4.4029;
+      // Access the pump component via its id
+      if (id(pump).is_connected()) {
+        return 1.0;
       }
       return 0.0;
-    unit_of_measurement: "GPM"
+    unit_of_measurement: ""
 ```
 
 ---

@@ -142,14 +142,32 @@ void TelemetryService::on_packet(const uint8_t* data, size_t len) {
             handle_warnings_response(data, len, opspec);
           }
         } else if (opspec == 0x09) {
-          // Register-read format: opspec 0x09 response only carries 2-byte register ID,
-          // which is identical for alarms (0x580000) and warnings (0x58000B).
-          // We use polling order to distinguish: alarms are always queued first.
-          if (!next_09_is_warnings_) {
-            handle_alarms_response(data, len, opspec);
-            next_09_is_warnings_ = true;
-          } else {
-            handle_warnings_response(data, len, opspec);
+          // Register-read format: use the 3-byte register address from the
+          // request echo in the response (bytes 10-12 for opspec 0x09 responses
+          // with len >= 15). Fall back to poll-order toggle only if we can't
+          // distinguish by register address.
+          bool routed = false;
+          if (len >= 15) {
+            // Extract 3-byte register address echoed in the response
+            uint32_t reg_addr = (static_cast<uint32_t>(data[10]) << 16) |
+                                (static_cast<uint32_t>(data[11]) << 8) |
+                                static_cast<uint32_t>(data[12]);
+            if (reg_addr == 0x580000) {
+              handle_alarms_response(data, len, opspec);
+              routed = true;
+            } else if (reg_addr == 0x58000B) {
+              handle_warnings_response(data, len, opspec);
+              routed = true;
+            }
+          }
+          // Fallback: use polling order if register address wasn't available
+          if (!routed) {
+            if (!next_09_is_warnings_) {
+              handle_alarms_response(data, len, opspec);
+              next_09_is_warnings_ = true;
+            } else {
+              handle_warnings_response(data, len, opspec);
+            }
           }
         }
       }

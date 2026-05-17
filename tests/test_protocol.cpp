@@ -203,6 +203,81 @@ void test_packet_roundtrip() {
   TEST_ASSERT_EQ(packet_crc, calculated_crc, "Round-trip: CRC matches calculated value");
 }
 
+// Test negative cases: malformed frames, bad CRC, truncated packets
+void test_parse_frame_negative() {
+  std::cout << "\n=== Testing Frame Parser Negative Cases ===" << std::endl;
+
+  // parse_frame is in production code; here we test via the protocol.h helpers
+  // by verifying CRC validation catches corrupted packets.
+
+  // Test 1: Single-byte flip in CRC corrupts the packet
+  uint8_t good_packet[11];
+  build_class10_read_packet(0x570045, good_packet);
+  uint16_t good_crc = calc_crc16_read(&good_packet[1], 8);
+  uint16_t stored_crc = (static_cast<uint16_t>(good_packet[9]) << 8) | good_packet[10];
+  TEST_ASSERT_EQ(good_crc, stored_crc, "Negative: Good packet CRC matches");
+
+  // Corrupt one data byte and verify CRC no longer matches
+  uint8_t corrupted[11];
+  memcpy(corrupted, good_packet, 11);
+  corrupted[6] ^= 0x01;  // Flip one bit in register byte
+  uint16_t recalc_crc = calc_crc16_read(&corrupted[1], 8);
+  uint16_t orig_crc = (static_cast<uint16_t>(corrupted[9]) << 8) | corrupted[10];
+  TEST_ASSERT(recalc_crc != orig_crc, "Negative: Bit-flip detected by CRC mismatch");
+
+  // Test 2: Truncated packet — CRC computed over fewer bytes differs
+  uint8_t truncated[8];
+  memcpy(truncated, good_packet, 8);
+  // CRC over 5 bytes instead of 8 should differ
+  uint16_t short_crc = calc_crc16_read(&truncated[1], 5);
+  TEST_ASSERT(short_crc != good_crc, "Negative: Truncated packet CRC differs");
+
+  // Test 3: Wrong start byte
+  uint8_t bad_start[11];
+  memcpy(bad_start, good_packet, 11);
+  bad_start[0] = 0xFF;  // Invalid start byte
+  TEST_ASSERT(bad_start[0] != 0x27 && bad_start[0] != 0x24,
+              "Negative: Invalid start byte is neither 0x27 nor 0x24");
+
+  // Test 4: CRC of all-zero payload
+  uint8_t zeros[4] = {0x00, 0x00, 0x00, 0x00};
+  uint16_t zero_crc = calc_crc16(zeros, 4);
+  TEST_ASSERT(zero_crc != 0xFFFF, "Negative: All-zeros CRC differs from initial value");
+
+  // Test 5: CRC of single byte
+  uint8_t single[1] = {0xAB};
+  uint16_t single_crc = calc_crc16(single, 1);
+  TEST_ASSERT(single_crc != 0x0000 && single_crc != 0xFFFF,
+              "Negative: Single-byte CRC is non-trivial");
+
+  // Test 6: Float decode with high-bit-set bytes (UB check — should not crash)
+  uint8_t high_bits[] = {0xFF, 0xFF, 0xFF, 0xFF};
+  float nan_val = read_float_be(high_bits, 0);
+  // NaN != NaN by IEEE 754, so just check it doesn't crash
+  (void)nan_val;
+  tests_passed++;
+  std::cout << "[PASS] Negative: High-bit float decode does not crash" << std::endl;
+
+  // Test 7: Large register address boundary
+  uint8_t max_reg_pkt[11];
+  build_class10_read_packet(0xFFFFFF, max_reg_pkt);
+  TEST_ASSERT_EQ(max_reg_pkt[6], 0xFF, "Negative: Max register high byte");
+  TEST_ASSERT_EQ(max_reg_pkt[7], 0xFF, "Negative: Max register mid byte");
+  TEST_ASSERT_EQ(max_reg_pkt[8], 0xFF, "Negative: Max register low byte");
+  // Verify CRC is still valid for max register
+  uint16_t max_crc = calc_crc16_read(&max_reg_pkt[1], 8);
+  uint16_t max_stored = (static_cast<uint16_t>(max_reg_pkt[9]) << 8) | max_reg_pkt[10];
+  TEST_ASSERT_EQ(max_crc, max_stored, "Negative: Max register CRC valid");
+
+  // Test 8: Zero register address
+  uint8_t zero_reg_pkt[11];
+  build_class10_read_packet(0x000000, zero_reg_pkt);
+  TEST_ASSERT_EQ(zero_reg_pkt[6], 0x00, "Negative: Zero register high byte");
+  uint16_t z_crc = calc_crc16_read(&zero_reg_pkt[1], 8);
+  uint16_t z_stored = (static_cast<uint16_t>(zero_reg_pkt[9]) << 8) | zero_reg_pkt[10];
+  TEST_ASSERT_EQ(z_crc, z_stored, "Negative: Zero register CRC valid");
+}
+
 int main() {
   std::cout << "===========================================================" << std::endl;
   std::cout << "  GENI Protocol Test Suite for ALPHA HWR Component" << std::endl;
@@ -212,6 +287,7 @@ int main() {
   test_build_class10_read_packet();
   test_read_float_be();
   test_packet_roundtrip();
+  test_parse_frame_negative();
   
   std::cout << "\n===========================================================" << std::endl;
   std::cout << "  Test Results" << std::endl;

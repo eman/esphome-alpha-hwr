@@ -145,6 +145,7 @@ class DeviceInfoService {
 
   // State tracking for async reads
   int pending_reads_ = 0;
+  int failed_reads_ = 0;
   std::function<void(bool)> completion_callback_;
 
   /**

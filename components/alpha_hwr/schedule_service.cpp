@@ -656,12 +656,14 @@ bool ScheduleService::write_entries_async(
         } else {
           ESP_LOGW(TAG,
                    "Async write timeout/error for layer %d - treating as "
-                   "success (per Python reference)",
+                   "success (per Python reference: pump commits on timeout)",
                    layer);
         }
+        // NOTE: Always reports true to match Python reference behavior.
+        // The pump's two-phase commit often times out even on success because
+        // the ACK notification arrives outside the expected window.
         if (on_complete) {
-          on_complete(
-              true); // Always return true to match Python behavior for timeouts
+          on_complete(true);
         }
       },
       3000);
@@ -697,23 +699,28 @@ bool ScheduleService::clear_entry(const std::string &day, uint8_t layer) {
   ESP_LOGI(TAG, "Clearing schedule entry for %s on layer %d...", day.c_str(),
            layer);
 
-  // Read current schedule for this layer
-  std::vector<ScheduleEntry> entries;
-  if (!this->read_entries(&entries, layer)) {
-    ESP_LOGE(TAG, "Failed to read current schedule for layer %d", layer);
-    return false;
-  }
+  // Use async read + filter + write to avoid the sync/async mismatch:
+  // read_entries() queues an async BLE command and returns immediately.
+  this->read_entries_async(layer,
+    [this, day, layer](bool success, const std::vector<ScheduleEntry> &entries) {
+      if (!success) {
+        ESP_LOGE(TAG, "Failed to read current schedule for layer %d", layer);
+        return;
+      }
 
-  // Filter out the entry for the specified day
-  std::vector<ScheduleEntry> filtered_entries;
-  for (const auto &entry : entries) {
-    if (entry.get_day() != day) {
-      filtered_entries.push_back(entry);
-    }
-  }
+      // Filter out the entry for the specified day
+      std::vector<ScheduleEntry> filtered_entries;
+      for (const auto &entry : entries) {
+        if (entry.get_day() != day) {
+          filtered_entries.push_back(entry);
+        }
+      }
 
-  // Write back the filtered entries
-  return this->write_entries(filtered_entries, layer);
+      // Write back the filtered entries
+      this->write_entries(filtered_entries, layer);
+    });
+
+  return true;
 }
 
 // -------------------------------------------------------------------------

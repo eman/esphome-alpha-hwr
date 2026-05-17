@@ -192,7 +192,10 @@ void BLEConnectionManager::handle_connection_opened(const esp_ble_gattc_cb_param
   
   // Wait for encryption/pairing to stabilize before discovery
   if (scheduler_callback_) {
-    scheduler_callback_(POST_CONNECT_DELAY_MS, [this]() {
+    scheduler_sequence_++;
+    uint32_t seq = scheduler_sequence_;
+    scheduler_callback_(POST_CONNECT_DELAY_MS, [this, seq]() {
+      if (seq != this->scheduler_sequence_) return;  // Stale callback
       ESP_LOGI(TAG, "Starting service discovery...");
     });
   }
@@ -243,7 +246,10 @@ void BLEConnectionManager::handle_service_discovery_complete(esp_gatt_if_t gattc
         
         // Schedule a retry
         if (scheduler_callback_) {
-          scheduler_callback_(DISCOVERY_RETRY_DELAY_MS, [this, gattc_if]() {
+          scheduler_sequence_++;
+          uint32_t seq = scheduler_sequence_;
+          scheduler_callback_(DISCOVERY_RETRY_DELAY_MS, [this, gattc_if, seq]() {
+            if (seq != this->scheduler_sequence_) return;  // Stale callback
             ESP_LOGI(TAG, "Triggering service discovery retry...");
             esp_ble_gattc_search_service(gattc_if, this->client_->get_conn_id(), nullptr);
           });
@@ -363,6 +369,7 @@ void BLEConnectionManager::handle_gattc_event(esp_gattc_cb_event_t event, esp_ga
     
     case ESP_GATTC_DISCONNECT_EVT:
       ESP_LOGW(TAG, "Disconnected (reason: 0x%02x)", param->disconnect.reason);
+      scheduler_sequence_++;  // Invalidate any pending scheduler callbacks
       if (disconnection_callback_) {
         disconnection_callback_();
       }

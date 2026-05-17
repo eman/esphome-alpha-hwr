@@ -28,7 +28,7 @@ Checks: >
 
 WarningsAsErrors: ''
 
-HeaderFilterRegex: 'components/alpha_hwr/.*'
+HeaderFilterRegex: '(components/alpha_hwr|components/dhw_demand|tests)/.*'
 
 CheckOptions:
   - key: bugprone-argument-comment.StrictMode

@@ -140,8 +140,10 @@ void test_flow_only_onset_requires_one_full_off_tick() {
       pump_off_flow_onset_is_confirmed(true, false, false, true);
   bool carried_recirc_flow_confirmed =
       pump_off_flow_onset_is_confirmed(true, true, false, false);
+  // After fix M4: charge-drop now correctly sets onset_corroborating_signal_present,
+  // so it should confirm a first-tick flow onset (matching the intent in AGENTS.md §10.4).
   bool charge_only_first_tick_confirmed =
-      pump_off_flow_onset_is_confirmed(true, false, true, false);
+      pump_off_flow_onset_is_confirmed(true, false, true, true);
 
   TEST_ASSERT(!first_tick_confirmed,
               "A brand-new flow-only onset is treated as ambiguous");
@@ -151,8 +153,8 @@ void test_flow_only_onset_requires_one_full_off_tick() {
               "Corroborated first-tick flow is accepted immediately");
   TEST_ASSERT(!carried_recirc_flow_confirmed,
               "Flow carried from a pump-on tick stays ambiguous on the first off tick");
-  TEST_ASSERT(!charge_only_first_tick_confirmed,
-              "Charge-only corroboration does not confirm a first-tick flow onset");
+  TEST_ASSERT(charge_only_first_tick_confirmed,
+              "Charge-drop corroboration confirms a first-tick flow onset");
 }
 
 void test_ambiguous_flow_onset_does_not_prime_continuation() {

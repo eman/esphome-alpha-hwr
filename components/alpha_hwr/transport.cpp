@@ -59,6 +59,15 @@ void Transport::loop() {
       ESP_LOGV(TAG, "Sending chunk: %zu bytes (%zu/%zu sent)", 
                to_send, cmd.bytes_sent + to_send, cmd.packet.size());
 
+      if (!this->write_callback_) {
+        ESP_LOGW(TAG, "Write callback not set, dropping command");
+        if (cmd.callback) {
+          cmd.callback(false, nullptr, 0);
+        }
+        this->command_queue_.pop_front();
+        this->state_ = State::IDLE;
+        break;
+      }
       if (this->write_callback_(cmd.packet.data() + cmd.bytes_sent, to_send)) {
         cmd.bytes_sent += to_send;
         this->last_send_time_ = now;

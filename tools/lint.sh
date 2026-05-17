@@ -20,6 +20,8 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
 COMPONENT_DIR="$PROJECT_DIR/components/alpha_hwr"
+DHW_DIR="$PROJECT_DIR/components/dhw_demand"
+TESTS_DIR="$PROJECT_DIR/tests"
 
 # Colors for output
 RED='\033[0;31m'
@@ -44,7 +46,7 @@ fi
 
 echo ""
 echo "Tool: cppcheck $(cppcheck --version 2>&1 | head -1)"
-echo "Target: $COMPONENT_DIR"
+echo "Targets: $COMPONENT_DIR, $DHW_DIR, $TESTS_DIR"
 echo ""
 
 # Run cppcheck
@@ -77,7 +79,9 @@ echo "Running cppcheck..."
 echo ""
 
 OUTPUT=$(cppcheck "${CPPCHECK_ARGS[@]}" \
-  "$COMPONENT_DIR"/*.cpp "$COMPONENT_DIR"/*.h 2>&1)
+  "$COMPONENT_DIR"/*.cpp "$COMPONENT_DIR"/*.h \
+  "$DHW_DIR"/*.cpp "$DHW_DIR"/*.h \
+  "$TESTS_DIR"/*.cpp "$TESTS_DIR"/*.h 2>&1)
 
 WARNINGS=$(echo "$OUTPUT" | grep -c "warning:" || true)
 ERRORS=$(echo "$OUTPUT" | grep -c "error:" || true)

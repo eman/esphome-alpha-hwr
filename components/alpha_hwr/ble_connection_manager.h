@@ -84,6 +84,7 @@ class BLEConnectionManager {
   
   // Service discovery retry mechanism
   uint8_t discovery_retry_count_{0};
+  uint32_t scheduler_sequence_{0};  // Sequence counter to invalidate stale lambdas
   static const uint8_t MAX_DISCOVERY_RETRIES = 3;
   static const uint32_t DISCOVERY_RETRY_DELAY_MS = 1000;
   static const uint32_t POST_CONNECT_DELAY_MS = 500;

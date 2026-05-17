@@ -74,7 +74,8 @@ float DhwDemandComponent::read_sensor_(sensor::Sensor *s) {
 float DhwDemandComponent::compute_deriv_(float current, float &prev,
                                           float dt_s) {
   if (std::isnan(current)) {
-    prev = current;
+    // Don't overwrite prev — preserve last valid sample so the next
+    // valid reading still produces a usable derivative.
     return NAN;
   }
   if (std::isnan(prev) || dt_s <= 0.0f) {
@@ -87,10 +88,10 @@ float DhwDemandComponent::compute_deriv_(float current, float &prev,
 }
 
 bool DhwDemandComponent::flow_latch_active_() {
-  // Scan backwards through the circular buffer up to flow_latch_seconds_ / 10
-  // samples. Round up so sub-10-second latch values still inspect at least one
-  // sample on the component's default 10s grid.
-  int samples = (flow_latch_seconds_ + 9) / 10;
+  // Derive sample count from the actual update interval rather than
+  // hardcoding a 10s assumption.
+  int interval_s = std::max(1, static_cast<int>(get_update_interval() / 1000));
+  int samples = (flow_latch_seconds_ + interval_s - 1) / interval_s;
   if (samples < 1)
     samples = 1;
   if (samples > DROPLET_BUF_SIZE)
@@ -154,6 +155,7 @@ float DhwDemandComponent::detect_pump_off_(float flow, bool prev_flow_present,
     if (!tank_warming) {
       signals[count++] = {"deterministic_charge", 0.7f};
       corroborating_signal_present = true;
+      onset_corroborating_signal_present = true;
     }
   }
 

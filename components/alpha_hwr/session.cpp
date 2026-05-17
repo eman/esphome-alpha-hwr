@@ -14,8 +14,7 @@ namespace core {
 static const char *const TAG = "alpha_hwr.session";
 
 Session::Session() 
-    : state_(SessionState::IDLE),
-      last_error_(nullptr) {
+    : state_(SessionState::IDLE) {
   ESP_LOGD(TAG, "Session initialized: state=IDLE");
 }
 
@@ -59,7 +58,7 @@ void Session::transition_to(SessionState new_state, const char* reason) {
 
 void Session::on_connected() {
   transition_to(SessionState::SERVICE_DISCOVERY, "BLE connected, starting discovery");
-  last_error_ = nullptr;
+  last_error_.clear();
 }
 
 void Session::on_service_found() {
@@ -97,19 +96,19 @@ void Session::on_authenticated() {
 
 void Session::on_disconnected() {
   transition_to(SessionState::IDLE, "BLE disconnected");
-  last_error_ = nullptr;
+  last_error_.clear();
 }
 
 void Session::on_error(const char* error_message) {
   state_ = SessionState::ERROR;
-  last_error_ = error_message;
-  ESP_LOGE(TAG, "Session ERROR: %s", error_message);
+  last_error_ = (error_message != nullptr) ? error_message : "Unknown error";
+  ESP_LOGE(TAG, "Session ERROR: %s", last_error_.c_str());
 }
 
 void Session::reset() {
   ESP_LOGD(TAG, "Resetting session");
   state_ = SessionState::IDLE;
-  last_error_ = nullptr;
+  last_error_.clear();
 }
 
 }  // namespace core

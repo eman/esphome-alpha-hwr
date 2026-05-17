@@ -71,8 +71,10 @@ void encode_float_be(float value, uint8_t *bytes) {
 // Float decoding (big-endian)
 // Reference: alpha_hwr/protocol/codec.py::decode_float_be()
 float decode_float_be(const uint8_t *data, size_t offset) {
-  uint32_t temp = (data[offset] << 24) | (data[offset + 1] << 16) |
-                  (data[offset + 2] << 8) | data[offset + 3];
+  uint32_t temp = (static_cast<uint32_t>(data[offset]) << 24) |
+                  (static_cast<uint32_t>(data[offset + 1]) << 16) |
+                  (static_cast<uint32_t>(data[offset + 2]) << 8) |
+                  static_cast<uint32_t>(data[offset + 3]);
   float value;
   memcpy(&value, &temp, 4);
   return value;
@@ -88,7 +90,8 @@ void encode_uint16_be(uint16_t value, uint8_t *bytes) {
 // Uint16 decoding (big-endian)
 // Reference: alpha_hwr/protocol/codec.py::decode_uint16_be()
 uint16_t decode_uint16_be(const uint8_t *data, size_t offset) {
-  return (data[offset] << 8) | data[offset + 1];
+  return (static_cast<uint16_t>(data[offset]) << 8) |
+         static_cast<uint16_t>(data[offset + 1]);
 }
 
 // Uint32 encoding (big-endian)
@@ -103,8 +106,10 @@ void encode_uint32_be(uint32_t value, uint8_t *bytes) {
 // Uint32 decoding (big-endian)
 // Reference: alpha_hwr/protocol/codec.py::decode_uint32_be()
 uint32_t decode_uint32_be(const uint8_t *data, size_t offset) {
-  return (data[offset] << 24) | (data[offset + 1] << 16) |
-         (data[offset + 2] << 8) | data[offset + 3];
+  return (static_cast<uint32_t>(data[offset]) << 24) |
+         (static_cast<uint32_t>(data[offset + 1]) << 16) |
+         (static_cast<uint32_t>(data[offset + 2]) << 8) |
+         static_cast<uint32_t>(data[offset + 3]);
 }
 
 }  // namespace protocol

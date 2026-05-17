@@ -37,6 +37,7 @@
 
 #include "esphome/core/component.h"
 #include <cstdint>
+#include <string>
 
 namespace esphome {
 namespace alpha_hwr {
@@ -272,7 +273,7 @@ class Session {
    * 
    * @return Error message or nullptr if no error
    */
-  const char* get_last_error() const { return last_error_; }
+  const char* get_last_error() const { return last_error_.empty() ? nullptr : last_error_.c_str(); }
   
   /**
    * Reset to IDLE state.
@@ -283,7 +284,7 @@ class Session {
   
  private:
   SessionState state_;
-  const char* last_error_;
+  std::string last_error_;
   
   /**
    * Internal helper to transition state with logging.

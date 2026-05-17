@@ -113,6 +113,7 @@ class Authentication {
   SchedulerCallback scheduler_callback_;  ///< Callback to schedule delayed tasks
   CompletionCallback completion_callback_;  ///< Callback for completion
   bool running_ = false;  ///< True if authentication is in progress
+  uint32_t auth_sequence_ = 0;  ///< Sequence counter to invalidate stale lambdas
   
   // Authentication stage functions
   void stage1_legacy_burst(int repeat_count);
