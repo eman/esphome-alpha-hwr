@@ -291,15 +291,10 @@ bool Transport::try_dispatch_response(const uint8_t* data, size_t len) {
   uint16_t packet_sub_id = (len > 7) ? (data[6] << 8) | data[7] : 0;
   uint16_t packet_obj_id = (len > 9) ? (data[8] << 8) | data[9] : 0;
 
-  // Log ALL incoming packets when waiting for a command response (for debugging)
+  // Log incoming packets at verbose level when waiting for a command response
   if (this->state_ == State::AWAITING_RESPONSE && !this->command_queue_.empty()) {
     auto &cmd = this->command_queue_.front();
     if (len > 5) {
-      // Use LOGI for OpSpec 0x0E notifications (critical for Object 86 debugging)
-      if (opspec == 0x0E && data[4] == 0x0A) {
-        ESP_LOGI(TAG, "[AWAITING] ⚠️  Class 10 OpSpec 0x0E notification: Sub=%d (0x%04X), Obj=%d (0x%04X) - SHOULD MATCH WILDCARD!",
-                 packet_sub_id, packet_sub_id, packet_obj_id, packet_obj_id);
-      }
       ESP_LOGV(TAG, "[AWAITING] Packet received: len=%d, Class=%02X, OpSpec=%02X, Sub=%d, Obj=%d (waiting for Obj %d Sub %d)",
                len, (len > 4 ? data[4] : 0xFF), opspec, packet_sub_id, packet_obj_id, cmd.expect_obj_id, cmd.expect_sub_id);
     }
@@ -308,22 +303,6 @@ bool Transport::try_dispatch_response(const uint8_t* data, size_t len) {
   // 1. Check if we are waiting for a command response
   if (this->state_ == State::AWAITING_RESPONSE && !this->command_queue_.empty()) {
     auto &cmd = this->command_queue_.front();
-    
-    // For debugging Object 86, log EVERY Class 10 packet received when awaiting
-    if (cmd.expect_obj_id == 0x0056 && len > 5 && data[4] == 0x0A) {
-      ESP_LOGI(TAG, "[OBJ86] Class 10 packet received while awaiting: OpSpec=0x%02X, len=%d bytes", 
-               data[5], len);
-      // Log the full packet structure
-      if (len >= 10) {
-        uint16_t pkt_sub = (data[6] << 8) | data[7];
-        uint16_t pkt_obj = (data[8] << 8) | data[9];
-        ESP_LOGI(TAG, "[OBJ86]   Sub=%d (0x%04X), Obj=%d (0x%04X)", pkt_sub, pkt_sub, pkt_obj, pkt_obj);
-      }
-    }
-    
-    // For Class 10 DataObject reads, we need to check if this is a valid response
-    // by checking the packet structure, not just Object/Sub ID matching
-    // because the pump may send telemetry responses while we're waiting
     
     // First, validate basic packet structure
     if (len < 12) {
