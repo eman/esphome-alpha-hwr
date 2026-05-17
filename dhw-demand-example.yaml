@@ -30,9 +30,9 @@ substitutions:
   mac_address: "AA:BB:CC:DD:EE:FF"  # ← CHANGE THIS to your pump's MAC
 
   # ── Home Assistant entity IDs for supplementary sensors ────────────────────
-  flow_entity:            sensor.droplet_f5bc_flow_rate      # ← CHANGE
-  tank_lower_temp_entity: sensor.nwp500_tank_lower_temperature  # ← CHANGE
-  dhw_charge_entity:      sensor.nwp500_dhw_charge           # ← CHANGE
+  flow_entity:            sensor.your_flow_sensor             # ← CHANGE to your flow meter entity
+  tank_lower_temp_entity: sensor.your_tank_lower_temperature  # ← CHANGE to your tank temp entity
+  dhw_charge_entity:      sensor.your_dhw_charge              # ← CHANGE to your DHW charge entity
 
 packages:
   alpha_hwr: github://eman/esphome-alpha-hwr/packages/alpha_hwr_pairing.yaml@main
@@ -109,7 +109,7 @@ sensor:
   # Remove if no NWP500 or equivalent is present.
   - platform: homeassistant
     id: dhw_in_use_flag
-    entity_id: sensor.nwp500_dhw_in_use
+    entity_id: sensor.your_dhw_in_use  # ← CHANGE to your DHW in-use entity
 
 # ── DHW Demand Detector — pump telemetry wiring ────────────────────────────────
 #
