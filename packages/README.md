@@ -124,7 +124,7 @@ sensor:
     name: "Flow (GPM)"
     lambda: |-
       // Convert m³/h to gallons per minute
-      if (id(pump).is_connected()) {
+      if (id(hwr_pump_client).is_connected()) {
         return id(flow_rate).state * 4.4029;
       }
       return 0.0;

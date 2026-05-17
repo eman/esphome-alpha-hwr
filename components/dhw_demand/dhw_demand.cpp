@@ -74,8 +74,9 @@ float DhwDemandComponent::read_sensor_(sensor::Sensor *s) {
 float DhwDemandComponent::compute_deriv_(float current, float &prev,
                                           uint32_t &prev_ms, uint32_t now) {
   if (std::isnan(current)) {
-    // Don't overwrite prev or prev_ms — preserve last valid sample so the
-    // next valid reading computes the derivative over the true elapsed time.
+    // Both prev and prev_ms are intentionally left unchanged so the next valid
+    // reading computes dt_s over the true elapsed time (spanning any NaN gap),
+    // not just a single tick.
     return NAN;
   }
   if (std::isnan(prev) || prev_ms == 0) {

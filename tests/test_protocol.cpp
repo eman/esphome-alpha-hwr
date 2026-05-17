@@ -203,12 +203,9 @@ void test_packet_roundtrip() {
   TEST_ASSERT_EQ(packet_crc, calculated_crc, "Round-trip: CRC matches calculated value");
 }
 
-// Test negative cases: malformed frames, bad CRC, truncated packets
-void test_parse_frame_negative() {
-  std::cout << "\n=== Testing Frame Parser Negative Cases ===" << std::endl;
-
-  // parse_frame is in production code; here we test via the protocol.h helpers
-  // by verifying CRC validation catches corrupted packets.
+// Test CRC helpers and packet-builder boundary/edge cases
+void test_crc_and_builder_edge_cases() {
+  std::cout << "\n=== Testing CRC Helpers and Builder Edge Cases ===" << std::endl;
 
   // Test 1: Single-byte flip in CRC corrupts the packet
   uint8_t good_packet[11];
@@ -287,7 +284,7 @@ int main() {
   test_build_class10_read_packet();
   test_read_float_be();
   test_packet_roundtrip();
-  test_parse_frame_negative();
+  test_crc_and_builder_edge_cases();
   
   std::cout << "\n===========================================================" << std::endl;
   std::cout << "  Test Results" << std::endl;

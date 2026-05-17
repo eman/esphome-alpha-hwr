@@ -59,8 +59,10 @@ ParsedFrame parse_frame(const uint8_t* data, size_t len) {
     return result;
   }
   if (len > expected_total) {
-    // Extra trailing bytes — tolerate but note the inconsistency.
-    ESP_LOGV(TAG, "Frame has trailing bytes: header says %zu total, got %zu bytes", expected_total, len);
+    // Extra trailing bytes — clamp to expected length so CRC validation and
+    // payload extraction use the correct window rather than the extra bytes.
+    ESP_LOGV(TAG, "Frame has trailing bytes: header says %zu total, got %zu bytes; clamping", expected_total, len);
+    len = expected_total;
   }
 
   // Validate CRC
