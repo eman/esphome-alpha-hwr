@@ -1,5 +1,6 @@
 #include "ble_connection_manager.h"
 #include "esphome/core/log.h"
+#include <algorithm>
 #include <vector>
 
 namespace esphome {
@@ -467,10 +468,16 @@ bool BLEConnectionManager::check_is_bonded(const esp_bd_addr_t bda) {
     return false;
   }
 
-  std::vector<esp_ble_bond_dev_t> bond_list(bond_count);
-  esp_ble_get_bond_device_list(&bond_count, bond_list.data());
+  std::vector<esp_ble_bond_dev_t> bond_list(static_cast<size_t>(bond_count));
+  esp_err_t err = esp_ble_get_bond_device_list(&bond_count, bond_list.data());
+  if (err != ESP_OK) {
+    ESP_LOGW(TAG, "Failed to read bond device list: 0x%x — assuming unbonded", err);
+    return false;
+  }
 
-  for (int i = 0; i < bond_count; i++) {
+  // Clamp iteration to the count actually written by the API call.
+  const int count = std::min(bond_count, static_cast<int>(bond_list.size()));
+  for (int i = 0; i < count; i++) {
     if (memcmp(bond_list[i].bd_addr, bda, sizeof(esp_bd_addr_t)) == 0) {
       return true;
     }

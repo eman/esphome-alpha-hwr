@@ -100,9 +100,13 @@ void Transport::loop() {
 
     case State::AWAITING_RESPONSE:
       if (now - cmd.timestamp_ms > cmd.timeout_ms) {
-        // Wildcard commands (obj=0, sub=0) are used for optional feature reads
-        // (e.g., trend data, device info). A timeout just means the pump doesn't
-        // support that object — log at DEBUG to avoid noise.
+        // Wildcard commands (obj=0, sub=0) are used when the response cannot
+        // be matched by Object/Sub-ID — this covers both optional feature reads
+        // (trend data, device info) and protocol operations where the pump's
+        // response uses an OpSpec that doesn't carry standard Obj/Sub fields
+        // (e.g., control-mode writes that reply with OpSpec 0x15). A timeout
+        // here means either the feature is absent or the window closed; either
+        // way it is expected behaviour — log at DEBUG to avoid noise.
         if (cmd.expect_obj_id == 0 && cmd.expect_sub_id == 0) {
           ESP_LOGD(TAG, "Command timeout (wildcard match) — pump did not respond");
         } else {
