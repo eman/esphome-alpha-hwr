@@ -86,7 +86,8 @@ void HistoryService::read_trends_async(
     size_t frame_len = protocol::build_geni_packet(0xE7, 0xF8, apdu, 5, frame);
     std::vector<uint8_t> packet(frame, frame + frame_len);
 
-    // Use wildcard response matching — accept any non-register Class 10 response
+    // Use wildcard response matching — accept any non-register Class 10 response.
+    // Timeout: 1500 ms — trend reads either respond immediately or not at all.
     transport_.send_command(packet, 0, 0,
         [this, idx, trends, on_complete, read_next, cfg](
             bool success, const uint8_t *payload, size_t payload_len) {
@@ -109,10 +110,14 @@ void HistoryService::read_trends_async(
         trends->push_back(series);
         ESP_LOGD(TAG, "Trend %s: current=%.2f %s", cfg.name, td.current_value, cfg.unit);
       } else {
-        ESP_LOGW(TAG, "Trend %s: read failed (success=%d, len=%zu)", cfg.name, success, payload_len);
+        // Some pump models do not populate all trend channels (e.g. Temperature
+        // trend may be absent on certain hardware revisions). Log at DEBUG so
+        // it doesn't produce noise on every startup.
+        ESP_LOGD(TAG, "Trend %s: no data (success=%d, len=%zu) — may not be supported by this pump",
+                 cfg.name, success, payload_len);
       }
       (*read_next)(idx + 1);
-    }, 3000);
+    }, 1500);
   };
 
   (*read_next)(0);

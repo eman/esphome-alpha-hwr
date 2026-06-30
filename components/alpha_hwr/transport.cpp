@@ -100,8 +100,15 @@ void Transport::loop() {
 
     case State::AWAITING_RESPONSE:
       if (now - cmd.timestamp_ms > cmd.timeout_ms) {
-        ESP_LOGW(TAG, "Command timeout waiting for Obj %d Sub %d", 
-                 cmd.expect_obj_id, cmd.expect_sub_id);
+        // Wildcard commands (obj=0, sub=0) are used for optional feature reads
+        // (e.g., trend data, device info). A timeout just means the pump doesn't
+        // support that object — log at DEBUG to avoid noise.
+        if (cmd.expect_obj_id == 0 && cmd.expect_sub_id == 0) {
+          ESP_LOGD(TAG, "Command timeout (wildcard match) — pump did not respond");
+        } else {
+          ESP_LOGW(TAG, "Command timeout waiting for Obj %d Sub %d",
+                   cmd.expect_obj_id, cmd.expect_sub_id);
+        }
         if (cmd.callback) {
           cmd.callback(false, nullptr, 0);
         }
