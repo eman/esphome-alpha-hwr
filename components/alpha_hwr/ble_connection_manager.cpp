@@ -1,5 +1,6 @@
 #include "ble_connection_manager.h"
 #include "esphome/core/log.h"
+#include <vector>
 
 namespace esphome {
 namespace alpha_hwr {
@@ -170,17 +171,27 @@ void BLEConnectionManager::handle_connection_opened(const esp_ble_gattc_cb_param
   // Reset discovery retry counter
   discovery_retry_count_ = 0;
   
-  // Only request encryption/pairing if explicitly enabled
+  // Request encryption only when we already have a stored bond.
+  // - Bonded:   request encryption immediately so the pump can resume the
+  //             encrypted session before GATT discovery proceeds.
+  // - Unbonded: stay silent — this pump initiates bonding itself via
+  //             ESP_GAP_BLE_SEC_REQ_EVT.  A central-initiated pairing
+  //             request on an unbonded pump returns 0x52 ("Pairing Not
+  //             Supported"), causing the pump's own SEC_REQ to be missed.
   if (pairing_enabled_) {
-    ESP_LOGI(TAG, "Requesting encryption/pairing...");
-    esp_err_t ret = esp_ble_set_encryption(client_->get_remote_bda(), ESP_BLE_SEC_ENCRYPT);
-    if (ret != ESP_OK) {
-      ESP_LOGW(TAG, "✗ Failed to request encryption: 0x%x", ret);
+    if (check_is_bonded(client_->get_remote_bda())) {
+      ESP_LOGI(TAG, "Device is bonded - requesting encryption to resume secure session");
+      esp_err_t ret = esp_ble_set_encryption(client_->get_remote_bda(), ESP_BLE_SEC_ENCRYPT);
+      if (ret != ESP_OK) {
+        ESP_LOGW(TAG, "✗ Failed to request encryption: 0x%x", ret);
+      }
+    } else {
+      ESP_LOGI(TAG, "Device is not bonded - waiting for pump to initiate pairing");
     }
   } else {
     ESP_LOGI(TAG, "Skipping encryption request - pairing disabled");
   }
-  
+
   // Update connection parameters for better stability
   esp_ble_conn_update_params_t conn_params;
   memcpy(conn_params.bda, client_->get_remote_bda(), 6);
@@ -448,6 +459,23 @@ void BLEConnectionManager::handle_gap_event(esp_gap_ble_cb_event_t event, esp_bl
       // Don't log all GAP events to reduce noise
       break;
   }
+}
+
+bool BLEConnectionManager::check_is_bonded(const esp_bd_addr_t bda) {
+  int bond_count = esp_ble_get_bond_device_num();
+  if (bond_count <= 0) {
+    return false;
+  }
+
+  std::vector<esp_ble_bond_dev_t> bond_list(bond_count);
+  esp_ble_get_bond_device_list(&bond_count, bond_list.data());
+
+  for (int i = 0; i < bond_count; i++) {
+    if (memcmp(bond_list[i].bd_addr, bda, sizeof(esp_bd_addr_t)) == 0) {
+      return true;
+    }
+  }
+  return false;
 }
 
 }  // namespace core

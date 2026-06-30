@@ -36,7 +36,16 @@ void AlphaHwrComponent::setup() {
       [this]() { this->session_.on_connected(); });
 
   ble_manager_.set_disconnection_callback([this]() {
+    // Cancel in-flight auth so its pending scheduler lambdas are invalidated
+    // and do not fire against the next BLE connection.
+    this->auth_.cancel();
+    // Stop telemetry so the next auth-complete callback can restart it cleanly.
+    this->telemetry_service_.stop();
+    // Reset initial-read flag so device info, clock sync, etc. are re-fetched
+    // after reconnect (pump may have rebooted).
+    this->initial_data_read_done_ = false;
     this->session_.on_disconnected();
+    // Clears command queue, pending handlers, reassembly buffer, and FSM state.
     this->transport_.reset();
   });
 

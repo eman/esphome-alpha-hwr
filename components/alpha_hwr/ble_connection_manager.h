@@ -71,6 +71,8 @@ class BLEConnectionManager {
   void handle_service_discovery_complete(esp_gatt_if_t gattc_if);
   void handle_notification(const esp_ble_gattc_cb_param_t *param);
   void handle_auth_complete(const esp_ble_gap_cb_param_t *param);
+  /// Returns true if the device at @p bda already has a stored bond.
+  static bool check_is_bonded(const esp_bd_addr_t bda);
   
   // BLE client reference
   ble_client::BLEClient *client_{nullptr};

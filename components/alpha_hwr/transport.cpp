@@ -220,6 +220,11 @@ void Transport::reset() {
   reassembling_ = false;
   reassembly_buffer_.clear();
   expected_packet_length_ = 0;
+  // Discard any queued commands and pending response handlers so stale BLE
+  // writes from the previous connection do not execute on the next connect.
+  command_queue_.clear();
+  pending_handlers_.clear();
+  state_ = State::IDLE;
 }
 
 void Transport::register_response_handler(uint16_t object_id, uint16_t sub_id, ResponseCallback callback) {
