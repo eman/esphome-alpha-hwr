@@ -28,6 +28,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     `telemetry_service_.stop()`, resetting `initial_data_read_done_`, and
     flushing the transport command queue and pending response handlers on every
     disconnect.
+- **Deprecated `ESPBTUUID::to_string()` replaced with `to_str()`** — two
+  `ESP_LOGW` calls in `ble_connection_manager.cpp` used the deprecated
+  `to_string()` method that ESPHome will remove in 2026.8.0
+  ([#4](https://github.com/eman/esphome-alpha-hwr/issues/4), PR [#7](https://github.com/eman/esphome-alpha-hwr/pull/7)).
 - **Spurious warnings for unsupported trend channels** — some pump models
   (e.g. ALPHA HWR 15-290 SU/T) do not populate the Temperature trend channel
   (Object 53 SubID 453), generating two `WARN`-level log lines on every
