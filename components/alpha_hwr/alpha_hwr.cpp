@@ -68,6 +68,19 @@ void AlphaHwrComponent::setup() {
         this->transport_.on_notification(data, len);
       });
 
+  ble_manager_.set_advertisement_callback(
+      [this](const core::PumpAdvertisementInfo &info) {
+        ESP_LOGI(TAG, "Pump advertisement: family=0x%02X type=0x%02X version=0x%02X",
+                 info.product_family, info.product_type, info.product_version);
+#ifdef USE_TEXT_SENSOR
+        if (product_version_sensor_ != nullptr) {
+          char buf[5];
+          snprintf(buf, sizeof(buf), "0x%02X", info.product_version);
+          product_version_sensor_->publish_state(buf);
+        }
+#endif
+      });
+
   // Set transport write callback
   this->transport_.set_write_callback(
       [this](const uint8_t *data, size_t len) -> bool {

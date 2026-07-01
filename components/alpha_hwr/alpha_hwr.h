@@ -163,6 +163,9 @@ public:
   void set_product_name_text_sensor(text_sensor::TextSensor *sensor) {
     product_name_sensor_ = sensor;
   }
+  void set_product_version_text_sensor(text_sensor::TextSensor *sensor) {
+    product_version_sensor_ = sensor;
+  }
   void set_single_events_text_sensor(text_sensor::TextSensor *sensor) {
     single_events_text_sensor_ = sensor;
   }
@@ -261,6 +264,9 @@ private:
   text_sensor::TextSensor *hardware_version_sensor_{nullptr};
   text_sensor::TextSensor *ble_version_sensor_{nullptr};
   text_sensor::TextSensor *product_name_sensor_{nullptr};
+  // product_version is decoded from the BLE advertisement at scan time
+  // (before any connection) so it is available as a pre-connection discriminator.
+  text_sensor::TextSensor *product_version_sensor_{nullptr};
   text_sensor::TextSensor *single_events_text_sensor_{nullptr};
   text_sensor::TextSensor *event_log_text_sensor_{nullptr};
   text_sensor::TextSensor *history_text_sensor_{nullptr};
