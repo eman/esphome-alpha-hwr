@@ -77,11 +77,14 @@ class BLEConnectionManager {
   void handle_gattc_event(esp_gattc_cb_event_t event, esp_gatt_if_t gattc_if, esp_ble_gattc_cb_param_t *param);
   void handle_gap_event(esp_gap_ble_cb_event_t event, esp_ble_gap_cb_param_t *param);
 
-  // Advertisement info — populated at scan time, before the connection opens.
+  // Advertisement info — populated at scan time via cache_adv_info_from_service_data(),
+  // before the connection opens.  Call this from an on_ble_service_data_advertise
+  // trigger in YAML (see packages/alpha_hwr_base.yaml for the wiring).
   const PumpAdvertisementInfo &get_advertisement_info() const { return adv_info_; }
   void set_advertisement_callback(std::function<void(const PumpAdvertisementInfo &)> cb) {
     advertisement_callback_ = std::move(cb);
   }
+  void cache_adv_info_from_service_data(const std::vector<uint8_t> &service_data);
 
   // Device validation (used in discovery mode / YAML on_ble_advertise filters)
   static bool is_alpha_hwr_device(const esp32_ble_tracker::ESPBTDevice &device,
@@ -103,22 +106,6 @@ class BLEConnectionManager {
   /// Returns true if the device at @p bda already has a stored bond.
   static bool check_is_bonded(const esp_bd_addr_t bda);
 
-  /**
-   * Parse raw advertisement bytes for the target device.
-   *
-   * Walks the AD structures in @p adv_data looking for:
-   *   - AD type 0xFF (Manufacturer Specific): company_id at bytes 0-1,
-   *     product_family at byte 2, product_type at byte 3, product_version
-   *     at byte 4.
-   *   - AD type 0x16 (Service Data, 16-bit UUID): service_uuid at bytes 0-1,
-   *     product_family at byte 5, product_type at byte 6, product_version
-   *     at byte 7 (3-byte header after UUID, matching Python reference).
-   *
-   * Stores the result in adv_info_ and fires advertisement_callback_ if the
-   * data is new (i.e. adv_info_ was not already valid).
-   */
-  void parse_advertisement(const uint8_t *adv_data, uint8_t adv_len);
-  
   // BLE client reference
   ble_client::BLEClient *client_{nullptr};
   

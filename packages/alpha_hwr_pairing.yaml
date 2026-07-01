@@ -40,6 +40,13 @@ esp32_ble_tracker:
   scan_parameters:
     interval: 1.1s
     window: 1.1s
+  # Populate advertisement identifiers (product_version etc.) before the
+  # GATT connection opens.  ESPHome's BLEClientNode does not receive scan
+  # result events directly, so we hook them here via the tracker trigger.
+  on_ble_service_data_advertise:
+    - service_uuid: FE5D
+      then:
+        - lambda: "pump->on_ble_service_data_seen(x);"
 
 ble_client:
   - mac_address: ${mac_address}

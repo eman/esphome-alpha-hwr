@@ -13,79 +13,58 @@ static const char *TAG = "alpha_hwr.ble";
 // Grundfos company/service UUID shared by both AD types.
 static const uint16_t GRUNDFOS_UUID_16 = 0xFE5D;
 
-// AD type constants
-static const uint8_t AD_TYPE_MFG_SPECIFIC = 0xFF;
-static const uint8_t AD_TYPE_SERVICE_DATA_16 = 0x16;
+// ─── Advertisement-info caching (from parsed ESPBTDevice) ────────────────────
+//
+// ESPHome's esp32_ble_tracker parses advertisement AD structures into typed
+// lists (get_service_datas(), get_manufacturer_datas()) before calling
+// on_ble_advertise / on_ble_service_data_advertise triggers.  We receive the
+// ESPBTDevice there rather than raw bytes, so we use the parsed fields.
+//
+// The pump advertises via Service Data (AD type 0x16) with UUID 0xFE5D.
+// ESPHome strips the 2-byte UUID from the payload, so get_service_datas()[i].data
+// starts at the frame header:
+//   data[0..2]: 3-byte frame header  (Python service_data[0..2])
+//   data[3]:    product_family       (Python service_data[3])  0x34 = ALPHA
+//   data[4]:    product_type         (Python service_data[4])  0x07 = HWR
+//   data[5]:    product_version      (Python service_data[5])  firmware discriminator
+//
+// A Manufacturer Specific Data fallback (0xFF) is also handled for firmware
+// variants that may use that AD type:
+//   data[0..1]: company_id already stripped as UUID by ESPHome
+//   data[2]:    product_family
+//   data[3]:    product_type
+//   data[4]:    product_version
 
-// ─── Advertisement-info parsing ──────────────────────────────────────────────
+void BLEConnectionManager::cache_adv_info_from_service_data(const std::vector<uint8_t> &service_data) {
+  if (adv_info_.valid) return;  // Only capture once per session
 
-void BLEConnectionManager::parse_advertisement(const uint8_t *adv_data, uint8_t adv_len) {
-  // Walk AD structures.  Format: [AD_LEN][AD_TYPE][AD_DATA ...] ...
-  // AD_LEN includes the AD_TYPE byte but NOT the AD_LEN byte itself.
-  size_t i = 0;
-  while (i < adv_len) {
-    uint8_t ad_len = adv_data[i];
-    if (ad_len == 0 || i + ad_len >= adv_len) break;
-
-    uint8_t ad_type     = adv_data[i + 1];
-    const uint8_t *data = adv_data + i + 2;   // payload after type byte
-    uint8_t data_len    = ad_len - 1;          // payload length
-
-    if (ad_type == AD_TYPE_MFG_SPECIFIC && data_len >= 5) {
-      // Manufacturer Specific Data (0xFF):
-      //   data[0..1] = company_id (little-endian)
-      //   data[2]    = product_family  (0x34 = ALPHA)
-      //   data[3]    = product_type    (0x07 = HWR)
-      //   data[4]    = product_version
-      uint16_t cid = static_cast<uint16_t>(data[0]) | (static_cast<uint16_t>(data[1]) << 8);
-      if (cid == GRUNDFOS_UUID_16) {
-        ESP_LOGD(TAG, "Adv: Grundfos mfg data (0xFF), len=%d, family=0x%02X type=0x%02X ver=0x%02X",
-                 data_len, data[2], data[3], data[4]);
-        if (!adv_info_.valid) {
-          adv_info_.product_family  = data[2];
-          adv_info_.product_type    = data[3];
-          adv_info_.product_version = data[4];
-          adv_info_.valid = true;
-        }
-      }
-    } else if (ad_type == AD_TYPE_SERVICE_DATA_16 && data_len >= 8) {
-      // Service Data — 16-bit UUID (0x16):
-      //   data[0..1] = service_uuid (little-endian)
-      //   data[2..4] = 3-byte frame header (matches Python: data[0..2] in bleak)
-      //   data[5]    = product_family  → Python service_data[3]
-      //   data[6]    = product_type    → Python service_data[4]
-      //   data[7]    = product_version → Python service_data[5]
-      uint16_t svc = static_cast<uint16_t>(data[0]) | (static_cast<uint16_t>(data[1]) << 8);
-      if (svc == GRUNDFOS_UUID_16) {
-        ESP_LOGD(TAG, "Adv: Grundfos service data (0x16), len=%d, family=0x%02X type=0x%02X ver=0x%02X",
-                 data_len, data[5], data[6], data[7]);
-        if (!adv_info_.valid) {
-          adv_info_.product_family  = data[5];
-          adv_info_.product_type    = data[6];
-          adv_info_.product_version = data[7];
-          adv_info_.valid = true;
-        }
-      }
-    }
-
-    i += ad_len + 1;
+  // ESPHome strips the 2-byte UUID before passing service data to the lambda,
+  // so the payload layout is:
+  //   service_data[0..2]: 3-byte frame header  (Python service_data[0..2])
+  //   service_data[3]:    product_family        (Python service_data[3])  0x34 = ALPHA
+  //   service_data[4]:    product_type          (Python service_data[4])  0x07 = HWR
+  //   service_data[5]:    product_version       (Python service_data[5])
+  if (service_data.size() < 6) {
+    ESP_LOGD(TAG, "Service data too short (%zu bytes), skipping adv cache", service_data.size());
+    return;
   }
 
-  // Build a compact hex string of the full advertisement for debugging.
-  // Only done once (when adv_hex is still empty) to avoid repeated allocation.
-  if (adv_info_.valid && adv_info_.adv_hex.empty()) {
-    char hex_char[3];
-    for (uint8_t b = 0; b < adv_len; b++) {
-      snprintf(hex_char, sizeof(hex_char), "%02X", adv_data[b]);
-      adv_info_.adv_hex += hex_char;
-    }
-    ESP_LOGI(TAG, "Pump advertisement decoded: family=0x%02X type=0x%02X version=0x%02X",
-             adv_info_.product_family, adv_info_.product_type, adv_info_.product_version);
-    ESP_LOGD(TAG, "  Raw adv bytes: %s", adv_info_.adv_hex.c_str());
-    if (advertisement_callback_) {
-      advertisement_callback_(adv_info_);
-    }
+  adv_info_.product_family  = service_data[3];
+  adv_info_.product_type    = service_data[4];
+  adv_info_.product_version = service_data[5];
+  adv_info_.valid = true;
+
+  char hex_char[3];
+  for (auto b : service_data) {
+    snprintf(hex_char, sizeof(hex_char), "%02X", b);
+    adv_info_.adv_hex += hex_char;
   }
+
+  ESP_LOGI(TAG, "Pump advertisement: family=0x%02X type=0x%02X version=0x%02X",
+           adv_info_.product_family, adv_info_.product_type, adv_info_.product_version);
+  ESP_LOGD(TAG, "  Service data: %s", adv_info_.adv_hex.c_str());
+
+  if (advertisement_callback_) advertisement_callback_(adv_info_);
 }
 
 // ─── Device validation (discovery / on_ble_advertise mode) ──────────────────
@@ -498,26 +477,6 @@ void BLEConnectionManager::handle_gap_event(esp_gap_ble_cb_event_t event, esp_bl
     case ESP_GAP_BLE_AUTH_CMPL_EVT:
       handle_auth_complete(param);
       break;
-
-    case ESP_GAP_BLE_SCAN_RESULT_EVT: {
-      // Intercept scan results to capture advertisement data for our target
-      // device before the GATT connection opens.  This is the only point
-      // where raw AD bytes are available in the fixed-MAC (ble_client) flow.
-      auto &rst = param->scan_rst;
-      if (rst.search_evt != ESP_GAP_SEARCH_INQ_RES_EVT) break;
-      if (!client_) break;
-
-      // Filter: only process our configured target device.
-      if (memcmp(rst.bda, client_->get_remote_bda(), ESP_BD_ADDR_LEN) != 0) break;
-
-      // Don't re-parse once we have valid advertisement info.
-      if (adv_info_.valid) break;
-
-      ESP_LOGD(TAG, "Scan result from target device, parsing advertisement (%d bytes)",
-               rst.adv_data_len);
-      parse_advertisement(rst.ble_adv, rst.adv_data_len);
-      break;
-    }
 
     case ESP_GAP_BLE_SEC_REQ_EVT: {
       char addr_str[18];

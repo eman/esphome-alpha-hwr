@@ -202,9 +202,21 @@ public:
   void gap_event_handler(esp_gap_ble_cb_event_t event,
                          esp_ble_gap_cb_param_t *param) override;
 
-  // Static helper method to validate if a device is an ALPHA HWR pump
-  // Returns true if device matches Grundfos ALPHA HWR product signature
+  // Static helper: validate if a device is an ALPHA HWR pump (discovery mode).
+  // Returns true if the device matches the Grundfos ALPHA HWR product signature.
   static bool is_alpha_hwr_device(const esp32_ble_tracker::ESPBTDevice &device);
+
+  // Called from on_ble_service_data_advertise / on_ble_advertise triggers for
+  // the Grundfos service UUID.  Caches product_family/type/version from the
+  // service data payload so they are available before the GATT connection opens.
+  // The esp32_ble_tracker strips the 2-byte UUID from the payload, so:
+  //   x[0..2] = 3-byte frame header
+  //   x[3]    = product_family  (0x34 = ALPHA)
+  //   x[4]    = product_type    (0x07 = HWR)
+  //   x[5]    = product_version
+  void on_ble_service_data_seen(const std::vector<uint8_t> &x) {
+    ble_manager_.cache_adv_info_from_service_data(x);
+  }
 
 private:
   ble_client::BLEClient *parent_ = nullptr;
