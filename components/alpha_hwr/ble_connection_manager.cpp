@@ -418,11 +418,18 @@ void BLEConnectionManager::handle_auth_complete(const esp_ble_gap_cb_param_t *pa
     ESP_LOGW(TAG, "  Device: %s", addr_str);
     ESP_LOGW(TAG, "  Failure reason: %s (0x%02x)", fail_reason, auth_cmpl.fail_reason);
     ESP_LOGW(TAG, "  Auth mode: 0x%02x", auth_cmpl.auth_mode);
-    // Drop any deferred subscription — the link never became encrypted, and
-    // the connection is about to be torn down.  The flags are re-armed on the
-    // next connection open.
+    // Bonded reconnect whose encryption failed: the link may stay up in an
+    // unauthenticated state, and a later discovery-complete would then send
+    // the CCCD write unencrypted — the exact race this deferral exists to
+    // prevent.  Tear the connection down instead; the normal reconnect path
+    // (including any reconnect settle window) takes over from there.
+    bool disconnect_needed = encryption_pending_;
     encryption_pending_ = false;
     subscription_deferred_ = false;
+    if (disconnect_needed && client_ != nullptr) {
+      ESP_LOGW(TAG, "Disconnecting - no GATT writes allowed on an unauthenticated bonded link");
+      client_->disconnect();
+    }
     if (pairing_status_sensor_ != nullptr) {
       pairing_status_sensor_->publish_state(false);
     }
