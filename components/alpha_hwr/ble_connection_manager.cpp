@@ -404,7 +404,22 @@ void BLEConnectionManager::handle_gattc_event(esp_gattc_cb_event_t event, esp_ga
                                                esp_ble_gattc_cb_param_t *param) {
   switch (event) {
     case ESP_GATTC_OPEN_EVT:
-      handle_connection_opened(param);
+      // ESP_GATTC_OPEN_EVT fires for both successful and failed opens. Only a
+      // successful open is a real connection. The base layer (esp32_ble_client)
+      // treats BOTH ESP_GATT_OK and ESP_GATT_ALREADY_OPEN as success, so mirror
+      // that here — treating ALREADY_OPEN as a failure would instead leave the
+      // component wedged (no encryption request, no session transition) until
+      // the next disconnect. Any other status is a failed open: do not run the
+      // connection-opened handler on one — otherwise, with the pump powered down
+      // or out of range, the reconnect loop's stream of failed opens drives
+      // phantom IDLE->SERVICE_DISCOVERY transitions. The base layer owns
+      // failure/retry handling.
+      if (param->open.status == ESP_GATT_OK ||
+          param->open.status == ESP_GATT_ALREADY_OPEN) {
+        handle_connection_opened(param);
+      } else {
+        ESP_LOGD(TAG, "Ignoring failed BLE open (status 0x%02x)", param->open.status);
+      }
       break;
       
     case ESP_GATTC_SEARCH_RES_EVT:
