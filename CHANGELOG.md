@@ -7,6 +7,42 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **`reconnect_settle_time` option** — device-agnostic fix for bond loss after
+  a pump restart (issue [#5](https://github.com/eman/esphome-alpha-hwr/issues/5),
+  PR [#11](https://github.com/eman/esphome-alpha-hwr/pull/11)). After a
+  power-cycle the ESP32 could reconnect the instant the pump advertised, before
+  its BLE stack was ready; the on-open encryption request then failed with
+  `0x61` and ESP-IDF silently erased the stored bond. When set, the component
+  waits for the pump to *reappear* after a disconnect and holds off
+  reconnection for the configured settle time — timed from reappearance, so a
+  5-second cycle and a 5-minute outage behave identically. The window applies
+  only when a bond exists, so initial pairing is never delayed. Default `0s`
+  (fully opt-in, previous behavior unchanged).
+- **Pump advertisement decoding at scan time** — new `PumpAdvertisementInfo`
+  decoded from raw BLE advertisement bytes before any GATT connection, exposing
+  `product_family`, `product_type`, and `product_version` (the BLE firmware
+  discriminator between pump hardware revisions) plus the raw advertisement hex
+  for debugging (PR [#10](https://github.com/eman/esphome-alpha-hwr/pull/10)).
+
+### Fixed
+
+- **Failed BLE opens no longer treated as real connections** — the base layer
+  forwards `ESP_GATTC_OPEN_EVT` to components even when the open failed, so
+  with the pump powered down or out of range the reconnect loop's stream of
+  failed opens drove phantom `IDLE -> SERVICE_DISCOVERY` transitions, misfired
+  encryption requests against dead connections, and could defeat the
+  `reconnect_settle_time` window. The handler now runs only for successful
+  opens (`ESP_GATT_OK` or `ESP_GATT_ALREADY_OPEN`, mirroring the base layer's
+  success condition) and log-and-ignores the rest
+  (PR [#9](https://github.com/eman/esphome-alpha-hwr/pull/9)).
+- **`is_alpha_hwr_device()` matched the wrong advertisement field** — the check
+  read Manufacturer Specific data at bytes 2/3, but the pump advertises its
+  identity via Service Data (AD type `0x16`); detection now parses Service Data
+  at the offsets used by the Python reference
+  (PR [#10](https://github.com/eman/esphome-alpha-hwr/pull/10)).
+
 ---
 
 ## [0.5.0] - 2026-06-30
