@@ -168,3 +168,9 @@ alpha_hwr:
    product_name:
       name: "Product Name"
       entity_category: diagnostic
+   # Advertisement-derived BLE firmware discriminator (family/type/version
+   # bytes broadcast in the FE5D service data, captured at scan time before
+   # the GATT connection opens).
+   product_version:
+      name: "Product Version"
+      entity_category: diagnostic
