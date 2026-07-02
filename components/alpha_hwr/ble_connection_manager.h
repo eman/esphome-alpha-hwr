@@ -15,9 +15,10 @@ namespace core {
  * Pump identification data decoded from the BLE advertisement before any
  * connection is established.
  *
- * Populated by handle_gap_event() on ESP_GAP_BLE_SCAN_RESULT_EVT when the
- * target device is seen.  Available immediately on the first scan hit, so
- * it can drive conditional logic (e.g. encryption timing) before the GATT
+ * Populated by cache_adv_info_from_service_data(), which is wired to the
+ * esp32_ble_tracker on_ble_service_data_advertise trigger in YAML (see
+ * packages/alpha_hwr_base.yaml).  Available on the first scan hit, so it
+ * can drive conditional logic (e.g. encryption timing) before the GATT
  * connection opens.
  *
  * Reference: Python client._scan_advertisement_data()
@@ -29,7 +30,7 @@ struct PumpAdvertisementInfo {
   uint8_t product_family{0};   // 0x34 = ALPHA family
   uint8_t product_type{0};     // 0x07 = HWR type
   uint8_t product_version{0};  // BLE firmware version discriminator
-  std::string adv_hex;         // Full raw advertisement bytes (hex), for debugging
+  std::string adv_hex;         // FE5D service-data payload (hex, UUID stripped), for debugging
   bool valid{false};           // True once successfully parsed
 };
 

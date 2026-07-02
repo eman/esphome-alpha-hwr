@@ -10,42 +10,35 @@ namespace core {
 
 static const char *TAG = "alpha_hwr.ble";
 
-// Grundfos company/service UUID shared by both AD types.
-static const uint16_t GRUNDFOS_UUID_16 = 0xFE5D;
+// Expected product identification bytes in the FE5D service data.
+// Reference: Python client._scan_advertisement_data() service_data[3]/[4].
+static const uint8_t EXPECTED_PRODUCT_FAMILY = 0x34;  // ALPHA family
+static const uint8_t EXPECTED_PRODUCT_TYPE = 0x07;    // HWR type
 
-// ─── Advertisement-info caching (from parsed ESPBTDevice) ────────────────────
-//
-// ESPHome's esp32_ble_tracker parses advertisement AD structures into typed
-// lists (get_service_datas(), get_manufacturer_datas()) before calling
-// on_ble_advertise / on_ble_service_data_advertise triggers.  We receive the
-// ESPBTDevice there rather than raw bytes, so we use the parsed fields.
+// ─── Advertisement-info caching (from scan-time service data) ────────────────
 //
 // The pump advertises via Service Data (AD type 0x16) with UUID 0xFE5D.
-// ESPHome strips the 2-byte UUID from the payload, so get_service_datas()[i].data
-// starts at the frame header:
-//   data[0..2]: 3-byte frame header  (Python service_data[0..2])
-//   data[3]:    product_family       (Python service_data[3])  0x34 = ALPHA
-//   data[4]:    product_type         (Python service_data[4])  0x07 = HWR
-//   data[5]:    product_version      (Python service_data[5])  firmware discriminator
-//
-// A Manufacturer Specific Data fallback (0xFF) is also handled for firmware
-// variants that may use that AD type:
-//   data[0..1]: company_id already stripped as UUID by ESPHome
-//   data[2]:    product_family
-//   data[3]:    product_type
-//   data[4]:    product_version
+// ESPHome strips the 2-byte UUID before invoking the
+// on_ble_service_data_advertise trigger, so the payload layout is:
+//   service_data[0..2]: 3-byte frame header  (Python service_data[0..2])
+//   service_data[3]:    product_family       (Python service_data[3])  0x34 = ALPHA
+//   service_data[4]:    product_type         (Python service_data[4])  0x07 = HWR
+//   service_data[5]:    product_version      (Python service_data[5])  firmware discriminator
 
 void BLEConnectionManager::cache_adv_info_from_service_data(const std::vector<uint8_t> &service_data) {
   if (adv_info_.valid) return;  // Only capture once per session
 
-  // ESPHome strips the 2-byte UUID before passing service data to the lambda,
-  // so the payload layout is:
-  //   service_data[0..2]: 3-byte frame header  (Python service_data[0..2])
-  //   service_data[3]:    product_family        (Python service_data[3])  0x34 = ALPHA
-  //   service_data[4]:    product_type          (Python service_data[4])  0x07 = HWR
-  //   service_data[5]:    product_version       (Python service_data[5])
   if (service_data.size() < 6) {
     ESP_LOGD(TAG, "Service data too short (%zu bytes), skipping adv cache", service_data.size());
+    return;
+  }
+
+  // Validate the product bytes before committing to the one-shot cache, so a
+  // malformed payload or a different Grundfos product cannot poison it.
+  if (service_data[3] != EXPECTED_PRODUCT_FAMILY || service_data[4] != EXPECTED_PRODUCT_TYPE) {
+    ESP_LOGD(TAG, "FE5D service data is not an ALPHA HWR advertisement "
+                  "(family=0x%02X type=0x%02X), skipping adv cache",
+             service_data[3], service_data[4]);
     return;
   }
 
@@ -76,8 +69,9 @@ void BLEConnectionManager::cache_adv_info_from_service_data(const std::vector<ui
 //   byte  4:   product_type    (0x07 = HWR)   → matches Python service_data[4]
 //   byte  5:   product_version                → matches Python service_data[5]
 //
-// A Manufacturer Specific Data fallback (0xFF, same UUID, bytes 2/3/4) is
-// also checked in case a firmware variant advertises that way.
+// The Python reference implementation matches on service data only; a
+// service-UUID match is kept as a secondary catch-all for firmware variants
+// that omit the product bytes.
 bool BLEConnectionManager::is_alpha_hwr_device(const esp32_ble_tracker::ESPBTDevice &device,
                                                 uint16_t company_id,
                                                 uint8_t product_family,
@@ -103,23 +97,10 @@ bool BLEConnectionManager::is_alpha_hwr_device(const esp32_ble_tracker::ESPBTDev
     }
   }
 
-  // Secondary: Manufacturer Specific Data (0xFF) — fallback for firmware variants.
-  for (const auto &mfg_data : device.get_manufacturer_datas()) {
-    esp_bt_uuid_t uuid = mfg_data.uuid.get_uuid();
-    if (uuid.len == ESP_UUID_LEN_16 && uuid.uuid.uuid16 == company_id) {
-      const auto &d = mfg_data.data;
-      // Layout: data[0-1]=company_id already stripped as UUID; data[2]=family, data[3]=type
-      if (d.size() >= 5 && d[2] == product_family && d[3] == product_type) {
-        ESP_LOGI(TAG, "Found ALPHA HWR via manufacturer data (0xFF), version=0x%02X", d[4]);
-        return true;
-      }
-    }
-  }
-
-  // Tertiary: Service UUID match — catches devices that don't include product bytes.
+  // Secondary: Service UUID match — catches devices that don't include product bytes.
   for (const auto &svc_uuid : device.get_service_uuids()) {
     if (svc_uuid == service_uuid) {
-      ESP_LOGI(TAG, "Found ALPHA HWR via service UUID (tertiary match)");
+      ESP_LOGI(TAG, "Found ALPHA HWR via service UUID (secondary match)");
       return true;
     }
   }
