@@ -68,8 +68,12 @@ CONFIG_SCHEMA = cv.Schema(
         cv.GenerateID(): cv.declare_id(AlphaHwrComponent),
         cv.Required("ble_client_id"): cv.use_id(ble_client.BLEClient),
         cv.Optional(CONF_ENABLE_PAIRING, default=False): cv.boolean,
+        # 2s default: covers the pump's measured post-boot vulnerability window
+        # (bounded at 320-720ms, during which an encryption request fails with
+        # 0x61 and erases the bond) with ~2.8x margin even assuming zero
+        # host-side processing time. See issue #14 for the measurements.
         cv.Optional(
-            CONF_RECONNECT_SETTLE_TIME, default="0s"
+            CONF_RECONNECT_SETTLE_TIME, default="2s"
         ): cv.positive_time_period_milliseconds,
         cv.Optional(CONF_FLOW): sensor.sensor_schema(
             unit_of_measurement="m³/h",
