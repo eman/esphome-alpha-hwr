@@ -18,8 +18,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   waits for the pump to *reappear* after a disconnect and holds off
   reconnection for the configured settle time — timed from reappearance, so a
   5-second cycle and a 5-minute outage behave identically. The window applies
-  only when a bond exists, so initial pairing is never delayed. Default `0s`
-  (fully opt-in, previous behavior unchanged).
+  only when a bond exists, so initial pairing is never delayed. Defaults to
+  `2s`, which covers the measured 320-720ms pump vulnerability window with
+  ~2.8x margin independent of host-side timing (issue
+  [#14](https://github.com/eman/esphome-alpha-hwr/issues/14)); set `0s` to
+  disable and restore the previous immediate-reconnect behavior.
 - **Pump advertisement decoding at scan time** — new `PumpAdvertisementInfo`
   decoded from raw BLE advertisement bytes before any GATT connection, exposing
   `product_family`, `product_type`, and `product_version` (the BLE firmware
