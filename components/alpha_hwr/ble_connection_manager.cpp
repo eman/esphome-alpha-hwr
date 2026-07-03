@@ -228,8 +228,10 @@ void BLEConnectionManager::handle_connection_opened(const esp_ble_gattc_cb_param
     connection_callback_();
   }
   
-  // Reset discovery retry counter
+  // Reset discovery retry counter and per-connection encryption state
   discovery_retry_count_ = 0;
+  encryption_pending_ = false;
+  subscription_deferred_ = false;
   
   // Request encryption only when we already have a stored bond.
   // - Bonded:   request encryption immediately so the pump can resume the
@@ -244,6 +246,11 @@ void BLEConnectionManager::handle_connection_opened(const esp_ble_gattc_cb_param
       esp_err_t ret = esp_ble_set_encryption(client_->get_remote_bda(), ESP_BLE_SEC_ENCRYPT);
       if (ret != ESP_OK) {
         ESP_LOGW(TAG, "✗ Failed to request encryption: 0x%x", ret);
+      } else {
+        // SMP negotiation is now in flight; hold off the CCCD write until
+        // ESP_GAP_BLE_AUTH_CMPL_EVT so the unencrypted write cannot race it
+        // (issue #12).
+        encryption_pending_ = true;
       }
     } else {
       ESP_LOGI(TAG, "Device is not bonded - waiting for pump to initiate pairing");
@@ -302,7 +309,16 @@ void BLEConnectionManager::handle_service_discovery_complete(esp_gatt_if_t gattc
       // Check for characteristic
       auto *chr = client_->get_characteristic(service->uuid, characteristic_uuid_);
       if (chr) {
-        subscribe_to_notifications();
+        if (encryption_pending_) {
+          // Bonded reconnect with SMP negotiation still in flight: defer the
+          // CCCD write until AUTH_CMPL success (issue #12).  On slower chips
+          // auth completes long before discovery and this path never runs.
+          ESP_LOGI(TAG, "Encryption still negotiating - deferring notification "
+                        "subscription until auth completes");
+          subscription_deferred_ = true;
+        } else {
+          subscribe_to_notifications();
+        }
       } else {
         char uuid_buf[esphome::esp32_ble::UUID_STR_LEN];
         ESP_LOGW(TAG, "Characteristic NOT found: %s", characteristic_uuid_.to_str(uuid_buf));
@@ -359,6 +375,14 @@ void BLEConnectionManager::handle_auth_complete(const esp_ble_gap_cb_param_t *pa
     if (pairing_status_sensor_ != nullptr) {
       pairing_status_sensor_->publish_state(true);
     }
+    encryption_pending_ = false;
+    if (subscription_deferred_) {
+      // Service discovery finished while SMP was negotiating; the link is now
+      // encrypted, so the held-back CCCD write is safe to send (issue #12).
+      subscription_deferred_ = false;
+      ESP_LOGI(TAG, "Auth complete - performing deferred notification subscription");
+      subscribe_to_notifications();
+    }
   } else {
     // Decode failure reason for better debugging
     const char *fail_reason = "Unknown";
@@ -394,6 +418,18 @@ void BLEConnectionManager::handle_auth_complete(const esp_ble_gap_cb_param_t *pa
     ESP_LOGW(TAG, "  Device: %s", addr_str);
     ESP_LOGW(TAG, "  Failure reason: %s (0x%02x)", fail_reason, auth_cmpl.fail_reason);
     ESP_LOGW(TAG, "  Auth mode: 0x%02x", auth_cmpl.auth_mode);
+    // Bonded reconnect whose encryption failed: the link may stay up in an
+    // unauthenticated state, and a later discovery-complete would then send
+    // the CCCD write unencrypted — the exact race this deferral exists to
+    // prevent.  Tear the connection down instead; the normal reconnect path
+    // (including any reconnect settle window) takes over from there.
+    bool disconnect_needed = encryption_pending_;
+    encryption_pending_ = false;
+    subscription_deferred_ = false;
+    if (disconnect_needed && client_ != nullptr) {
+      ESP_LOGW(TAG, "Disconnecting - no GATT writes allowed on an unauthenticated bonded link");
+      client_->disconnect();
+    }
     if (pairing_status_sensor_ != nullptr) {
       pairing_status_sensor_->publish_state(false);
     }
@@ -461,6 +497,8 @@ void BLEConnectionManager::handle_gattc_event(esp_gattc_cb_event_t event, esp_ga
         disconnection_callback_();
       }
       discovery_retry_count_ = 0;
+      encryption_pending_ = false;
+      subscription_deferred_ = false;
       break;
     
     default:

@@ -116,6 +116,17 @@ class BLEConnectionManager {
   
   // Configuration
   bool pairing_enabled_{false};
+
+  // Bonded-reconnect encryption tracking (see issue #12).
+  // encryption_pending_ is true from the moment esp_ble_set_encryption() is
+  // issued until ESP_GAP_BLE_AUTH_CMPL_EVT arrives.  While it is set, the
+  // CCCD write (notification subscription) must not be sent: an unencrypted
+  // GATT write racing SMP negotiation can be rejected with "insufficient
+  // authentication", a failure path that can end in bond erasure.
+  bool encryption_pending_{false};
+  // Set when service discovery completed while encryption was still pending;
+  // the subscription is then performed from the AUTH_CMPL success handler.
+  bool subscription_deferred_{false};
   
   // Service discovery retry mechanism
   uint8_t discovery_retry_count_{0};
