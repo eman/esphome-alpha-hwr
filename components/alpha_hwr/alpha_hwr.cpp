@@ -53,6 +53,10 @@ void AlphaHwrComponent::setup() {
     // Reset initial-read flag so device info, clock sync, etc. are re-fetched
     // after reconnect (pump may have rebooted).
     this->initial_data_read_done_ = false;
+    // Invalidate pending initial-read-chain timers so a disconnect mid-chain
+    // can't leave them to fire reads against the next connection (issue #18).
+    // The chain re-runs fresh on reconnect, so nothing is lost.
+    this->read_chain_gen_++;
     this->session_.on_disconnected();
     // Clears command queue, pending handlers, reassembly buffer, and FSM state.
     this->transport_.reset();
@@ -258,20 +262,27 @@ void AlphaHwrComponent::trigger_initial_data_reads() {
   initial_data_read_done_ = true;
   ESP_LOGD(TAG, "Triggering initial data reads...");
 
+  // Capture the current generation; each timer lambda below checks it so a
+  // disconnect (which bumps read_chain_gen_) invalidates the whole chain.
+  const uint32_t gen = this->read_chain_gen_;
+
   // Read device information strings
-  this->set_timeout(1000, [this]() {
+  this->set_timeout(1000, [this, gen]() {
+    if (gen != this->read_chain_gen_) return;  // Stale: disconnected mid-chain
     ESP_LOGD(TAG, "Reading device information...");
     this->read_device_info();
 
     // Chain: read operating statistics after device info
-    this->set_timeout(2000, [this]() {
+    this->set_timeout(2000, [this, gen]() {
+      if (gen != this->read_chain_gen_) return;
       ESP_LOGD(TAG, "Reading operating statistics...");
       this->read_statistics();
     });
   });
 
   // Sync pump clock (Read time first to calculate drift, then sync)
-  this->set_timeout(2000, [this]() {
+  this->set_timeout(2000, [this, gen]() {
+    if (gen != this->read_chain_gen_) return;
     ESP_LOGD(TAG, "Performing initial pump clock sync...");
 
     // First read the pump clock to measure drift
@@ -321,27 +332,31 @@ void AlphaHwrComponent::trigger_initial_data_reads() {
   });
 
   // Refresh schedule display
-  this->set_timeout(4000, [this]() {
+  this->set_timeout(4000, [this, gen]() {
+    if (gen != this->read_chain_gen_) return;
     ESP_LOGD(TAG, "Refreshing schedule display...");
     this->update_schedule_display();
   });
 
   // Read event log, then chain history, then single events
-  this->set_timeout(6000, [this]() {
+  this->set_timeout(6000, [this, gen]() {
+    if (gen != this->read_chain_gen_) return;
     ESP_LOGD(TAG, "Reading event log...");
-    this->read_event_log([this](bool success) {
+    this->read_event_log([this, gen](bool success) {
       if (success) {
         ESP_LOGD(TAG, "Event log read complete");
       } else {
         ESP_LOGW(TAG, "Event log read failed");
       }
-      this->set_timeout(2000, [this]() {
+      this->set_timeout(2000, [this, gen]() {
+        if (gen != this->read_chain_gen_) return;
         ESP_LOGD(TAG, "Reading history trends...");
-        this->read_history([this](bool success) {
+        this->read_history([this, gen](bool success) {
           if (success) {
             ESP_LOGD(TAG, "History trends read complete");
           }
-          this->set_timeout(2000, [this]() {
+          this->set_timeout(2000, [this, gen]() {
+            if (gen != this->read_chain_gen_) return;
             ESP_LOGD(TAG, "Reading single events...");
             this->read_single_events(
                 [](bool success,
@@ -358,7 +373,8 @@ void AlphaHwrComponent::trigger_initial_data_reads() {
   });
 
   // Query control mode and setpoints
-  this->set_timeout(5000, [this]() {
+  this->set_timeout(5000, [this, gen]() {
+    if (gen != this->read_chain_gen_) return;
     ESP_LOGD(TAG, "Reading control mode and setpoints from pump...");
     this->control_service_.read_setpoints_from_pump();
   });
