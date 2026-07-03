@@ -310,6 +310,12 @@ private:
   // the BLE connection persists through an ESP32 restart (no re-auth).
   bool initial_data_read_done_{false};
 
+  // Generation counter for the initial-read chain timers. Bumped on
+  // disconnect so pending set_timeout lambdas from a previous connection
+  // self-invalidate instead of firing reads against the next connection
+  // (same pattern as auth_sequence_ / scheduler_sequence_). See issue #18.
+  uint32_t read_chain_gen_{0};
+
   // Time synchronization tracking
   uint32_t last_time_sync_timestamp_{0}; // millis() when last sync occurred
   static constexpr uint32_t TIME_SYNC_INTERVAL_MS =
