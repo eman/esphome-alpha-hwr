@@ -45,6 +45,9 @@ void AlphaHwrComponent::setup() {
     // Cancel in-flight auth so its pending scheduler lambdas are invalidated
     // and do not fire against the next BLE connection.
     this->auth_.cancel();
+    // Also cancel the pending stabilize-to-auth timer, so a disconnect inside
+    // the stabilize window can't leave it to start auth against the next connection.
+    this->cancel_timeout("hwr_auth_start");
     // Stop telemetry so the next auth-complete callback can restart it cleanly.
     this->telemetry_service_.stop();
     // Reset initial-read flag so device info, clock sync, etc. are re-fetched
@@ -91,7 +94,7 @@ void AlphaHwrComponent::setup() {
     this->session_.on_subscribed();
 
     // Wait for pump to stabilize, then authenticate
-    this->set_timeout(2000, [this]() {
+    this->set_timeout("hwr_auth_start", 2000, [this]() {
       ESP_LOGI(TAG, "Pump stabilized. Starting authentication...");
       this->authenticate();
     });
