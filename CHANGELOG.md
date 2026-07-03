@@ -45,6 +45,32 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   identity via Service Data (AD type `0x16`); detection now parses Service Data
   at the offsets used by the Python reference
   (PR [#10](https://github.com/eman/esphome-alpha-hwr/pull/10)).
+- **CCCD write raced BLE encryption negotiation on bonded reconnect** — on
+  fast-BLE chips, service discovery could complete mid-SMP-negotiation, so the
+  notification-subscription (CCCD) write fired unencrypted and raced
+  `ESP_GAP_BLE_AUTH_CMPL_EVT`; a rejection could end in bond erasure. The
+  subscription is now deferred until `AUTH_CMPL` succeeds whenever an
+  encryption request is still pending, tracked by two connection-scoped flags
+  that reset on open, auth failure, and disconnect
+  (issue [#12](https://github.com/eman/esphome-alpha-hwr/issues/12), PR
+  [#13](https://github.com/eman/esphome-alpha-hwr/pull/13)).
+- **Stabilize-to-auth timer survived a disconnect landing before auth started**
+  — a disconnect inside the ~2s reconnect-settle window (before
+  `authenticate()` had run) left the anonymous stabilize timer pending, so it
+  later fired against whatever connection existed next. The timer is now named
+  (`hwr_auth_start`) and explicitly cancelled on disconnect alongside
+  `auth_.cancel()` (issue [#15](https://github.com/eman/esphome-alpha-hwr/issues/15),
+  PR [#17](https://github.com/eman/esphome-alpha-hwr/pull/17)).
+- **Initial-read-chain timers survived a disconnect mid-chain** — the post-auth
+  chain of reads (device info, statistics, clock sync, schedule display,
+  setpoints, event log/history/single-events) used anonymous `set_timeout`
+  calls that kept firing against a new connection if a disconnect landed
+  during the chain. A `read_chain_gen_` generation counter, bumped on
+  disconnect, is now captured by every timer lambda at schedule time; each
+  returns early if the generation no longer matches, mirroring the
+  self-invalidation pattern already used by `auth_sequence_` and
+  `scheduler_sequence_` (issue [#18](https://github.com/eman/esphome-alpha-hwr/issues/18),
+  PR [#19](https://github.com/eman/esphome-alpha-hwr/pull/19)).
 
 ---
 
