@@ -96,6 +96,11 @@ class BLEConnectionManager {
 
   // Debug helpers
   void dump_services();
+
+  // Pump Link Status support: latched human-readable reason of the most recent
+  // failed attempt, and the bond state observed at the last connection-open.
+  const std::string &get_last_failure() const { return last_failure_; }
+  bool was_bonded_at_open() const { return bonded_at_open_; }
   
  private:
   void subscribe_to_notifications();
@@ -143,6 +148,11 @@ class BLEConnectionManager {
   std::function<void()> subscribed_callback_;
   std::function<void(const uint8_t*, size_t)> notification_callback_;
   std::function<void(const PumpAdvertisementInfo &)> advertisement_callback_;
+
+  // Pump Link Status support
+  std::string last_failure_;     // latched last failure reason (human-readable)
+  bool bonded_at_open_{false};   // bond state captured at the last connection-open
+  bool significant_failure_held_{false};  // hold an auth/encryption failure reason over routine disconnects until recovery
 
   // Advertisement identifiers decoded at scan time (pre-connection)
   PumpAdvertisementInfo adv_info_;

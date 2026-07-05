@@ -223,6 +223,10 @@ void BLEConnectionManager::subscribe_to_notifications() {
 void BLEConnectionManager::handle_connection_opened(const esp_ble_gattc_cb_param_t *param) {
   ESP_LOGI(TAG, "BLE connection opened. Pairing enabled: %s", pairing_enabled_ ? "YES" : "NO");
   
+  // Pump Link Status: capture the bond state for this connection once, before the
+  // component callback (which reads it via was_bonded_at_open()).
+  bonded_at_open_ = check_is_bonded(client_->get_remote_bda());
+
   // Notify component of connection
   if (connection_callback_) {
     connection_callback_();
@@ -241,7 +245,7 @@ void BLEConnectionManager::handle_connection_opened(const esp_ble_gattc_cb_param
   //             request on an unbonded pump returns 0x52 ("Pairing Not
   //             Supported"), causing the pump's own SEC_REQ to be missed.
   if (pairing_enabled_) {
-    if (check_is_bonded(client_->get_remote_bda())) {
+    if (bonded_at_open_) {  // reuse the check_is_bonded() result captured above
       ESP_LOGI(TAG, "Device is bonded - requesting encryption to resume secure session");
       esp_err_t ret = esp_ble_set_encryption(client_->get_remote_bda(), ESP_BLE_SEC_ENCRYPT);
       if (ret != ESP_OK) {
@@ -376,6 +380,13 @@ void BLEConnectionManager::handle_auth_complete(const esp_ble_gap_cb_param_t *pa
       pairing_status_sensor_->publish_state(true);
     }
     encryption_pending_ = false;
+    // Recovery: a successful (re-)auth clears any held significant-failure reason,
+    // so the fault sensor stops showing the old cause once the link is healthy.
+    // This single clear site is sufficient: the hold is only ever set on an auth
+    // failure, which erases the bond, so recovery must pass back through a fresh
+    // AUTH_CMPL success here to reach READY. (The fault display is also gated on
+    // is_ready().) So no path reaches READY with the hold still set.
+    significant_failure_held_ = false;
     if (subscription_deferred_) {
       // Service discovery finished while SMP was negotiating; the link is now
       // encrypted, so the held-back CCCD write is safe to send (issue #12).
@@ -418,6 +429,15 @@ void BLEConnectionManager::handle_auth_complete(const esp_ble_gap_cb_param_t *pa
     ESP_LOGW(TAG, "  Device: %s", addr_str);
     ESP_LOGW(TAG, "  Failure reason: %s (0x%02x)", fail_reason, auth_cmpl.fail_reason);
     ESP_LOGW(TAG, "  Auth mode: 0x%02x", auth_cmpl.auth_mode);
+    {
+      // Latch the failure reason for the Pump Link Status companion, and mark it
+      // significant so the routine disconnects of the ensuing (possibly unbonded)
+      // reconnect loop don't overwrite the real cause before recovery.
+      char afbuf[64];
+      snprintf(afbuf, sizeof(afbuf), "%s (0x%02x)", fail_reason, auth_cmpl.fail_reason);
+      last_failure_ = afbuf;
+      significant_failure_held_ = true;
+    }
     // Bonded reconnect whose encryption failed: the link may stay up in an
     // unauthenticated state, and a later discovery-complete would then send
     // the CCCD write unencrypted — the exact race this deferral exists to
@@ -490,8 +510,31 @@ void BLEConnectionManager::handle_gattc_event(esp_gattc_cb_event_t event, esp_ga
       handle_notification(param);
       break;
     
-    case ESP_GATTC_DISCONNECT_EVT:
+    case ESP_GATTC_DISCONNECT_EVT: {
       ESP_LOGW(TAG, "Disconnected (reason: 0x%02x)", param->disconnect.reason);
+      // Latch a human-readable failure reason for the Pump Link Status companion
+      // (set before the callback so the component can read it on the same event).
+      // Skip while a significant auth/encryption failure is being held, so the
+      // routine disconnects of the ensuing reconnect loop don't overwrite the
+      // real cause before recovery.
+      if (!significant_failure_held_) {
+        const char *rname;
+        switch (param->disconnect.reason) {
+          case ESP_GATT_CONN_L2C_FAILURE:          rname = "L2CAP Failure"; break;
+          case ESP_GATT_CONN_TIMEOUT:              rname = "Connection Timeout"; break;
+          case ESP_GATT_CONN_TERMINATE_PEER_USER:  rname = "Remote Terminated"; break;
+          case ESP_GATT_CONN_TERMINATE_LOCAL_HOST: rname = "Local Host Terminated"; break;
+          case ESP_GATT_CONN_LMP_TIMEOUT:          rname = "LL Response Timeout"; break;
+          case ESP_GATT_CONN_FAIL_ESTABLISH:       rname = "Failed To Establish"; break;
+          case ESP_GATT_CONN_CONN_CANCEL:          rname = "Connection Cancelled"; break;
+          // ESP_GATT_CONN_UNKNOWN (0) and ESP_GATT_CONN_NONE (0x0101) are
+          // "no known reason" sentinels; let them fall to the default below.
+          default:                                 rname = "Disconnected"; break;
+        }
+        char fbuf[48];
+        snprintf(fbuf, sizeof(fbuf), "%s (0x%02x)", rname, param->disconnect.reason);
+        last_failure_ = fbuf;
+      }
       scheduler_sequence_++;  // Invalidate any pending scheduler callbacks
       if (disconnection_callback_) {
         disconnection_callback_();
@@ -500,6 +543,7 @@ void BLEConnectionManager::handle_gattc_event(esp_gattc_cb_event_t event, esp_ga
       encryption_pending_ = false;
       subscription_deferred_ = false;
       break;
+    }
     
     default:
       break;

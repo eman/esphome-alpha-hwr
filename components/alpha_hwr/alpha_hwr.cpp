@@ -18,6 +18,8 @@ void AlphaHwrComponent::setup() {
   ESP_LOGI(TAG, "================== Alpha HWR Component setup() called "
                 "==================");
 
+  this->link_boot_ms_ = millis();  // Pump Link Status: mark the startup window
+
   // Initialize BLE connection manager
   ble_manager_.set_ble_client(parent_);
   ble_manager_.set_pairing_enabled(pairing_enabled_);
@@ -39,6 +41,11 @@ void AlphaHwrComponent::setup() {
     this->reconnect_timer_armed_ = false;
     this->cancel_timeout("reconnect_settle");
     this->session_.on_connected();
+    // Pump Link Status: record this connection-open.
+    this->link_last_open_ms_ = millis();
+    this->link_ever_opened_ = true;
+    this->link_reached_ready_ = false;
+    this->evaluate_link_status();
   });
 
   ble_manager_.set_disconnection_callback([this]() {
@@ -60,6 +67,16 @@ void AlphaHwrComponent::setup() {
     this->session_.on_disconnected();
     // Clears command queue, pending handlers, reassembly buffer, and FSM state.
     this->transport_.reset();
+
+    // Pump Link Status: a connection ended. If it had reached READY this is a
+    // clean drop of a good link (start fresh); otherwise it was a failed attempt.
+    if (this->link_reached_ready_) {
+      this->link_consecutive_failures_ = 0;
+    } else {
+      this->link_consecutive_failures_++;
+    }
+    this->link_reached_ready_ = false;
+    this->evaluate_link_status();
 
     // Optional reconnect settle window: after a disconnect, hold off reconnection
     // and start the settle timer only once the pump REAPPEARS (see parse_device),
@@ -162,6 +179,11 @@ void AlphaHwrComponent::setup() {
     // Start telemetry service when authenticated
     this->telemetry_service_.start();
 
+    // Pump Link Status: we reached a working link.
+    this->link_reached_ready_ = true;
+    this->link_consecutive_failures_ = 0;
+    this->evaluate_link_status();
+
     // Trigger the one-time data read chain
     this->trigger_initial_data_reads();
   });
@@ -254,6 +276,85 @@ bool AlphaHwrComponent::parse_device(
 void AlphaHwrComponent::loop() {
   // Process transport command queue and state machine
   this->transport_.loop();
+
+  // Pump Link Status: periodic re-evaluation (throttled). This catches the
+  // no-events "unreachable" case — when the pump is offline the connect loop
+  // produces no callbacks, so only an elapsed-time check can detect it.
+  if (millis() - this->link_last_eval_ms_ >= 1000) {
+    this->link_last_eval_ms_ = millis();
+    this->evaluate_link_status();
+  }
+}
+
+// Pump Link Status state machine. The status is the FIRST matching condition
+// below (a priority ladder), re-evaluated on the connection/disconnection/auth
+// callbacks and on the ~1s loop() tick above:
+//
+//   Connected     the GENI session has reached READY (session_.is_ready()): the
+//                 pump is fully usable, not merely BLE-linked.
+//   Initializing  no connection has opened since boot, still within the 15s boot
+//                 grace (LINK_INIT_GRACE_MS).
+//   Unpaired      pairing is enabled but there was no bond at the last open (the
+//                 pump has no stored bond: never paired yet, or the bond was
+//                 erased by an encryption failure like 0x61). NOTE: this also
+//                 shows transiently through an initial pairing handshake, since no
+//                 bond exists until it completes, before flipping to Connected; it
+//                 persists only when the bond is genuinely absent (needs re-pair).
+//   Unreachable   no successful open for over 20s (LINK_UNREACHABLE_MS), measured
+//                 from the last open / last Connected; or never opened since boot
+//                 and past the 15s grace. Covers both an absent pump and a present
+//                 pump we cannot connect to (the two are not distinguished).
+//   Reconnecting  not ready, opened within 20s, but >= 3 consecutive failed
+//                 attempts (LINK_FAIL_K): links keep opening yet the session keeps
+//                 failing before READY.
+//   Connecting    not ready, opened within 20s, fewer than 3 failures: a normal
+//                 in-progress attempt (including the first after a clean drop).
+void AlphaHwrComponent::evaluate_link_status() {
+#ifdef USE_TEXT_SENSOR
+  // Companion sensor: show the latched failure reason only while the link is unhealthy;
+  // read "None" once it's Connected again, so a stale reason doesn't sit next to a healthy
+  // status. "None" is also the pre-failure default.
+  if (this->pump_last_link_failure_sensor_ != nullptr) {
+    const std::string &lf = this->ble_manager_.get_last_failure();
+    const std::string shown =
+        (this->session_.is_ready() || lf.empty()) ? std::string("None") : lf;
+    if (shown != this->link_last_failure_published_) {
+      this->link_last_failure_published_ = shown;
+      this->pump_last_link_failure_sensor_->publish_state(shown);
+    }
+  }
+
+  if (this->pump_link_status_sensor_ == nullptr)
+    return;
+
+  constexpr uint32_t LINK_INIT_GRACE_MS = 15000;   // boot grace before "unreachable"
+  constexpr uint32_t LINK_UNREACHABLE_MS = 20000;  // no open this long -> unreachable
+  constexpr uint16_t LINK_FAIL_K = 3;              // failed attempts -> reconnecting
+  const uint32_t now = millis();
+
+  const char *state;
+  if (this->session_.is_ready()) {
+    state = "Connected";
+    this->link_last_open_ms_ = now;  // measure "unreachable" from the drop, not the first open
+  } else if (!this->link_ever_opened_) {
+    state = (now - this->link_boot_ms_ < LINK_INIT_GRACE_MS) ? "Initializing"
+                                                             : "Unreachable";
+  } else if (this->pairing_enabled_ && !this->ble_manager_.was_bonded_at_open()) {
+    state = "Unpaired";
+  } else if (now - this->link_last_open_ms_ > LINK_UNREACHABLE_MS) {
+    state = "Unreachable";
+  } else if (this->link_consecutive_failures_ >= LINK_FAIL_K) {
+    state = "Reconnecting";
+  } else {
+    state = "Connecting";
+  }
+
+  if (this->link_last_status_ != state) {
+    this->link_last_status_ = state;
+    this->pump_link_status_sensor_->publish_state(state);
+    ESP_LOGI(TAG, "Pump link status: %s", state);
+  }
+#endif
 }
 
 void AlphaHwrComponent::trigger_initial_data_reads() {

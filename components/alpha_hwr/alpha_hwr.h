@@ -182,6 +182,12 @@ public:
   void set_last_clock_sync_sensor(text_sensor::TextSensor *sensor) {
     last_clock_sync_sensor_ = sensor;
   }
+  void set_pump_link_status_text_sensor(text_sensor::TextSensor *sensor) {
+    pump_link_status_sensor_ = sensor;
+  }
+  void set_pump_last_link_failure_text_sensor(text_sensor::TextSensor *sensor) {
+    pump_last_link_failure_sensor_ = sensor;
+  }
 #endif
   // Numeric sensor setters for operating statistics
   void set_start_count_sensor(sensor::Sensor *sensor) {
@@ -298,6 +304,9 @@ private:
   text_sensor::TextSensor *history_text_sensor_{nullptr};
   text_sensor::TextSensor *cycle_timestamps_text_sensor_{nullptr};
   text_sensor::TextSensor *last_clock_sync_sensor_{nullptr};
+  // Pump link status (coarse connection-health enum) + latched last failure
+  text_sensor::TextSensor *pump_link_status_sensor_{nullptr};
+  text_sensor::TextSensor *pump_last_link_failure_sensor_{nullptr};
 #endif
 
   // Operating statistics sensors
@@ -326,6 +335,19 @@ private:
    * Called from update() to sync pump RTC with system time once per day.
    */
   void check_and_sync_time();
+
+  // Pump Link Status evaluator: coarse link-health enum from session/bond/timing,
+  // published (plus the latched last-failure string) on change. Driven by the
+  // connection/disconnection/auth callbacks and a periodic check in loop().
+  void evaluate_link_status();
+  uint32_t link_boot_ms_{0};
+  uint32_t link_last_open_ms_{0};
+  uint32_t link_last_eval_ms_{0};
+  uint16_t link_consecutive_failures_{0};
+  bool link_ever_opened_{false};
+  bool link_reached_ready_{false};
+  std::string link_last_status_;
+  std::string link_last_failure_published_;
 
 public:
   // Control service access methods (for ESPHome switches/buttons)
