@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.7.0] - 2026-07-05
+
 ### Added
 
 - **Pump Link Status and Pump Link Fault text sensors** — two optional text
