@@ -16,6 +16,8 @@
 # - Active Alarms (text sensor) - Requires pairing
 # - Active Warnings (text sensor) - Requires pairing
 # - Pairing Status (binary sensor)
+# - Pump Link Status (text sensor)
+# - Pump Link Fault (text sensor)
 #
 # Requirements:
 # - ESP32 with BLE support
@@ -66,7 +68,13 @@ alpha_hwr:
    # Pairing Status
    pairing_status:
      name: "Pairing Status"
-   
+
+   # Pump Link Status (coarse connection health) + latched last-failure detail
+   pump_link_status:
+     name: "Pump Link Status"
+   pump_last_link_failure:
+     name: "Pump Link Fault"
+
    # Enhanced Electrical (requires pairing)
    voltage:
      name: "AC Voltage"

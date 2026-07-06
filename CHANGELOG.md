@@ -7,6 +7,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **Pump Link Status and Pump Link Fault text sensors** — two optional text
+  sensors surfacing BLE link health. `Pump Link Status` reports a coarse
+  connection-state enum (`Initializing`, `Connecting`, `Reconnecting`,
+  `Connected`, `Unpaired`, `Unreachable`); `Pump Link Fault` shows the latched
+  human-readable reason for the most recent failure (e.g. `Encryption Start
+  Failed (0x61)`, `Remote Terminated (0x13)`), clearing to `None` once the link
+  returns to `Connected`. The fault deliberately holds a significant
+  auth/encryption failure through the reconnect churn so the cause survives to
+  be seen without logs. Aimed at self-support, triage, and monitoring/automation
+  (issue [#21](https://github.com/eman/esphome-alpha-hwr/issues/21), PR
+  [#22](https://github.com/eman/esphome-alpha-hwr/pull/22)).
+
 ## [0.6.0] - 2026-07-03
 
 ### Added
