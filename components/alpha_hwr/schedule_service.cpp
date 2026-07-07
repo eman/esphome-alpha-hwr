@@ -442,6 +442,63 @@ bool ScheduleService::read_entries_async(
   return true;
 }
 
+bool ScheduleService::build_schedule_apdu(const std::vector<ScheduleEntry> &entries, 
+                                          uint8_t layer, uint8_t apdu_out[53]) {
+  // Prepare 42-byte payload (7 days × 6 bytes)
+  uint8_t payload_data[42];
+  memset(payload_data, 0, 42); // Initialize with zeros (disabled entries)
+
+  // Fill payload with entries
+  for (const auto &entry : entries) {
+    int day_idx = -1;
+    for (int i = 0; i < 7; i++) {
+      if (entry.get_day() == DAY_NAMES[i]) {
+        day_idx = i;
+        break;
+      }
+    }
+
+    if (day_idx == -1) {
+      ESP_LOGW(TAG, "Invalid day name in entry: %s", entry.get_day());
+      continue;
+    }
+
+    size_t offset = day_idx * 6;
+
+    // Fill 6-byte entry
+    entry.to_bytes(payload_data + offset);
+
+    ESP_LOGV(TAG,
+             "Added entry for %s at offset %zu: %02X %02X %02X %02X %02X %02X",
+             entry.get_day(), offset, payload_data[offset],
+             payload_data[offset + 1], payload_data[offset + 2],
+             payload_data[offset + 3], payload_data[offset + 4],
+             payload_data[offset + 5]);
+  }
+
+  // Build APDU
+  uint16_t sub_id = 1000 + layer;
+  uint8_t sub_h = (sub_id >> 8) & 0xFF;
+  uint8_t sub_l = sub_id & 0xFF;
+
+  apdu_out[0] = 0x0A;   // Class 10
+  apdu_out[1] = 0xB3;   // OpSpec 5
+  apdu_out[2] = 84;     // Object ID 84
+  apdu_out[3] = sub_h;  // SubID high byte
+  apdu_out[4] = sub_l;  // SubID low byte
+  apdu_out[5] = 0x00;   // Reserved
+  apdu_out[6] = 0xDE;   // Type 222 header
+  apdu_out[7] = 0x01;
+  apdu_out[8] = 0x00;
+  apdu_out[9] = 0x00;  // Size high byte
+  apdu_out[10] = 0x2A; // Size low byte (42 bytes)
+
+  // Append payload
+  memcpy(apdu_out + 11, payload_data, 42);
+  
+  return true;
+}
+
 bool ScheduleService::write_entries(const std::vector<ScheduleEntry> &entries,
                                     uint8_t layer) {
   if (!this->session_.is_ready()) {
@@ -468,58 +525,10 @@ bool ScheduleService::write_entries(const std::vector<ScheduleEntry> &entries,
   ESP_LOGI(TAG, "Writing %zu schedule entries to layer %d...", entries.size(),
            layer);
 
-  // Prepare 42-byte payload (7 days × 6 bytes)
-  uint8_t payload_data[42];
-  memset(payload_data, 0, 42); // Initialize with zeros (disabled entries)
-
-  // Map day names to indices
-  std::map<std::string, int> day_indices;
-  for (int i = 0; i < 7; i++) {
-    day_indices[DAY_NAMES[i]] = i;
+  uint8_t apdu[53];
+  if (!this->build_schedule_apdu(entries, layer, apdu)) {
+    return false;
   }
-
-  // Fill payload with entries
-  for (const auto &entry : entries) {
-    auto it = day_indices.find(entry.get_day());
-    if (it == day_indices.end()) {
-      ESP_LOGW(TAG, "Invalid day name in entry: %s", entry.get_day().c_str());
-      continue;
-    }
-
-    int day_idx = it->second;
-    size_t offset = day_idx * 6;
-
-    // Fill 6-byte entry
-    entry.to_bytes(payload_data + offset);
-
-    ESP_LOGV(TAG,
-             "Added entry for %s at offset %zu: %02X %02X %02X %02X %02X %02X",
-             entry.get_day().c_str(), offset, payload_data[offset],
-             payload_data[offset + 1], payload_data[offset + 2],
-             payload_data[offset + 3], payload_data[offset + 4],
-             payload_data[offset + 5]);
-  }
-
-  // Build APDU
-  uint16_t sub_id = 1000 + layer;
-  uint8_t sub_h = (sub_id >> 8) & 0xFF;
-  uint8_t sub_l = sub_id & 0xFF;
-
-  uint8_t apdu[53]; // 11 header bytes + 42 data bytes
-  apdu[0] = 0x0A;   // Class 10
-  apdu[1] = 0xB3;   // OpSpec 5
-  apdu[2] = 84;     // Object ID 84
-  apdu[3] = sub_h;  // SubID high byte
-  apdu[4] = sub_l;  // SubID low byte
-  apdu[5] = 0x00;   // Reserved
-  apdu[6] = 0xDE;   // Type 222 header
-  apdu[7] = 0x01;
-  apdu[8] = 0x00;
-  apdu[9] = 0x00;  // Size high byte
-  apdu[10] = 0x2A; // Size low byte (42 bytes)
-
-  // Append payload
-  memcpy(apdu + 11, payload_data, 42);
 
   // Send write command
   if (!this->write_class10_command(apdu, 53)) {
@@ -530,6 +539,7 @@ bool ScheduleService::write_entries(const std::vector<ScheduleEntry> &entries,
   ESP_LOGI(TAG, "Schedule written successfully to layer %d", layer);
   return true;
 }
+
 
 bool ScheduleService::write_entries_async(
     const std::vector<ScheduleEntry> &entries, uint8_t layer,

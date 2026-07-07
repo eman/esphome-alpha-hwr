@@ -344,6 +344,12 @@ public:
                            std::function<void(bool success)> on_complete);
 
   /**
+   * Internal helper to build the 53-byte APDU for writing a schedule layer.
+   */
+  bool build_schedule_apdu(const std::vector<ScheduleEntry> &entries, 
+                           uint8_t layer, uint8_t apdu_out[53]);
+
+  /**
    * Clear (disable) a schedule entry for a specific day (async).
    *
    * This disables the schedule for a specific day on the specified layer,
