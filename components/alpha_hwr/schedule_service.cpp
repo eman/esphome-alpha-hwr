@@ -273,7 +273,7 @@ bool ScheduleService::read_entries(std::vector<ScheduleEntry> *entries,
   apdu[4] = sub_id & 0xFF;
 
   this->transport_.send_apdu_command(
-      apdu, 5, 0xDE01, 0,
+      apdu, 5, 84, sub_id,
       [this, entries, layer](bool success, const uint8_t *payload,
                              size_t payload_len) {
         if (!success) {
@@ -391,7 +391,7 @@ bool ScheduleService::read_entries_async(
   apdu[4] = sub_id & 0xFF;
 
   this->transport_.send_apdu_command(
-      apdu, 5, 0xDE01, 0,
+      apdu, 5, 84, sub_id,
       [this, on_complete, layer](bool success, const uint8_t *payload,
                                  size_t payload_len) {
         ESP_LOGD(TAG,
@@ -586,7 +586,7 @@ bool ScheduleService::write_entries_async(
   ESP_LOGI(TAG, "Queueing async schedule write for layer %d...", layer);
 
   this->transport_.send_apdu_command(
-      apdu, 53, 0xDE01, 0,
+      apdu, 53, 84, sub_id,
       [on_complete, layer](bool success, const uint8_t *data, size_t len) {
         if (success) {
           ESP_LOGI(TAG, "Async write completed with ACK for layer %d", layer);
@@ -890,7 +890,7 @@ void ScheduleService::write_cached_layer_async(
   ESP_LOGI(TAG, "Writing cached layer %d to pump...", layer);
 
   this->transport_.send_apdu_command(
-      apdu, 53, 0xDE01, 0,
+      apdu, 53, 84, sub_id,
       [this, on_complete, layer](bool success, const uint8_t *data,
                                  size_t len) {
         // Send configuration commit after write

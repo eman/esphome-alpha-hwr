@@ -19,7 +19,7 @@ namespace esphome {
 namespace alpha_hwr {
 namespace services {
 
-static constexpr uint8_t 0 = 53;
+static constexpr uint8_t OBJECT_TRENDS = 53;
 
 // SubID → { name, unit, scale }
 struct TrendConfig {
@@ -78,12 +78,12 @@ void HistoryService::read_trends_async(
     uint8_t apdu[5];
     apdu[0] = 0x0A;
     apdu[1] = 0x03;
-    apdu[2] = 0;
+    apdu[2] = OBJECT_TRENDS;
     apdu[3] = (sub_id >> 8) & 0xFF;
     apdu[4] = sub_id & 0xFF;
 
     // Use wildcard response matching — accept any non-register Class 10 response.
-    transport_.send_apdu_command(apdu, 5, 0, sub_id,
+    transport_.send_apdu_command(apdu, 5, OBJECT_TRENDS, sub_id,
         [this, idx, trends, on_complete, read_next, cfg](
             bool success, const uint8_t *payload, size_t payload_len) {
       if (success && payload_len >= 32) {  // 3 header + 29 data
@@ -172,7 +172,7 @@ void HistoryService::read_cycle_timestamps_async(
   apdu[4] = sub_id & 0xFF;
 
   // Use wildcard matching for Object 88 responses
-  transport_.send_apdu_command(apdu, 5, 0, sub_id,
+  transport_.send_apdu_command(apdu, 5, OBJECT_TRENDS, sub_id,
       [this, count, on_complete](bool success, const uint8_t *payload, size_t payload_len) {
     std::vector<uint32_t> timestamps;
 

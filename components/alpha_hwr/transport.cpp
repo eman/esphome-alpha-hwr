@@ -399,10 +399,11 @@ bool Transport::try_dispatch_response(const uint8_t* data, size_t len) {
     // WILDCARD MATCH: If expect_obj_id == 0, accept ANY Class 10 packet
     // EXCEPT passive notifications (OpSpec 0x0E), which should never fulfill a command
     if (cmd.expect_obj_id == 0x0000 && cmd.expect_sub_id == 0x0000) {
-      matched = true;
-      ESP_LOGV(TAG, "Wildcard match: accepting any Class 10 packet (OpSpec=0x%02X, Obj=%d, Sub=%d)",
-               opspec, packet_obj_id, packet_sub_id);
-
+      if (opspec == 0x0E) {
+        ESP_LOGV(TAG, "Skipping wildcard match for passive notification (OpSpec 0x0E)");
+        matched = false;
+      } else {
+        matched = true;
         ESP_LOGV(TAG, "Wildcard match: accepting Class 10 packet (OpSpec=0x%02X, Obj=%d, Sub=%d)",
                  opspec, packet_obj_id, packet_sub_id);
       }
