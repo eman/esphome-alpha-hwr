@@ -327,19 +327,19 @@ bool ScheduleService::read_entries_async(
     ESP_LOGD(TAG, "Reading schedule entries from all layers (async)...");
 
     struct ReadAllState {
-      ScheduleService *service;
-      uint8_t current_layer;
+      int current_layer = 0;
       std::vector<ScheduleEntry> all_entries;
-      std::function<void(bool success, const std::vector<ScheduleEntry> &)> on_complete;
+      std::function<void(bool, const std::vector<ScheduleEntry> &)> on_complete;
+      ScheduleService *service;
     };
 
     auto state = std::make_shared<ReadAllState>();
-    state->service = this;
-    state->current_layer = 0;
     state->on_complete = on_complete;
+    state->service = this;
 
-    auto read_next_layer = [](auto& self, std::shared_ptr<ReadAllState> st) -> void {
+    auto read_next_layer = [](auto &self, std::shared_ptr<ReadAllState> st) -> void {
       if (st->current_layer > 4) {
+        // All layers read, return combined results
         ESP_LOGD(TAG, "Read %zu total schedule entries from all layers",
                  st->all_entries.size());
         if (st->on_complete)
@@ -352,6 +352,7 @@ bool ScheduleService::read_entries_async(
           layer_to_read,
           [st, self](bool success, const std::vector<ScheduleEntry> &entries) {
             if (success) {
+              // Append entries from this layer to combined list
               for (const auto &entry : entries) {
                 st->all_entries.push_back(entry);
               }
@@ -368,6 +369,7 @@ bool ScheduleService::read_entries_async(
           });
     };
 
+    // Start reading from layer 0
     read_next_layer(read_next_layer, state);
     return true;
   }
@@ -534,7 +536,6 @@ bool ScheduleService::write_entries(const std::vector<ScheduleEntry> &entries,
   return true;
 }
 
-
 bool ScheduleService::write_entries_async(
     const std::vector<ScheduleEntry> &entries, uint8_t layer,
     std::function<void(bool)> on_complete) {
@@ -576,60 +577,16 @@ bool ScheduleService::write_entries_async(
   ESP_LOGI(TAG, "Writing %zu schedule entries to layer %d (async mode)...",
            entries.size(), layer);
 
-  // Prepare 42-byte payload (7 days × 6 bytes)
-  uint8_t payload_data[42];
-  memset(payload_data, 0, 42); // Initialize with zeros (disabled entries)
-
-  // Map day names to indices
-  std::map<std::string, int> day_indices;
-  for (int i = 0; i < 7; i++) {
-    day_indices[DAY_NAMES[i]] = i;
+  uint8_t apdu[53];
+  if (!this->build_schedule_apdu(entries, layer, apdu)) {
+    if (on_complete) on_complete(false);
+    return false;
   }
 
-  // Fill payload with entries
-  for (const auto &entry : entries) {
-    auto it = day_indices.find(entry.get_day());
-    if (it == day_indices.end()) {
-      ESP_LOGW(TAG, "Invalid day name in entry: %s", entry.get_day().c_str());
-      continue;
-    }
-
-    int day_idx = it->second;
-    size_t offset = day_idx * 6;
-
-    // Fill 6-byte entry
-    entry.to_bytes(payload_data + offset);
-
-    ESP_LOGV(TAG, "Added entry for %s at offset %zu", entry.get_day().c_str(),
-             offset);
-  }
-
-  // Build APDU
-  uint16_t sub_id = 1000 + layer;
-  uint8_t sub_h = (sub_id >> 8) & 0xFF;
-  uint8_t sub_l = sub_id & 0xFF;
-
-  uint8_t apdu[53]; // 11 header bytes + 42 data bytes
-  apdu[0] = 0x0A;   // Class 10
-  apdu[1] = 0xB3;   // OpSpec 5
-  apdu[2] = 84;     // Object ID 84
-  apdu[3] = sub_h;  // SubID high byte
-  apdu[4] = sub_l;  // SubID low byte
-  apdu[5] = 0x00;   // Reserved
-  apdu[6] = 0xDE;   // Type 222 header
-  apdu[7] = 0x01;
-  apdu[8] = 0x00;
-  apdu[9] = 0x00;  // Size high byte
-  apdu[10] = 0x2A; // Size low byte (42 bytes)
-
-  // Append payload
-  memcpy(apdu + 11, payload_data, 42);
-
-  // Build GENI frame
   ESP_LOGI(TAG, "Queueing async schedule write for layer %d...", layer);
 
   this->transport_.send_apdu_command(
-      apdu, 5, 0xDE01, 0,
+      apdu, 53, 0xDE01, 0,
       [on_complete, layer](bool success, const uint8_t *data, size_t len) {
         if (success) {
           ESP_LOGI(TAG, "Async write completed with ACK for layer %d", layer);
@@ -737,7 +694,7 @@ bool ScheduleService::validate_entries(
     if (!valid_day) {
       char buf[128];
       snprintf(buf, sizeof(buf), "Entry %zu: Invalid day name '%s'", i,
-               entry.get_day().c_str());
+               entry.get_day());
       errors->push_back(std::string(buf));
     }
 
@@ -746,7 +703,7 @@ bool ScheduleService::validate_entries(
       char buf[128];
       snprintf(buf, sizeof(buf),
                "Entry %zu (%s): Invalid layer %d (must be 0-4)", i,
-               entry.get_day().c_str(), entry.get_layer());
+               entry.get_day(), entry.get_layer());
       errors->push_back(std::string(buf));
     }
 
@@ -755,7 +712,7 @@ bool ScheduleService::validate_entries(
     if (!entry.is_valid_time_range(&error_msg)) {
       char buf[256];
       snprintf(buf, sizeof(buf), "Entry %zu (%s %s-%s): %s", i,
-               entry.get_day().c_str(), entry.get_begin_time().c_str(),
+               entry.get_day(), entry.get_begin_time().c_str(),
                entry.get_end_time().c_str(), error_msg.c_str());
       errors->push_back(std::string(buf));
     }
@@ -776,7 +733,7 @@ bool ScheduleService::validate_entries(
         char buf[256];
         snprintf(buf, sizeof(buf),
                  "Overlap detected: %s layer %d: %s-%s overlaps with %s-%s",
-                 entry1.get_day().c_str(), entry1.get_layer(),
+                 entry1.get_day(), entry1.get_layer(),
                  entry1.get_begin_time().c_str(), entry1.get_end_time().c_str(),
                  entry2.get_begin_time().c_str(),
                  entry2.get_end_time().c_str());
@@ -789,7 +746,7 @@ bool ScheduleService::validate_entries(
   std::map<std::pair<std::string, int>, int> day_layer_counts;
   for (const auto &entry : entries) {
     if (entry.is_enabled()) {
-      auto key = std::make_pair(entry.get_day(), entry.get_layer());
+      auto key = std::make_pair(std::string(entry.get_day()), entry.get_layer());
       day_layer_counts[key]++;
     }
   }
@@ -818,9 +775,10 @@ bool ScheduleService::validate_entries(
 
 bool ScheduleService::write_class10_command(const uint8_t *apdu,
                                             size_t apdu_len) {
-  // Build GENI frame
-  // Use send_command to queue the packet with pacing and non-blocking wait
-  this->transport_.send_command(packet);
+  ESP_LOGD(TAG, "Queueing Class 10 command (%zu bytes)", apdu_len);
+
+  // Use send_apdu_command to queue the packet with pacing and non-blocking wait
+  this->transport_.send_apdu_command(apdu, apdu_len);
 
   return true;
 }
@@ -932,7 +890,7 @@ void ScheduleService::write_cached_layer_async(
   ESP_LOGI(TAG, "Writing cached layer %d to pump...", layer);
 
   this->transport_.send_apdu_command(
-      apdu, 5, 0xDE01, 0,
+      apdu, 53, 0xDE01, 0,
       [this, on_complete, layer](bool success, const uint8_t *data,
                                  size_t len) {
         // Send configuration commit after write
@@ -985,7 +943,7 @@ void ScheduleService::read_single_events_async(
     apdu[4] = sub_id & 0xFF;
 
     this->transport_.send_apdu_command(
-      apdu, 5, 0xDC01, 0,
+        apdu, 5, 0xDC01, 0,
         [this, idx, events, on_complete, max_events,
          read_next](bool success, const uint8_t *payload, size_t payload_len) {
           if (success && payload_len >= 13) {
@@ -1034,7 +992,7 @@ void ScheduleService::write_single_event_async(
   event.to_bytes(apdu + 11);
 
   this->transport_.send_apdu_command(
-      apdu, 5, 0xDC01, 0,
+      apdu, 21, 0xDC01, 0,
       [this, on_complete, event](bool success, const uint8_t *data,
                                  size_t len) {
         this->send_configuration_commit();

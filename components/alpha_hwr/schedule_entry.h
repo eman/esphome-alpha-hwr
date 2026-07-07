@@ -51,44 +51,41 @@ class ScheduleEntry {
    * Default constructor - creates disabled entry for Monday 00:00-00:00.
    */
   ScheduleEntry()
-      : day_("Monday"),
-        begin_hour_(0),
+      : begin_hour_(0),
         begin_minute_(0),
         end_hour_(0),
         end_minute_(0),
         action_(0x02),
         layer_(0),
+        day_index_(0),
         enabled_(false) {}
 
-  /**
-   * Create a schedule entry with full parameters.
-   *
-   * @param day Day name (Monday-Sunday)
-   * @param begin_hour Start hour (0-23)
-   * @param begin_minute Start minute (0-59)
-   * @param end_hour End hour (0-23)
-   * @param end_minute End minute (0-59)
-   * @param action Action code (default 0x02 = run pump)
-   * @param layer Schedule layer 0-4 (default 0)
-   * @param enabled Whether entry is active (default true)
-   */
   ScheduleEntry(const std::string &day, uint8_t begin_hour, uint8_t begin_minute, uint8_t end_hour,
                 uint8_t end_minute, uint8_t action = 0x02, uint8_t layer = 0, bool enabled = true)
-      : day_(day),
-        begin_hour_(begin_hour),
+      : begin_hour_(begin_hour),
         begin_minute_(begin_minute),
         end_hour_(end_hour),
         end_minute_(end_minute),
         action_(action),
         layer_(layer),
-        enabled_(enabled) {}
+        day_index_(0),
+        enabled_(enabled) {
+    set_day(day);
+  }
 
   // -------------------------------------------------------------------------
   // Getters & Setters
   // -------------------------------------------------------------------------
 
-  const std::string &get_day() const { return this->day_; }
-  void set_day(const std::string &day) { this->day_ = day; }
+  const char *get_day() const { return VALID_DAYS[this->day_index_]; }
+  void set_day(const std::string &day) { 
+    for (uint8_t i = 0; i < 7; i++) {
+      if (day == VALID_DAYS[i]) {
+        this->day_index_ = i;
+        break;
+      }
+    }
+  }
 
   uint8_t get_begin_hour() const { return this->begin_hour_; }
   void set_begin_hour(uint8_t hour) { this->begin_hour_ = hour; }
@@ -119,12 +116,7 @@ class ScheduleEntry {
    * Get day index (0=Monday, 6=Sunday).
    */
   int get_day_index() const {
-    for (int i = 0; i < 7; i++) {
-      if (this->day_ == VALID_DAYS[i]) {
-        return i;
-      }
-    }
-    return -1;  // Invalid day
+    return this->day_index_;
   }
 
   /**
@@ -238,7 +230,7 @@ class ScheduleEntry {
    */
   bool overlaps_with(const ScheduleEntry &other) const {
     // Only check overlap if same day, same layer, and both enabled
-    if (this->day_ != other.day_) {
+    if (this->day_index_ != other.day_index_) {
       return false;
     }
     if (this->layer_ != other.layer_) {
@@ -314,13 +306,11 @@ class ScheduleEntry {
    * @return ScheduleEntry instance
    */
   static ScheduleEntry from_bytes(const uint8_t *data, const std::string &day, uint8_t layer = 0) {
-    return ScheduleEntry(day, data[2],  // begin_hour
-                         data[3],        // begin_minute
-                         data[4],        // end_hour
-                         data[5],        // end_minute
-                         data[1],        // action
-                         layer, data[0] != 0  // enabled
-    );
+    uint8_t begin_h = data[2] > 23 ? 23 : data[2];
+    uint8_t begin_m = data[3] > 59 ? 59 : data[3];
+    uint8_t end_h = data[4] > 23 ? 23 : data[4];
+    uint8_t end_m = data[5] > 59 ? 59 : data[5];
+    return ScheduleEntry(day, begin_h, begin_m, end_h, end_m, data[1], layer, data[0] != 0);
   }
 
   // -------------------------------------------------------------------------
@@ -332,20 +322,20 @@ class ScheduleEntry {
    */
   std::string to_string() const {
     char buf[100];
-    snprintf(buf, sizeof(buf), "%s L%d: %s-%s (%s, action=0x%02X)", this->day_.c_str(), this->layer_,
+    snprintf(buf, sizeof(buf), "%s L%d: %s-%s (%s, action=0x%02X)", this->get_day(), this->layer_,
              this->get_begin_time().c_str(), this->get_end_time().c_str(), this->enabled_ ? "enabled" : "disabled",
              this->action_);
     return std::string(buf);
   }
 
  protected:
-  std::string day_;
   uint8_t begin_hour_;
   uint8_t begin_minute_;
   uint8_t end_hour_;
   uint8_t end_minute_;
   uint8_t action_;
   uint8_t layer_;
+  uint8_t day_index_;
   bool enabled_;
 };
 
