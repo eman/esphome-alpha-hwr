@@ -326,55 +326,49 @@ bool ScheduleService::read_entries_async(
   if (layer == -1) {
     ESP_LOGD(TAG, "Reading schedule entries from all layers (async)...");
 
-    // Create a shared vector to collect entries from all layers
-    auto all_entries = std::make_shared<std::vector<ScheduleEntry>>();
+    struct ReadAllState {
+      ScheduleService *service;
+      uint8_t current_layer;
+      std::vector<ScheduleEntry> all_entries;
+      std::function<void(bool success, const std::vector<ScheduleEntry> &)> on_complete;
+    };
 
-    // Create a shared_ptr to hold the recursive function so it can capture
-    // itself safely This avoids the "capture by value of uninitialized
-    // function" undefined behavior
-    auto read_next_layer = std::make_shared<std::function<void(int)>>();
+    auto state = std::make_shared<ReadAllState>();
+    state->service = this;
+    state->current_layer = 0;
+    state->on_complete = on_complete;
 
-    *read_next_layer = [this, all_entries, read_next_layer,
-                        on_complete](int current_layer) {
-      if (current_layer > 4) {
-        // All layers read, return combined results
+    auto read_next_layer = [](auto& self, std::shared_ptr<ReadAllState> st) -> void {
+      if (st->current_layer > 4) {
         ESP_LOGD(TAG, "Read %zu total schedule entries from all layers",
-                 all_entries->size());
-        if (on_complete)
-          on_complete(true, *all_entries);
-        // Break the cycle to allow proper cleanup
-        *read_next_layer = nullptr;
+                 st->all_entries.size());
+        if (st->on_complete)
+          st->on_complete(true, st->all_entries);
         return;
       }
 
-      // Read current layer
-      this->read_entries_async(
-          current_layer,
-          [this, all_entries, on_complete, read_next_layer, current_layer](
-              bool success, const std::vector<ScheduleEntry> &entries) {
+      int layer_to_read = st->current_layer;
+      st->service->read_entries_async(
+          layer_to_read,
+          [st, self](bool success, const std::vector<ScheduleEntry> &entries) {
             if (success) {
-              // Append entries from this layer to combined list
               for (const auto &entry : entries) {
-                all_entries->push_back(entry);
+                st->all_entries.push_back(entry);
               }
-              ESP_LOGV(TAG, "Layer %d contributed %zu entries", current_layer,
+              ESP_LOGV(TAG, "Layer %d contributed %zu entries", st->current_layer,
                        entries.size());
             } else {
               ESP_LOGW(TAG,
                        "Failed to read layer %d (continuing with other layers)",
-                       current_layer);
+                       st->current_layer);
             }
 
-            // Move to next layer by calling the function stored in the
-            // shared_ptr
-            if (*read_next_layer) {
-              (*read_next_layer)(current_layer + 1);
-            }
+            st->current_layer++;
+            self(self, st);
           });
     };
 
-    // Start reading from layer 0
-    (*read_next_layer)(0);
+    read_next_layer(read_next_layer, state);
     return true;
   }
 
