@@ -722,60 +722,7 @@ public:
     if (!this->schedule_text_sensor_)
       return;
 
-    bool enabled = false;
-    schedule_service_.get_state(&enabled);
-
-    std::string json = "{\"e\":";
-    json += enabled ? "1" : "0";
-    json += ",\"s\":{";
-
-    bool first_layer = true;
-    for (int layer = 0; layer < 5; layer++) {
-      if (!schedule_service_.is_layer_cached(layer))
-        continue;
-
-      bool has_entries = false;
-      std::string layer_json = "[";
-      for (int day = 0; day < 7; day++) {
-        if (day > 0)
-          layer_json += ",";
-        ScheduleEntry entry;
-        if (get_cached_schedule_entry(layer, day, &entry) &&
-            entry.is_enabled()) {
-          int start = entry.get_begin_hour() * 60 + entry.get_begin_minute();
-          int end = entry.get_end_hour() * 60 + entry.get_end_minute();
-          layer_json += "[";
-          layer_json += to_string(start);
-          layer_json += ",";
-          layer_json += to_string(end);
-          layer_json += "]";
-          has_entries = true;
-        } else {
-          layer_json += "0";
-        }
-      }
-      layer_json += "]";
-
-      if (has_entries) {
-        if (!first_layer)
-          json += ",";
-        json += "\"";
-        json += to_string(layer);
-        json += "\":";
-        json += layer_json;
-        first_layer = false;
-      }
-    }
-
-    json += "}}";
-
-    // Safety: HA limits entity state to 255 characters
-    if (json.size() > 255) {
-      json.resize(252);
-      json += "...";
-      ESP_LOGW(TAG, "Schedule JSON truncated to 255 chars");
-    }
-
+    std::string json = schedule_service_.generate_json();
     this->schedule_text_sensor_->publish_state(json);
     ESP_LOGD(TAG, "Published schedule JSON (%zu chars)", json.size());
 #endif

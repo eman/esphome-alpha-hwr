@@ -7,6 +7,7 @@
 #include "transport.h"
 #include "esphome/core/log.h"
 #include "esphome/core/hal.h"
+#include "frame_builder.h"
 #include <algorithm>
 
 namespace esphome {
@@ -139,6 +140,32 @@ void Transport::send_command(const std::vector<uint8_t>& packet, uint16_t expect
   
   this->command_queue_.push_back(cmd);
   ESP_LOGV(TAG, "Command queued (queue size: %zu)", this->command_queue_.size());
+}
+
+void Transport::send_apdu_command(const uint8_t* apdu, size_t apdu_len,
+                                  uint16_t expect_obj_id, uint16_t expect_sub_id,
+                                  CommandCallback callback, uint32_t timeout_ms,
+                                  bool allow_register_read) {
+  uint8_t packet_raw[256];
+  // build_geni_packet uses SERVICE_ID_HIGH (0xE7) and SOURCE_ADDRESS (0xF8) automatically
+  size_t packet_len = protocol::build_geni_packet(
+      protocol::SERVICE_ID_HIGH, protocol::SOURCE_ADDRESS,
+      apdu, apdu_len, packet_raw);
+
+  if (packet_len == 0) {
+    // APDU too large to fit in a single GENI frame (build_geni_packet returns 0).
+    // Fail fast instead of queuing an empty command that would never be sent
+    // or matched, leaving the caller waiting until timeout.
+    ESP_LOGE(TAG, "send_apdu_command: failed to build GENI frame (apdu_len=%zu)", apdu_len);
+    if (callback) {
+      callback(false, nullptr, 0);
+    }
+    return;
+  }
+
+  std::vector<uint8_t> packet(packet_raw, packet_raw + packet_len);
+  
+  this->send_command(packet, expect_obj_id, expect_sub_id, callback, timeout_ms, allow_register_read);
 }
 
 bool Transport::is_frame_start(uint8_t byte) {

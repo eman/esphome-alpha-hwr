@@ -70,15 +70,7 @@ class TimeService {
  private:
   core::Transport *transport_;
 
-  /**
-   * @brief Build GENI packet for setting clock.
-   *
-   * Constructs the 19-byte datetime payload and wraps it in a GENI frame.
-   *
-   * @param dt ESPTime to set
-   * @return Complete GENI frame ready to send
-   */
-  static std::vector<uint8_t> build_set_clock_packet(const ESPTime &dt);
+
 
   /**
    * @brief Parse clock response data.

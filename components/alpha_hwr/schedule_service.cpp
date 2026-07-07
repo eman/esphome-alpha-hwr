@@ -82,15 +82,9 @@ bool ScheduleService::poll_state() {
   apdu[3] = 0x00;
   apdu[4] = 0x01;
 
-  uint8_t frame[64];
-  size_t frame_len;
-  frame_len = protocol::build_geni_packet(0xE7, 0xF8, apdu, 5, frame);
-
-  std::vector<uint8_t> packet(frame, frame + frame_len);
-
   // IMPORTANT: Pump responds with SubID 0, not SubID 1 that we requested!
-  this->transport_.send_command(
-      packet, 0xDA01, 0,
+  this->transport_.send_apdu_command(
+      apdu, 5, 0xDA01, 0,
       [this](bool success, const uint8_t *payload, size_t payload_len) {
         if (!success) {
           ESP_LOGW(TAG, "Failed to poll schedule state (timeout)");
@@ -278,14 +272,8 @@ bool ScheduleService::read_entries(std::vector<ScheduleEntry> *entries,
   apdu[3] = (sub_id >> 8) & 0xFF;
   apdu[4] = sub_id & 0xFF;
 
-  uint8_t frame[64];
-  size_t frame_len;
-  frame_len = protocol::build_geni_packet(0xE7, 0xF8, apdu, 5, frame);
-
-  std::vector<uint8_t> packet(frame, frame + frame_len);
-
-  this->transport_.send_command(
-      packet, 0xDE01, 0,
+  this->transport_.send_apdu_command(
+      apdu, 5, 0xDE01, 0,
       [this, entries, layer](bool success, const uint8_t *payload,
                              size_t payload_len) {
         if (!success) {
@@ -406,14 +394,8 @@ bool ScheduleService::read_entries_async(
   apdu[3] = (sub_id >> 8) & 0xFF;
   apdu[4] = sub_id & 0xFF;
 
-  uint8_t frame[64];
-  size_t frame_len;
-  frame_len = protocol::build_geni_packet(0xE7, 0xF8, apdu, 5, frame);
-
-  std::vector<uint8_t> packet(frame, frame + frame_len);
-
-  this->transport_.send_command(
-      packet, 0xDE01, 0,
+  this->transport_.send_apdu_command(
+      apdu, 5, 0xDE01, 0,
       [this, on_complete, layer](bool success, const uint8_t *payload,
                                  size_t payload_len) {
         ESP_LOGD(TAG,
@@ -640,16 +622,10 @@ bool ScheduleService::write_entries_async(
   memcpy(apdu + 11, payload_data, 42);
 
   // Build GENI frame
-  uint8_t frame[256];
-  size_t frame_len;
-  frame_len = protocol::build_geni_packet(0xE7, 0xF8, apdu, 53, frame);
-
-  std::vector<uint8_t> packet(frame, frame + frame_len);
-
   ESP_LOGI(TAG, "Queueing async schedule write for layer %d...", layer);
 
-  this->transport_.send_command(
-      packet, 0xDE01, 0,
+  this->transport_.send_apdu_command(
+      apdu, sizeof(apdu), 0xDE01, 0,
       [on_complete, layer](bool success, const uint8_t *data, size_t len) {
         if (success) {
           ESP_LOGI(TAG, "Async write completed with ACK for layer %d", layer);
@@ -838,18 +814,8 @@ bool ScheduleService::validate_entries(
 
 bool ScheduleService::write_class10_command(const uint8_t *apdu,
                                             size_t apdu_len) {
-  // Build GENI frame
-  uint8_t frame[256];
-  size_t frame_len;
-  frame_len = protocol::build_geni_packet(0xE7, 0xF8, apdu, apdu_len, frame);
-
-  ESP_LOGD(TAG, "Queueing Class 10 command (%zu bytes)", frame_len);
-
-  // Convert frame to vector for send_command
-  std::vector<uint8_t> packet(frame, frame + frame_len);
-
-  // Use send_command to queue the packet with pacing and non-blocking wait
-  this->transport_.send_command(packet);
+  // Build GENI frame and queue the packet with pacing and non-blocking wait
+  this->transport_.send_apdu_command(apdu, apdu_len);
 
   return true;
 }
@@ -863,7 +829,7 @@ bool ScheduleService::write_class10_command(const uint8_t *apdu,
 // -------------------------------------------------------------------------
 
 bool ScheduleService::get_cached_entry(uint8_t layer, uint8_t day_index,
-                                       ScheduleEntry *entry) {
+                                       ScheduleEntry *entry) const {
   if (layer > 4 || day_index > 6 || !entry)
     return false;
   if (!layer_cached_[layer])
@@ -958,16 +924,10 @@ void ScheduleService::write_cached_layer_async(
   apdu[10] = 0x2A;
   memcpy(apdu + 11, cached_layer_data_[layer], 42);
 
-  uint8_t frame[256];
-  size_t frame_len;
-  frame_len = protocol::build_geni_packet(0xE7, 0xF8, apdu, 53, frame);
-
-  std::vector<uint8_t> packet(frame, frame + frame_len);
-
   ESP_LOGI(TAG, "Writing cached layer %d to pump...", layer);
 
-  this->transport_.send_command(
-      packet, 0xDE01, 0,
+  this->transport_.send_apdu_command(
+      apdu, sizeof(apdu), 0xDE01, 0,
       [this, on_complete, layer](bool success, const uint8_t *data,
                                  size_t len) {
         // Send configuration commit after write
@@ -1019,13 +979,8 @@ void ScheduleService::read_single_events_async(
     apdu[3] = (sub_id >> 8) & 0xFF;
     apdu[4] = sub_id & 0xFF;
 
-    uint8_t frame[64];
-    size_t frame_len;
-    frame_len = protocol::build_geni_packet(0xE7, 0xF8, apdu, 5, frame);
-    std::vector<uint8_t> packet(frame, frame + frame_len);
-
-    this->transport_.send_command(
-        packet, 0xDC01, 0,
+    this->transport_.send_apdu_command(
+      apdu, 5, 0xDC01, 0,
         [this, idx, events, on_complete, max_events,
          read_next](bool success, const uint8_t *payload, size_t payload_len) {
           if (success && payload_len >= 13) {
@@ -1073,13 +1028,8 @@ void ScheduleService::write_single_event_async(
   apdu[10] = 0x0A; // Size: 10 bytes
   event.to_bytes(apdu + 11);
 
-  uint8_t frame[256];
-  size_t frame_len;
-  frame_len = protocol::build_geni_packet(0xE7, 0xF8, apdu, 21, frame);
-  std::vector<uint8_t> packet(frame, frame + frame_len);
-
-  this->transport_.send_command(
-      packet, 0xDC01, 0,
+  this->transport_.send_apdu_command(
+      apdu, sizeof(apdu), 0xDC01, 0,
       [this, on_complete, event](bool success, const uint8_t *data,
                                  size_t len) {
         this->send_configuration_commit();
@@ -1235,6 +1185,63 @@ bool ScheduleService::get_schedule_display_string(
 
   *result = output;
   return true;
+}
+
+std::string ScheduleService::generate_json() const {
+  bool enabled = this->schedule_enabled_;
+
+  std::string json;
+  json.reserve(256);
+  json += "{\"e\":";
+  json += enabled ? "1" : "0";
+  json += ",\"s\":{";
+
+  char buf[32];
+  bool first_layer = true;
+  for (int layer = 0; layer < 5; layer++) {
+    if (!is_layer_cached(layer))
+      continue;
+
+    bool has_entries = false;
+    std::string layer_json;
+    layer_json.reserve(100);
+    layer_json += "[";
+    for (int day = 0; day < 7; day++) {
+      if (day > 0)
+        layer_json += ",";
+      ScheduleEntry entry;
+      if (get_cached_entry(layer, day, &entry) && entry.is_enabled()) {
+        int start = entry.get_begin_hour() * 60 + entry.get_begin_minute();
+        int end = entry.get_end_hour() * 60 + entry.get_end_minute();
+        snprintf(buf, sizeof(buf), "[%d,%d]", start, end);
+        layer_json += buf;
+        has_entries = true;
+      } else {
+        layer_json += "0";
+      }
+    }
+    layer_json += "]";
+
+    if (has_entries) {
+      if (!first_layer)
+        json += ",";
+      snprintf(buf, sizeof(buf), "\"%d\":", layer);
+      json += buf;
+      json += layer_json;
+      first_layer = false;
+    }
+  }
+
+  json += "}}";
+
+  // Safety: HA limits entity state to 255 characters
+  if (json.size() > 255) {
+    json.resize(252);
+    json += "...";
+    ESP_LOGW(TAG, "Schedule JSON truncated to 255 chars");
+  }
+
+  return json;
 }
 
 } // namespace services

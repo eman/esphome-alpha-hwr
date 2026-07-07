@@ -82,13 +82,9 @@ void HistoryService::read_trends_async(
     apdu[3] = (sub_id >> 8) & 0xFF;
     apdu[4] = sub_id & 0xFF;
 
-    uint8_t frame[64];
-    size_t frame_len = protocol::build_geni_packet(0xE7, 0xF8, apdu, 5, frame);
-    std::vector<uint8_t> packet(frame, frame + frame_len);
-
     // Use wildcard response matching — accept any non-register Class 10 response.
     // Timeout: 1500 ms — trend reads either respond immediately or not at all.
-    transport_.send_command(packet, 0, 0,
+    transport_.send_apdu_command(apdu, sizeof(apdu), 0, 0,
         [this, idx, trends, on_complete, read_next, cfg](
             bool success, const uint8_t *payload, size_t payload_len) {
       if (success && payload_len >= 32) {  // 3 header + 29 data
@@ -176,12 +172,8 @@ void HistoryService::read_cycle_timestamps_async(
   apdu[3] = (sub_id >> 8) & 0xFF;
   apdu[4] = sub_id & 0xFF;
 
-  uint8_t frame[64];
-  size_t frame_len = protocol::build_geni_packet(0xE7, 0xF8, apdu, 5, frame);
-  std::vector<uint8_t> packet(frame, frame + frame_len);
-
   // Use wildcard matching for Object 88 responses
-  transport_.send_command(packet, 0, 0,
+  transport_.send_apdu_command(apdu, sizeof(apdu), 0, 0,
       [this, count, on_complete](bool success, const uint8_t *payload, size_t payload_len) {
     std::vector<uint32_t> timestamps;
 
