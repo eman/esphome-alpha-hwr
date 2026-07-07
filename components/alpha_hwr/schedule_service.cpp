@@ -16,7 +16,6 @@
 #include "transport.h"
 #include <algorithm>
 #include <cstring>
-#include <map>
 #include <memory>
 #include <set>
 
@@ -30,6 +29,73 @@ static const char *TAG = "schedule_service";
 static const char *DAY_NAMES[7] = {"Monday",   "Tuesday", "Wednesday",
                                    "Thursday", "Friday",  "Saturday",
                                    "Sunday"};
+
+namespace {
+
+// Maps a schedule day name to its 0-6 index (Monday=0 ... Sunday=6), matching
+// DAY_NAMES order. Returns -1 if the name doesn't match any known day.
+int day_name_to_index(const std::string &day) {
+  for (int i = 0; i < 7; i++) {
+    if (day == DAY_NAMES[i]) {
+      return i;
+    }
+  }
+  return -1;
+}
+
+// Builds the 53-byte Class 10 SET APDU (11-byte header + 42-byte payload)
+// used to write a full week of schedule entries to one layer. Shared by
+// write_entries() and write_entries_async() so the encoding logic only
+// lives in one place.
+void build_schedule_apdu(const std::vector<ScheduleEntry> &entries,
+                         uint8_t layer, uint8_t apdu_out[53]) {
+  // Prepare 42-byte payload (7 days × 6 bytes)
+  uint8_t payload_data[42];
+  memset(payload_data, 0, 42); // Initialize with zeros (disabled entries)
+
+  // Fill payload with entries
+  for (const auto &entry : entries) {
+    int day_idx = day_name_to_index(entry.get_day());
+    if (day_idx < 0) {
+      ESP_LOGW(TAG, "Invalid day name in entry: %s", entry.get_day().c_str());
+      continue;
+    }
+
+    size_t offset = day_idx * 6;
+
+    // Fill 6-byte entry
+    entry.to_bytes(payload_data + offset);
+
+    ESP_LOGV(TAG,
+             "Added entry for %s at offset %zu: %02X %02X %02X %02X %02X %02X",
+             entry.get_day().c_str(), offset, payload_data[offset],
+             payload_data[offset + 1], payload_data[offset + 2],
+             payload_data[offset + 3], payload_data[offset + 4],
+             payload_data[offset + 5]);
+  }
+
+  // Build APDU
+  uint16_t sub_id = 1000 + layer;
+  uint8_t sub_h = (sub_id >> 8) & 0xFF;
+  uint8_t sub_l = sub_id & 0xFF;
+
+  apdu_out[0] = 0x0A;  // Class 10
+  apdu_out[1] = 0xB3;  // OpSpec 5
+  apdu_out[2] = 84;    // Object ID 84
+  apdu_out[3] = sub_h; // SubID high byte
+  apdu_out[4] = sub_l; // SubID low byte
+  apdu_out[5] = 0x00;  // Reserved
+  apdu_out[6] = 0xDE;  // Type 222 header
+  apdu_out[7] = 0x01;
+  apdu_out[8] = 0x00;
+  apdu_out[9] = 0x00;  // Size high byte
+  apdu_out[10] = 0x2A; // Size low byte (42 bytes)
+
+  // Append payload
+  memcpy(apdu_out + 11, payload_data, 42);
+}
+
+}  // namespace
 
 // -------------------------------------------------------------------------
 // Constructor
@@ -468,61 +534,11 @@ bool ScheduleService::write_entries(const std::vector<ScheduleEntry> &entries,
   ESP_LOGI(TAG, "Writing %zu schedule entries to layer %d...", entries.size(),
            layer);
 
-  // Prepare 42-byte payload (7 days × 6 bytes)
-  uint8_t payload_data[42];
-  memset(payload_data, 0, 42); // Initialize with zeros (disabled entries)
-
-  // Map day names to indices
-  std::map<std::string, int> day_indices;
-  for (int i = 0; i < 7; i++) {
-    day_indices[DAY_NAMES[i]] = i;
-  }
-
-  // Fill payload with entries
-  for (const auto &entry : entries) {
-    auto it = day_indices.find(entry.get_day());
-    if (it == day_indices.end()) {
-      ESP_LOGW(TAG, "Invalid day name in entry: %s", entry.get_day().c_str());
-      continue;
-    }
-
-    int day_idx = it->second;
-    size_t offset = day_idx * 6;
-
-    // Fill 6-byte entry
-    entry.to_bytes(payload_data + offset);
-
-    ESP_LOGV(TAG,
-             "Added entry for %s at offset %zu: %02X %02X %02X %02X %02X %02X",
-             entry.get_day().c_str(), offset, payload_data[offset],
-             payload_data[offset + 1], payload_data[offset + 2],
-             payload_data[offset + 3], payload_data[offset + 4],
-             payload_data[offset + 5]);
-  }
-
-  // Build APDU
-  uint16_t sub_id = 1000 + layer;
-  uint8_t sub_h = (sub_id >> 8) & 0xFF;
-  uint8_t sub_l = sub_id & 0xFF;
-
   uint8_t apdu[53]; // 11 header bytes + 42 data bytes
-  apdu[0] = 0x0A;   // Class 10
-  apdu[1] = 0xB3;   // OpSpec 5
-  apdu[2] = 84;     // Object ID 84
-  apdu[3] = sub_h;  // SubID high byte
-  apdu[4] = sub_l;  // SubID low byte
-  apdu[5] = 0x00;   // Reserved
-  apdu[6] = 0xDE;   // Type 222 header
-  apdu[7] = 0x01;
-  apdu[8] = 0x00;
-  apdu[9] = 0x00;  // Size high byte
-  apdu[10] = 0x2A; // Size low byte (42 bytes)
-
-  // Append payload
-  memcpy(apdu + 11, payload_data, 42);
+  build_schedule_apdu(entries, layer, apdu);
 
   // Send write command
-  if (!this->write_class10_command(apdu, 53)) {
+  if (!this->write_class10_command(apdu, sizeof(apdu))) {
     ESP_LOGE(TAG, "Failed to write schedule to layer %d", layer);
     return false;
   }
@@ -572,56 +588,9 @@ bool ScheduleService::write_entries_async(
   ESP_LOGI(TAG, "Writing %zu schedule entries to layer %d (async mode)...",
            entries.size(), layer);
 
-  // Prepare 42-byte payload (7 days × 6 bytes)
-  uint8_t payload_data[42];
-  memset(payload_data, 0, 42); // Initialize with zeros (disabled entries)
-
-  // Map day names to indices
-  std::map<std::string, int> day_indices;
-  for (int i = 0; i < 7; i++) {
-    day_indices[DAY_NAMES[i]] = i;
-  }
-
-  // Fill payload with entries
-  for (const auto &entry : entries) {
-    auto it = day_indices.find(entry.get_day());
-    if (it == day_indices.end()) {
-      ESP_LOGW(TAG, "Invalid day name in entry: %s", entry.get_day().c_str());
-      continue;
-    }
-
-    int day_idx = it->second;
-    size_t offset = day_idx * 6;
-
-    // Fill 6-byte entry
-    entry.to_bytes(payload_data + offset);
-
-    ESP_LOGV(TAG, "Added entry for %s at offset %zu", entry.get_day().c_str(),
-             offset);
-  }
-
-  // Build APDU
-  uint16_t sub_id = 1000 + layer;
-  uint8_t sub_h = (sub_id >> 8) & 0xFF;
-  uint8_t sub_l = sub_id & 0xFF;
-
   uint8_t apdu[53]; // 11 header bytes + 42 data bytes
-  apdu[0] = 0x0A;   // Class 10
-  apdu[1] = 0xB3;   // OpSpec 5
-  apdu[2] = 84;     // Object ID 84
-  apdu[3] = sub_h;  // SubID high byte
-  apdu[4] = sub_l;  // SubID low byte
-  apdu[5] = 0x00;   // Reserved
-  apdu[6] = 0xDE;   // Type 222 header
-  apdu[7] = 0x01;
-  apdu[8] = 0x00;
-  apdu[9] = 0x00;  // Size high byte
-  apdu[10] = 0x2A; // Size low byte (42 bytes)
+  build_schedule_apdu(entries, layer, apdu);
 
-  // Append payload
-  memcpy(apdu + 11, payload_data, 42);
-
-  // Build GENI frame
   ESP_LOGI(TAG, "Queueing async schedule write for layer %d...", layer);
 
   this->transport_.send_apdu_command(
@@ -782,22 +751,28 @@ bool ScheduleService::validate_entries(
   }
 
   // Check layer counts (warn if too many entries per day/layer)
-  std::map<std::pair<std::string, int>, int> day_layer_counts;
+  int day_layer_counts[7][5] = {}; // [day_index][layer] -> enabled entry count
   for (const auto &entry : entries) {
-    if (entry.is_enabled()) {
-      auto key = std::make_pair(entry.get_day(), entry.get_layer());
-      day_layer_counts[key]++;
-    }
+    if (!entry.is_enabled())
+      continue;
+    int day_idx = day_name_to_index(entry.get_day());
+    uint8_t layer = entry.get_layer();
+    if (day_idx < 0 || layer > 4)
+      continue; // Already reported as an error above
+    day_layer_counts[day_idx][layer]++;
   }
 
-  for (const auto &kv : day_layer_counts) {
-    if (kv.second > 10) { // Arbitrary high limit
-      char buf[256];
-      snprintf(
-          buf, sizeof(buf),
-          "Warning: %s layer %d has %d entries. This may exceed pump capacity.",
-          kv.first.first.c_str(), kv.first.second, kv.second);
-      errors->push_back(std::string(buf));
+  for (int day_idx = 0; day_idx < 7; day_idx++) {
+    for (int layer = 0; layer < 5; layer++) {
+      int count = day_layer_counts[day_idx][layer];
+      if (count > 10) { // Arbitrary high limit
+        char buf[256];
+        snprintf(
+            buf, sizeof(buf),
+            "Warning: %s layer %d has %d entries. This may exceed pump capacity.",
+            DAY_NAMES[day_idx], layer, count);
+        errors->push_back(std::string(buf));
+      }
     }
   }
 
