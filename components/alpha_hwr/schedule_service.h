@@ -485,7 +485,7 @@ public:
    * @param entry Output ScheduleEntry populated from cache
    * @return True if cache valid, false if layer not yet read
    */
-  bool get_cached_entry(uint8_t layer, uint8_t day_index, ScheduleEntry *entry);
+  bool get_cached_entry(uint8_t layer, uint8_t day_index, ScheduleEntry *entry) const;
 
   /**
    * Set a single day's schedule entry on a layer (read-modify-write).
@@ -520,6 +520,13 @@ public:
   bool is_layer_cached(uint8_t layer) const {
     return layer <= 4 && layer_cached_[layer];
   }
+
+  /**
+   * Generate the compact JSON representation of the schedule state used by
+   * the Home Assistant text sensor (enabled flag + cached per-layer entries).
+   * Truncated to 255 chars to fit HA's text sensor state length limit.
+   */
+  std::string generate_json() const;
 
   /**
    * Send configuration commit to persist schedule changes.

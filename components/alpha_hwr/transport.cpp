@@ -151,7 +151,18 @@ void Transport::send_apdu_command(const uint8_t* apdu, size_t apdu_len,
   size_t packet_len = protocol::build_geni_packet(
       protocol::SERVICE_ID_HIGH, protocol::SOURCE_ADDRESS,
       apdu, apdu_len, packet_raw);
-      
+
+  if (packet_len == 0) {
+    // APDU too large to fit in a single GENI frame (build_geni_packet returns 0).
+    // Fail fast instead of queuing an empty command that would never be sent
+    // or matched, leaving the caller waiting until timeout.
+    ESP_LOGE(TAG, "send_apdu_command: failed to build GENI frame (apdu_len=%zu)", apdu_len);
+    if (callback) {
+      callback(false, nullptr, 0);
+    }
+    return;
+  }
+
   std::vector<uint8_t> packet(packet_raw, packet_raw + packet_len);
   
   this->send_command(packet, expect_obj_id, expect_sub_id, callback, timeout_ms, allow_register_read);
@@ -397,15 +408,12 @@ bool Transport::try_dispatch_response(const uint8_t* data, size_t len) {
     bool matched = false;
     
     // WILDCARD MATCH: If expect_obj_id == 0, accept ANY Class 10 packet
-    // EXCEPT passive notifications (OpSpec 0x0E), which should never fulfill a command
+    // This is used for Object 86 Sub 6 reads, which receive passive notifications (OpSpec 0x0E)
+    // Reference: Python base.py::match_class10_response only checks p[4] == 0x0A
     if (cmd.expect_obj_id == 0x0000 && cmd.expect_sub_id == 0x0000) {
       matched = true;
       ESP_LOGV(TAG, "Wildcard match: accepting any Class 10 packet (OpSpec=0x%02X, Obj=%d, Sub=%d)",
                opspec, packet_obj_id, packet_sub_id);
-
-        ESP_LOGV(TAG, "Wildcard match: accepting Class 10 packet (OpSpec=0x%02X, Obj=%d, Sub=%d)",
-                 opspec, packet_obj_id, packet_sub_id);
-      }
     } else {
       // Exact match: check Object ID and Sub-ID
       matched = (packet_obj_id == cmd.expect_obj_id && (packet_sub_id == cmd.expect_sub_id || packet_sub_id == 0));

@@ -625,7 +625,7 @@ bool ScheduleService::write_entries_async(
   ESP_LOGI(TAG, "Queueing async schedule write for layer %d...", layer);
 
   this->transport_.send_apdu_command(
-      apdu, 5, 0xDE01, 0,
+      apdu, sizeof(apdu), 0xDE01, 0,
       [on_complete, layer](bool success, const uint8_t *data, size_t len) {
         if (success) {
           ESP_LOGI(TAG, "Async write completed with ACK for layer %d", layer);
@@ -814,9 +814,8 @@ bool ScheduleService::validate_entries(
 
 bool ScheduleService::write_class10_command(const uint8_t *apdu,
                                             size_t apdu_len) {
-  // Build GENI frame
-  // Use send_command to queue the packet with pacing and non-blocking wait
-  this->transport_.send_command(packet);
+  // Build GENI frame and queue the packet with pacing and non-blocking wait
+  this->transport_.send_apdu_command(apdu, apdu_len);
 
   return true;
 }
@@ -830,7 +829,7 @@ bool ScheduleService::write_class10_command(const uint8_t *apdu,
 // -------------------------------------------------------------------------
 
 bool ScheduleService::get_cached_entry(uint8_t layer, uint8_t day_index,
-                                       ScheduleEntry *entry) {
+                                       ScheduleEntry *entry) const {
   if (layer > 4 || day_index > 6 || !entry)
     return false;
   if (!layer_cached_[layer])
@@ -928,7 +927,7 @@ void ScheduleService::write_cached_layer_async(
   ESP_LOGI(TAG, "Writing cached layer %d to pump...", layer);
 
   this->transport_.send_apdu_command(
-      apdu, 5, 0xDE01, 0,
+      apdu, sizeof(apdu), 0xDE01, 0,
       [this, on_complete, layer](bool success, const uint8_t *data,
                                  size_t len) {
         // Send configuration commit after write
@@ -1030,7 +1029,7 @@ void ScheduleService::write_single_event_async(
   event.to_bytes(apdu + 11);
 
   this->transport_.send_apdu_command(
-      apdu, 5, 0xDC01, 0,
+      apdu, sizeof(apdu), 0xDC01, 0,
       [this, on_complete, event](bool success, const uint8_t *data,
                                  size_t len) {
         this->send_configuration_commit();
@@ -1189,9 +1188,7 @@ bool ScheduleService::get_schedule_display_string(
 }
 
 std::string ScheduleService::generate_json() const {
-  bool enabled = false;
-  // Use const_cast to call get_state since it's not const (or we can just read the flag)
-  enabled = this->schedule_enabled_;
+  bool enabled = this->schedule_enabled_;
 
   std::string json;
   json.reserve(256);

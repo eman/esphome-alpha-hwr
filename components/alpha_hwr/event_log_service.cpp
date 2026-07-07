@@ -42,8 +42,8 @@ void EventLogService::read_metadata_async(
   apdu[4] = SUBID_METADATA & 0xFF;
 
   // Type 243 (EventLogInfo) → response bytes 6-7 = 0xF301
-  static constexpr uint16_t 0 = 0xF301;
-  transport_.send_apdu_command(apdu, 5, 0, 0,
+  static constexpr uint16_t TYPE_EVENT_LOG_INFO = 0xF301;
+  transport_.send_apdu_command(apdu, sizeof(apdu), TYPE_EVENT_LOG_INFO, 0,
       [this, on_complete](bool success, const uint8_t *payload, size_t payload_len) {
     if (!success || payload_len < 10) {  // 3 sub-header + 7 data minimum
       ESP_LOGW(TAG, "Event log metadata read failed (success=%d, len=%zu)", success, payload_len);
