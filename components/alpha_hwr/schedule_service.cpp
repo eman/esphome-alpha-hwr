@@ -32,17 +32,6 @@ static const char *DAY_NAMES[7] = {"Monday",   "Tuesday", "Wednesday",
 
 namespace {
 
-// Maps a schedule day name to its 0-6 index (Monday=0 ... Sunday=6), matching
-// DAY_NAMES order. Returns -1 if the name doesn't match any known day.
-int day_name_to_index(const std::string &day) {
-  for (int i = 0; i < 7; i++) {
-    if (day == DAY_NAMES[i]) {
-      return i;
-    }
-  }
-  return -1;
-}
-
 // Builds the 53-byte Class 10 SET APDU (11-byte header + 42-byte payload)
 // used to write a full week of schedule entries to one layer. Shared by
 // write_entries() and write_entries_async() so the encoding logic only
@@ -55,9 +44,9 @@ void build_schedule_apdu(const std::vector<ScheduleEntry> &entries,
 
   // Fill payload with entries
   for (const auto &entry : entries) {
-    int day_idx = day_name_to_index(entry.get_day());
+    int day_idx = entry.get_day_index();
     if (day_idx < 0) {
-      ESP_LOGW(TAG, "Invalid day name in entry: %s", entry.get_day().c_str());
+      ESP_LOGW(TAG, "Invalid day name in entry: %s", entry.get_day());
       continue;
     }
 
@@ -68,7 +57,7 @@ void build_schedule_apdu(const std::vector<ScheduleEntry> &entries,
 
     ESP_LOGV(TAG,
              "Added entry for %s at offset %zu: %02X %02X %02X %02X %02X %02X",
-             entry.get_day().c_str(), offset, payload_data[offset],
+             entry.get_day(), offset, payload_data[offset],
              payload_data[offset + 1], payload_data[offset + 2],
              payload_data[offset + 3], payload_data[offset + 4],
              payload_data[offset + 5]);
@@ -707,7 +696,7 @@ bool ScheduleService::validate_entries(
     if (!valid_day) {
       char buf[128];
       snprintf(buf, sizeof(buf), "Entry %zu: Invalid day name '%s'", i,
-               entry.get_day().c_str());
+               entry.get_day());
       errors->push_back(std::string(buf));
     }
 
@@ -716,7 +705,7 @@ bool ScheduleService::validate_entries(
       char buf[128];
       snprintf(buf, sizeof(buf),
                "Entry %zu (%s): Invalid layer %d (must be 0-4)", i,
-               entry.get_day().c_str(), entry.get_layer());
+               entry.get_day(), entry.get_layer());
       errors->push_back(std::string(buf));
     }
 
@@ -725,7 +714,7 @@ bool ScheduleService::validate_entries(
     if (!entry.is_valid_time_range(&error_msg)) {
       char buf[256];
       snprintf(buf, sizeof(buf), "Entry %zu (%s %s-%s): %s", i,
-               entry.get_day().c_str(), entry.get_begin_time().c_str(),
+               entry.get_day(), entry.get_begin_time().c_str(),
                entry.get_end_time().c_str(), error_msg.c_str());
       errors->push_back(std::string(buf));
     }
@@ -746,7 +735,7 @@ bool ScheduleService::validate_entries(
         char buf[256];
         snprintf(buf, sizeof(buf),
                  "Overlap detected: %s layer %d: %s-%s overlaps with %s-%s",
-                 entry1.get_day().c_str(), entry1.get_layer(),
+                 entry1.get_day(), entry1.get_layer(),
                  entry1.get_begin_time().c_str(), entry1.get_end_time().c_str(),
                  entry2.get_begin_time().c_str(),
                  entry2.get_end_time().c_str());
@@ -760,7 +749,7 @@ bool ScheduleService::validate_entries(
   for (const auto &entry : entries) {
     if (!entry.is_enabled())
       continue;
-    int day_idx = day_name_to_index(entry.get_day());
+    int day_idx = entry.get_day_index();
     uint8_t layer = entry.get_layer();
     if (day_idx < 0 || layer > 4)
       continue; // Already reported as an error above
