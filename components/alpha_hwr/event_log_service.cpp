@@ -41,13 +41,9 @@ void EventLogService::read_metadata_async(
   apdu[3] = (SUBID_METADATA >> 8) & 0xFF;
   apdu[4] = SUBID_METADATA & 0xFF;
 
-  uint8_t frame[64];
-  size_t frame_len = protocol::build_geni_packet(0xE7, 0xF8, apdu, 5, frame);
-  std::vector<uint8_t> packet(frame, frame + frame_len);
-
   // Type 243 (EventLogInfo) → response bytes 6-7 = 0xF301
-  static constexpr uint16_t TYPE_EVENT_LOG_INFO = 0xF301;
-  transport_.send_command(packet, TYPE_EVENT_LOG_INFO, 0,
+  static constexpr uint16_t 0 = 0xF301;
+  transport_.send_apdu_command(apdu, 5, 0, 0,
       [this, on_complete](bool success, const uint8_t *payload, size_t payload_len) {
     if (!success || payload_len < 10) {  // 3 sub-header + 7 data minimum
       ESP_LOGW(TAG, "Event log metadata read failed (success=%d, len=%zu)", success, payload_len);
@@ -109,14 +105,10 @@ void EventLogService::read_entries_async(
       apdu[3] = (sub_id >> 8) & 0xFF;
       apdu[4] = sub_id & 0xFF;
 
-      uint8_t frame[64];
-      size_t frame_len = protocol::build_geni_packet(0xE7, 0xF8, apdu, 5, frame);
-      std::vector<uint8_t> packet(frame, frame + frame_len);
-
       // Entry responses use OpSpec 0x14 with bytes 6-7=0x0000, 8-9=0xF402
       // Must allow register-read matching since OpSpec 0x14 is normally filtered
       static constexpr uint16_t ENTRY_MATCH_SUB = 0xF402;
-      this->transport_.send_command(packet, 0, ENTRY_MATCH_SUB,
+      this->transport_.send_apdu_command(apdu, 5, 0, ENTRY_MATCH_SUB,
           [this, idx, entries, on_complete, count, read_next](
               bool success, const uint8_t *payload, size_t payload_len) {
         if (success) {

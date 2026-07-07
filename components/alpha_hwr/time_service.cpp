@@ -40,21 +40,13 @@ void TimeService::get_clock_async(std::function<void(ESPTime)> callback) {
   apdu[3] = (SUB_ID_DATETIME_ACTUAL >> 8) & 0xFF;  // Sub-ID high (0x00)
   apdu[4] = SUB_ID_DATETIME_ACTUAL & 0xFF;  // Sub-ID low (0x65 = 101)
   
-  // Build GENI frame
-  uint8_t frame_buf[32];
-  size_t frame_len = build_geni_packet(0xE7, 0xF8, apdu, sizeof(apdu), frame_buf);
-  std::vector<uint8_t> packet(frame_buf, frame_buf + frame_len);
-  
-  ESP_LOGD(TAG, "Clock GET packet: %s", format_hex_pretty(packet).c_str());
-  
   // Send Class 10 GET: Object 94, SubID 101 (DateTimeActual)
-  // send_command signature: (packet, expect_obj_id, expect_sub_id, callback, timeout_ms)
+  // send_apdu_command signature: (apdu, len, expect_obj_id, expect_sub_id, callback, timeout_ms)
   // Use wildcard matching (0, 0) to accept any Class 10 response, matching Python's behavior
   // Reference: base.py::match_class10_response only checks p[4] == 0x0A
-  transport_->send_command(
-    packet,
-    0,  // Wildcard: accept any Object ID
-    0,  // Wildcard: accept any Sub-ID
+  transport_->send_apdu_command(
+    apdu, sizeof(apdu),
+    0, 0,
     [this, callback](bool success, const uint8_t *data, size_t len) {
       if (!success || !data || len == 0) {
         ESP_LOGW(TAG, "Clock read timeout or failed");
@@ -103,31 +95,17 @@ void TimeService::set_clock_async(std::function<void(bool)> callback) {
   ESP_LOGI(TAG, "Syncing pump clock to system time: %04d-%02d-%02d %02d:%02d:%02d",
            now.year, now.month, now.day_of_month, now.hour, now.minute, now.second);
   
-  // Build the set clock packet
-  std::vector<uint8_t> packet = build_set_clock_packet(now);
+  // Build Class 10 SET frame
+  // APDU: [Class=0x0A][OpSpec][SubH][SubL][ObjH][ObjL][data(16)]
+  // op_bits = 20; OpSpec = 0x80 | 20 = 0x94
+  uint8_t apdu[22];
+  apdu[0] = 0x0A;    // Class 10
+  apdu[1] = 0x94;    // OpSpec: SET + 20 bytes (4 IDs + 16 data)
+  apdu[2] = 0x5E;    // Sub-ID high (0x5E00 = Object 94)
+  apdu[3] = 0x00;    // Sub-ID low
+  apdu[4] = 0x64;    // Obj-ID high (0x6401 = SubID 100)
+  apdu[5] = 0x01;    // Obj-ID low
   
-  ESP_LOGD(TAG, "Clock SET packet: %s (%zu bytes)", 
-           format_hex_pretty(packet).c_str(), packet.size());
-  
-  // Send the write command as fire-and-forget, then verify by reading back.
-  // The pump responds with a generic Class 10 ACK (OpSpec 0x01) which doesn't
-  // carry Obj/Sub IDs, so standard response matching can't match it.
-  // Reference: time.py lines 276-278 uses ack_filter matching p[4]==0x0A && p[5]==0x01
-  transport_->send_command(packet);
-  
-  // Schedule verification read after 500ms to allow pump to apply the time
-  if (callback) {
-    // Use a simple approach: just report success since the packet is correctly formatted.
-    // If we need verification, the daily sync retry will catch failures.
-    ESP_LOGD(TAG, "Clock SET packet sent successfully");
-    callback(true);
-  }
-}
-
-std::vector<uint8_t> TimeService::build_set_clock_packet(const ESPTime &dt) {
-  // Build Type 322 data payload (16 bytes):
-  // [Type322Header(6)][Year(2BE)][Month][Day][Hour][Min][Sec][Pad(3)]
-  // Reference: time.py lines 249-259
   uint8_t data[16] = {0};
   
   // Type 322 header (constant) - from Python _TYPE_322_HEADER
@@ -139,37 +117,30 @@ std::vector<uint8_t> TimeService::build_set_clock_packet(const ESPTime &dt) {
   data[5] = 0x01;
   
   // Year as big-endian uint16
-  encode_uint16_be(dt.year, &data[6]);
+  data[6] = (now.year >> 8) & 0xFF;
+  data[7] = now.year & 0xFF;
   
   // Month, Day, Hour, Minute, Second
-  data[8] = dt.month;
-  data[9] = dt.day_of_month;
-  data[10] = dt.hour;
-  data[11] = dt.minute;
-  data[12] = dt.second;
+  data[8] = now.month;
+  data[9] = now.day_of_month;
+  data[10] = now.hour;
+  data[11] = now.minute;
+  data[12] = now.second;
   // data[13-15] = 0 (padding, already initialized)
   
-  // Build Class 10 SET frame using build_data_object_set equivalent
-  // Reference: time.py line 268: FrameBuilder.build_data_object_set(sub_id=0x5E00, obj_id=0x6401, data)
-  // 
-  // APDU: [Class=0x0A][OpSpec][SubH][SubL][ObjH][ObjL][data(16)]
-  // standard_len = 1(svc) + 1(src) + 1(class) + 1(opspec) + 4(IDs) + 16(data) = 24
-  // op_bits = 24 - 4 = 20; OpSpec = 0x80 | 20 = 0x94
-  uint8_t apdu[22];  // class(1) + opspec(1) + IDs(4) + data(16)
-  apdu[0] = 0x0A;    // Class 10
-  apdu[1] = 0x94;    // OpSpec: SET + 20 bytes (4 IDs + 16 data)
-  apdu[2] = 0x5E;    // Sub-ID high (0x5E00 = Object 94)
-  apdu[3] = 0x00;    // Sub-ID low
-  apdu[4] = 0x64;    // Obj-ID high (0x6401 = SubID 100)
-  apdu[5] = 0x01;    // Obj-ID low
   memcpy(&apdu[6], data, 16);
   
-  // Build GENI frame using protocol layer
-  uint8_t frame_buf[64];
-  size_t frame_len = build_geni_packet(0xE7, 0xF8, apdu, sizeof(apdu), frame_buf);
-  std::vector<uint8_t> frame(frame_buf, frame_buf + frame_len);
+  ESP_LOGD(TAG, "Clock SET sending %d bytes APDU", (int)sizeof(apdu));
   
-  return frame;
+  // Send the write command as fire-and-forget, then verify by reading back.
+  transport_->send_apdu_command(apdu, sizeof(apdu));
+  
+  // Schedule verification read after 500ms to allow pump to apply the time
+  if (callback) {
+    // Use a simple approach: just report success since the packet is correctly formatted.
+    ESP_LOGD(TAG, "Clock SET packet sent successfully");
+    callback(true);
+  }
 }
 
 ESPTime TimeService::parse_clock_response(const uint8_t *data, size_t len) {

@@ -7,6 +7,7 @@
 #include "transport.h"
 #include "esphome/core/log.h"
 #include "esphome/core/hal.h"
+#include "frame_builder.h"
 #include <algorithm>
 
 namespace esphome {
@@ -139,6 +140,21 @@ void Transport::send_command(const std::vector<uint8_t>& packet, uint16_t expect
   
   this->command_queue_.push_back(cmd);
   ESP_LOGV(TAG, "Command queued (queue size: %zu)", this->command_queue_.size());
+}
+
+void Transport::send_apdu_command(const uint8_t* apdu, size_t apdu_len,
+                                  uint16_t expect_obj_id, uint16_t expect_sub_id,
+                                  CommandCallback callback, uint32_t timeout_ms,
+                                  bool allow_register_read) {
+  uint8_t packet_raw[256];
+  // build_geni_packet uses SERVICE_ID_HIGH (0xE7) and SOURCE_ADDRESS (0xF8) automatically
+  size_t packet_len = protocol::build_geni_packet(
+      protocol::SERVICE_ID_HIGH, protocol::SOURCE_ADDRESS,
+      apdu, apdu_len, packet_raw);
+      
+  std::vector<uint8_t> packet(packet_raw, packet_raw + packet_len);
+  
+  this->send_command(packet, expect_obj_id, expect_sub_id, callback, timeout_ms, allow_register_read);
 }
 
 bool Transport::is_frame_start(uint8_t byte) {
@@ -381,12 +397,15 @@ bool Transport::try_dispatch_response(const uint8_t* data, size_t len) {
     bool matched = false;
     
     // WILDCARD MATCH: If expect_obj_id == 0, accept ANY Class 10 packet
-    // This is used for Object 86 Sub 6 reads, which receive passive notifications (OpSpec 0x0E)
-    // Reference: Python base.py::match_class10_response only checks p[4] == 0x0A
+    // EXCEPT passive notifications (OpSpec 0x0E), which should never fulfill a command
     if (cmd.expect_obj_id == 0x0000 && cmd.expect_sub_id == 0x0000) {
       matched = true;
       ESP_LOGV(TAG, "Wildcard match: accepting any Class 10 packet (OpSpec=0x%02X, Obj=%d, Sub=%d)",
                opspec, packet_obj_id, packet_sub_id);
+
+        ESP_LOGV(TAG, "Wildcard match: accepting Class 10 packet (OpSpec=0x%02X, Obj=%d, Sub=%d)",
+                 opspec, packet_obj_id, packet_sub_id);
+      }
     } else {
       // Exact match: check Object ID and Sub-ID
       matched = (packet_obj_id == cmd.expect_obj_id && (packet_sub_id == cmd.expect_sub_id || packet_sub_id == 0));

@@ -111,14 +111,10 @@ void ControlService::read_setpoints_from_pump() {
     apdu[3] = 0x01;  // Sub 430 high byte (430 = 0x01AE)
     apdu[4] = 0xAE;  // Sub 430 low byte
     
-    uint8_t packet_raw[64];
-    size_t packet_len = protocol::build_geni_packet(0xE7, 0xF8, apdu, 5, packet_raw);
-    std::vector<uint8_t> packet(packet_raw, packet_raw + packet_len);
-    
     // Use wildcard matching (0, 0) like Python reference's match_class10_response,
     // because the pump responds with OpSpec 0x15 whose frame layout doesn't follow
     // the standard [ObjH][ObjL][SubH][SubL] order that explicit matching expects.
-    this->transport_.send_command(packet, 0, 0,
+    this->transport_.send_apdu_command(apdu, 5, 0, 0,
       [this](bool ok, const uint8_t* payload, size_t payload_len) {
         if (!ok || payload_len < 12) {
           ESP_LOGW(TAG, "Failed to read temp range (success=%d, len=%zu)", ok, payload_len);
@@ -219,15 +215,10 @@ bool ControlService::get_mode_async(std::function<void(bool, ControlMode)> on_co
    apdu[3] = 0x00;  // SubID 6 high byte
    apdu[4] = 0x06;  // SubID 6 low byte
    
-   uint8_t packet_raw[64];
-   size_t packet_len = protocol::build_geni_packet(0xE7, 0xF8, apdu, 5, packet_raw);
-
-  std::vector<uint8_t> packet(packet_raw, packet_raw + packet_len);
-
   // Send with response matching for Object 86 Sub 6 response
   // The pump responds with OpSpec 0x0E notification: bytes 6-7 = Sub 0x0001, bytes 8-9 = Obj 0x2F01
-    this->transport_.send_command(
-      packet, 
+    this->transport_.send_apdu_command(
+      apdu, 5, 
       0x0001,  // Match Sub-ID at bytes 6-7 of response frame
       0x2F01,  // Match Obj-ID at bytes 8-9 of response frame
       [this, on_complete](bool success, const uint8_t* payload, size_t payload_len) {
@@ -425,13 +416,8 @@ bool ControlService::enable_remote_mode() {
    // Reference: control.py lines 329-332
    const uint8_t apdu[3] = {0x03, 0xC1, 0x07};
    
-   uint8_t packet_raw[32];
-   size_t packet_len = protocol::build_geni_packet(0xE7, 0xF8, apdu, 3, packet_raw);
-   
-   std::vector<uint8_t> packet(packet_raw, packet_raw + packet_len);
-
    // Send command via transport queue
-   this->transport_.send_command(packet);
+   this->transport_.send_apdu_command(apdu, 3);
    
    // Update state
    this->is_remote_mode_enabled_ = true;
@@ -452,13 +438,8 @@ bool ControlService::enable_remote_mode() {
    // Reference: control.py lines 358-361
    const uint8_t apdu[3] = {0x03, 0xC1, 0x06};
    
-   uint8_t packet_raw[32];
-   size_t packet_len = protocol::build_geni_packet(0xE7, 0xF8, apdu, 3, packet_raw);
-   
-   std::vector<uint8_t> packet(packet_raw, packet_raw + packet_len);
-
    // Send command via transport queue
-   this->transport_.send_command(packet);
+   this->transport_.send_apdu_command(apdu, 3);
    
    // Update state
    this->is_remote_mode_enabled_ = false;
@@ -548,12 +529,8 @@ bool ControlService::send_control_request(ControlMode mode, bool start, float se
   apdu[5] = 0x01;  // Obj ID low
   memcpy(&apdu[6], payload, 12);
 
-  uint8_t packet_raw[64];
-  size_t packet_len = protocol::build_geni_packet(0xE7, 0xF8, apdu, 18, packet_raw);
-  std::vector<uint8_t> packet(packet_raw, packet_raw + packet_len);
-
   // Send command and schedule configuration commit
-  this->transport_.send_command(packet);
+  this->transport_.send_apdu_command(apdu, 18);
 
   if (schedule_callback_) {
     schedule_callback_([this]() { this->send_configuration_commit(); }, 200);
@@ -575,11 +552,7 @@ void ControlService::set_class10_setpoint(float value, uint16_t sub_id, uint16_t
   apdu[5] = obj_id & 0xFF;
   protocol::encode_float_be(value, &apdu[6]);
 
-  uint8_t packet_raw[64];
-  size_t packet_len = protocol::build_geni_packet(0xE7, 0xF8, apdu, 10, packet_raw);
-  std::vector<uint8_t> packet(packet_raw, packet_raw + packet_len);
-
-  this->transport_.send_command(packet);
+  this->transport_.send_apdu_command(apdu, 10);
 
   // Schedule configuration commit after setpoint write
   if (schedule_callback_) {
@@ -768,11 +741,7 @@ void ControlService::set_temperature_range_async(float min_temp, float max_temp,
     apdu[10] = 0x0D;    // Size low byte (13 bytes)
     memcpy(&apdu[11], struct_data, 13);
     
-    uint8_t packet_raw[64];
-    size_t packet_len = protocol::build_geni_packet(0xE7, 0xF8, apdu, 24, packet_raw);
-    std::vector<uint8_t> packet(packet_raw, packet_raw + packet_len);
-    
-    this->transport_.send_command(packet);
+    this->transport_.send_apdu_command(apdu, 24);
     
     // Cache temperature range values
     cached_temp_min_ = min_temp;
@@ -889,11 +858,7 @@ void ControlService::set_cycle_time_control_async(uint8_t on_minutes, uint8_t of
     apdu[5] = 0x5B;    // Obj-ID low
     memcpy(&apdu[6], data, 11);
     
-    uint8_t packet_raw[64];
-    size_t packet_len = protocol::build_geni_packet(0xE7, 0xF8, apdu, 17, packet_raw);
-    std::vector<uint8_t> packet(packet_raw, packet_raw + packet_len);
-    
-    this->transport_.send_command(packet);
+    this->transport_.send_apdu_command(apdu, 17);
     this->send_configuration_commit();
     
     ESP_LOGI(TAG, "✓ Cycle time set: %d min ON, %d min OFF", on_minutes, off_minutes);

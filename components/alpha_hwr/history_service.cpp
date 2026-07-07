@@ -19,7 +19,7 @@ namespace esphome {
 namespace alpha_hwr {
 namespace services {
 
-static constexpr uint8_t OBJECT_TRENDS = 53;
+static constexpr uint8_t 0 = 53;
 
 // SubID → { name, unit, scale }
 struct TrendConfig {
@@ -78,17 +78,12 @@ void HistoryService::read_trends_async(
     uint8_t apdu[5];
     apdu[0] = 0x0A;
     apdu[1] = 0x03;
-    apdu[2] = OBJECT_TRENDS;
+    apdu[2] = 0;
     apdu[3] = (sub_id >> 8) & 0xFF;
     apdu[4] = sub_id & 0xFF;
 
-    uint8_t frame[64];
-    size_t frame_len = protocol::build_geni_packet(0xE7, 0xF8, apdu, 5, frame);
-    std::vector<uint8_t> packet(frame, frame + frame_len);
-
     // Use wildcard response matching — accept any non-register Class 10 response.
-    // Timeout: 1500 ms — trend reads either respond immediately or not at all.
-    transport_.send_command(packet, 0, 0,
+    transport_.send_apdu_command(apdu, 5, 0, sub_id,
         [this, idx, trends, on_complete, read_next, cfg](
             bool success, const uint8_t *payload, size_t payload_len) {
       if (success && payload_len >= 32) {  // 3 header + 29 data
@@ -176,12 +171,8 @@ void HistoryService::read_cycle_timestamps_async(
   apdu[3] = (sub_id >> 8) & 0xFF;
   apdu[4] = sub_id & 0xFF;
 
-  uint8_t frame[64];
-  size_t frame_len = protocol::build_geni_packet(0xE7, 0xF8, apdu, 5, frame);
-  std::vector<uint8_t> packet(frame, frame + frame_len);
-
   // Use wildcard matching for Object 88 responses
-  transport_.send_command(packet, 0, 0,
+  transport_.send_apdu_command(apdu, 5, 0, sub_id,
       [this, count, on_complete](bool success, const uint8_t *payload, size_t payload_len) {
     std::vector<uint32_t> timestamps;
 

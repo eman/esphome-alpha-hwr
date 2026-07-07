@@ -123,20 +123,11 @@ bool DeviceInfoService::read_class7_string_async(uint8_t string_id,
   // Build Class 7 ReadString APDU: [0x07][0x01][StringID]
   uint8_t apdu[3] = {0x07, 0x01, string_id};
   
-  // Build GENI packet
-  uint8_t packet[20];  // Max needed: 4 (header) + 3 (APDU) + 2 (CRC) = 9 bytes
-  size_t packet_len = protocol::build_geni_packet(0xE7, 0xF8, apdu, 3, packet);
-  
-  ESP_LOGV(TAG, "Reading Class 7 String ID %d", string_id);
-  
-  // Convert to vector for transport
-  std::vector<uint8_t> packet_vec(packet, packet + packet_len);
-  
   // Send command and wait for Class 7 response
   // We don't use Object/Sub-ID matching for Class 7 (set to 0)
   // Instead, we'll match on Class byte (0x07) in the response handler
-  transport_.send_command(
-    packet_vec,
+  transport_.send_apdu_command(
+    apdu, 3,
     0,  // expect_obj_id (not used for Class 7)
     0,  // expect_sub_id (not used for Class 7)
     [this, string_id, on_complete](bool success, const uint8_t* data, size_t len) {
@@ -214,13 +205,8 @@ void DeviceInfoService::read_statistics_async(std::function<void(bool, uint32_t,
   // Build Class 10 read for Object 93, Sub-ID 1 (operation_history_pump_obj)
   // APDU: [Class=0x0A][OpSpec=0x03][ObjID=0x5D][SubH=0x00][SubL=0x01]
   uint8_t apdu[] = {0x0A, 0x03, 0x5D, 0x00, 0x01};  // Object 93 = 0x5D, Sub 1
-  uint8_t packet[20];
-  size_t packet_len = protocol::build_geni_packet(0xE7, 0xF8, apdu, sizeof(apdu), packet);
-
-  std::vector<uint8_t> packet_vec(packet, packet + packet_len);
-
-  transport_.send_command(
-    packet_vec,
+  transport_.send_apdu_command(
+    apdu, sizeof(apdu),
     0,  // Use wildcard matching (reference only checks Class 10)
     0,  // Use wildcard matching
     [on_complete](bool success, const uint8_t *data, size_t len) {

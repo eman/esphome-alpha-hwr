@@ -172,6 +172,16 @@ class Transport {
                     uint32_t timeout_ms = 3000, bool allow_register_read = false);
 
   /**
+   * Helper to build and queue a command directly from an APDU.
+   * This abstracts away the GENI addressing (Service ID, Source ID)
+   * from the service layer.
+   */
+  void send_apdu_command(const uint8_t* apdu, size_t apdu_len,
+                         uint16_t expect_obj_id = 0, uint16_t expect_sub_id = 0,
+                         CommandCallback callback = nullptr,
+                         uint32_t timeout_ms = 3000, bool allow_register_read = false);
+
+  /**
    * Set callback for complete packets.
    * 
    * The callback will be invoked whenever a complete GENI packet
