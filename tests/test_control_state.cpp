@@ -14,6 +14,7 @@
 #include <cstring>
 #include <string>
 #include <cmath>
+#include <functional>
 
 // Test result tracking (same framework as test_protocol.cpp)
 int tests_passed = 0;
@@ -75,6 +76,10 @@ struct PumpEnabledState {
   // suffix, reproducing the #43 hardcoded-3671 bug if left unfixed).
   float last_sent_setpoint{NAN};
 
+  // Mock callback for schedule_callback_ to track if post-command readback
+  // is scheduled (fixes #52)
+  std::function<void(uint32_t)> mock_schedule_callback;
+
   // Mirrors ControlService::update_mode_from_notification()
   void update_from_notification(uint8_t mode, uint8_t operation_mode) {
     current_mode = static_cast<ControlMode>(mode);
@@ -85,6 +90,7 @@ struct PumpEnabledState {
 
   // Mirrors ControlService::start() (fix for #43: reuse cached setpoint
   // instead of always relying on the mode's hardcoded default suffix).
+  // Also schedules post-command readback (fixes #52).
   bool start(uint8_t mode = 255) {
     if (mode != 255) {
       current_mode = static_cast<ControlMode>(mode);
@@ -112,13 +118,26 @@ struct PumpEnabledState {
 
     pump_enabled = true;
     pump_enabled_valid = true;
+
+    // Schedule post-command readback after ~500ms (fixes #52)
+    if (mock_schedule_callback) {
+      mock_schedule_callback(500);
+    }
+
     return true;
   }
 
   // Mirrors ControlService::stop()
+  // Also schedules post-command readback (fixes #52).
   bool stop(uint8_t /* mode */ = 255) {
     pump_enabled = false;
     pump_enabled_valid = true;
+
+    // Schedule post-command readback after ~500ms (fixes #52)
+    if (mock_schedule_callback) {
+      mock_schedule_callback(500);
+    }
+
     return true;
   }
 
@@ -854,6 +873,52 @@ void test_start_dhw_and_temp_range_unaffected() {
 }
 
 // ============================================================================
+// Test: Post-command readback after start (fixes #52)
+// ============================================================================
+void test_start_schedules_readback() {
+  std::cout << "\n=== Testing start() Schedules Post-Command Readback (#52) ===" << std::endl;
+
+  PumpEnabledState state;
+  
+  // Mock the schedule callback tracking
+  bool readback_scheduled = false;
+  uint32_t readback_delay = 0;
+  state.mock_schedule_callback = [&readback_scheduled, &readback_delay](uint32_t delay) {
+    readback_scheduled = true;
+    readback_delay = delay;
+  };
+
+  state.start();
+
+  TEST_ASSERT(readback_scheduled, "start() schedules a post-command readback");
+  TEST_ASSERT_EQ(readback_delay, 500,
+                 "Post-command readback scheduled with ~500ms delay (per reporter's bench testing)");
+}
+
+// ============================================================================
+// Test: Post-command readback after stop (fixes #52)
+// ============================================================================
+void test_stop_schedules_readback() {
+  std::cout << "\n=== Testing stop() Schedules Post-Command Readback (#52) ===" << std::endl;
+
+  PumpEnabledState state;
+  
+  // Mock the schedule callback tracking
+  bool readback_scheduled = false;
+  uint32_t readback_delay = 0;
+  state.mock_schedule_callback = [&readback_scheduled, &readback_delay](uint32_t delay) {
+    readback_scheduled = true;
+    readback_delay = delay;
+  };
+
+  state.stop();
+
+  TEST_ASSERT(readback_scheduled, "stop() schedules a post-command readback");
+  TEST_ASSERT_EQ(readback_delay, 500,
+                 "Post-command readback scheduled with ~500ms delay");
+}
+
+// ============================================================================
 // Main
 // ============================================================================
 int main() {
@@ -896,6 +961,8 @@ int main() {
   test_start_with_mode_override_ignores_stale_setpoint();
   test_start_after_mode_override_does_not_resend_stale_setpoint();
   test_start_dhw_and_temp_range_unaffected();
+  test_start_schedules_readback();
+  test_stop_schedules_readback();
 
   std::cout << "\n===========================================================" << std::endl;
   std::cout << "  Test Results" << std::endl;

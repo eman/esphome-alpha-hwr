@@ -435,6 +435,23 @@ bool ControlService::start(uint8_t mode) {
   pump_enabled_ = true;
   pump_enabled_valid_ = true;
 
+  // Schedule a post-command readback after ~500ms to ensure cached state is
+  // synchronized with pump's actual state (fixes #52). The pump does not send
+  // unsolicited notifications after start/stop commands, so the non-optimistic
+  // Pump Enabled switch won't update from cache until the next telemetry poll
+  // or a readback occurs. Reporter bench-tested ~500ms delay and confirmed it
+  // works reliably.
+  if (schedule_callback_) {
+    schedule_callback_([this]() {
+      ESP_LOGD(TAG, "Post-command readback after start (issue #52)");
+      get_mode_async([](bool success, ControlMode mode) {
+        if (!success) {
+          ESP_LOGW(TAG, "Post-command readback failed after start");
+        }
+      });
+    }, 500);
+  }
+
   ESP_LOGI(TAG, "Pump start command sent (mode=%d)", static_cast<uint8_t>(target));
   return true;
 }
@@ -464,6 +481,23 @@ bool ControlService::stop(uint8_t mode) {
   // Pump is now disabled (user stopped it)
   pump_enabled_ = false;
   pump_enabled_valid_ = true;
+
+  // Schedule a post-command readback after ~500ms to ensure cached state is
+  // synchronized with pump's actual state (fixes #52). The pump does not send
+  // unsolicited notifications after start/stop commands, so the non-optimistic
+  // Pump Enabled switch won't update from cache until the next telemetry poll
+  // or a readback occurs. Reporter bench-tested ~500ms delay and confirmed it
+  // works reliably.
+  if (schedule_callback_) {
+    schedule_callback_([this]() {
+      ESP_LOGD(TAG, "Post-command readback after stop (issue #52)");
+      get_mode_async([](bool success, ControlMode mode) {
+        if (!success) {
+          ESP_LOGW(TAG, "Post-command readback failed after stop");
+        }
+      });
+    }, 500);
+  }
 
   ESP_LOGI(TAG, "Pump stop command sent (mode=%d)", static_cast<uint8_t>(target));
   return true;
