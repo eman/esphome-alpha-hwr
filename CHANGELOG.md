@@ -7,6 +7,48 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- **Memory leak in schedule "read all layers" async chain** —
+  `ScheduleService::read_entries_async(-1, ...)` drove its layer-by-layer read
+  loop with a self-referential `std::shared_ptr<std::function>`. `Transport::reset()`
+  (called on every BLE disconnect) clears the pending command queue without
+  invoking callbacks, so a disconnect landing mid-read left the self-reference
+  unbroken and leaked the closure (cached entries, completion callback, and all).
+  Rewritten using a stateless recursive lambda plus a plain, non-cyclic state
+  object, so an interrupted read now cleans up normally regardless of when the
+  disconnect happens (issue [#32](https://github.com/eman/esphome-alpha-hwr/issues/32),
+  PR [#38](https://github.com/eman/esphome-alpha-hwr/pull/38)).
+
+### Changed
+
+- **Centralized GENI frame construction** — added `Transport::send_apdu_command()`;
+  services no longer manually call `build_geni_packet()` and hardcode the
+  transport-level Service ID/Source Address themselves, keeping protocol framing
+  out of the services layer per the project's layered architecture
+  (issue [#28](https://github.com/eman/esphome-alpha-hwr/issues/28),
+  PR [#36](https://github.com/eman/esphome-alpha-hwr/pull/36)).
+- **Schedule JSON generation moved into `ScheduleService`** —
+  `ScheduleService::generate_json()` now owns building the compact JSON used by
+  the Weekly Schedule text sensor; `AlphaHwrComponent` no longer reaches into
+  `ScheduleService`'s internal cache directly
+  (issue [#29](https://github.com/eman/esphome-alpha-hwr/issues/29),
+  PR [#36](https://github.com/eman/esphome-alpha-hwr/pull/36)).
+- **Consolidated schedule write encoding** — `write_entries()` and
+  `write_entries_async()` now share a `build_schedule_apdu()` helper instead of
+  duplicating the per-day entry encoding logic
+  (issue [#30](https://github.com/eman/esphome-alpha-hwr/issues/30),
+  PR [#41](https://github.com/eman/esphome-alpha-hwr/pull/41)).
+- **Reduced `ScheduleEntry` memory footprint** — replaced the `std::string day_`
+  field with a compact `uint8_t` day index (falling back to a sentinel for
+  unrecognized day names instead of silently treating them as valid), and
+  replaced a `std::map`-based per-day/layer entry count in schedule validation
+  with a fixed array
+  (issues [#31](https://github.com/eman/esphome-alpha-hwr/issues/31),
+  [#34](https://github.com/eman/esphome-alpha-hwr/issues/34), PRs
+  [#41](https://github.com/eman/esphome-alpha-hwr/pull/41),
+  [#42](https://github.com/eman/esphome-alpha-hwr/pull/42)).
+
 ## [0.7.0] - 2026-07-05
 
 ### Added
