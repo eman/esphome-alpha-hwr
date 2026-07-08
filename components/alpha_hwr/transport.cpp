@@ -326,6 +326,13 @@ bool Transport::try_dispatch_response(const uint8_t* data, size_t len) {
   // gate, so short responses aren't discarded before we even look at them.
   if (len >= 5 && this->state_ == State::AWAITING_RESPONSE && !this->command_queue_.empty()) {
     auto &cmd = this->command_queue_.front();
+    // What class was the *queued* command itself sent as? (byte 4 of the
+    // outgoing GENI frame is the class byte, same offset as in responses.)
+    // Only match a Class 3/7 response against a command that was actually
+    // sent as that same class -- otherwise an unrelated Class 10 telemetry
+    // notification could be mistaken for the response to a queued Class 3
+    // command (or vice versa).
+    uint8_t queued_class = (cmd.packet.size() > 4) ? cmd.packet[4] : 0x00;
     bool is_class3 = (data[4] == 0x03);
     bool is_class7 = (data[4] == 0x07);
 
@@ -333,8 +340,10 @@ bool Transport::try_dispatch_response(const uint8_t* data, size_t len) {
     // descriptor-only -- see ControlService::enable_remote_mode()).
     // Class 7: device info strings, etc.
     // Both use a different packet structure than Class 10 DataObjects, so
-    // when expect_obj_id == 0 && expect_sub_id == 0 we match by class byte alone.
-    if ((is_class3 || is_class7) && cmd.expect_obj_id == 0x0000 && cmd.expect_sub_id == 0x0000) {
+    // when expect_obj_id == 0 && expect_sub_id == 0 we match by class byte
+    // alone -- but only when the queued command was sent as that class.
+    if ((is_class3 || is_class7) && data[4] == queued_class &&
+        cmd.expect_obj_id == 0x0000 && cmd.expect_sub_id == 0x0000) {
       ESP_LOGV(TAG, "Class %d response matched (wildcard match by class byte)", is_class3 ? 3 : 7);
       if (cmd.callback) {
         cmd.callback(true, data, len);
@@ -342,6 +351,17 @@ bool Transport::try_dispatch_response(const uint8_t* data, size_t len) {
       this->command_queue_.pop_front();
       this->state_ = State::IDLE;
       return true;
+    }
+
+    // If the queued command was itself Class 3 or Class 7 but this response
+    // is neither (e.g. a Class 10 telemetry notification arrived first),
+    // it's definitely not our answer -- let it fall through to the general
+    // packet callback instead of risking the Class 10 wildcard path below
+    // matching it by accident.
+    if ((queued_class == 0x03 || queued_class == 0x07) && !is_class3 && !is_class7) {
+      ESP_LOGV(TAG, "Awaiting Class %d response, ignoring unrelated Class 0x%02X packet",
+               queued_class, data[4]);
+      return false;
     }
   }
 

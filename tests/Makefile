@@ -6,7 +6,7 @@ CXXFLAGS = -std=c++11 -Wall -Wextra -O2 -I.
 LDFLAGS =
 
 # Test executables
-TESTS = test_protocol test_control_state test_dhw_demand_logic
+TESTS = test_protocol test_control_state test_dhw_demand_logic test_transport_matching
 
 # Default target
 all: $(TESTS)
@@ -20,6 +20,9 @@ test_control_state: test_control_state.cpp
 
 test_dhw_demand_logic: test_dhw_demand_logic.cpp
 	$(CXX) $(CXXFLAGS) test_dhw_demand_logic.cpp -o test_dhw_demand_logic $(LDFLAGS)
+
+test_transport_matching: test_transport_matching.cpp
+	$(CXX) $(CXXFLAGS) test_transport_matching.cpp -o test_transport_matching $(LDFLAGS)
 
 # Run tests
 test: $(TESTS)
@@ -37,6 +40,11 @@ test: $(TESTS)
 	@echo "Running DHW Detector Logic Tests..."
 	@echo "=========================================="
 	@./test_dhw_demand_logic
+	@echo ""
+	@echo "=========================================="
+	@echo "Running Transport Matching Tests..."
+	@echo "=========================================="
+	@./test_transport_matching
 
 # Alternative targets for specific compilers
 test-gcc: CXX = g++

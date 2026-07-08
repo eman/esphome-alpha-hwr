@@ -19,11 +19,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   and comparing the raw ACK bytes, ruling out the source address as a factor.
   Switched both commands to `0x81`. Also added `Transport` support for
   matching short Class 3 ACK responses (previously only Class 7/10 responses
-  were dispatched to command callbacks; Class 3 ACKs as short as 8 bytes were
-  silently discarded before even reaching a length check), so
-  `is_remote_mode_enabled_` is now only updated once the pump's ACK actually
-  confirms success, instead of being set unconditionally right after sending
-  the command
+  were dispatched to command callbacks; Class 3 ACKs as short as 8 bytes
+  were rejected by the existing 12-byte minimum-length guard before any
+  class-specific matching ran), gated so a queued Class 3/7 command can only
+  be satisfied by a response of that same class (an unrelated Class 10
+  telemetry notification arriving first can no longer be mistaken for the
+  answer). `is_remote_mode_enabled_` is now only updated once the pump's ACK
+  actually confirms success, instead of being set unconditionally right
+  after sending the command
   (issue [#46](https://github.com/eman/esphome-alpha-hwr/issues/46)).
 - **Memory leak in schedule "read all layers" async chain** —
   `ScheduleService::read_entries_async(-1, ...)` drove its layer-by-layer read

@@ -3,6 +3,8 @@ test_protocol
 test_control_state
 calc_test_crcs
 verify_crc
+test_dhw_demand_logic
+test_transport_matching
 
 # Object files
 *.o
