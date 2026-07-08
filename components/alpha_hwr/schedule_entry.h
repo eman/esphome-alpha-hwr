@@ -260,7 +260,14 @@ class ScheduleEntry {
    *   22:00-02:00 and 01:00-03:00 = True (both cross midnight, overlap)
    */
   bool overlaps_with(const ScheduleEntry &other) const {
-    // Only check overlap if same day, same layer, and both enabled
+    // Only check overlap if same day, same layer, and both enabled.
+    // Entries with an invalid day (day_index_ == INVALID_DAY_INDEX) never
+    // overlap with anything - otherwise two entries that both failed to
+    // parse a valid day name would collide on the shared sentinel value
+    // and produce a spurious overlap report.
+    if (this->day_index_ >= INVALID_DAY_INDEX || other.day_index_ >= INVALID_DAY_INDEX) {
+      return false;
+    }
     if (this->day_index_ != other.day_index_) {
       return false;
     }

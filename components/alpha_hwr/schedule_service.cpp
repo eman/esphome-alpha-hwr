@@ -46,7 +46,7 @@ void build_schedule_apdu(const std::vector<ScheduleEntry> &entries,
   for (const auto &entry : entries) {
     int day_idx = entry.get_day_index();
     if (day_idx < 0) {
-      ESP_LOGW(TAG, "Invalid day name in entry: %s", entry.get_day());
+      ESP_LOGW(TAG, "Invalid day name in entry (day_index=%d), skipping", day_idx);
       continue;
     }
 
@@ -686,13 +686,7 @@ bool ScheduleService::validate_entries(
     const auto &entry = entries[i];
 
     // Check valid day name
-    bool valid_day = false;
-    for (const char *day : DAY_NAMES) {
-      if (entry.get_day() == day) {
-        valid_day = true;
-        break;
-      }
-    }
+    bool valid_day = entry.get_day_index() >= 0;
     if (!valid_day) {
       char buf[128];
       snprintf(buf, sizeof(buf), "Entry %zu: Invalid day name '%s'", i,
