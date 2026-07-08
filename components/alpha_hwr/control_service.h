@@ -466,6 +466,36 @@ class ControlService {
   void handle_remote_mode_ack(bool enabling, bool got_response, const uint8_t* data, size_t len);
 
   /**
+   * Resolve the pump's current enabled (on/off) state before sending a
+   * setpoint or mode-change control request, so those writes never
+   * implicitly force-enable or force-disable the pump (fixes #45).
+   *
+   * The GENIbus control frame fuses mode + setpoint + on/off into a single
+   * write (see send_control_request()), so there's no way to write a
+   * setpoint/mode without also specifying a start/stop flag — the fix is to
+   * send the pump's actual last-known on/off state instead of hardcoding
+   * "true" (start).
+   *
+   * If the state is already known (pump_enabled_valid_), invokes
+   * on_resolved(true, enabled) synchronously. Otherwise performs a
+   * get_mode_async() read-back first (get_mode_async() updates
+   * pump_enabled_/pump_enabled_valid_ internally on success). If that
+   * read-back also fails, the state genuinely cannot be determined --
+   * invokes on_resolved(false, ...) so the caller can abort the control
+   * request entirely, rather than guessing either "true" (which could
+   * force-enable a stopped pump, the original bug) or "false" (which would
+   * send an explicit STOP and could force-disable a running pump -- just as
+   * bad, in the opposite direction).
+   *
+   * @param on_resolved Callback invoked with (resolved, enabled). When
+   *   resolved is false, enabled is meaningless and the caller must not
+   *   proceed with the control request.
+   *
+   * Reference: issue #45 suggested fix
+   */
+  void with_resolved_enabled_state(std::function<void(bool resolved, bool enabled)> on_resolved);
+
+  /**
    * Diagnostic log for issue #44: bench-verified (2026-07-08) that Constant
    * Flow mode's Object 86/Sub 6 setpoint readback returns a fixed value
    * (~0.000694 m³/h) regardless of the actual commanded setpoint (tested

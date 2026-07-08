@@ -479,29 +479,53 @@ bool ControlService::set_mode(ControlMode mode) {
   uint8_t mode_val = static_cast<uint8_t>(mode);
   ESP_LOGI(TAG, "Setting control mode to %d (%s)...", mode_val, get_mode_name(mode));
 
-  // Always use send_control_request() which handles all modes via Class 10
-  // (defaults to mode_byte 0x02 for modes not in CLASS10_CONTROL_MAP)
-  // Reference: control.py::set_mode() lines 345-366
-  if (!send_control_request(mode, true)) {
-    ESP_LOGW(TAG, "Failed to send control request for mode %d", mode_val);
-    return false;
-  }
+  // Fix #45: send the pump's actual current enabled state instead of
+  // hardcoding "true" (start), so switching modes never implicitly
+  // force-enables the pump while it's off.
+  //
+  // NOTE: with_resolved_enabled_state() usually resolves synchronously (when
+  // pump_enabled_valid_ is already known), but can fall back to an async
+  // get_mode_async() read-back. Since this function's bool return can't
+  // reflect a result that isn't known yet, we return true optimistically
+  // here (consistent with start()/stop(), which already return true after
+  // just queueing a transport command) and log any failure from within the
+  // callback instead.
+  with_resolved_enabled_state([this, mode, mode_val](bool resolved, bool enabled) {
+    if (!resolved) {
+      // Enabled state genuinely unknown even after a read-back attempt --
+      // abort rather than guessing (either guess risks force-enabling or
+      // force-disabling the pump).
+      ESP_LOGE(TAG, "Aborting mode change to %d: could not determine pump enabled state", mode_val);
+      return;
+    }
+    // Always use send_control_request() which handles all modes via Class 10
+    // (defaults to mode_byte 0x02 for modes not in CLASS10_CONTROL_MAP)
+    // Reference: control.py::set_mode() lines 345-366
+    if (!send_control_request(mode, enabled)) {
+      ESP_LOGW(TAG, "Failed to send control request for mode %d", mode_val);
+      return;
+    }
 
-  current_mode_ = mode;
-  mode_valid_ = true;
-  // Clear stale setpoint from previous mode
-  cached_setpoint_ = NAN;
+    current_mode_ = mode;
+    mode_valid_ = true;
+    // Clear stale setpoint from previous mode
+    cached_setpoint_ = NAN;
 
-  if (mode_change_callback_) {
-    mode_change_callback_(current_mode_, 0, 0.0f);
-  }
+    if (mode_change_callback_) {
+      mode_change_callback_(current_mode_, 0, 0.0f);
+    }
 
-  // Read setpoints for the new mode after delay (pump needs time to update passive notifications)
-  if (schedule_callback_) {
-    schedule_callback_([this]() { read_setpoints_from_pump(); }, 5000);
-  }
+    // Read setpoints for the new mode after delay (pump needs time to update passive notifications)
+    if (schedule_callback_) {
+      schedule_callback_([this]() { read_setpoints_from_pump(); }, 5000);
+    }
 
-  ESP_LOGI(TAG, "Mode set to %s", get_mode_name(mode));
+    // Log what flag was sent, not an assertion about the resulting pump
+    // state (the pump's actual state could differ if it changes elsewhere
+    // between this send and any later read-back).
+    ESP_LOGI(TAG, "Mode set to %s (sent enabled=%s)", get_mode_name(mode), enabled ? "true" : "false");
+  });
+
   return true;
 }
 
@@ -576,6 +600,31 @@ bool ControlService::enable_remote_mode() {
    ESP_LOGI(TAG, "Disable remote mode command sent, awaiting ACK...");
    return true;
  }
+
+void ControlService::with_resolved_enabled_state(std::function<void(bool resolved, bool enabled)> on_resolved) {
+  if (pump_enabled_valid_) {
+    on_resolved(true, pump_enabled_);
+    return;
+  }
+
+  // Fix #45: don't guess "true" (start) when we don't actually know the
+  // pump's current on/off state — read it back first.
+  ESP_LOGD(TAG, "Pump enabled state unknown; reading from pump before sending control request...");
+  get_mode_async([this, on_resolved](bool success, ControlMode /*mode*/) {
+    // get_mode_async() updates pump_enabled_/pump_enabled_valid_ internally
+    // on success (see its response handler above).
+    if (!success || !pump_enabled_valid_) {
+      // Genuinely unknown: neither "true" nor "false" is safe to guess here
+      // (either could force-enable or force-disable the pump), so abort
+      // the control request entirely instead of picking one.
+      ESP_LOGW(TAG, "Could not determine pump enabled state before control request; "
+                    "aborting rather than guessing (could force-enable or force-disable the pump)");
+      on_resolved(false, false);
+      return;
+    }
+    on_resolved(true, pump_enabled_);
+  });
+}
 
 const char *ControlService::get_mode_name(ControlMode mode) {
   switch (mode) {
@@ -728,27 +777,37 @@ void ControlService::set_constant_pressure_async(float value_m, std::function<vo
   // Convert meters to Pascals (Python reference line 558)
   float value_pa = value_m * 9806.65f;
   
-  // Step 1: Update overall operation request (Sub 6)
-  if (!send_control_request(ControlMode::CONSTANT_PRESSURE, true, value_pa)) {
-    ESP_LOGE(TAG, "Failed to send control request for constant pressure");
-    if (callback) callback(false);
-    return;
-  }
-  
-  // Step 2: Update specific pressure setpoint (Sub 15)
-  // Schedule after 400ms to allow control request + commit to complete
-  if (schedule_callback_) {
-    schedule_callback_([this, value_pa, value_m, callback]() {
+  // Fix #45: send the pump's actual current enabled state instead of
+  // hardcoding "true", so writing a setpoint never implicitly force-enables
+  // the pump while it's off.
+  with_resolved_enabled_state([this, value_pa, value_m, callback](bool resolved, bool enabled) {
+    if (!resolved) {
+      ESP_LOGE(TAG, "Aborting constant pressure setpoint write: could not determine pump enabled state");
+      if (callback) callback(false);
+      return;
+    }
+    // Step 1: Update overall operation request (Sub 6)
+    if (!send_control_request(ControlMode::CONSTANT_PRESSURE, enabled, value_pa)) {
+      ESP_LOGE(TAG, "Failed to send control request for constant pressure");
+      if (callback) callback(false);
+      return;
+    }
+    
+    // Step 2: Update specific pressure setpoint (Sub 15)
+    // Schedule after 400ms to allow control request + commit to complete
+    if (schedule_callback_) {
+      schedule_callback_([this, value_pa, value_m, callback]() {
+        set_class10_setpoint(value_pa, SUB_PRESSURE_SETPOINT);
+        cached_setpoint_ = value_m;
+        ESP_LOGI(TAG, "✓ Constant pressure set to %.2f m (%.0f Pa)", value_m, value_pa);
+        if (callback) callback(true);
+      }, 400);
+    } else {
       set_class10_setpoint(value_pa, SUB_PRESSURE_SETPOINT);
       cached_setpoint_ = value_m;
-      ESP_LOGI(TAG, "✓ Constant pressure set to %.2f m (%.0f Pa)", value_m, value_pa);
       if (callback) callback(true);
-    }, 400);
-  } else {
-    set_class10_setpoint(value_pa, SUB_PRESSURE_SETPOINT);
-    cached_setpoint_ = value_m;
-    if (callback) callback(true);
-  }
+    }
+  });
 }
 
 void ControlService::set_constant_speed_async(float value_rpm, std::function<void(bool)> callback) {
@@ -762,26 +821,36 @@ void ControlService::set_constant_speed_async(float value_rpm, std::function<voi
     return;
   }
   
-  // Step 1: Update overall operation request (Sub 6)
-  if (!send_control_request(ControlMode::CONSTANT_SPEED, true, value_rpm)) {
-    ESP_LOGE(TAG, "Failed to send control request for constant speed");
-    if (callback) callback(false);
-    return;
-  }
-  
-  // Step 2: Update specific speed setpoint (Sub 13)
-  if (schedule_callback_) {
-    schedule_callback_([this, value_rpm, callback]() {
+  // Fix #45: send the pump's actual current enabled state instead of
+  // hardcoding "true", so writing a setpoint never implicitly force-enables
+  // the pump while it's off.
+  with_resolved_enabled_state([this, value_rpm, callback](bool resolved, bool enabled) {
+    if (!resolved) {
+      ESP_LOGE(TAG, "Aborting constant speed setpoint write: could not determine pump enabled state");
+      if (callback) callback(false);
+      return;
+    }
+    // Step 1: Update overall operation request (Sub 6)
+    if (!send_control_request(ControlMode::CONSTANT_SPEED, enabled, value_rpm)) {
+      ESP_LOGE(TAG, "Failed to send control request for constant speed");
+      if (callback) callback(false);
+      return;
+    }
+    
+    // Step 2: Update specific speed setpoint (Sub 13)
+    if (schedule_callback_) {
+      schedule_callback_([this, value_rpm, callback]() {
+        set_class10_setpoint(value_rpm, SUB_SPEED_SETPOINT);
+        cached_setpoint_ = value_rpm;
+        ESP_LOGI(TAG, "✓ Constant speed set to %.0f RPM", value_rpm);
+        if (callback) callback(true);
+      }, 400);
+    } else {
       set_class10_setpoint(value_rpm, SUB_SPEED_SETPOINT);
       cached_setpoint_ = value_rpm;
-      ESP_LOGI(TAG, "✓ Constant speed set to %.0f RPM", value_rpm);
       if (callback) callback(true);
-    }, 400);
-  } else {
-    set_class10_setpoint(value_rpm, SUB_SPEED_SETPOINT);
-    cached_setpoint_ = value_rpm;
-    if (callback) callback(true);
-  }
+    }
+  });
 }
 
 void ControlService::set_constant_flow_async(float value_m3h, std::function<void(bool)> callback) {
@@ -795,26 +864,36 @@ void ControlService::set_constant_flow_async(float value_m3h, std::function<void
     return;
   }
   
-  // Step 1: Update overall operation request (Sub 6)
-  if (!send_control_request(ControlMode::CONSTANT_FLOW, true, value_m3h)) {
-    ESP_LOGE(TAG, "Failed to send control request for constant flow");
-    if (callback) callback(false);
-    return;
-  }
-  
-  // Step 2: Update specific flow setpoint (Sub 39)
-  if (schedule_callback_) {
-    schedule_callback_([this, value_m3h, callback]() {
+  // Fix #45: send the pump's actual current enabled state instead of
+  // hardcoding "true", so writing a setpoint never implicitly force-enables
+  // the pump while it's off.
+  with_resolved_enabled_state([this, value_m3h, callback](bool resolved, bool enabled) {
+    if (!resolved) {
+      ESP_LOGE(TAG, "Aborting constant flow setpoint write: could not determine pump enabled state");
+      if (callback) callback(false);
+      return;
+    }
+    // Step 1: Update overall operation request (Sub 6)
+    if (!send_control_request(ControlMode::CONSTANT_FLOW, enabled, value_m3h)) {
+      ESP_LOGE(TAG, "Failed to send control request for constant flow");
+      if (callback) callback(false);
+      return;
+    }
+    
+    // Step 2: Update specific flow setpoint (Sub 39)
+    if (schedule_callback_) {
+      schedule_callback_([this, value_m3h, callback]() {
+        set_class10_setpoint(value_m3h, SUB_FLOW_SETPOINT);
+        cached_setpoint_ = value_m3h;
+        ESP_LOGI(TAG, "✓ Constant flow set to %.2f m³/h", value_m3h);
+        if (callback) callback(true);
+      }, 400);
+    } else {
       set_class10_setpoint(value_m3h, SUB_FLOW_SETPOINT);
       cached_setpoint_ = value_m3h;
-      ESP_LOGI(TAG, "✓ Constant flow set to %.2f m³/h", value_m3h);
       if (callback) callback(true);
-    }, 400);
-  } else {
-    set_class10_setpoint(value_m3h, SUB_FLOW_SETPOINT);
-    cached_setpoint_ = value_m3h;
-    if (callback) callback(true);
-  }
+    }
+  });
 }
 
 void ControlService::set_temperature_range_async(float min_temp, float max_temp, bool autoadapt_enabled,
@@ -835,64 +914,74 @@ void ControlService::set_temperature_range_async(float min_temp, float max_temp,
     return;
   }
   
-  // Step 1: Switch mode and set baseline (Sub 6) with min_temp as setpoint
-  // Reference: control.py::set_temperature_range_control() line 924
-  if (!send_control_request(ControlMode::TEMPERATURE_RANGE, true, min_temp)) {
-    ESP_LOGE(TAG, "Failed to switch to TEMPERATURE_RANGE mode");
-    if (callback) callback(false);
-    return;
-  }
-  
-  // Step 2: Write temperature range to Object 91, Sub-ID 430
-  // Reference: control.py::set_temperature_range_control() lines 930-955
-  // Payload format (Type 1012): [DeltaTempEnabled(1)][MinTemp(4)][MaxTemp(4)][TimeLimits(4)]
-  auto write_temp_range = [this, min_temp, max_temp, autoadapt_enabled, callback]() {
-    uint8_t struct_data[13];
-    struct_data[0] = autoadapt_enabled ? 0x01 : 0x00;
-    protocol::encode_float_be(min_temp, &struct_data[1]);
-    protocol::encode_float_be(max_temp, &struct_data[5]);
-    struct_data[9] = 0x05;
-    struct_data[10] = 0x3C;
-    struct_data[11] = 0x01;
-    struct_data[12] = 0x1E;
+  // Fix #45: send the pump's actual current enabled state instead of
+  // hardcoding "true", so writing a setpoint never implicitly force-enables
+  // the pump while it's off.
+  with_resolved_enabled_state([this, min_temp, max_temp, autoadapt_enabled, callback](bool resolved, bool enabled) {
+    if (!resolved) {
+      ESP_LOGE(TAG, "Aborting temperature range write: could not determine pump enabled state");
+      if (callback) callback(false);
+      return;
+    }
+    // Step 1: Switch mode and set baseline (Sub 6) with min_temp as setpoint
+    // Reference: control.py::set_temperature_range_control() line 924
+    if (!send_control_request(ControlMode::TEMPERATURE_RANGE, enabled, min_temp)) {
+      ESP_LOGE(TAG, "Failed to switch to TEMPERATURE_RANGE mode");
+      if (callback) callback(false);
+      return;
+    }
     
-    // APDU: [Class][OpSpec][ObjID][SubH][SubL][Reserved][Type(3)][Size(2)][Data(13)]
-    uint8_t apdu[24];
-    apdu[0] = 0x0A;     // Class 10
-    apdu[1] = 0xB3;     // OpSpec 0xB3
-    apdu[2] = 91;       // Object 91
-    apdu[3] = 0x01;     // Sub-ID high (0x01AE = 430)
-    apdu[4] = 0xAE;     // Sub-ID low
-    apdu[5] = 0x00;     // Reserved
-    apdu[6] = 0xF4;     // Type 1012 byte 1
-    apdu[7] = 0x03;     // Type 1012 byte 2
-    apdu[8] = 0x00;     // Type 1012 byte 3
-    apdu[9] = 0x00;     // Size high byte
-    apdu[10] = 0x0D;    // Size low byte (13 bytes)
-    memcpy(&apdu[11], struct_data, 13);
+    // Step 2: Write temperature range to Object 91, Sub-ID 430
+    // Reference: control.py::set_temperature_range_control() lines 930-955
+    // Payload format (Type 1012): [DeltaTempEnabled(1)][MinTemp(4)][MaxTemp(4)][TimeLimits(4)]
+    auto write_temp_range = [this, min_temp, max_temp, autoadapt_enabled, callback]() {
+      uint8_t struct_data[13];
+      struct_data[0] = autoadapt_enabled ? 0x01 : 0x00;
+      protocol::encode_float_be(min_temp, &struct_data[1]);
+      protocol::encode_float_be(max_temp, &struct_data[5]);
+      struct_data[9] = 0x05;
+      struct_data[10] = 0x3C;
+      struct_data[11] = 0x01;
+      struct_data[12] = 0x1E;
+      
+      // APDU: [Class][OpSpec][ObjID][SubH][SubL][Reserved][Type(3)][Size(2)][Data(13)]
+      uint8_t apdu[24];
+      apdu[0] = 0x0A;     // Class 10
+      apdu[1] = 0xB3;     // OpSpec 0xB3
+      apdu[2] = 91;       // Object 91
+      apdu[3] = 0x01;     // Sub-ID high (0x01AE = 430)
+      apdu[4] = 0xAE;     // Sub-ID low
+      apdu[5] = 0x00;     // Reserved
+      apdu[6] = 0xF4;     // Type 1012 byte 1
+      apdu[7] = 0x03;     // Type 1012 byte 2
+      apdu[8] = 0x00;     // Type 1012 byte 3
+      apdu[9] = 0x00;     // Size high byte
+      apdu[10] = 0x0D;    // Size low byte (13 bytes)
+      memcpy(&apdu[11], struct_data, 13);
+      
+      this->transport_.send_apdu_command(apdu, 24);
+      
+      // Cache temperature range values
+      cached_temp_min_ = min_temp;
+      cached_temp_max_ = max_temp;
+      cached_setpoint_ = min_temp;
+      cached_autoadapt_ = autoadapt_enabled ? 1 : 0;
+      
+      // Send configuration commit (transport queue handles ordering)
+      this->send_configuration_commit();
+      if (callback) callback(true);
+    };
     
-    this->transport_.send_apdu_command(apdu, 24);
+    ESP_LOGI(TAG, "Temperature range write queued: %.1f-%.1f°C (AutoAdapt: %s)",
+             min_temp, max_temp, autoadapt_enabled ? "ON" : "OFF");
     
-    // Cache temperature range values
-    cached_temp_min_ = min_temp;
-    cached_temp_max_ = max_temp;
-    cached_setpoint_ = min_temp;
-    cached_autoadapt_ = autoadapt_enabled ? 1 : 0;
-    
-    // Send configuration commit (transport queue handles ordering)
-    this->send_configuration_commit();
-    if (callback) callback(true);
-  };
-  
-  ESP_LOGI(TAG, "Temperature range write queued: %.1f-%.1f°C (AutoAdapt: %s)",
-           min_temp, max_temp, autoadapt_enabled ? "ON" : "OFF");
-  
-  // Schedule step 2 after step 1 completes
-  if (schedule_callback_) {
-    schedule_callback_(write_temp_range, 400);
-  } else {
-    write_temp_range();
-  }
+    // Schedule step 2 after step 1 completes
+    if (schedule_callback_) {
+      schedule_callback_(write_temp_range, 400);
+    } else {
+      write_temp_range();
+    }
+  });
 }
 
 void ControlService::set_proportional_pressure_async(float value_m, std::function<void(bool)> callback) {
@@ -910,27 +999,37 @@ void ControlService::set_proportional_pressure_async(float value_m, std::functio
   // Reference: control.py::set_proportional_pressure() line 657
   float value_pa = value_m * 9806.65f;
   
-  // Step 1: Update overall operation request (Sub 6) with Pa value
-  if (!send_control_request(ControlMode::PROPORTIONAL_PRESSURE, true, value_pa)) {
-    ESP_LOGE(TAG, "Failed to send control request for proportional pressure");
-    if (callback) callback(false);
-    return;
-  }
-  
-  // Step 2: Update specific pressure setpoint (Sub 15)
-  // Reference: control.py::set_proportional_pressure() lines 665-667
-  if (schedule_callback_) {
-    schedule_callback_([this, value_pa, value_m, callback]() {
+  // Fix #45: send the pump's actual current enabled state instead of
+  // hardcoding "true", so writing a setpoint never implicitly force-enables
+  // the pump while it's off.
+  with_resolved_enabled_state([this, value_pa, value_m, callback](bool resolved, bool enabled) {
+    if (!resolved) {
+      ESP_LOGE(TAG, "Aborting proportional pressure setpoint write: could not determine pump enabled state");
+      if (callback) callback(false);
+      return;
+    }
+    // Step 1: Update overall operation request (Sub 6) with Pa value
+    if (!send_control_request(ControlMode::PROPORTIONAL_PRESSURE, enabled, value_pa)) {
+      ESP_LOGE(TAG, "Failed to send control request for proportional pressure");
+      if (callback) callback(false);
+      return;
+    }
+    
+    // Step 2: Update specific pressure setpoint (Sub 15)
+    // Reference: control.py::set_proportional_pressure() lines 665-667
+    if (schedule_callback_) {
+      schedule_callback_([this, value_pa, value_m, callback]() {
+        set_class10_setpoint(value_pa, SUB_PRESSURE_SETPOINT);
+        cached_setpoint_ = value_m;
+        ESP_LOGI(TAG, "✓ Proportional pressure set to %.2f m (%.0f Pa)", value_pa / 9806.65f, value_pa);
+        if (callback) callback(true);
+      }, 400);
+    } else {
       set_class10_setpoint(value_pa, SUB_PRESSURE_SETPOINT);
       cached_setpoint_ = value_m;
-      ESP_LOGI(TAG, "✓ Proportional pressure set to %.2f m (%.0f Pa)", value_pa / 9806.65f, value_pa);
       if (callback) callback(true);
-    }, 400);
-  } else {
-    set_class10_setpoint(value_pa, SUB_PRESSURE_SETPOINT);
-    cached_setpoint_ = value_m;
-    if (callback) callback(true);
-  }
+    }
+  });
 }
 
 void ControlService::set_cycle_time_control_async(uint8_t on_minutes, uint8_t off_minutes,
@@ -945,62 +1044,72 @@ void ControlService::set_cycle_time_control_async(uint8_t on_minutes, uint8_t of
     return;
   }
   
-  // Step 1: Switch mode via send_control_request(DHW_ON_OFF)
-  // Reference: control.py::set_cycle_time_control() lines 1006-1007
-  if (!send_control_request(ControlMode::DHW_ON_OFF, true)) {
-    ESP_LOGE(TAG, "Failed to switch to DHW_ON_OFF mode");
-    if (callback) callback(false);
-    return;
-  }
-  
-  // Step 2: Write cycle time configuration to Object 91, Sub-ID 430
-  // Reference: control.py::set_cycle_time_control() lines 1010-1055
-  auto write_cycle_config = [this, on_minutes, off_minutes, callback]() {
-    // Payload: [00 00][OFF_min][01 42 02][ON_min][FB]  (8 bytes)
-    const uint8_t struct_payload[8] = {
-      0x00, 0x00,           // Header
-      off_minutes,          // Byte 2: OFF time
-      0x01, 0x42, 0x02,     // Fixed magic bytes
-      on_minutes,           // Byte 6: ON time
-      0xFB                  // Fixed suffix
+  // Fix #45: send the pump's actual current enabled state instead of
+  // hardcoding "true", so switching mode never implicitly force-enables
+  // the pump while it's off.
+  with_resolved_enabled_state([this, on_minutes, off_minutes, callback](bool resolved, bool enabled) {
+    if (!resolved) {
+      ESP_LOGE(TAG, "Aborting cycle time control write: could not determine pump enabled state");
+      if (callback) callback(false);
+      return;
+    }
+    // Step 1: Switch mode via send_control_request(DHW_ON_OFF)
+    // Reference: control.py::set_cycle_time_control() lines 1006-1007
+    if (!send_control_request(ControlMode::DHW_ON_OFF, enabled)) {
+      ESP_LOGE(TAG, "Failed to switch to DHW_ON_OFF mode");
+      if (callback) callback(false);
+      return;
+    }
+    
+    // Step 2: Write cycle time configuration to Object 91, Sub-ID 430
+    // Reference: control.py::set_cycle_time_control() lines 1010-1055
+    auto write_cycle_config = [this, on_minutes, off_minutes, callback]() {
+      // Payload: [00 00][OFF_min][01 42 02][ON_min][FB]  (8 bytes)
+      const uint8_t struct_payload[8] = {
+        0x00, 0x00,           // Header
+        off_minutes,          // Byte 2: OFF time
+        0x01, 0x42, 0x02,     // Fixed magic bytes
+        on_minutes,           // Byte 6: ON time
+        0xFB                  // Fixed suffix
+      };
+      
+      // APDU: [Class][OpSpec][ObjID][SubH][SubL][Reserved][Type_H][Type_L][Size][Payload(8)]
+      // Object 91, Sub-ID 430 (0x01AE), Type 1012 (0x03F4)
+      // Using build_data_object_set equivalent format
+      uint8_t data[11];  // Type(2) + Size(1) + Payload(8)
+      data[0] = 0x03;    // Type high: 1012 = 0x03F4
+      data[1] = 0xF4;    // Type low
+      data[2] = 0x08;    // Size: 8 bytes
+      memcpy(&data[3], struct_payload, 8);
+      
+      // Build full APDU matching build_data_object_set format:
+      // [0x0A][OpSpec][SubH][SubL][ObjH][ObjL][data...]
+      // sub_id=0x01AE (430), obj_id=91 (0x005B)
+      // standard_len = 1(svc) + 1(src) + 1(class) + 1(opspec) + 4(IDs) + len(data) = 8 + 11 = 19
+      // op_bits = 19 - 4 = 15 => OpSpec = 0x80 | 15 = 0x8F
+      uint8_t apdu[17];  // class(1) + opspec(1) + IDs(4) + data(11)
+      apdu[0] = 0x0A;    // Class 10
+      apdu[1] = 0x8F;    // OpSpec: SET + 15 bytes (4 IDs + 11 data)
+      apdu[2] = 0x01;    // Sub-ID high (0x01AE = 430)
+      apdu[3] = 0xAE;    // Sub-ID low
+      apdu[4] = 0x00;    // Obj-ID high (91 = 0x005B)
+      apdu[5] = 0x5B;    // Obj-ID low
+      memcpy(&apdu[6], data, 11);
+      
+      this->transport_.send_apdu_command(apdu, 17);
+      this->send_configuration_commit();
+      
+      ESP_LOGI(TAG, "✓ Cycle time set: %d min ON, %d min OFF", on_minutes, off_minutes);
+      if (callback) callback(true);
     };
     
-    // APDU: [Class][OpSpec][ObjID][SubH][SubL][Reserved][Type_H][Type_L][Size][Payload(8)]
-    // Object 91, Sub-ID 430 (0x01AE), Type 1012 (0x03F4)
-    // Using build_data_object_set equivalent format
-    uint8_t data[11];  // Type(2) + Size(1) + Payload(8)
-    data[0] = 0x03;    // Type high: 1012 = 0x03F4
-    data[1] = 0xF4;    // Type low
-    data[2] = 0x08;    // Size: 8 bytes
-    memcpy(&data[3], struct_payload, 8);
-    
-    // Build full APDU matching build_data_object_set format:
-    // [0x0A][OpSpec][SubH][SubL][ObjH][ObjL][data...]
-    // sub_id=0x01AE (430), obj_id=91 (0x005B)
-    // standard_len = 1(svc) + 1(src) + 1(class) + 1(opspec) + 4(IDs) + len(data) = 8 + 11 = 19
-    // op_bits = 19 - 4 = 15 => OpSpec = 0x80 | 15 = 0x8F
-    uint8_t apdu[17];  // class(1) + opspec(1) + IDs(4) + data(11)
-    apdu[0] = 0x0A;    // Class 10
-    apdu[1] = 0x8F;    // OpSpec: SET + 15 bytes (4 IDs + 11 data)
-    apdu[2] = 0x01;    // Sub-ID high (0x01AE = 430)
-    apdu[3] = 0xAE;    // Sub-ID low
-    apdu[4] = 0x00;    // Obj-ID high (91 = 0x005B)
-    apdu[5] = 0x5B;    // Obj-ID low
-    memcpy(&apdu[6], data, 11);
-    
-    this->transport_.send_apdu_command(apdu, 17);
-    this->send_configuration_commit();
-    
-    ESP_LOGI(TAG, "✓ Cycle time set: %d min ON, %d min OFF", on_minutes, off_minutes);
-    if (callback) callback(true);
-  };
-  
-  // Schedule step 2 after step 1 completes
-  if (schedule_callback_) {
-    schedule_callback_(write_cycle_config, 400);
-  } else {
-    write_cycle_config();
-  }
+    // Schedule step 2 after step 1 completes
+    if (schedule_callback_) {
+      schedule_callback_(write_cycle_config, 400);
+    } else {
+      write_cycle_config();
+    }
+  });
 }
 
 }  // namespace services
