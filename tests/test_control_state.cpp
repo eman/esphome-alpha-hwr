@@ -99,23 +99,36 @@ struct PumpEnabledState {
     pump_enabled_valid = true;
   }
 
-  // Mirrors ControlService::with_resolved_enabled_state()'s synchronous path
-  // (pump_enabled_valid == true): resolves to the pump's actual last-known
-  // enabled state. When unknown, defaults to false (don't force-enable)
-  // rather than guessing "true" as the pre-#45 code effectively did. The
-  // real implementation falls back to an async get_mode_async() read-back
-  // in the unknown case; that round trip isn't modeled here, only its
-  // documented "safe default if the read fails" behavior.
-  bool resolve_enabled_state_for_control_request() const {
-    return pump_enabled_valid ? pump_enabled : false;
+  // Mirrors ControlService::with_resolved_enabled_state() after review
+  // feedback on PR #49: when the enabled state is genuinely unknown (even
+  // after a simulated read-back attempt), the caller must abort the control
+  // request entirely -- neither "true" nor "false" is safe to guess, since
+  // "true" could force-enable a stopped pump (the original #45 bug) and
+  // "false" could force-disable a running pump (just as bad, in reverse).
+  struct EnabledStateResolution {
+    bool resolved;
+    bool enabled;
+  };
+  EnabledStateResolution resolve_enabled_state_for_control_request() const {
+    if (pump_enabled_valid) {
+      return {true, pump_enabled};
+    }
+    return {false, false};  // Unknown: caller must abort, not guess
   }
 
-  // Mirrors ControlService::set_mode() after the #45 fix: sends the
-  // resolved enabled state instead of hardcoding true. Records what would
-  // have been sent as the start/stop flag so tests can assert on it.
+  // Mirrors ControlService::set_mode() after the #45 fix + review feedback:
+  // aborts (sends nothing, mode unchanged) when the enabled state can't be
+  // resolved, instead of guessing. Records what would have been sent as the
+  // start/stop flag so tests can assert on it.
   bool last_sent_enabled_flag{false};
+  bool aborted_due_to_unknown_state{false};
   bool set_mode(ControlMode mode) {
-    last_sent_enabled_flag = resolve_enabled_state_for_control_request();
+    EnabledStateResolution resolution = resolve_enabled_state_for_control_request();
+    if (!resolution.resolved) {
+      aborted_due_to_unknown_state = true;
+      return false;
+    }
+    last_sent_enabled_flag = resolution.enabled;
     current_mode = mode;
     mode_valid = true;
     return true;
@@ -429,10 +442,11 @@ void test_set_mode_preserves_enabled_when_on() {
 }
 
 // ============================================================================
-// Test: unknown enabled state defaults to NOT enabling, never guesses true (#45)
+// Test: unknown enabled state aborts the control request rather than
+// guessing true or false (#45, hardened per review feedback on PR #49)
 // ============================================================================
-void test_resolve_enabled_state_defaults_safe_when_unknown() {
-  std::cout << "\n=== Testing Unknown Enabled State Defaults to False, Not True (#45) ===" << std::endl;
+void test_resolve_enabled_state_aborts_when_unknown() {
+  std::cout << "\n=== Testing Unknown Enabled State Aborts Rather Than Guessing (#45) ===" << std::endl;
 
   PumpEnabledState state;
   // pump_enabled_valid is false (never determined yet) -- simulates the
@@ -440,10 +454,32 @@ void test_resolve_enabled_state_defaults_safe_when_unknown() {
   // read-back also failed.
   TEST_ASSERT_EQ(state.pump_enabled_valid, false, "Precondition: enabled state is unknown");
 
-  bool resolved = state.resolve_enabled_state_for_control_request();
+  PumpEnabledState::EnabledStateResolution resolution = state.resolve_enabled_state_for_control_request();
 
-  TEST_ASSERT_EQ(resolved, false,
-                 "#45: unknown enabled state resolves to false, never guesses true (old bug)");
+  TEST_ASSERT_EQ(resolution.resolved, false,
+                 "#45: unknown enabled state is reported as unresolved, not guessed as false");
+}
+
+// ============================================================================
+// Test: set_mode() aborts entirely (sends nothing, mode unchanged) when the
+// enabled state is unknown -- guessing "false" would risk sending an
+// explicit STOP and force-disabling a pump that was actually running.
+// ============================================================================
+void test_set_mode_aborts_when_enabled_state_unknown() {
+  std::cout << "\n=== Testing set_mode() Aborts When Enabled State Unknown (Review Feedback) ===" << std::endl;
+
+  PumpEnabledState state;
+  state.current_mode = ControlMode::TEMPERATURE_RANGE;
+  state.mode_valid = true;
+  // pump_enabled_valid left false: state genuinely unknown.
+
+  bool result = state.set_mode(ControlMode::CONSTANT_SPEED);
+
+  TEST_ASSERT_EQ(result, false, "set_mode() reports failure when enabled state is unknown");
+  TEST_ASSERT_EQ(state.aborted_due_to_unknown_state, true,
+                 "set_mode() aborts instead of guessing true or false");
+  TEST_ASSERT(state.current_mode == ControlMode::TEMPERATURE_RANGE,
+              "set_mode() does not change the mode when it aborts");
 }
 
 // ============================================================================
@@ -471,7 +507,8 @@ int main() {
   test_mode_read_updates_enabled();
   test_set_mode_does_not_force_enable_when_off();
   test_set_mode_preserves_enabled_when_on();
-  test_resolve_enabled_state_defaults_safe_when_unknown();
+  test_resolve_enabled_state_aborts_when_unknown();
+  test_set_mode_aborts_when_enabled_state_unknown();
 
   std::cout << "\n===========================================================" << std::endl;
   std::cout << "  Test Results" << std::endl;

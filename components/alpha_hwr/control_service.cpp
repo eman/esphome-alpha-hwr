@@ -388,7 +388,14 @@ bool ControlService::set_mode(ControlMode mode) {
   // here (consistent with start()/stop(), which already return true after
   // just queueing a transport command) and log any failure from within the
   // callback instead.
-  with_resolved_enabled_state([this, mode, mode_val](bool enabled) {
+  with_resolved_enabled_state([this, mode, mode_val](bool resolved, bool enabled) {
+    if (!resolved) {
+      // Enabled state genuinely unknown even after a read-back attempt --
+      // abort rather than guessing (either guess risks force-enabling or
+      // force-disabling the pump).
+      ESP_LOGE(TAG, "Aborting mode change to %d: could not determine pump enabled state", mode_val);
+      return;
+    }
     // Always use send_control_request() which handles all modes via Class 10
     // (defaults to mode_byte 0x02 for modes not in CLASS10_CONTROL_MAP)
     // Reference: control.py::set_mode() lines 345-366
@@ -411,7 +418,10 @@ bool ControlService::set_mode(ControlMode mode) {
       schedule_callback_([this]() { read_setpoints_from_pump(); }, 5000);
     }
 
-    ESP_LOGI(TAG, "Mode set to %s (pump %s)", get_mode_name(mode), enabled ? "enabled" : "stayed off");
+    // Log what flag was sent, not an assertion about the resulting pump
+    // state (the pump's actual state could differ if it changes elsewhere
+    // between this send and any later read-back).
+    ESP_LOGI(TAG, "Mode set to %s (sent enabled=%s)", get_mode_name(mode), enabled ? "true" : "false");
   });
 
   return true;
@@ -461,9 +471,9 @@ bool ControlService::enable_remote_mode() {
    return true;
  }
 
-void ControlService::with_resolved_enabled_state(std::function<void(bool enabled)> on_resolved) {
+void ControlService::with_resolved_enabled_state(std::function<void(bool resolved, bool enabled)> on_resolved) {
   if (pump_enabled_valid_) {
-    on_resolved(pump_enabled_);
+    on_resolved(true, pump_enabled_);
     return;
   }
 
@@ -474,10 +484,15 @@ void ControlService::with_resolved_enabled_state(std::function<void(bool enabled
     // get_mode_async() updates pump_enabled_/pump_enabled_valid_ internally
     // on success (see its response handler above).
     if (!success || !pump_enabled_valid_) {
+      // Genuinely unknown: neither "true" nor "false" is safe to guess here
+      // (either could force-enable or force-disable the pump), so abort
+      // the control request entirely instead of picking one.
       ESP_LOGW(TAG, "Could not determine pump enabled state before control request; "
-                    "defaulting to NOT enabling (safer than forcing the pump on)");
+                    "aborting rather than guessing (could force-enable or force-disable the pump)");
+      on_resolved(false, false);
+      return;
     }
-    on_resolved(pump_enabled_valid_ ? pump_enabled_ : false);
+    on_resolved(true, pump_enabled_);
   });
 }
 
@@ -635,7 +650,12 @@ void ControlService::set_constant_pressure_async(float value_m, std::function<vo
   // Fix #45: send the pump's actual current enabled state instead of
   // hardcoding "true", so writing a setpoint never implicitly force-enables
   // the pump while it's off.
-  with_resolved_enabled_state([this, value_pa, value_m, callback](bool enabled) {
+  with_resolved_enabled_state([this, value_pa, value_m, callback](bool resolved, bool enabled) {
+    if (!resolved) {
+      ESP_LOGE(TAG, "Aborting constant pressure setpoint write: could not determine pump enabled state");
+      if (callback) callback(false);
+      return;
+    }
     // Step 1: Update overall operation request (Sub 6)
     if (!send_control_request(ControlMode::CONSTANT_PRESSURE, enabled, value_pa)) {
       ESP_LOGE(TAG, "Failed to send control request for constant pressure");
@@ -674,7 +694,12 @@ void ControlService::set_constant_speed_async(float value_rpm, std::function<voi
   // Fix #45: send the pump's actual current enabled state instead of
   // hardcoding "true", so writing a setpoint never implicitly force-enables
   // the pump while it's off.
-  with_resolved_enabled_state([this, value_rpm, callback](bool enabled) {
+  with_resolved_enabled_state([this, value_rpm, callback](bool resolved, bool enabled) {
+    if (!resolved) {
+      ESP_LOGE(TAG, "Aborting constant speed setpoint write: could not determine pump enabled state");
+      if (callback) callback(false);
+      return;
+    }
     // Step 1: Update overall operation request (Sub 6)
     if (!send_control_request(ControlMode::CONSTANT_SPEED, enabled, value_rpm)) {
       ESP_LOGE(TAG, "Failed to send control request for constant speed");
@@ -712,7 +737,12 @@ void ControlService::set_constant_flow_async(float value_m3h, std::function<void
   // Fix #45: send the pump's actual current enabled state instead of
   // hardcoding "true", so writing a setpoint never implicitly force-enables
   // the pump while it's off.
-  with_resolved_enabled_state([this, value_m3h, callback](bool enabled) {
+  with_resolved_enabled_state([this, value_m3h, callback](bool resolved, bool enabled) {
+    if (!resolved) {
+      ESP_LOGE(TAG, "Aborting constant flow setpoint write: could not determine pump enabled state");
+      if (callback) callback(false);
+      return;
+    }
     // Step 1: Update overall operation request (Sub 6)
     if (!send_control_request(ControlMode::CONSTANT_FLOW, enabled, value_m3h)) {
       ESP_LOGE(TAG, "Failed to send control request for constant flow");
@@ -757,7 +787,12 @@ void ControlService::set_temperature_range_async(float min_temp, float max_temp,
   // Fix #45: send the pump's actual current enabled state instead of
   // hardcoding "true", so writing a setpoint never implicitly force-enables
   // the pump while it's off.
-  with_resolved_enabled_state([this, min_temp, max_temp, autoadapt_enabled, callback](bool enabled) {
+  with_resolved_enabled_state([this, min_temp, max_temp, autoadapt_enabled, callback](bool resolved, bool enabled) {
+    if (!resolved) {
+      ESP_LOGE(TAG, "Aborting temperature range write: could not determine pump enabled state");
+      if (callback) callback(false);
+      return;
+    }
     // Step 1: Switch mode and set baseline (Sub 6) with min_temp as setpoint
     // Reference: control.py::set_temperature_range_control() line 924
     if (!send_control_request(ControlMode::TEMPERATURE_RANGE, enabled, min_temp)) {
@@ -837,7 +872,12 @@ void ControlService::set_proportional_pressure_async(float value_m, std::functio
   // Fix #45: send the pump's actual current enabled state instead of
   // hardcoding "true", so writing a setpoint never implicitly force-enables
   // the pump while it's off.
-  with_resolved_enabled_state([this, value_pa, value_m, callback](bool enabled) {
+  with_resolved_enabled_state([this, value_pa, value_m, callback](bool resolved, bool enabled) {
+    if (!resolved) {
+      ESP_LOGE(TAG, "Aborting proportional pressure setpoint write: could not determine pump enabled state");
+      if (callback) callback(false);
+      return;
+    }
     // Step 1: Update overall operation request (Sub 6) with Pa value
     if (!send_control_request(ControlMode::PROPORTIONAL_PRESSURE, enabled, value_pa)) {
       ESP_LOGE(TAG, "Failed to send control request for proportional pressure");
@@ -877,7 +917,12 @@ void ControlService::set_cycle_time_control_async(uint8_t on_minutes, uint8_t of
   // Fix #45: send the pump's actual current enabled state instead of
   // hardcoding "true", so switching mode never implicitly force-enables
   // the pump while it's off.
-  with_resolved_enabled_state([this, on_minutes, off_minutes, callback](bool enabled) {
+  with_resolved_enabled_state([this, on_minutes, off_minutes, callback](bool resolved, bool enabled) {
+    if (!resolved) {
+      ESP_LOGE(TAG, "Aborting cycle time control write: could not determine pump enabled state");
+      if (callback) callback(false);
+      return;
+    }
     // Step 1: Switch mode via send_control_request(DHW_ON_OFF)
     // Reference: control.py::set_cycle_time_control() lines 1006-1007
     if (!send_control_request(ControlMode::DHW_ON_OFF, enabled)) {

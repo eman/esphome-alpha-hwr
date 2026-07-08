@@ -18,10 +18,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   pump's actual on/off state, so writing a setpoint or switching modes while
   the pump was off silently turned it on. Since the frame fuses mode +
   setpoint + on/off into a single write, there's no way to omit the flag —
-  these calls now send the pump's actual last-known enabled state (via a new
+  these calls now send the pump's actual last-known enabled state via a new
   `ControlService::with_resolved_enabled_state()` helper, which reads it back
-  from the pump first if not yet known, defaulting to "not enabled" rather
-  than guessing) instead of hardcoding "true".
+  from the pump first if not yet known. If that read-back also fails, the
+  control request is aborted entirely rather than guessing an on/off state
+  (guessing "enabled" risked the original bug; guessing "disabled" would
+  risk sending an explicit stop to a pump that was actually running).
   (issue [#45](https://github.com/eman/esphome-alpha-hwr/issues/45)).
 - **Memory leak in schedule "read all layers" async chain** —
   `ScheduleService::read_entries_async(-1, ...)` drove its layer-by-layer read
