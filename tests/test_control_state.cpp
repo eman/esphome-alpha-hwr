@@ -13,6 +13,7 @@
 #include <cstdint>
 #include <cstring>
 #include <string>
+#include <cmath>
 
 // Test result tracking (same framework as test_protocol.cpp)
 int tests_passed = 0;
@@ -66,6 +67,13 @@ struct PumpEnabledState {
   bool pump_enabled_valid{false};
   ControlMode current_mode{ControlMode::NONE};
   bool mode_valid{false};
+  float cached_setpoint{NAN};  // Mirrors ControlService::cached_setpoint_ (display units)
+
+  // Records the setpoint actually sent to send_control_request() by the last
+  // start() call, so tests can assert on it. NAN means "no setpoint was
+  // passed" (i.e. send_control_request() fell back to the mode's default
+  // suffix, reproducing the #43 hardcoded-3671 bug if left unfixed).
+  float last_sent_setpoint{NAN};
 
   // Mirrors ControlService::update_mode_from_notification()
   void update_from_notification(uint8_t mode, uint8_t operation_mode) {
@@ -75,12 +83,33 @@ struct PumpEnabledState {
     pump_enabled_valid = true;
   }
 
-  // Mirrors ControlService::start()
+  // Mirrors ControlService::start() (fix for #43: reuse cached setpoint
+  // instead of always relying on the mode's hardcoded default suffix).
   bool start(uint8_t mode = 255) {
     if (mode != 255) {
       current_mode = static_cast<ControlMode>(mode);
       mode_valid = true;
+      // Clear any setpoint cached for the previous mode -- it's not valid
+      // for the newly-requested mode. Mirrors ControlService::start().
+      cached_setpoint = NAN;
     }
+
+    ControlMode target = current_mode;
+
+    // Only reuse cached_setpoint when no explicit mode override was given,
+    // a cached setpoint exists, and the target mode is one where
+    // cached_setpoint is known to hold a plain setpoint float.
+    float start_setpoint = NAN;
+    if (mode == 255 && !std::isnan(cached_setpoint) &&
+        (target == ControlMode::CONSTANT_PRESSURE || target == ControlMode::PROPORTIONAL_PRESSURE ||
+         target == ControlMode::CONSTANT_SPEED || target == ControlMode::CONSTANT_FLOW)) {
+      start_setpoint = cached_setpoint;
+      if (target == ControlMode::CONSTANT_PRESSURE || target == ControlMode::PROPORTIONAL_PRESSURE) {
+        start_setpoint *= 9806.65f;
+      }
+    }
+    last_sent_setpoint = start_setpoint;
+
     pump_enabled = true;
     pump_enabled_valid = true;
     return true;
@@ -120,6 +149,48 @@ struct RemoteModeState {
     // ack_byte != 0x00 (e.g. 0x01 "rejected"): leave state unchanged
   }
 };
+
+/**
+ * Mirrors ControlService::check_flow_setpoint_scale() (issue #44 diagnostic
+ * aid). Returns true if the transition from previous_setpoint to
+ * new_setpoint would trigger the scaling-mismatch warning (>10x change in
+ * either direction), false otherwise. Guards against NAN and a zero
+ * previous value (first read / not-yet-cached) to avoid false positives.
+ */
+bool flow_setpoint_scale_flagged(float previous_setpoint, float new_setpoint) {
+  if (std::isnan(previous_setpoint) || std::isnan(new_setpoint) || previous_setpoint == 0.0f) {
+    return false;
+  }
+  float ratio = new_setpoint / previous_setpoint;
+  return (ratio > 10.0f || ratio < 0.1f);
+}
+
+/**
+ * Mirrors the setpoint-caching branch of
+ * ControlService::update_mode_from_notification() / get_mode_async() after
+ * the #44 display fix (and the review-feedback follow-up fixing cross-mode
+ * contamination): for CONSTANT_FLOW, the Object 86/Sub 6 register is
+ * known-unreliable (bench-verified) and is never applied to cached_setpoint_.
+ * The previous (client-commanded) value is kept as-is *only* when we were
+ * already in CONSTANT_FLOW (steady state); if we just transitioned into
+ * CONSTANT_FLOW from a different mode, the stale cross-mode value (RPM,
+ * meters, etc.) is cleared to NAN instead of leaking in as a bogus flow
+ * setpoint. Pressure modes still apply the Pa->m conversion; all other
+ * modes still trust the register.
+ */
+float resolve_cached_setpoint_from_pump_read(ControlMode mode, ControlMode previous_mode,
+                                              float previous_cached, float raw_from_pump) {
+  if (mode == ControlMode::CONSTANT_PRESSURE || mode == ControlMode::PROPORTIONAL_PRESSURE) {
+    return raw_from_pump / 9806.65f;
+  } else if (mode == ControlMode::CONSTANT_FLOW) {
+    if (previous_mode != ControlMode::CONSTANT_FLOW) {
+      return NAN;  // Just entered Constant Flow: clear stale cross-mode value
+    }
+    return previous_cached;  // Steady state: keep last client-commanded value
+  } else {
+    return raw_from_pump;
+  }
+}
 
 // ============================================================================
 // Test: Initial state (before any pump communication)
@@ -438,6 +509,240 @@ void test_remote_mode_timeout_leaves_state_unchanged() {
 }
 
 // ============================================================================
+// Test: Constant Flow setpoint scale check flags the reporter's scenario (#44)
+// ============================================================================
+void test_flow_scale_flags_reporter_scenario() {
+  std::cout << "\n=== Testing Flow Setpoint Scale Check: Reporter's Scenario (#44) ===" << std::endl;
+
+  // Reporter had a plausible commanded setpoint, then a readback of 0.003056
+  // (~650x smaller) — should be flagged as a likely scaling issue.
+  TEST_ASSERT(flow_setpoint_scale_flagged(2.0f, 0.003056f),
+              "#44: readback far below commanded setpoint is flagged");
+}
+
+// ============================================================================
+// Test: Flow setpoint scale check flags large upward jumps too
+// ============================================================================
+void test_flow_scale_flags_large_upward_jump() {
+  std::cout << "\n=== Testing Flow Setpoint Scale Check: Large Upward Jump ===" << std::endl;
+
+  TEST_ASSERT(flow_setpoint_scale_flagged(0.5f, 6.0f),
+              "Large upward jump (12x) is flagged");
+}
+
+// ============================================================================
+// Test: Flow setpoint scale check does not false-positive on normal adjustments
+// ============================================================================
+void test_flow_scale_ignores_normal_adjustment() {
+  std::cout << "\n=== Testing Flow Setpoint Scale Check: Normal Adjustment (No False Positive) ===" << std::endl;
+
+  TEST_ASSERT(!flow_setpoint_scale_flagged(2.0f, 2.1f),
+              "Small user-driven adjustment (1.05x) is not flagged");
+  TEST_ASSERT(!flow_setpoint_scale_flagged(2.0f, 0.3f),
+              "3x change (within 0.1x-10x band) is not flagged");
+}
+
+// ============================================================================
+// Test: Flow setpoint scale check ignores first read / uninitialized values
+// ============================================================================
+void test_flow_scale_ignores_first_read() {
+  std::cout << "\n=== Testing Flow Setpoint Scale Check: First Read Guard ===" << std::endl;
+
+  TEST_ASSERT(!flow_setpoint_scale_flagged(NAN, 2.0f),
+              "First read (previous=NAN) is never flagged");
+  TEST_ASSERT(!flow_setpoint_scale_flagged(0.0f, 2.0f),
+              "Zero previous value is never flagged (avoids divide-by-zero)");
+  TEST_ASSERT(!flow_setpoint_scale_flagged(2.0f, NAN),
+              "NAN new value is never flagged");
+}
+
+// ============================================================================
+// Test: Constant Flow display keeps last commanded value in steady state,
+// ignores bad register (#44 fix)
+// ============================================================================
+void test_flow_display_ignores_unreliable_register() {
+  std::cout << "\n=== Testing Constant Flow Display Ignores Unreliable Register (#44 fix) ===" << std::endl;
+
+  // Bench-verified scenario: already in Constant Flow (steady state), user
+  // commanded 2.0 m³/h, register always reads back 0.000694.
+  float resolved = resolve_cached_setpoint_from_pump_read(ControlMode::CONSTANT_FLOW, ControlMode::CONSTANT_FLOW,
+                                                           2.0f, 0.000694f);
+  TEST_ASSERT_EQ(resolved, 2.0f,
+                 "#44: Constant Flow keeps the last commanded value instead of the bad register readback");
+
+  // Never commanded yet (previous cached is NAN) -> stays NAN, doesn't show a wrong number.
+  float resolved_uncommanded = resolve_cached_setpoint_from_pump_read(ControlMode::CONSTANT_FLOW, ControlMode::CONSTANT_FLOW,
+                                                                       NAN, 0.000694f);
+  TEST_ASSERT(std::isnan(resolved_uncommanded),
+              "#44: Constant Flow with nothing commanded yet stays NAN rather than showing the bad register value");
+}
+
+// ============================================================================
+// Test: Entering Constant Flow from a different mode clears a stale
+// cross-mode cached setpoint instead of leaking it in as a bogus flow value
+// (review feedback on #44/PR #48).
+// ============================================================================
+void test_flow_mode_transition_clears_cross_mode_setpoint() {
+  std::cout << "\n=== Testing Constant Flow Mode Transition Clears Cross-Mode Setpoint (Review Feedback) ===" << std::endl;
+
+  // Coming from Constant Speed with a cached 2000 RPM value -- must NOT
+  // display as if it were a 2000 m^3/h flow setpoint.
+  float resolved = resolve_cached_setpoint_from_pump_read(ControlMode::CONSTANT_FLOW, ControlMode::CONSTANT_SPEED,
+                                                           2000.0f, 0.000694f);
+  TEST_ASSERT(std::isnan(resolved),
+              "Entering Constant Flow from Constant Speed clears the stale 2000 RPM cross-mode value");
+
+  // Coming from Constant Pressure with a cached 4.0 m value -- same story.
+  float resolved_from_pressure = resolve_cached_setpoint_from_pump_read(ControlMode::CONSTANT_FLOW, ControlMode::CONSTANT_PRESSURE,
+                                                                         4.0f, 0.000694f);
+  TEST_ASSERT(std::isnan(resolved_from_pressure),
+              "Entering Constant Flow from Constant Pressure clears the stale 4.0 m cross-mode value");
+}
+
+// ============================================================================
+// Test: Other modes still trust the register (no regression from #44 fix)
+// ============================================================================
+void test_other_modes_still_trust_register() {
+  std::cout << "\n=== Testing Other Modes Still Trust the Register (No Regression) ===" << std::endl;
+
+  float resolved_speed = resolve_cached_setpoint_from_pump_read(ControlMode::CONSTANT_SPEED, ControlMode::NONE,
+                                                                 NAN, 2000.0f);
+  TEST_ASSERT_EQ(resolved_speed, 2000.0f, "Constant Speed still reads its setpoint from the register");
+
+  float resolved_pressure = resolve_cached_setpoint_from_pump_read(ControlMode::CONSTANT_PRESSURE, ControlMode::NONE,
+                                                                    NAN, 4.0f * 9806.65f);
+  TEST_ASSERT(std::fabs(resolved_pressure - 4.0f) < 0.01f,
+              "Constant Pressure still converts the register's Pa reading to meters");
+}
+
+// ============================================================================
+// Test: start() reuses cached Constant Speed setpoint (fixes #43)
+// ============================================================================
+void test_start_reuses_cached_speed_setpoint() {
+  std::cout << "\n=== Testing start() Reuses Cached Constant Speed Setpoint (#43) ===" << std::endl;
+
+  PumpEnabledState state;
+  state.current_mode = ControlMode::CONSTANT_SPEED;
+  state.mode_valid = true;
+  state.cached_setpoint = 2000.0f;  // User configured 2000 RPM
+
+  state.start();  // mode=255 → use current mode
+
+  TEST_ASSERT(!std::isnan(state.last_sent_setpoint),
+              "#43: start() sends a setpoint instead of falling back to default suffix");
+  TEST_ASSERT_EQ(state.last_sent_setpoint, 2000.0f,
+                 "#43: start() sends the cached 2000 RPM setpoint, not hardcoded 3671");
+}
+
+// ============================================================================
+// Test: start() converts cached Constant Pressure setpoint (meters) to Pascals
+// ============================================================================
+void test_start_converts_pressure_setpoint() {
+  std::cout << "\n=== Testing start() Converts Cached Pressure Setpoint (m -> Pa) ===" << std::endl;
+
+  PumpEnabledState state;
+  state.current_mode = ControlMode::CONSTANT_PRESSURE;
+  state.mode_valid = true;
+  state.cached_setpoint = 4.0f;  // User configured 4.0 m
+
+  state.start();
+
+  float expected_pa = 4.0f * 9806.65f;
+  TEST_ASSERT(!std::isnan(state.last_sent_setpoint),
+              "Pressure: start() sends a setpoint instead of the default suffix");
+  TEST_ASSERT(std::fabs(state.last_sent_setpoint - expected_pa) < 0.01f,
+              "Pressure: cached 4.0 m setpoint is converted to Pascals before sending");
+}
+
+// ============================================================================
+// Test: start() falls back to default suffix when no setpoint is cached yet
+// ============================================================================
+void test_start_falls_back_without_cached_setpoint() {
+  std::cout << "\n=== Testing start() Fallback When No Cached Setpoint (Regression Guard) ===" << std::endl;
+
+  PumpEnabledState state;
+  state.current_mode = ControlMode::CONSTANT_SPEED;
+  state.mode_valid = true;
+  // cached_setpoint left as NAN (nothing read from pump yet)
+
+  state.start();
+
+  TEST_ASSERT(std::isnan(state.last_sent_setpoint),
+              "Fallback: no cached setpoint -> no setpoint override sent (unchanged behavior)");
+}
+
+// ============================================================================
+// Test: explicit mode override does not reuse a stale cached setpoint
+// ============================================================================
+void test_start_with_mode_override_ignores_stale_setpoint() {
+  std::cout << "\n=== Testing start(mode) Ignores Stale Cached Setpoint ===" << std::endl;
+
+  PumpEnabledState state;
+  state.current_mode = ControlMode::CONSTANT_SPEED;
+  state.mode_valid = true;
+  state.cached_setpoint = 2000.0f;  // Cached for CONSTANT_SPEED
+
+  // Switch to a different mode with an explicit override
+  state.start(static_cast<uint8_t>(ControlMode::CONSTANT_PRESSURE));
+
+  TEST_ASSERT(std::isnan(state.last_sent_setpoint),
+              "Mode override: stale Constant Speed setpoint is not reused for the new mode");
+  TEST_ASSERT(state.current_mode == ControlMode::CONSTANT_PRESSURE,
+              "Mode override: mode updated to CONSTANT_PRESSURE");
+}
+
+// ============================================================================
+// Test: a later start() (mode=255) after a mode override does not resend a
+// stale cached setpoint under the new mode (regression for review feedback
+// on #43/PR #47: start(mode) didn't clear cached_setpoint_, so a subsequent
+// start() could reuse an unrelated value -- e.g. a pressure setpoint in
+// meters resent as if it were a speed setpoint in RPM).
+// ============================================================================
+void test_start_after_mode_override_does_not_resend_stale_setpoint() {
+  std::cout << "\n=== Testing start() After Mode Override Doesn't Resend Stale Setpoint ===" << std::endl;
+
+  PumpEnabledState state;
+  state.current_mode = ControlMode::CONSTANT_PRESSURE;
+  state.mode_valid = true;
+  state.cached_setpoint = 4.0f;  // Cached pressure setpoint (meters)
+
+  // Explicit mode override to Constant Speed -- must clear the stale
+  // pressure setpoint so it can't leak into the new mode.
+  state.start(static_cast<uint8_t>(ControlMode::CONSTANT_SPEED));
+  TEST_ASSERT(std::isnan(state.last_sent_setpoint),
+              "Mode override start(): no setpoint resent yet (nothing cached for Constant Speed)");
+
+  // A later start() with mode=255 (e.g. re-enabling the pump) must NOT
+  // resend the old 4.0 (meters) value reinterpreted as a Constant Speed
+  // (RPM) setpoint.
+  state.start();
+  TEST_ASSERT(std::isnan(state.last_sent_setpoint),
+              "Subsequent start(): stale pressure setpoint (4.0 m) is not resent as a bogus "
+              "Constant Speed setpoint after a mode override");
+}
+
+// ============================================================================
+// Test: DHW On/Off and Temperature Range never reuse cached_setpoint
+// ============================================================================
+void test_start_dhw_and_temp_range_unaffected() {
+  std::cout << "\n=== Testing DHW On/Off and Temperature Range Unaffected by Fix ===" << std::endl;
+
+  ControlMode special_modes[] = {ControlMode::DHW_ON_OFF, ControlMode::TEMPERATURE_RANGE};
+
+  for (auto mode : special_modes) {
+    PumpEnabledState state;
+    state.current_mode = mode;
+    state.mode_valid = true;
+    state.cached_setpoint = 1234.5f;  // Should never be reused for these modes
+
+    state.start();
+
+    TEST_ASSERT(std::isnan(state.last_sent_setpoint),
+                "Special mode: cached_setpoint is never reused (default suffix still used)");
+  }
+}
+
+// ============================================================================
 // Main
 // ============================================================================
 int main() {
@@ -463,6 +768,19 @@ int main() {
   test_remote_mode_clean_ack_confirms_state();
   test_remote_mode_rejected_ack_leaves_state_unchanged();
   test_remote_mode_timeout_leaves_state_unchanged();
+  test_flow_scale_flags_reporter_scenario();
+  test_flow_scale_flags_large_upward_jump();
+  test_flow_scale_ignores_normal_adjustment();
+  test_flow_scale_ignores_first_read();
+  test_flow_display_ignores_unreliable_register();
+  test_flow_mode_transition_clears_cross_mode_setpoint();
+  test_other_modes_still_trust_register();
+  test_start_reuses_cached_speed_setpoint();
+  test_start_converts_pressure_setpoint();
+  test_start_falls_back_without_cached_setpoint();
+  test_start_with_mode_override_ignores_stale_setpoint();
+  test_start_after_mode_override_does_not_resend_stale_setpoint();
+  test_start_dhw_and_temp_range_unaffected();
 
   std::cout << "\n===========================================================" << std::endl;
   std::cout << "  Test Results" << std::endl;

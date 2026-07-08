@@ -157,11 +157,18 @@ class ControlService {
    * - Flag byte = 0x00 for start operation
    * - Sends configuration commit after start
    * - Requires authenticated session
-   * 
+   * - When called with mode=255 (use current mode) and a setpoint has
+   *   already been cached for CONSTANT_PRESSURE, PROPORTIONAL_PRESSURE,
+   *   CONSTANT_SPEED, or CONSTANT_FLOW, that cached setpoint is resent
+   *   instead of the mode's hardcoded default suffix (fixes #43: enabling
+   *   the pump no longer forces it to a fixed ~3671 RPM). If no cached
+   *   setpoint is available yet, or an explicit mode override is passed,
+   *   the default suffix is used (unchanged behavior).
+   *
    * Example:
    *   control.start();  // Start with current mode
    *   control.start(static_cast<uint8_t>(ControlMode::CONSTANT_PRESSURE));  // Start with specific mode
-   * 
+   *
    * Reference: control.py::start() lines 165-234
    */
   bool start(uint8_t mode = 255);
@@ -278,7 +285,7 @@ class ControlService {
     * @param operation_mode Operation mode byte (AUTO/STOP/USER_DEFINED)
     * @param setpoint Setpoint value from notification
     */
-   void update_mode_from_notification(uint8_t mode, uint8_t operation_mode, float setpoint);
+  void update_mode_from_notification(uint8_t mode, uint8_t operation_mode, float setpoint);
    
    /**
     * Get whether remote mode is enabled.
@@ -428,6 +435,12 @@ class ControlService {
      std::function<void()> config_commit_callback_;
     
     // Cached setpoint values read from pump (NAN = not yet read)
+    // NOTE: for CONSTANT_FLOW mode specifically, Object 86/Sub 6 is confirmed
+    // (bench-tested, issue #44) to NOT reliably carry the flow setpoint — it
+    // returns a fixed, commanded-value-independent readback. So for this one
+    // mode, cached_setpoint_ is populated only by set_constant_flow_async()'s
+    // optimistic client-side write, never by passive notifications or explicit
+    // Object 86/Sub 6 reads (see update_mode_from_notification()/get_mode_async()).
     float cached_setpoint_{NAN};           // Current mode's setpoint from passive notification
     float cached_temp_min_{NAN};           // Temperature range min (Object 91 Sub 430)
     float cached_temp_max_{NAN};           // Temperature range max (Object 91 Sub 430)
@@ -451,6 +464,21 @@ class ControlService {
    * @param len Length of data
    */
   void handle_remote_mode_ack(bool enabling, bool got_response, const uint8_t* data, size_t len);
+
+  /**
+   * Diagnostic log for issue #44: bench-verified (2026-07-08) that Constant
+   * Flow mode's Object 86/Sub 6 setpoint readback returns a fixed value
+   * (~0.000694 m³/h) regardless of the actual commanded setpoint (tested
+   * 0.2/2.0/8.0 m³/h — all identical). Because of this, cached_setpoint_ is no
+   * longer updated from this register while in CONSTANT_FLOW mode (see call
+   * sites); this function only logs when a large jump would have occurred, in
+   * case a different pump/firmware revision behaves differently.
+   *
+   * @param previous_setpoint cached_setpoint_ before this update (display units)
+   * @param new_setpoint value that would have been cached had the register been trusted
+   * @param raw_register_value Raw float as read from Object 86/Sub 6, pre-conversion
+   */
+  void check_flow_setpoint_scale(float previous_setpoint, float new_setpoint, float raw_register_value);
   
   /**
    * Send configuration commit packet.

@@ -28,6 +28,37 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   actually confirms success, instead of being set unconditionally right
   after sending the command
   (issue [#46](https://github.com/eman/esphome-alpha-hwr/issues/46)).
+- **Constant Flow Setpoint displayed a value off by ~1000x** —
+  bench-verified against the physical pump (2026-07-08) that Class 10
+  Object 86/Sub 6 returns the exact same raw value (~0.000694 m³/h)
+  regardless of the actual commanded flow setpoint (tested 0.2/2.0/8.0 m³/h,
+  all identical); converted to the originally reported units, that's
+  `0.003056 gal/min` — an exact match. Since this register is confirmed
+  unreliable for Constant Flow specifically, `ControlService` no longer
+  applies its readback to the cached setpoint for this mode; the display now
+  reflects only the last client-commanded value (from
+  `set_constant_flow_async()`), showing unavailable until a value is
+  explicitly set rather than a definitely-wrong number. Other modes are
+  unaffected — they still read their setpoint from the register as before.
+  A diagnostic warning log (`check_flow_setpoint_scale()`, added alongside
+  this fix) is kept in case a different pump/firmware revision behaves
+  differently.
+  (Enabling the pump in Constant Flow mode no longer forces a hardcoded
+  ~3671 RPM either, as that shares the fix for #43.)
+  (issue [#44](https://github.com/eman/esphome-alpha-hwr/issues/44),
+  PR [#48](https://github.com/eman/esphome-alpha-hwr/pull/48)).
+- **Pump Enabled ignored the configured setpoint, forcing a hardcoded ~3671 RPM** —
+  `ControlService::start()` called `send_control_request()` with no setpoint,
+  so `CLASS10_CONTROL_MAP`'s default suffix (which decodes to exactly `3671.0`)
+  was always sent for Constant Pressure, Proportional Pressure, Constant Speed,
+  and Constant Flow modes on every enable, regardless of any setpoint
+  previously configured. `start()` now reuses the pump's cached setpoint
+  (converting meters back to Pascals for the pressure modes) when no explicit
+  mode override is requested and a setpoint has already been read for the
+  current mode; falls back to the previous default-suffix behavior otherwise,
+  including for DHW On/Off, Temperature Range, and AutoAdapt modes
+  (issue [#43](https://github.com/eman/esphome-alpha-hwr/issues/43),
+  PR [#47](https://github.com/eman/esphome-alpha-hwr/pull/47)).
 - **Memory leak in schedule "read all layers" async chain** —
   `ScheduleService::read_entries_async(-1, ...)` drove its layer-by-layer read
   loop with a self-referential `std::shared_ptr<std::function>`. `Transport::reset()`
