@@ -309,8 +309,11 @@ class ControlService {
     */
    bool is_pump_enabled() const { return pump_enabled_; }
 
-   /** Get cached setpoint for current mode (NAN if not yet read from pump). */
-   float get_cached_setpoint() const { return cached_setpoint_; }
+   /** Get cached setpoints per mode (NAN if not yet read from pump) — issue #51. */
+   float get_cached_pressure_setpoint() const { return cached_pressure_setpoint_; }
+   float get_cached_proportional_setpoint() const { return cached_proportional_setpoint_; }
+   float get_cached_speed_setpoint() const { return cached_speed_setpoint_; }
+   float get_cached_flow_setpoint() const { return cached_flow_setpoint_; }
    /** Get cached temperature range min (NAN if not yet read). */
    float get_cached_temp_min() const { return cached_temp_min_; }
    /** Get cached temperature range max (NAN if not yet read). */
@@ -434,14 +437,17 @@ class ControlService {
     std::function<void(ControlMode, uint8_t, float)> mode_change_callback_;
      std::function<void()> config_commit_callback_;
     
-    // Cached setpoint values read from pump (NAN = not yet read)
-    // NOTE: for CONSTANT_FLOW mode specifically, Object 86/Sub 6 is confirmed
-    // (bench-tested, issue #44) to NOT reliably carry the flow setpoint — it
-    // returns a fixed, commanded-value-independent readback. So for this one
-    // mode, cached_setpoint_ is populated only by set_constant_flow_async()'s
-    // optimistic client-side write, never by passive notifications or explicit
-    // Object 86/Sub 6 reads (see update_mode_from_notification()/get_mode_async()).
-    float cached_setpoint_{NAN};           // Current mode's setpoint from passive notification
+    // Per-mode setpoint cache (issue #51): each mode stores only its own value,
+    // eliminating cross-mode contamination bugs that arose from the old shared
+    // cached_setpoint_ field. NAN = not yet read from pump.
+    //
+    // NOTE: cached_flow_setpoint_ is populated ONLY by set_constant_flow_async()'s
+    // optimistic client-side write — Object 86/Sub 6 is confirmed unreliable for
+    // CONSTANT_FLOW (bench-tested, issue #44).
+    float cached_pressure_setpoint_{NAN};       // CONSTANT_PRESSURE: meters of water column
+    float cached_proportional_setpoint_{NAN};   // PROPORTIONAL_PRESSURE: meters
+    float cached_speed_setpoint_{NAN};           // CONSTANT_SPEED: RPM
+    float cached_flow_setpoint_{NAN};            // CONSTANT_FLOW: m³/h (client-write only)
     float cached_temp_min_{NAN};           // Temperature range min (Object 91 Sub 430)
     float cached_temp_max_{NAN};           // Temperature range max (Object 91 Sub 430)
     uint8_t cached_operation_mode_{0xFF};  // Operation mode from notification
@@ -451,7 +457,13 @@ class ControlService {
   static constexpr uint16_t SUB_SPEED_SETPOINT = 13;
   static constexpr uint16_t SUB_PRESSURE_SETPOINT = 15;
   static constexpr uint16_t SUB_FLOW_SETPOINT = 39;
-  
+    /**
+    * Get the cached setpoint for a specific mode.
+    * Used internally for callbacks and log messages (issue #51).
+    * Returns NAN for modes without a scalar setpoint (AUTO_ADAPT_*, TEMPERATURE_RANGE, etc.).
+    */
+   float get_setpoint_for_mode(ControlMode mode) const;
+
   /**
    * Handle the ACK response for enable_remote_mode()/disable_remote_mode()
    * (fixes #46). Only updates is_remote_mode_enabled_ when the pump's Class 3

@@ -412,9 +412,18 @@ public:
     return services::ControlService::get_mode_name(mode);
   }
 
-  // Cached setpoint getters (NAN = not yet read from pump)
-  float get_cached_setpoint() const {
-    return control_service_.get_cached_setpoint();
+  // Per-mode cached setpoint getters (NAN = not yet read from pump) — issue #51
+  float get_cached_pressure_setpoint() const {
+    return control_service_.get_cached_pressure_setpoint();
+  }
+  float get_cached_proportional_setpoint() const {
+    return control_service_.get_cached_proportional_setpoint();
+  }
+  float get_cached_speed_setpoint() const {
+    return control_service_.get_cached_speed_setpoint();
+  }
+  float get_cached_flow_setpoint() const {
+    return control_service_.get_cached_flow_setpoint();
   }
   float get_cached_temp_min() const {
     return control_service_.get_cached_temp_min();
