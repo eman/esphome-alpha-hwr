@@ -53,12 +53,6 @@ ble_client:
 alpha_hwr:
   id: pump
   ble_client_id: hwr_pump_client
-  # Optional: Configure periodic control state polling to detect out-of-band
-  # pump state changes (internal schedules, manual button presses, external app
-  # control). Polls the pump for state changes at regular intervals.
-  # Default: 30 seconds. Set to 0 to disable polling if you guarantee
-  # exclusive component control (issue #54).
-  # control_state_poll_interval: 30s
   flow:
     name: "Flow Rate"
   head:

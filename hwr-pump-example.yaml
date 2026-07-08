@@ -7,28 +7,11 @@ esphome:
 # ==============================================================================
 # 
 # This example demonstrates basic telemetry monitoring without BLE pairing.
-# Perfect for getting started or when you only need basic pump data.
-#
-# Telemetry Available:
-# - Flow Rate, Head Pressure, Water Temperature, Motor Speed, Power
-#
-# For enhanced telemetry (voltage, current, all temperatures), 
-# see hwr-pairing-example.yaml
 #
 # Setup Instructions:
 # 1. Replace the MAC address below with your pump's BLE MAC address
 # 2. Update WiFi credentials (or copy secrets-example.yaml to secrets.yaml)
 # 3. Flash to your ESP32
-#
-# Device Discovery:
-# - Find your pump's MAC using the ESPHome Bluetooth scan feature
-# - Or use a BLE scanner app on your phone
-# - MAC format: "AA:BB:CC:DD:EE:FF"
-#
-# Configuration Options:
-# - control_state_poll_interval: Periodic polling to detect out-of-band pump
-#   state changes (default 30s; set to 0s to disable if exclusive control
-#   is guaranteed). See README.md for full configuration reference.
 # ==============================================================================
 
 substitutions:
