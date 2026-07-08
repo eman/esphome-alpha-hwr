@@ -378,11 +378,47 @@ bool ControlService::start(uint8_t mode) {
   // Reference: control.py::start() lines 183-206
   if (mode != 255) {
     current_mode_ = static_cast<ControlMode>(mode);
+    // Clear any setpoint cached for the previous mode -- it's not valid for
+    // the newly-requested mode (e.g. a pressure value in meters must not be
+    // reused as a speed value in RPM by a later start() call). Mirrors the
+    // same clear in set_mode().
+    cached_setpoint_ = NAN;
   }
   
   ControlMode target = current_mode_;
-  
-  if (!send_control_request(target, true)) {
+
+  // Resolve the setpoint to send with the start command.
+  //
+  // Bug (#43): send_control_request() falls back to CLASS10_CONTROL_MAP's
+  // default suffix when no setpoint is given, which decodes to a hardcoded
+  // 3671.0 for CONSTANT_PRESSURE/PROPORTIONAL_PRESSURE/CONSTANT_SPEED/
+  // CONSTANT_FLOW. Reuse the pump's actual last-known setpoint instead, so
+  // enabling the pump doesn't clobber the user's configured setpoint.
+  //
+  // Only reuse cached_setpoint_ when:
+  // - no explicit mode override was requested (a cached value from a prior
+  //   mode is not valid for a newly-requested mode), and
+  // - the target mode is one where cached_setpoint_ is known to hold a
+  //   plain setpoint float in pump-native units. DHW_ON_OFF and
+  //   TEMPERATURE_RANGE use special-purpose suffix encodings (not a plain
+  //   setpoint), and AUTO_ADAPT_* setpoint semantics are undocumented, so
+  //   those keep using the default suffix (unchanged behavior).
+  float start_setpoint = NAN;
+  if (mode == 255 && !std::isnan(cached_setpoint_) &&
+      (target == ControlMode::CONSTANT_PRESSURE || target == ControlMode::PROPORTIONAL_PRESSURE ||
+       target == ControlMode::CONSTANT_SPEED || target == ControlMode::CONSTANT_FLOW)) {
+    // cached_setpoint_ is stored in display units (meters for pressure
+    // modes); convert back to raw pump units (Pascals) before sending.
+    start_setpoint = cached_setpoint_;
+    if (target == ControlMode::CONSTANT_PRESSURE || target == ControlMode::PROPORTIONAL_PRESSURE) {
+      start_setpoint *= 9806.65f;
+    }
+    ESP_LOGD(TAG, "Reusing cached setpoint on start: %.4f (raw units)", start_setpoint);
+  } else {
+    ESP_LOGD(TAG, "No cached setpoint to reuse on start; using mode default suffix");
+  }
+
+  if (!send_control_request(target, true, start_setpoint)) {
     ESP_LOGE(TAG, "Failed to send start command");
     return false;
   }
