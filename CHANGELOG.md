@@ -26,6 +26,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   risk sending an explicit stop to a pump that was actually running).
   (issue [#45](https://github.com/eman/esphome-alpha-hwr/issues/45),
   PR [#49](https://github.com/eman/esphome-alpha-hwr/pull/49)).
+- **Constant Flow Setpoint displayed a value off by ~1000x** —
+  bench-verified against the physical pump (2026-07-08) that Class 10
+  Object 86/Sub 6 returns the exact same raw value (~0.000694 m³/h)
+  regardless of the actual commanded flow setpoint (tested 0.2/2.0/8.0 m³/h,
+  all identical); converted to the originally reported units, that's
+  `0.003056 gal/min` — an exact match. Since this register is confirmed
+  unreliable for Constant Flow specifically, `ControlService` no longer
+  applies its readback to the cached setpoint for this mode; the display now
+  reflects only the last client-commanded value (from
+  `set_constant_flow_async()`), showing unavailable until a value is
+  explicitly set rather than a definitely-wrong number. Other modes are
+  unaffected — they still read their setpoint from the register as before.
+  A diagnostic warning log (`check_flow_setpoint_scale()`, added alongside
+  this fix) is kept in case a different pump/firmware revision behaves
+  differently.
+  (Enabling the pump in Constant Flow mode no longer forces a hardcoded
+  ~3671 RPM either, as that shares the fix for #43.)
+  (issue [#44](https://github.com/eman/esphome-alpha-hwr/issues/44),
+  PR [#48](https://github.com/eman/esphome-alpha-hwr/pull/48)).
 - **Pump Enabled ignored the configured setpoint, forcing a hardcoded ~3671 RPM** —
   `ControlService::start()` called `send_control_request()` with no setpoint,
   so `CLASS10_CONTROL_MAP`'s default suffix (which decodes to exactly `3671.0`)
