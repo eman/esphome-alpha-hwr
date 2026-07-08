@@ -9,6 +9,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **Remote Mode command used the wrong GENIbus opcode and never actually took effect** —
+  `enable_remote_mode()`/`disable_remote_mode()` sent Class 3 command
+  `[0x03, 0xC1, ...]` (OpSpec 0xC1 = INFO). Bench-verified against a real
+  pump (2026-07-08) that this opcode is always rejected with a
+  "descriptor-only" ACK (`[03 01 AC]`), while OpSpec `0x81` (SET) reliably
+  produces the clean success ACK (`[03 00]`) — confirmed by sending both
+  variants (and both the `0xF8`/`0x0A` source-address theories) back-to-back
+  and comparing the raw ACK bytes, ruling out the source address as a factor.
+  Switched both commands to `0x81`. Also added `Transport` support for
+  matching short Class 3 ACK responses (previously only Class 7/10 responses
+  were dispatched to command callbacks; Class 3 ACKs as short as 8 bytes were
+  silently discarded before even reaching a length check), so
+  `is_remote_mode_enabled_` is now only updated once the pump's ACK actually
+  confirms success, instead of being set unconditionally right after sending
+  the command
+  (issue [#46](https://github.com/eman/esphome-alpha-hwr/issues/46)).
 - **Memory leak in schedule "read all layers" async chain** —
   `ScheduleService::read_entries_async(-1, ...)` drove its layer-by-layer read
   loop with a self-referential `std::shared_ptr<std::function>`. `Transport::reset()`

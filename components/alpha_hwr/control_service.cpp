@@ -403,6 +403,28 @@ bool ControlService::set_mode(ControlMode mode) {
   return true;
 }
 
+void ControlService::handle_remote_mode_ack(bool enabling, bool got_response, const uint8_t* data, size_t len) {
+  // Class 3 command ACK format: [Start][Len][Dest][SvcH][Class=0x03][Ack]...[CRC]
+  // Ack byte 0x00 = clean/success ACK; 0x01 (with a trailing descriptor byte)
+  // = rejected/no-op. Bench-verified against a real pump (2026-07-08, #46):
+  // opcode 0x81 (SET) reliably produces the 0x00 ack; the previous 0xC1
+  // (INFO) opcode always produced the 0x01 "rejected" ack, which is why
+  // remote mode never actually took effect before this fix.
+  if (!got_response || len < 6) {
+    ESP_LOGW(TAG, "Remote mode %s: no ACK received (timeout) -- state left unchanged",
+             enabling ? "enable" : "disable");
+    return;
+  }
+  uint8_t ack_byte = data[5];
+  if (ack_byte == 0x00) {
+    this->is_remote_mode_enabled_ = enabling;
+    ESP_LOGI(TAG, "Remote mode %s (confirmed: clean ACK from pump)", enabling ? "enabled" : "disabled (Auto)");
+  } else {
+    ESP_LOGW(TAG, "Remote mode %s command was rejected by pump (ack=0x%02X, expected 0x00) -- state left unchanged",
+             enabling ? "enable" : "disable", ack_byte);
+  }
+}
+
 bool ControlService::enable_remote_mode() {
    // Verify session is authenticated
    if (session_.get_state() != core::SessionState::READY) {
@@ -412,16 +434,21 @@ bool ControlService::enable_remote_mode() {
 
    ESP_LOGI(TAG, "Enabling remote mode...");
 
-   // Class 3: 03 C1 07
-   // Reference: control.py lines 329-332
-   const uint8_t apdu[3] = {0x03, 0xC1, 0x07};
+   // Class 3: 03 81 07 (OpSpec 0x81 = SET; command ID 7 = enable remote).
+   // Fix #46: was 0xC1 (INFO), which the pump always rejected with a
+   // "descriptor-only" ACK ([03 01 xx]) rather than the clean [03 00]
+   // success ACK -- bench-verified against a real pump.
+   const uint8_t apdu[3] = {0x03, 0x81, 0x07};
    
-   // Send command via transport queue
-   this->transport_.send_apdu_command(apdu, 3);
+   // Send command and wait for the ACK (wildcard match: any Class 3 response)
+   // so we only update is_remote_mode_enabled_ once the pump actually
+   // confirms the command, instead of assuming success.
+   this->transport_.send_apdu_command(apdu, 3, 0, 0,
+     [this](bool success, const uint8_t* data, size_t len) {
+       this->handle_remote_mode_ack(true, success, data, len);
+     });
    
-   // Update state
-   this->is_remote_mode_enabled_ = true;
-   ESP_LOGI(TAG, "Remote mode enabled");
+   ESP_LOGI(TAG, "Enable remote mode command sent, awaiting ACK...");
    return true;
  }
  
@@ -434,16 +461,17 @@ bool ControlService::enable_remote_mode() {
 
    ESP_LOGI(TAG, "Disabling remote mode (Auto)...");
 
-   // Class 3: 03 C1 06
-   // Reference: control.py lines 358-361
-   const uint8_t apdu[3] = {0x03, 0xC1, 0x06};
+   // Class 3: 03 81 06 (OpSpec 0x81 = SET; command ID 6 = disable remote / Auto).
+   // Fix #46: was 0xC1 (INFO) -- see enable_remote_mode() for details.
+   const uint8_t apdu[3] = {0x03, 0x81, 0x06};
    
-   // Send command via transport queue
-   this->transport_.send_apdu_command(apdu, 3);
+   // Send command and wait for the ACK -- see enable_remote_mode().
+   this->transport_.send_apdu_command(apdu, 3, 0, 0,
+     [this](bool success, const uint8_t* data, size_t len) {
+       this->handle_remote_mode_ack(false, success, data, len);
+     });
    
-   // Update state
-   this->is_remote_mode_enabled_ = false;
-   ESP_LOGI(TAG, "Remote mode disabled (Auto)");
+   ESP_LOGI(TAG, "Disable remote mode command sent, awaiting ACK...");
    return true;
  }
 
