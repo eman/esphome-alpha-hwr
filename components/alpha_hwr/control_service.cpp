@@ -444,7 +444,7 @@ bool ControlService::start(uint8_t mode) {
   if (schedule_callback_) {
     schedule_callback_([this]() {
       ESP_LOGD(TAG, "Post-command readback after start (issue #52)");
-      get_mode_async([](bool success, ControlMode mode) {
+      get_mode_async([](bool success, ControlMode /*mode*/) {
         if (!success) {
           ESP_LOGW(TAG, "Post-command readback failed after start");
         }
@@ -491,7 +491,7 @@ bool ControlService::stop(uint8_t mode) {
   if (schedule_callback_) {
     schedule_callback_([this]() {
       ESP_LOGD(TAG, "Post-command readback after stop (issue #52)");
-      get_mode_async([](bool success, ControlMode mode) {
+      get_mode_async([](bool success, ControlMode /*mode*/) {
         if (!success) {
           ESP_LOGW(TAG, "Post-command readback failed after stop");
         }
