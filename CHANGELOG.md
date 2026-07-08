@@ -9,6 +9,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **Constant Flow Setpoint displayed a value off by ~1000x** —
+  bench-verified against the physical pump (2026-07-08) that Class 10
+  Object 86/Sub 6 returns the exact same raw value (~0.000694 m³/h)
+  regardless of the actual commanded flow setpoint (tested 0.2/2.0/8.0 m³/h,
+  all identical); converted to the originally reported units, that's
+  `0.003056 gal/min` — an exact match. Since this register is confirmed
+  unreliable for Constant Flow specifically, `ControlService` no longer
+  applies its readback to the cached setpoint for this mode; the display now
+  reflects only the last client-commanded value (from
+  `set_constant_flow_async()`), showing unavailable until a value is
+  explicitly set rather than a definitely-wrong number. Other modes are
+  unaffected — they still read their setpoint from the register as before.
+  A diagnostic warning log (`check_flow_setpoint_scale()`, added alongside
+  this fix) is kept in case a different pump/firmware revision behaves
+  differently.
+  (Enabling the pump in Constant Flow mode no longer forces a hardcoded
+  ~3671 RPM either, as that shares the fix for #43.)
+  (issue [#44](https://github.com/eman/esphome-alpha-hwr/issues/44),
+  PR [#48](https://github.com/eman/esphome-alpha-hwr/pull/48)).
 - **Memory leak in schedule "read all layers" async chain** —
   `ScheduleService::read_entries_async(-1, ...)` drove its layer-by-layer read
   loop with a self-referential `std::shared_ptr<std::function>`. `Transport::reset()`
@@ -19,22 +38,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   object, so an interrupted read now cleans up normally regardless of when the
   disconnect happens (issue [#32](https://github.com/eman/esphome-alpha-hwr/issues/32),
   PR [#38](https://github.com/eman/esphome-alpha-hwr/pull/38)).
-
-### Added
-
-- **Diagnostic logging for Constant Flow setpoint scaling issue** —
-  `ControlService::check_flow_setpoint_scale()` now logs a warning whenever a
-  newly-read Constant Flow setpoint changes by more than 10x from the
-  previously cached value, alongside the raw pre-conversion register float.
-  The pump's Class 10 Object 86/Sub 6 register — shared by every control
-  mode — has been observed to return a Constant Flow setpoint readback wrong
-  by roughly three orders of magnitude on some pumps, and this isn't yet
-  root-caused; this logging is a bench-verification aid, not a fix, to help
-  pin down whether the register is unreliable for this mode specifically.
-  (Enabling the pump in Constant Flow mode no longer forces a hardcoded
-  ~3671 RPM, as that shares the fix for #43.)
-  (issue [#44](https://github.com/eman/esphome-alpha-hwr/issues/44),
-  PR [#48](https://github.com/eman/esphome-alpha-hwr/pull/48)).
 
 ### Changed
 

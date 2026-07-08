@@ -62,18 +62,24 @@ void ControlService::set_mode_change_callback(std::function<void(ControlMode, ui
  }
 
 void ControlService::check_flow_setpoint_scale(float previous_setpoint, float new_setpoint, float raw_register_value) {
-  // See issue #44: bench-verification aid for the suspected Object 86/Sub 6
-  // scaling problem in Constant Flow mode. Only fires once we have a
-  // meaningful previous value to compare against.
+  // See issue #44: bench-verified on 2026-07-08 — Object 86/Sub 6 in Constant
+  // Flow mode returns the exact same raw value (~0.000694 m³/h) regardless of
+  // the actual commanded setpoint (tested 0.2/2.0/8.0 m³/h, all read back
+  // identically). This register is confirmed NOT a reliable source of truth
+  // for this mode's setpoint, so update_mode_from_notification()/get_mode_async()
+  // no longer apply its value to cached_setpoint_ for CONSTANT_FLOW — this is
+  // now purely a diagnostic log (kept in case a future pump/firmware revision
+  // behaves differently) rather than something that gates a behavior change.
   if (std::isnan(previous_setpoint) || std::isnan(new_setpoint) || previous_setpoint == 0.0f) {
     return;
   }
   float ratio = new_setpoint / previous_setpoint;
   if (ratio > 10.0f || ratio < 0.1f) {
     ESP_LOGW(TAG,
-      "Constant Flow setpoint changed by %.1fx (was %.4f m³/h, now %.4f m³/h, raw register=%.6f) — "
-      "possible Object 86/Sub 6 scaling issue, see https://github.com/eman/esphome-alpha-hwr/issues/44",
-      ratio, previous_setpoint, new_setpoint, raw_register_value);
+      "Constant Flow setpoint readback changed by %.1fx (last known=%.4f m³/h, raw register=%.6f m³/h) — "
+      "Object 86/Sub 6 is known-unreliable for this mode (see #44); ignoring and keeping last "
+      "client-commanded value",
+      ratio, previous_setpoint, raw_register_value);
   }
 }
 
@@ -91,12 +97,15 @@ void ControlService::update_mode_from_notification(uint8_t mode, uint8_t operati
   if (current_mode_ == ControlMode::CONSTANT_PRESSURE ||
       current_mode_ == ControlMode::PROPORTIONAL_PRESSURE) {
     cached_setpoint_ = setpoint / 9806.65f;
+  } else if (current_mode_ == ControlMode::CONSTANT_FLOW) {
+    // Fix #44: this register doesn't reliably carry the flow setpoint (see
+    // check_flow_setpoint_scale() above), so don't let it clobber the last
+    // known-good, client-commanded value. cached_setpoint_ is left as-is
+    // (NAN until the user actually calls set_constant_flow_async(), which
+    // sets it optimistically).
+    check_flow_setpoint_scale(previous_setpoint, setpoint, setpoint);
   } else {
     cached_setpoint_ = setpoint;
-  }
-  
-  if (current_mode_ == ControlMode::CONSTANT_FLOW) {
-    check_flow_setpoint_scale(previous_setpoint, cached_setpoint_, setpoint);
   }
   
   // Derive pump enabled state from operation_mode:
@@ -283,16 +292,18 @@ bool ControlService::get_mode_async(std::function<void(bool, ControlMode)> on_co
               if (payload_len >= (size_t)(offset + 7)) {
                 float previous_setpoint = cached_setpoint_;
                 float raw_setpoint = protocol::decode_float_be(&payload[offset + 3]);
-                cached_setpoint_ = raw_setpoint;
                 
-                // Convert pressure setpoints from Pascals to meters
                 if (current_mode_ == ControlMode::CONSTANT_PRESSURE || 
                     current_mode_ == ControlMode::PROPORTIONAL_PRESSURE) {
-                  cached_setpoint_ /= 9806.65f;
-                }
-                
-                if (current_mode_ == ControlMode::CONSTANT_FLOW) {
-                  check_flow_setpoint_scale(previous_setpoint, cached_setpoint_, raw_setpoint);
+                  // Convert pressure setpoints from Pascals to meters
+                  cached_setpoint_ = raw_setpoint / 9806.65f;
+                } else if (current_mode_ == ControlMode::CONSTANT_FLOW) {
+                  // Fix #44: Object 86/Sub 6 doesn't reliably carry the flow
+                  // setpoint (see check_flow_setpoint_scale()); keep the last
+                  // known-good, client-commanded value instead of this readback.
+                  check_flow_setpoint_scale(previous_setpoint, raw_setpoint, raw_setpoint);
+                } else {
+                  cached_setpoint_ = raw_setpoint;
                 }
               }
               

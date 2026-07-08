@@ -116,6 +116,24 @@ bool flow_setpoint_scale_flagged(float previous_setpoint, float new_setpoint) {
   return (ratio > 10.0f || ratio < 0.1f);
 }
 
+/**
+ * Mirrors the setpoint-caching branch of
+ * ControlService::update_mode_from_notification() / get_mode_async() after
+ * the #44 display fix: for CONSTANT_FLOW, the Object 86/Sub 6 register is
+ * known-unreliable (bench-verified) and is never applied to cached_setpoint_;
+ * the previous (client-commanded) value is kept as-is. Pressure modes still
+ * apply the Pa->m conversion; all other modes still trust the register.
+ */
+float resolve_cached_setpoint_from_pump_read(ControlMode mode, float previous_cached, float raw_from_pump) {
+  if (mode == ControlMode::CONSTANT_PRESSURE || mode == ControlMode::PROPORTIONAL_PRESSURE) {
+    return raw_from_pump / 9806.65f;
+  } else if (mode == ControlMode::CONSTANT_FLOW) {
+    return previous_cached;
+  } else {
+    return raw_from_pump;
+  }
+}
+
 // ============================================================================
 // Test: Initial state (before any pump communication)
 // ============================================================================
@@ -436,6 +454,37 @@ void test_flow_scale_ignores_first_read() {
 }
 
 // ============================================================================
+// Test: Constant Flow display keeps last commanded value, ignores bad register (#44 fix)
+// ============================================================================
+void test_flow_display_ignores_unreliable_register() {
+  std::cout << "\n=== Testing Constant Flow Display Ignores Unreliable Register (#44 fix) ===" << std::endl;
+
+  // Bench-verified scenario: user commanded 2.0 m³/h, register always reads back 0.000694.
+  float resolved = resolve_cached_setpoint_from_pump_read(ControlMode::CONSTANT_FLOW, 2.0f, 0.000694f);
+  TEST_ASSERT_EQ(resolved, 2.0f,
+                 "#44: Constant Flow keeps the last commanded value instead of the bad register readback");
+
+  // Never commanded yet (previous cached is NAN) -> stays NAN, doesn't show a wrong number.
+  float resolved_uncommanded = resolve_cached_setpoint_from_pump_read(ControlMode::CONSTANT_FLOW, NAN, 0.000694f);
+  TEST_ASSERT(std::isnan(resolved_uncommanded),
+              "#44: Constant Flow with nothing commanded yet stays NAN rather than showing the bad register value");
+}
+
+// ============================================================================
+// Test: Other modes still trust the register (no regression from #44 fix)
+// ============================================================================
+void test_other_modes_still_trust_register() {
+  std::cout << "\n=== Testing Other Modes Still Trust the Register (No Regression) ===" << std::endl;
+
+  float resolved_speed = resolve_cached_setpoint_from_pump_read(ControlMode::CONSTANT_SPEED, NAN, 2000.0f);
+  TEST_ASSERT_EQ(resolved_speed, 2000.0f, "Constant Speed still reads its setpoint from the register");
+
+  float resolved_pressure = resolve_cached_setpoint_from_pump_read(ControlMode::CONSTANT_PRESSURE, NAN, 4.0f * 9806.65f);
+  TEST_ASSERT(std::fabs(resolved_pressure - 4.0f) < 0.01f,
+              "Constant Pressure still converts the register's Pa reading to meters");
+}
+
+// ============================================================================
 // Main
 // ============================================================================
 int main() {
@@ -462,6 +511,8 @@ int main() {
   test_flow_scale_flags_large_upward_jump();
   test_flow_scale_ignores_normal_adjustment();
   test_flow_scale_ignores_first_read();
+  test_flow_display_ignores_unreliable_register();
+  test_other_modes_still_trust_register();
 
   std::cout << "\n===========================================================" << std::endl;
   std::cout << "  Test Results" << std::endl;
