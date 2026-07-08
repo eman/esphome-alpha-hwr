@@ -9,6 +9,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **Pump Enabled switch lag after toggling** —
+  The pump does not send unsolicited notifications after Class 3 START/STOP
+  commands, so the non-optimistic `Pump Enabled` switch in Home Assistant
+  won't update from the component's cache until the next periodic telemetry
+  poll (~10 seconds). This creates a user-visible lag: users toggle the switch
+  and don't see confirmation until several seconds later. Fixed by scheduling
+  an explicit post-command `get_mode()` readback ~500ms after every start/stop
+  (reporter bench-tested this timing on real hardware and confirmed it resolves
+  the UI lag reliably). The readback is non-blocking and non-critical; if it
+  fails the UI simply updates on the next periodic poll as before.
+  (issue [#52](https://github.com/eman/esphome-alpha-hwr/issues/52)).
 - **Remote Mode command used the wrong GENIbus opcode and never actually took effect** —
   `enable_remote_mode()`/`disable_remote_mode()` sent Class 3 command
   `[0x03, 0xC1, ...]` (OpSpec 0xC1 = INFO). Bench-verified against a real
