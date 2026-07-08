@@ -127,6 +127,41 @@ struct PumpEnabledState {
     pump_enabled = (operation_mode != static_cast<uint8_t>(OperationMode::STOP));
     pump_enabled_valid = true;
   }
+
+  // Mirrors ControlService::with_resolved_enabled_state() after review
+  // feedback on PR #49: when the enabled state is genuinely unknown (even
+  // after a simulated read-back attempt), the caller must abort the control
+  // request entirely -- neither "true" nor "false" is safe to guess, since
+  // "true" could force-enable a stopped pump (the original #45 bug) and
+  // "false" could force-disable a running pump (just as bad, in reverse).
+  struct EnabledStateResolution {
+    bool resolved;
+    bool enabled;
+  };
+  EnabledStateResolution resolve_enabled_state_for_control_request() const {
+    if (pump_enabled_valid) {
+      return {true, pump_enabled};
+    }
+    return {false, false};  // Unknown: caller must abort, not guess
+  }
+
+  // Mirrors ControlService::set_mode() after the #45 fix + review feedback:
+  // aborts (sends nothing, mode unchanged) when the enabled state can't be
+  // resolved, instead of guessing. Records what would have been sent as the
+  // start/stop flag so tests can assert on it.
+  bool last_sent_enabled_flag{false};
+  bool aborted_due_to_unknown_state{false};
+  bool set_mode(ControlMode mode) {
+    EnabledStateResolution resolution = resolve_enabled_state_for_control_request();
+    if (!resolution.resolved) {
+      aborted_due_to_unknown_state = true;
+      return false;
+    }
+    last_sent_enabled_flag = resolution.enabled;
+    current_mode = mode;
+    mode_valid = true;
+    return true;
+  }
 };
 
 /**
@@ -443,6 +478,81 @@ void test_mode_read_updates_enabled() {
 }
 
 // ============================================================================
+// Test: setpoint/mode writes no longer force-enable the pump when off (#45)
+// ============================================================================
+void test_set_mode_does_not_force_enable_when_off() {
+  std::cout << "\n=== Testing set_mode() Doesn't Force-Enable When Off (#45) ===" << std::endl;
+
+  PumpEnabledState state;
+  // Pump is known to be off.
+  state.pump_enabled = false;
+  state.pump_enabled_valid = true;
+
+  state.set_mode(ControlMode::CONSTANT_PRESSURE);
+
+  TEST_ASSERT_EQ(state.last_sent_enabled_flag, false,
+                 "#45: set_mode() sends enabled=false (not hardcoded true) when pump is off");
+  TEST_ASSERT_EQ(state.pump_enabled, false,
+                 "#45: pump_enabled stays false -- no desync from mode change alone");
+}
+
+// ============================================================================
+// Test: setpoint/mode writes preserve the enabled state when pump is on (#45)
+// ============================================================================
+void test_set_mode_preserves_enabled_when_on() {
+  std::cout << "\n=== Testing set_mode() Preserves Enabled State When On (#45) ===" << std::endl;
+
+  PumpEnabledState state;
+  state.pump_enabled = true;
+  state.pump_enabled_valid = true;
+
+  state.set_mode(ControlMode::CONSTANT_SPEED);
+
+  TEST_ASSERT_EQ(state.last_sent_enabled_flag, true,
+                 "#45: set_mode() sends enabled=true when the pump was already on");
+}
+
+// ============================================================================
+// Test: unknown enabled state aborts the control request rather than
+// guessing true or false (#45, hardened per review feedback on PR #49)
+// ============================================================================
+void test_resolve_enabled_state_aborts_when_unknown() {
+  std::cout << "\n=== Testing Unknown Enabled State Aborts Rather Than Guessing (#45) ===" << std::endl;
+
+  PumpEnabledState state;
+  // pump_enabled_valid is false (never determined yet) -- simulates the
+  // rare case where with_resolved_enabled_state()'s get_mode_async()
+  // read-back also failed.
+  TEST_ASSERT_EQ(state.pump_enabled_valid, false, "Precondition: enabled state is unknown");
+
+  PumpEnabledState::EnabledStateResolution resolution = state.resolve_enabled_state_for_control_request();
+
+  TEST_ASSERT_EQ(resolution.resolved, false,
+                 "#45: unknown enabled state is reported as unresolved, not guessed as false");
+}
+
+// ============================================================================
+// Test: set_mode() aborts entirely (sends nothing, mode unchanged) when the
+// enabled state is unknown -- guessing "false" would risk sending an
+// explicit STOP and force-disabling a pump that was actually running.
+// ============================================================================
+void test_set_mode_aborts_when_enabled_state_unknown() {
+  std::cout << "\n=== Testing set_mode() Aborts When Enabled State Unknown (Review Feedback) ===" << std::endl;
+
+  PumpEnabledState state;
+  state.current_mode = ControlMode::TEMPERATURE_RANGE;
+  state.mode_valid = true;
+  // pump_enabled_valid left false: state genuinely unknown.
+
+  bool result = state.set_mode(ControlMode::CONSTANT_SPEED);
+
+  TEST_ASSERT_EQ(result, false, "set_mode() reports failure when enabled state is unknown");
+  TEST_ASSERT_EQ(state.aborted_due_to_unknown_state, true,
+                 "set_mode() aborts instead of guessing true or false");
+  TEST_ASSERT(state.current_mode == ControlMode::TEMPERATURE_RANGE,
+              "set_mode() does not change the mode when it aborts");
+}
+
 // ============================================================================
 // Test: Constant Flow setpoint scale check flags the reporter's scenario (#44)
 // ============================================================================
@@ -700,6 +810,10 @@ int main() {
   test_all_modes_auto_enabled();
   test_all_modes_stop_disabled();
   test_mode_read_updates_enabled();
+  test_set_mode_does_not_force_enable_when_off();
+  test_set_mode_preserves_enabled_when_on();
+  test_resolve_enabled_state_aborts_when_unknown();
+  test_set_mode_aborts_when_enabled_state_unknown();
   test_flow_scale_flags_reporter_scenario();
   test_flow_scale_flags_large_upward_jump();
   test_flow_scale_ignores_normal_adjustment();

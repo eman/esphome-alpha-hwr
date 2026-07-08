@@ -9,6 +9,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **Setpoint and mode changes unexpectedly enabled the pump** —
+  `ControlService::set_mode()` and every setpoint setter
+  (`set_constant_pressure_async`, `set_constant_speed_async`,
+  `set_constant_flow_async`, `set_proportional_pressure_async`,
+  `set_temperature_range_async`, `set_cycle_time_control_async`) hardcoded
+  the GENIbus control frame's start/stop flag to "start" regardless of the
+  pump's actual on/off state, so writing a setpoint or switching modes while
+  the pump was off silently turned it on. Since the frame fuses mode +
+  setpoint + on/off into a single write, there's no way to omit the flag —
+  these calls now send the pump's actual last-known enabled state via a new
+  `ControlService::with_resolved_enabled_state()` helper, which reads it back
+  from the pump first if not yet known. If that read-back also fails, the
+  control request is aborted entirely rather than guessing an on/off state
+  (guessing "enabled" risked the original bug; guessing "disabled" would
+  risk sending an explicit stop to a pump that was actually running).
+  (issue [#45](https://github.com/eman/esphome-alpha-hwr/issues/45),
+  PR [#49](https://github.com/eman/esphome-alpha-hwr/pull/49)).
 - **Constant Flow Setpoint displayed a value off by ~1000x** —
   bench-verified against the physical pump (2026-07-08) that Class 10
   Object 86/Sub 6 returns the exact same raw value (~0.000694 m³/h)
