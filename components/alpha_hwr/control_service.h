@@ -273,7 +273,7 @@ class ControlService {
     * @param operation_mode Operation mode byte (AUTO/STOP/USER_DEFINED)
     * @param setpoint Setpoint value from notification
     */
-   void update_mode_from_notification(uint8_t mode, uint8_t operation_mode, float setpoint);
+  void update_mode_from_notification(uint8_t mode, uint8_t operation_mode, float setpoint);
    
    /**
     * Get whether remote mode is enabled.
@@ -423,6 +423,12 @@ class ControlService {
      std::function<void()> config_commit_callback_;
     
     // Cached setpoint values read from pump (NAN = not yet read)
+    // NOTE: for CONSTANT_FLOW mode specifically, Object 86/Sub 6 is confirmed
+    // (bench-tested, issue #44) to NOT reliably carry the flow setpoint — it
+    // returns a fixed, commanded-value-independent readback. So for this one
+    // mode, cached_setpoint_ is populated only by set_constant_flow_async()'s
+    // optimistic client-side write, never by passive notifications or explicit
+    // Object 86/Sub 6 reads (see update_mode_from_notification()/get_mode_async()).
     float cached_setpoint_{NAN};           // Current mode's setpoint from passive notification
     float cached_temp_min_{NAN};           // Temperature range min (Object 91 Sub 430)
     float cached_temp_max_{NAN};           // Temperature range max (Object 91 Sub 430)
@@ -433,6 +439,21 @@ class ControlService {
   static constexpr uint16_t SUB_SPEED_SETPOINT = 13;
   static constexpr uint16_t SUB_PRESSURE_SETPOINT = 15;
   static constexpr uint16_t SUB_FLOW_SETPOINT = 39;
+  
+  /**
+   * Diagnostic log for issue #44: bench-verified (2026-07-08) that Constant
+   * Flow mode's Object 86/Sub 6 setpoint readback returns a fixed value
+   * (~0.000694 m³/h) regardless of the actual commanded setpoint (tested
+   * 0.2/2.0/8.0 m³/h — all identical). Because of this, cached_setpoint_ is no
+   * longer updated from this register while in CONSTANT_FLOW mode (see call
+   * sites); this function only logs when a large jump would have occurred, in
+   * case a different pump/firmware revision behaves differently.
+   *
+   * @param previous_setpoint cached_setpoint_ before this update (display units)
+   * @param new_setpoint value that would have been cached had the register been trusted
+   * @param raw_register_value Raw float as read from Object 86/Sub 6, pre-conversion
+   */
+  void check_flow_setpoint_scale(float previous_setpoint, float new_setpoint, float raw_register_value);
   
   /**
    * Send configuration commit packet.
