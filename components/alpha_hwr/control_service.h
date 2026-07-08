@@ -217,12 +217,21 @@ class ControlService {
    * Enables remote control (Class 3 command ID 7), allowing external
    * control of the pump via BLE/API. When enabled, pump ignores local controls.
    * 
-   * @return True if remote mode enabled successfully
+   * @return True once the command has been queued (the actual enabled
+   *   state is confirmed asynchronously by handle_remote_mode_ack() once
+   *   the pump's ACK arrives -- see get_remote_enabled())
    * 
    * Protocol Notes:
-   * - Uses Class 3 command: [0x03, 0xC1, 0x07]
+   * - Uses Class 3 command: [0x03, 0x81, 0x07] (OpSpec 0x81 = SET). Fixed
+   *   from 0xC1 (INFO) in issue #46 -- bench-verified against a real pump
+   *   that 0xC1 always produces a "rejected" ACK ([03 01 xx]), while 0x81
+   *   produces the clean success ACK ([03 00]).
+   * - is_remote_mode_enabled_ is only updated once the pump's ACK confirms
+   *   success (ack byte 0x00); a rejected or missing ACK leaves the
+   *   previous state unchanged.
    * 
-   * Reference: control.py::enable_remote_mode() lines 305-333
+   * Reference: control.py::enable_remote_mode() lines 305-333 (note: the
+   * Python reference has the same 0xC1 bug, not yet fixed there)
    */
   bool enable_remote_mode();
   
@@ -231,12 +240,15 @@ class ControlService {
    * 
    * Returns pump to automatic operation based on internal logic.
    * 
-   * @return True if remote mode disabled successfully
+   * @return True once the command has been queued (see enable_remote_mode()
+   *   for how the confirmed state is determined)
    * 
    * Protocol Notes:
-   * - Uses Class 3 command: [0x03, 0xC1, 0x06]
+   * - Uses Class 3 command: [0x03, 0x81, 0x06] (OpSpec 0x81 = SET). Fixed
+   *   from 0xC1 (INFO) -- see enable_remote_mode().
    * 
-   * Reference: control.py::disable_remote_mode() lines 335-362
+   * Reference: control.py::disable_remote_mode() lines 335-362 (note: the
+   * Python reference has the same 0xC1 bug, not yet fixed there)
    */
   bool disable_remote_mode();
    
@@ -440,6 +452,19 @@ class ControlService {
   static constexpr uint16_t SUB_PRESSURE_SETPOINT = 15;
   static constexpr uint16_t SUB_FLOW_SETPOINT = 39;
   
+  /**
+   * Handle the ACK response for enable_remote_mode()/disable_remote_mode()
+   * (fixes #46). Only updates is_remote_mode_enabled_ when the pump's Class 3
+   * ACK confirms success (ack byte 0x00); leaves the state unchanged on a
+   * rejected ACK (0x01) or a timeout, rather than assuming success.
+   *
+   * @param enabling True if this was an enable_remote_mode() call, false for disable
+   * @param got_response True if the transport got a matching response before timeout
+   * @param data Raw response bytes (only valid when got_response is true)
+   * @param len Length of data
+   */
+  void handle_remote_mode_ack(bool enabling, bool got_response, const uint8_t* data, size_t len);
+
   /**
    * Resolve the pump's current enabled (on/off) state before sending a
    * setpoint or mode-change control request, so those writes never

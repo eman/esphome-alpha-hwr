@@ -165,6 +165,27 @@ struct PumpEnabledState {
 };
 
 /**
+ * Minimal state tracker mirroring ControlService::handle_remote_mode_ack()
+ * (fix #46): is_remote_mode_enabled_ is only updated when the pump's Class 3
+ * ACK confirms success (ack byte 0x00); a rejected ACK (0x01) or a timeout
+ * leaves the previous state unchanged instead of blindly assuming success.
+ */
+struct RemoteModeState {
+  bool is_remote_mode_enabled{false};
+
+  // Mirrors ControlService::handle_remote_mode_ack()
+  void handle_ack(bool enabling, bool got_response, uint8_t ack_byte) {
+    if (!got_response) {
+      return;  // Timeout: leave state unchanged
+    }
+    if (ack_byte == 0x00) {
+      is_remote_mode_enabled = enabling;
+    }
+    // ack_byte != 0x00 (e.g. 0x01 "rejected"): leave state unchanged
+  }
+};
+
+/**
  * Mirrors ControlService::check_flow_setpoint_scale() (issue #44 diagnostic
  * aid). Returns true if the transition from previous_setpoint to
  * new_setpoint would trigger the scaling-mismatch warning (>10x change in
@@ -475,6 +496,51 @@ void test_mode_read_updates_enabled() {
   // Simulate get_mode_async callback with STOP
   state.update_from_mode_read(static_cast<uint8_t>(OperationMode::STOP));
   TEST_ASSERT_EQ(state.pump_enabled, false, "Mode read STOP: pump disabled");
+}
+
+// ============================================================================
+// Test: Remote mode ACK handling -- clean ACK (0x00) confirms the requested
+// state (fixes #46, bench-verified: opcode 0x81 produces this ACK)
+// ============================================================================
+void test_remote_mode_clean_ack_confirms_state() {
+  std::cout << "\n=== Testing Remote Mode: Clean ACK (0x00) Confirms State (#46) ===" << std::endl;
+
+  RemoteModeState state;
+
+  state.handle_ack(/*enabling=*/true, /*got_response=*/true, /*ack_byte=*/0x00);
+  TEST_ASSERT_EQ(state.is_remote_mode_enabled, true,
+                 "#46: clean ACK (0x00) confirms remote mode enabled");
+
+  state.handle_ack(/*enabling=*/false, /*got_response=*/true, /*ack_byte=*/0x00);
+  TEST_ASSERT_EQ(state.is_remote_mode_enabled, false,
+                 "#46: clean ACK (0x00) confirms remote mode disabled");
+}
+
+// ============================================================================
+// Test: Remote mode ACK handling -- rejected ACK (0x01) leaves state unchanged
+// (bench-verified: the old opcode 0xC1 always produced this rejected ACK)
+// ============================================================================
+void test_remote_mode_rejected_ack_leaves_state_unchanged() {
+  std::cout << "\n=== Testing Remote Mode: Rejected ACK (0x01) Leaves State Unchanged (#46) ===" << std::endl;
+
+  RemoteModeState state;
+  // Starts false; a rejected enable attempt must NOT flip it to true --
+  // this is the exact bug #46 reports (old code assumed success unconditionally).
+  state.handle_ack(/*enabling=*/true, /*got_response=*/true, /*ack_byte=*/0x01);
+  TEST_ASSERT_EQ(state.is_remote_mode_enabled, false,
+                 "#46: rejected ACK (0x01) does not falsely report remote mode as enabled");
+}
+
+// ============================================================================
+// Test: Remote mode ACK handling -- timeout (no response) leaves state unchanged
+// ============================================================================
+void test_remote_mode_timeout_leaves_state_unchanged() {
+  std::cout << "\n=== Testing Remote Mode: Timeout Leaves State Unchanged (#46) ===" << std::endl;
+
+  RemoteModeState state;
+  state.handle_ack(/*enabling=*/true, /*got_response=*/false, /*ack_byte=*/0x00);
+  TEST_ASSERT_EQ(state.is_remote_mode_enabled, false,
+                 "#46: no response (timeout) does not falsely report remote mode as enabled");
 }
 
 // ============================================================================
@@ -810,6 +876,9 @@ int main() {
   test_all_modes_auto_enabled();
   test_all_modes_stop_disabled();
   test_mode_read_updates_enabled();
+  test_remote_mode_clean_ack_confirms_state();
+  test_remote_mode_rejected_ack_leaves_state_unchanged();
+  test_remote_mode_timeout_leaves_state_unchanged();
   test_set_mode_does_not_force_enable_when_off();
   test_set_mode_preserves_enabled_when_on();
   test_resolve_enabled_state_aborts_when_unknown();
