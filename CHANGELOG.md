@@ -9,6 +9,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **Pump Enabled ignored the configured setpoint, forcing a hardcoded ~3671 RPM** —
+  `ControlService::start()` called `send_control_request()` with no setpoint,
+  so `CLASS10_CONTROL_MAP`'s default suffix (which decodes to exactly `3671.0`)
+  was always sent for Constant Pressure, Proportional Pressure, Constant Speed,
+  and Constant Flow modes on every enable, regardless of any setpoint
+  previously configured. `start()` now reuses the pump's cached setpoint
+  (converting meters back to Pascals for the pressure modes) when no explicit
+  mode override is requested and a setpoint has already been read for the
+  current mode; falls back to the previous default-suffix behavior otherwise,
+  including for DHW On/Off, Temperature Range, and AutoAdapt modes
+  (issue [#43](https://github.com/eman/esphome-alpha-hwr/issues/43),
+  PR [#47](https://github.com/eman/esphome-alpha-hwr/pull/47)).
 - **Memory leak in schedule "read all layers" async chain** —
   `ScheduleService::read_entries_async(-1, ...)` drove its layer-by-layer read
   loop with a self-referential `std::shared_ptr<std::function>`. `Transport::reset()`
