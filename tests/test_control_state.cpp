@@ -119,16 +119,25 @@ bool flow_setpoint_scale_flagged(float previous_setpoint, float new_setpoint) {
 /**
  * Mirrors the setpoint-caching branch of
  * ControlService::update_mode_from_notification() / get_mode_async() after
- * the #44 display fix: for CONSTANT_FLOW, the Object 86/Sub 6 register is
- * known-unreliable (bench-verified) and is never applied to cached_setpoint_;
- * the previous (client-commanded) value is kept as-is. Pressure modes still
- * apply the Pa->m conversion; all other modes still trust the register.
+ * the #44 display fix (and the review-feedback follow-up fixing cross-mode
+ * contamination): for CONSTANT_FLOW, the Object 86/Sub 6 register is
+ * known-unreliable (bench-verified) and is never applied to cached_setpoint_.
+ * The previous (client-commanded) value is kept as-is *only* when we were
+ * already in CONSTANT_FLOW (steady state); if we just transitioned into
+ * CONSTANT_FLOW from a different mode, the stale cross-mode value (RPM,
+ * meters, etc.) is cleared to NAN instead of leaking in as a bogus flow
+ * setpoint. Pressure modes still apply the Pa->m conversion; all other
+ * modes still trust the register.
  */
-float resolve_cached_setpoint_from_pump_read(ControlMode mode, float previous_cached, float raw_from_pump) {
+float resolve_cached_setpoint_from_pump_read(ControlMode mode, ControlMode previous_mode,
+                                              float previous_cached, float raw_from_pump) {
   if (mode == ControlMode::CONSTANT_PRESSURE || mode == ControlMode::PROPORTIONAL_PRESSURE) {
     return raw_from_pump / 9806.65f;
   } else if (mode == ControlMode::CONSTANT_FLOW) {
-    return previous_cached;
+    if (previous_mode != ControlMode::CONSTANT_FLOW) {
+      return NAN;  // Just entered Constant Flow: clear stale cross-mode value
+    }
+    return previous_cached;  // Steady state: keep last client-commanded value
   } else {
     return raw_from_pump;
   }
@@ -454,20 +463,46 @@ void test_flow_scale_ignores_first_read() {
 }
 
 // ============================================================================
-// Test: Constant Flow display keeps last commanded value, ignores bad register (#44 fix)
+// Test: Constant Flow display keeps last commanded value in steady state,
+// ignores bad register (#44 fix)
 // ============================================================================
 void test_flow_display_ignores_unreliable_register() {
   std::cout << "\n=== Testing Constant Flow Display Ignores Unreliable Register (#44 fix) ===" << std::endl;
 
-  // Bench-verified scenario: user commanded 2.0 m³/h, register always reads back 0.000694.
-  float resolved = resolve_cached_setpoint_from_pump_read(ControlMode::CONSTANT_FLOW, 2.0f, 0.000694f);
+  // Bench-verified scenario: already in Constant Flow (steady state), user
+  // commanded 2.0 m³/h, register always reads back 0.000694.
+  float resolved = resolve_cached_setpoint_from_pump_read(ControlMode::CONSTANT_FLOW, ControlMode::CONSTANT_FLOW,
+                                                           2.0f, 0.000694f);
   TEST_ASSERT_EQ(resolved, 2.0f,
                  "#44: Constant Flow keeps the last commanded value instead of the bad register readback");
 
   // Never commanded yet (previous cached is NAN) -> stays NAN, doesn't show a wrong number.
-  float resolved_uncommanded = resolve_cached_setpoint_from_pump_read(ControlMode::CONSTANT_FLOW, NAN, 0.000694f);
+  float resolved_uncommanded = resolve_cached_setpoint_from_pump_read(ControlMode::CONSTANT_FLOW, ControlMode::CONSTANT_FLOW,
+                                                                       NAN, 0.000694f);
   TEST_ASSERT(std::isnan(resolved_uncommanded),
               "#44: Constant Flow with nothing commanded yet stays NAN rather than showing the bad register value");
+}
+
+// ============================================================================
+// Test: Entering Constant Flow from a different mode clears a stale
+// cross-mode cached setpoint instead of leaking it in as a bogus flow value
+// (review feedback on #44/PR #48).
+// ============================================================================
+void test_flow_mode_transition_clears_cross_mode_setpoint() {
+  std::cout << "\n=== Testing Constant Flow Mode Transition Clears Cross-Mode Setpoint (Review Feedback) ===" << std::endl;
+
+  // Coming from Constant Speed with a cached 2000 RPM value -- must NOT
+  // display as if it were a 2000 m^3/h flow setpoint.
+  float resolved = resolve_cached_setpoint_from_pump_read(ControlMode::CONSTANT_FLOW, ControlMode::CONSTANT_SPEED,
+                                                           2000.0f, 0.000694f);
+  TEST_ASSERT(std::isnan(resolved),
+              "Entering Constant Flow from Constant Speed clears the stale 2000 RPM cross-mode value");
+
+  // Coming from Constant Pressure with a cached 4.0 m value -- same story.
+  float resolved_from_pressure = resolve_cached_setpoint_from_pump_read(ControlMode::CONSTANT_FLOW, ControlMode::CONSTANT_PRESSURE,
+                                                                         4.0f, 0.000694f);
+  TEST_ASSERT(std::isnan(resolved_from_pressure),
+              "Entering Constant Flow from Constant Pressure clears the stale 4.0 m cross-mode value");
 }
 
 // ============================================================================
@@ -476,10 +511,12 @@ void test_flow_display_ignores_unreliable_register() {
 void test_other_modes_still_trust_register() {
   std::cout << "\n=== Testing Other Modes Still Trust the Register (No Regression) ===" << std::endl;
 
-  float resolved_speed = resolve_cached_setpoint_from_pump_read(ControlMode::CONSTANT_SPEED, NAN, 2000.0f);
+  float resolved_speed = resolve_cached_setpoint_from_pump_read(ControlMode::CONSTANT_SPEED, ControlMode::NONE,
+                                                                 NAN, 2000.0f);
   TEST_ASSERT_EQ(resolved_speed, 2000.0f, "Constant Speed still reads its setpoint from the register");
 
-  float resolved_pressure = resolve_cached_setpoint_from_pump_read(ControlMode::CONSTANT_PRESSURE, NAN, 4.0f * 9806.65f);
+  float resolved_pressure = resolve_cached_setpoint_from_pump_read(ControlMode::CONSTANT_PRESSURE, ControlMode::NONE,
+                                                                    NAN, 4.0f * 9806.65f);
   TEST_ASSERT(std::fabs(resolved_pressure - 4.0f) < 0.01f,
               "Constant Pressure still converts the register's Pa reading to meters");
 }
@@ -512,6 +549,7 @@ int main() {
   test_flow_scale_ignores_normal_adjustment();
   test_flow_scale_ignores_first_read();
   test_flow_display_ignores_unreliable_register();
+  test_flow_mode_transition_clears_cross_mode_setpoint();
   test_other_modes_still_trust_register();
 
   std::cout << "\n===========================================================" << std::endl;

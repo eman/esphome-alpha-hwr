@@ -84,6 +84,12 @@ void ControlService::check_flow_setpoint_scale(float previous_setpoint, float ne
 }
 
 void ControlService::update_mode_from_notification(uint8_t mode, uint8_t operation_mode, float setpoint) {
+  // Capture the mode we were in *before* this update, so the Constant Flow
+  // branch below can tell a mode transition (stale cross-mode setpoint,
+  // must clear) apart from steady-state operation (keep the last known-good
+  // client-commanded value).
+  ControlMode previous_mode = current_mode_;
+  
   // Update internal state
   current_mode_ = static_cast<ControlMode>(mode);
   mode_valid_ = true;  // Mark mode as valid - we received it from the pump
@@ -100,9 +106,17 @@ void ControlService::update_mode_from_notification(uint8_t mode, uint8_t operati
   } else if (current_mode_ == ControlMode::CONSTANT_FLOW) {
     // Fix #44: this register doesn't reliably carry the flow setpoint (see
     // check_flow_setpoint_scale() above), so don't let it clobber the last
-    // known-good, client-commanded value. cached_setpoint_ is left as-is
-    // (NAN until the user actually calls set_constant_flow_async(), which
-    // sets it optimistically).
+    // known-good, client-commanded value.
+    if (previous_mode != ControlMode::CONSTANT_FLOW) {
+      // Just transitioned into Constant Flow from a different mode --
+      // cached_setpoint_ belongs to that other mode's units (RPM, meters,
+      // etc.) and must not leak in as a bogus flow value. Reset to NAN
+      // until the user actually calls set_constant_flow_async().
+      ESP_LOGD(TAG, "Entered Constant Flow from %s; clearing stale cross-mode cached setpoint",
+               get_mode_name(previous_mode));
+      cached_setpoint_ = NAN;
+      previous_setpoint = NAN;  // don't flag a scale "jump" against the cleared value
+    }
     check_flow_setpoint_scale(previous_setpoint, setpoint, setpoint);
   } else {
     cached_setpoint_ = setpoint;
@@ -280,6 +294,10 @@ bool ControlService::get_mode_async(std::function<void(bool, ControlMode)> on_co
 
             // Validate control mode value
             if (control_mode_byte <= static_cast<uint8_t>(ControlMode::NONE)) {
+              // Capture the mode we were in *before* this update -- see
+              // update_mode_from_notification() for why this matters for
+              // Constant Flow's stale cross-mode setpoint handling.
+              ControlMode previous_mode = current_mode_;
               current_mode_ = static_cast<ControlMode>(control_mode_byte);
               mode_valid_ = true;
               cached_operation_mode_ = operation_mode;
@@ -301,6 +319,15 @@ bool ControlService::get_mode_async(std::function<void(bool, ControlMode)> on_co
                   // Fix #44: Object 86/Sub 6 doesn't reliably carry the flow
                   // setpoint (see check_flow_setpoint_scale()); keep the last
                   // known-good, client-commanded value instead of this readback.
+                  if (previous_mode != ControlMode::CONSTANT_FLOW) {
+                    // Just transitioned into Constant Flow -- clear any
+                    // stale cross-mode setpoint (RPM, meters, etc.) instead
+                    // of letting it leak in as a bogus flow value.
+                    ESP_LOGD(TAG, "Entered Constant Flow from %s; clearing stale cross-mode cached setpoint",
+                             get_mode_name(previous_mode));
+                    cached_setpoint_ = NAN;
+                    previous_setpoint = NAN;  // don't flag a scale "jump" against the cleared value
+                  }
                   check_flow_setpoint_scale(previous_setpoint, raw_setpoint, raw_setpoint);
                 } else {
                   cached_setpoint_ = raw_setpoint;
