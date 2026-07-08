@@ -61,11 +61,29 @@ void ControlService::set_mode_change_callback(std::function<void(ControlMode, ui
    mode_change_callback_ = callback;
  }
 
+void ControlService::check_flow_setpoint_scale(float previous_setpoint, float new_setpoint, float raw_register_value) {
+  // See issue #44: bench-verification aid for the suspected Object 86/Sub 6
+  // scaling problem in Constant Flow mode. Only fires once we have a
+  // meaningful previous value to compare against.
+  if (std::isnan(previous_setpoint) || std::isnan(new_setpoint) || previous_setpoint == 0.0f) {
+    return;
+  }
+  float ratio = new_setpoint / previous_setpoint;
+  if (ratio > 10.0f || ratio < 0.1f) {
+    ESP_LOGW(TAG,
+      "Constant Flow setpoint changed by %.1fx (was %.4f m³/h, now %.4f m³/h, raw register=%.6f) — "
+      "possible Object 86/Sub 6 scaling issue, see https://github.com/eman/esphome-alpha-hwr/issues/44",
+      ratio, previous_setpoint, new_setpoint, raw_register_value);
+  }
+}
+
 void ControlService::update_mode_from_notification(uint8_t mode, uint8_t operation_mode, float setpoint) {
   // Update internal state
   current_mode_ = static_cast<ControlMode>(mode);
   mode_valid_ = true;  // Mark mode as valid - we received it from the pump
   cached_operation_mode_ = operation_mode;
+  
+  float previous_setpoint = cached_setpoint_;
   
   // Cache setpoint from notification — this is the same data Python's get_mode() reads
   // from Object 86 Sub 6. Apply unit conversion for pressure modes (Pa → meters).
@@ -75,6 +93,10 @@ void ControlService::update_mode_from_notification(uint8_t mode, uint8_t operati
     cached_setpoint_ = setpoint / 9806.65f;
   } else {
     cached_setpoint_ = setpoint;
+  }
+  
+  if (current_mode_ == ControlMode::CONSTANT_FLOW) {
+    check_flow_setpoint_scale(previous_setpoint, cached_setpoint_, setpoint);
   }
   
   // Derive pump enabled state from operation_mode:
@@ -259,12 +281,18 @@ bool ControlService::get_mode_async(std::function<void(bool, ControlMode)> on_co
               
               // Extract and cache setpoint (big-endian float at offset+3)
               if (payload_len >= (size_t)(offset + 7)) {
-                cached_setpoint_ = protocol::decode_float_be(&payload[offset + 3]);
+                float previous_setpoint = cached_setpoint_;
+                float raw_setpoint = protocol::decode_float_be(&payload[offset + 3]);
+                cached_setpoint_ = raw_setpoint;
                 
                 // Convert pressure setpoints from Pascals to meters
                 if (current_mode_ == ControlMode::CONSTANT_PRESSURE || 
                     current_mode_ == ControlMode::PROPORTIONAL_PRESSURE) {
                   cached_setpoint_ /= 9806.65f;
+                }
+                
+                if (current_mode_ == ControlMode::CONSTANT_FLOW) {
+                  check_flow_setpoint_scale(previous_setpoint, cached_setpoint_, raw_setpoint);
                 }
               }
               

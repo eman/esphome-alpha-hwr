@@ -20,6 +20,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   disconnect happens (issue [#32](https://github.com/eman/esphome-alpha-hwr/issues/32),
   PR [#38](https://github.com/eman/esphome-alpha-hwr/pull/38)).
 
+### Added
+
+- **Diagnostic logging for Constant Flow setpoint scaling issue** —
+  `ControlService::check_flow_setpoint_scale()` now logs a warning whenever a
+  newly-read Constant Flow setpoint changes by more than 10x from the
+  previously cached value, alongside the raw pre-conversion register float.
+  The pump's Class 10 Object 86/Sub 6 register — shared by every control
+  mode — has been observed to return a Constant Flow setpoint readback wrong
+  by roughly three orders of magnitude on some pumps, and this isn't yet
+  root-caused; this logging is a bench-verification aid, not a fix, to help
+  pin down whether the register is unreliable for this mode specifically.
+  (Enabling the pump in Constant Flow mode no longer forces a hardcoded
+  ~3671 RPM, as that shares the fix for #43.)
+  (issue [#44](https://github.com/eman/esphome-alpha-hwr/issues/44),
+  PR [#48](https://github.com/eman/esphome-alpha-hwr/pull/48)).
+
 ### Changed
 
 - **Centralized GENI frame construction** — added `Transport::send_apdu_command()`;

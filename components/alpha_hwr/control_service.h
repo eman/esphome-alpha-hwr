@@ -266,7 +266,7 @@ class ControlService {
     * @param operation_mode Operation mode byte (AUTO/STOP/USER_DEFINED)
     * @param setpoint Setpoint value from notification
     */
-   void update_mode_from_notification(uint8_t mode, uint8_t operation_mode, float setpoint);
+  void update_mode_from_notification(uint8_t mode, uint8_t operation_mode, float setpoint);
    
    /**
     * Get whether remote mode is enabled.
@@ -426,6 +426,23 @@ class ControlService {
   static constexpr uint16_t SUB_SPEED_SETPOINT = 13;
   static constexpr uint16_t SUB_PRESSURE_SETPOINT = 15;
   static constexpr uint16_t SUB_FLOW_SETPOINT = 39;
+  
+  /**
+   * Diagnostic check for issue #44: on some pumps, Constant Flow mode's
+   * Object 86/Sub 6 setpoint readback has been observed to jump by roughly
+   * three orders of magnitude from the actual commanded value (suspected
+   * register unreliability for this mode specifically, not yet root-caused).
+   *
+   * Logs a warning whenever the new Constant Flow setpoint differs from the
+   * previous cached value by more than 10x, to make it easy to spot and bench
+   * -verify the scaling issue from field logs without needing to reproduce it
+   * interactively.
+   *
+   * @param previous_setpoint cached_setpoint_ before this update (display units)
+   * @param new_setpoint cached_setpoint_ after this update (display units)
+   * @param raw_register_value Raw float as read from Object 86/Sub 6, pre-conversion
+   */
+  void check_flow_setpoint_scale(float previous_setpoint, float new_setpoint, float raw_register_value);
   
   /**
    * Send configuration commit packet.

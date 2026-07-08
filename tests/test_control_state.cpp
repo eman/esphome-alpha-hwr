@@ -13,6 +13,7 @@
 #include <cstdint>
 #include <cstring>
 #include <string>
+#include <cmath>
 
 // Test result tracking (same framework as test_protocol.cpp)
 int tests_passed = 0;
@@ -99,6 +100,21 @@ struct PumpEnabledState {
     pump_enabled_valid = true;
   }
 };
+
+/**
+ * Mirrors ControlService::check_flow_setpoint_scale() (issue #44 diagnostic
+ * aid). Returns true if the transition from previous_setpoint to
+ * new_setpoint would trigger the scaling-mismatch warning (>10x change in
+ * either direction), false otherwise. Guards against NAN and a zero
+ * previous value (first read / not-yet-cached) to avoid false positives.
+ */
+bool flow_setpoint_scale_flagged(float previous_setpoint, float new_setpoint) {
+  if (std::isnan(previous_setpoint) || std::isnan(new_setpoint) || previous_setpoint == 0.0f) {
+    return false;
+  }
+  float ratio = new_setpoint / previous_setpoint;
+  return (ratio > 10.0f || ratio < 0.1f);
+}
 
 // ============================================================================
 // Test: Initial state (before any pump communication)
@@ -372,6 +388,54 @@ void test_mode_read_updates_enabled() {
 }
 
 // ============================================================================
+// Test: Constant Flow setpoint scale check flags the reporter's scenario (#44)
+// ============================================================================
+void test_flow_scale_flags_reporter_scenario() {
+  std::cout << "\n=== Testing Flow Setpoint Scale Check: Reporter's Scenario (#44) ===" << std::endl;
+
+  // Reporter had a plausible commanded setpoint, then a readback of 0.003056
+  // (~650x smaller) — should be flagged as a likely scaling issue.
+  TEST_ASSERT(flow_setpoint_scale_flagged(2.0f, 0.003056f),
+              "#44: readback far below commanded setpoint is flagged");
+}
+
+// ============================================================================
+// Test: Flow setpoint scale check flags large upward jumps too
+// ============================================================================
+void test_flow_scale_flags_large_upward_jump() {
+  std::cout << "\n=== Testing Flow Setpoint Scale Check: Large Upward Jump ===" << std::endl;
+
+  TEST_ASSERT(flow_setpoint_scale_flagged(0.5f, 6.0f),
+              "Large upward jump (12x) is flagged");
+}
+
+// ============================================================================
+// Test: Flow setpoint scale check does not false-positive on normal adjustments
+// ============================================================================
+void test_flow_scale_ignores_normal_adjustment() {
+  std::cout << "\n=== Testing Flow Setpoint Scale Check: Normal Adjustment (No False Positive) ===" << std::endl;
+
+  TEST_ASSERT(!flow_setpoint_scale_flagged(2.0f, 2.1f),
+              "Small user-driven adjustment (1.05x) is not flagged");
+  TEST_ASSERT(!flow_setpoint_scale_flagged(2.0f, 0.3f),
+              "3x change (within 0.1x-10x band) is not flagged");
+}
+
+// ============================================================================
+// Test: Flow setpoint scale check ignores first read / uninitialized values
+// ============================================================================
+void test_flow_scale_ignores_first_read() {
+  std::cout << "\n=== Testing Flow Setpoint Scale Check: First Read Guard ===" << std::endl;
+
+  TEST_ASSERT(!flow_setpoint_scale_flagged(NAN, 2.0f),
+              "First read (previous=NAN) is never flagged");
+  TEST_ASSERT(!flow_setpoint_scale_flagged(0.0f, 2.0f),
+              "Zero previous value is never flagged (avoids divide-by-zero)");
+  TEST_ASSERT(!flow_setpoint_scale_flagged(2.0f, NAN),
+              "NAN new value is never flagged");
+}
+
+// ============================================================================
 // Main
 // ============================================================================
 int main() {
@@ -394,6 +458,10 @@ int main() {
   test_all_modes_auto_enabled();
   test_all_modes_stop_disabled();
   test_mode_read_updates_enabled();
+  test_flow_scale_flags_reporter_scenario();
+  test_flow_scale_flags_large_upward_jump();
+  test_flow_scale_ignores_normal_adjustment();
+  test_flow_scale_ignores_first_read();
 
   std::cout << "\n===========================================================" << std::endl;
   std::cout << "  Test Results" << std::endl;
