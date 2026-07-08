@@ -525,7 +525,7 @@ void AlphaHwrComponent::update() {
         // (1000ms delay to avoid collision with schedule poll at 500ms)
         this->set_timeout("control_state_poll", 1000, [this]() {
           ESP_LOGD(TAG, "Polling control state to detect out-of-band changes (issue #54)");
-          control_service_.get_mode_async([](bool success, ControlMode mode) {
+          control_service_.get_mode_async([](bool success, services::ControlMode mode) {
             if (success) {
               ESP_LOGD(TAG, "Control state poll succeeded (mode=%d)", static_cast<uint8_t>(mode));
             } else {
