@@ -9,6 +9,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **Component does not detect out-of-band pump state changes** —
+  If the pump changes state autonomously (e.g., internal schedule execution,
+  manual button press on the pump, external app control), the component's
+  cached state diverges from the pump's actual state until the component is
+  rebooted. This affects multi-control setups where exclusive component control
+  cannot be guaranteed. Fixed by implementing periodic control state polling
+  (Option 1 from issue discussion): a configurable background `get_mode()` read
+  at regular intervals (default 30 seconds) to detect and sync state changes.
+  Polling interval is configurable via the `control_state_poll_interval`
+  parameter and can be disabled by setting it to 0. Users who want exclusive
+  control can disable polling; those sharing pump control benefit from faster
+  divergence detection.
+  (issue [#54](https://github.com/eman/esphome-alpha-hwr/issues/54)).
 - **Pump Enabled switch lag after toggling** —
   The pump does not send unsolicited notifications after Class 3 START/STOP
   commands, so the non-optimistic `Pump Enabled` switch in Home Assistant
