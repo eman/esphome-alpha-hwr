@@ -506,8 +506,8 @@ void AlphaHwrComponent::update() {
 
     // Periodic control state polling (fixes #54): detect out-of-band pump state
     // changes (e.g., internal schedule execution, manual button press, external
-    // app control). Reuses existing schedule_callback mechanism with a longer
-    // interval to minimize BLE traffic.
+    // app control). Scheduled via set_timeout() with 1000ms delay after telemetry
+    // polls to minimize BLE traffic collisions.
     if (control_state_poll_interval_ms_ > 0) {
       uint32_t now = millis();
       
