@@ -325,6 +325,31 @@ For example, if `esphome.name: hwr-pump`, then Home Assistant service names use
 - `entity: text_sensor.hwr_pump_weekly_schedule`
 - `single_events_entity: text_sensor.hwr_pump_single_events`
 
+## Configuration Reference
+
+### alpha_hwr component
+
+The `alpha_hwr` component supports the following configuration options:
+
+| Option | Type | Default | Description |
+| --- | --- | --- | --- |
+| `ble_client_id` | string | **required** | ID of the BLE client to use for connection |
+| `enable_pairing` | boolean | `false` | Enable BLE pairing/bonding for authenticated access and enhanced telemetry |
+| `reconnect_settle_time` | time | `2s` | Hold-off delay after BLE disconnect before attempting reconnection. Allows pump time to power up after a reboot. Set to `0s` to reconnect immediately. |
+| `control_state_poll_interval` | time | `30s` | Interval for periodic control state polling to detect out-of-band pump state changes (internal schedules, manual button presses, external app control). Set to `0s` to disable polling if exclusive component control is guaranteed. (issue #54) |
+
+Example with all options:
+
+```yaml
+alpha_hwr:
+  id: pump
+  ble_client_id: hwr_pump_client
+  enable_pairing: true
+  reconnect_settle_time: 2s
+  control_state_poll_interval: 30s  # Detect out-of-band state changes
+  # ... sensor definitions ...
+```
+
 ## References
 
 - Protocol docs: <https://eman.github.io/alpha-hwr/reimplementation/>
