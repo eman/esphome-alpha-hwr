@@ -43,6 +43,9 @@ class ScheduleEntry {
   static constexpr const char *VALID_DAYS[7] = {
       "Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday"};
 
+  // Sentinel for day_index_ meaning "not one of the 7 valid days".
+  static constexpr uint8_t INVALID_DAY_INDEX = 7;
+
   // -------------------------------------------------------------------------
   // Constructors
   // -------------------------------------------------------------------------
@@ -51,7 +54,7 @@ class ScheduleEntry {
    * Default constructor - creates disabled entry for Monday 00:00-00:00.
    */
   ScheduleEntry()
-      : day_("Monday"),
+      : day_index_(0),
         begin_hour_(0),
         begin_minute_(0),
         end_hour_(0),
@@ -74,21 +77,46 @@ class ScheduleEntry {
    */
   ScheduleEntry(const std::string &day, uint8_t begin_hour, uint8_t begin_minute, uint8_t end_hour,
                 uint8_t end_minute, uint8_t action = 0x02, uint8_t layer = 0, bool enabled = true)
-      : day_(day),
+      : day_index_(INVALID_DAY_INDEX),
         begin_hour_(begin_hour),
         begin_minute_(begin_minute),
         end_hour_(end_hour),
         end_minute_(end_minute),
         action_(action),
         layer_(layer),
-        enabled_(enabled) {}
+        enabled_(enabled) {
+    this->set_day(day);
+  }
 
   // -------------------------------------------------------------------------
   // Getters & Setters
   // -------------------------------------------------------------------------
 
-  const std::string &get_day() const { return this->day_; }
-  void set_day(const std::string &day) { this->day_ = day; }
+  /**
+   * Get day name. Returns "" if this entry's day is not one of the 7 valid
+   * names (e.g. constructed from invalid input) - callers that validate day
+   * names (see ScheduleService::validate_entries) rely on this not matching
+   * any VALID_DAYS entry so invalid input is still reported as an error
+   * instead of being silently coerced into a real day.
+   */
+  const char *get_day() const {
+    return this->day_index_ < 7 ? VALID_DAYS[this->day_index_] : "";
+  }
+
+  /**
+   * Set day by name. If `day` doesn't match any VALID_DAYS entry, the day is
+   * left/marked invalid (see get_day()/get_day_index()) rather than silently
+   * defaulting to a real day.
+   */
+  void set_day(const std::string &day) {
+    this->day_index_ = INVALID_DAY_INDEX;
+    for (uint8_t i = 0; i < 7; i++) {
+      if (day == VALID_DAYS[i]) {
+        this->day_index_ = i;
+        break;
+      }
+    }
+  }
 
   uint8_t get_begin_hour() const { return this->begin_hour_; }
   void set_begin_hour(uint8_t hour) { this->begin_hour_ = hour; }
@@ -116,15 +144,10 @@ class ScheduleEntry {
   // -------------------------------------------------------------------------
 
   /**
-   * Get day index (0=Monday, 6=Sunday).
+   * Get day index (0=Monday, 6=Sunday, -1 if invalid).
    */
   int get_day_index() const {
-    for (int i = 0; i < 7; i++) {
-      if (this->day_ == VALID_DAYS[i]) {
-        return i;
-      }
-    }
-    return -1;  // Invalid day
+    return this->day_index_ < 7 ? static_cast<int>(this->day_index_) : -1;
   }
 
   /**
@@ -237,8 +260,15 @@ class ScheduleEntry {
    *   22:00-02:00 and 01:00-03:00 = True (both cross midnight, overlap)
    */
   bool overlaps_with(const ScheduleEntry &other) const {
-    // Only check overlap if same day, same layer, and both enabled
-    if (this->day_ != other.day_) {
+    // Only check overlap if same day, same layer, and both enabled.
+    // Entries with an invalid day (day_index_ == INVALID_DAY_INDEX) never
+    // overlap with anything - otherwise two entries that both failed to
+    // parse a valid day name would collide on the shared sentinel value
+    // and produce a spurious overlap report.
+    if (this->day_index_ >= INVALID_DAY_INDEX || other.day_index_ >= INVALID_DAY_INDEX) {
+      return false;
+    }
+    if (this->day_index_ != other.day_index_) {
       return false;
     }
     if (this->layer_ != other.layer_) {
@@ -332,14 +362,14 @@ class ScheduleEntry {
    */
   std::string to_string() const {
     char buf[100];
-    snprintf(buf, sizeof(buf), "%s L%d: %s-%s (%s, action=0x%02X)", this->day_.c_str(), this->layer_,
+    snprintf(buf, sizeof(buf), "%s L%d: %s-%s (%s, action=0x%02X)", this->get_day(), this->layer_,
              this->get_begin_time().c_str(), this->get_end_time().c_str(), this->enabled_ ? "enabled" : "disabled",
              this->action_);
     return std::string(buf);
   }
 
  protected:
-  std::string day_;
+  uint8_t day_index_;
   uint8_t begin_hour_;
   uint8_t begin_minute_;
   uint8_t end_hour_;
