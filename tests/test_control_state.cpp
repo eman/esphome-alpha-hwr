@@ -98,6 +98,28 @@ struct PumpEnabledState {
     pump_enabled = (operation_mode != static_cast<uint8_t>(OperationMode::STOP));
     pump_enabled_valid = true;
   }
+
+  // Mirrors ControlService::with_resolved_enabled_state()'s synchronous path
+  // (pump_enabled_valid == true): resolves to the pump's actual last-known
+  // enabled state. When unknown, defaults to false (don't force-enable)
+  // rather than guessing "true" as the pre-#45 code effectively did. The
+  // real implementation falls back to an async get_mode_async() read-back
+  // in the unknown case; that round trip isn't modeled here, only its
+  // documented "safe default if the read fails" behavior.
+  bool resolve_enabled_state_for_control_request() const {
+    return pump_enabled_valid ? pump_enabled : false;
+  }
+
+  // Mirrors ControlService::set_mode() after the #45 fix: sends the
+  // resolved enabled state instead of hardcoding true. Records what would
+  // have been sent as the start/stop flag so tests can assert on it.
+  bool last_sent_enabled_flag{false};
+  bool set_mode(ControlMode mode) {
+    last_sent_enabled_flag = resolve_enabled_state_for_control_request();
+    current_mode = mode;
+    mode_valid = true;
+    return true;
+  }
 };
 
 // ============================================================================
@@ -372,6 +394,59 @@ void test_mode_read_updates_enabled() {
 }
 
 // ============================================================================
+// Test: setpoint/mode writes no longer force-enable the pump when off (#45)
+// ============================================================================
+void test_set_mode_does_not_force_enable_when_off() {
+  std::cout << "\n=== Testing set_mode() Doesn't Force-Enable When Off (#45) ===" << std::endl;
+
+  PumpEnabledState state;
+  // Pump is known to be off.
+  state.pump_enabled = false;
+  state.pump_enabled_valid = true;
+
+  state.set_mode(ControlMode::CONSTANT_PRESSURE);
+
+  TEST_ASSERT_EQ(state.last_sent_enabled_flag, false,
+                 "#45: set_mode() sends enabled=false (not hardcoded true) when pump is off");
+  TEST_ASSERT_EQ(state.pump_enabled, false,
+                 "#45: pump_enabled stays false -- no desync from mode change alone");
+}
+
+// ============================================================================
+// Test: setpoint/mode writes preserve the enabled state when pump is on (#45)
+// ============================================================================
+void test_set_mode_preserves_enabled_when_on() {
+  std::cout << "\n=== Testing set_mode() Preserves Enabled State When On (#45) ===" << std::endl;
+
+  PumpEnabledState state;
+  state.pump_enabled = true;
+  state.pump_enabled_valid = true;
+
+  state.set_mode(ControlMode::CONSTANT_SPEED);
+
+  TEST_ASSERT_EQ(state.last_sent_enabled_flag, true,
+                 "#45: set_mode() sends enabled=true when the pump was already on");
+}
+
+// ============================================================================
+// Test: unknown enabled state defaults to NOT enabling, never guesses true (#45)
+// ============================================================================
+void test_resolve_enabled_state_defaults_safe_when_unknown() {
+  std::cout << "\n=== Testing Unknown Enabled State Defaults to False, Not True (#45) ===" << std::endl;
+
+  PumpEnabledState state;
+  // pump_enabled_valid is false (never determined yet) -- simulates the
+  // rare case where with_resolved_enabled_state()'s get_mode_async()
+  // read-back also failed.
+  TEST_ASSERT_EQ(state.pump_enabled_valid, false, "Precondition: enabled state is unknown");
+
+  bool resolved = state.resolve_enabled_state_for_control_request();
+
+  TEST_ASSERT_EQ(resolved, false,
+                 "#45: unknown enabled state resolves to false, never guesses true (old bug)");
+}
+
+// ============================================================================
 // Main
 // ============================================================================
 int main() {
@@ -394,6 +469,9 @@ int main() {
   test_all_modes_auto_enabled();
   test_all_modes_stop_disabled();
   test_mode_read_updates_enabled();
+  test_set_mode_does_not_force_enable_when_off();
+  test_set_mode_preserves_enabled_when_on();
+  test_resolve_enabled_state_defaults_safe_when_unknown();
 
   std::cout << "\n===========================================================" << std::endl;
   std::cout << "  Test Results" << std::endl;

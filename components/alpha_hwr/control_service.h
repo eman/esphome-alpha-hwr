@@ -428,6 +428,30 @@ class ControlService {
   static constexpr uint16_t SUB_FLOW_SETPOINT = 39;
   
   /**
+   * Resolve the pump's current enabled (on/off) state before sending a
+   * setpoint or mode-change control request, so those writes never
+   * implicitly force-enable or force-disable the pump (fixes #45).
+   *
+   * The GENIbus control frame fuses mode + setpoint + on/off into a single
+   * write (see send_control_request()), so there's no way to write a
+   * setpoint/mode without also specifying a start/stop flag — the fix is to
+   * send the pump's actual last-known on/off state instead of hardcoding
+   * "true" (start).
+   *
+   * If the state is already known (pump_enabled_valid_), invokes
+   * on_resolved() synchronously with it. Otherwise performs a
+   * get_mode_async() read-back first (get_mode_async() updates
+   * pump_enabled_/pump_enabled_valid_ internally on success), then invokes
+   * on_resolved(). If the read-back fails, defaults to `false` (don't
+   * force-enable) rather than guessing "true" as the old code effectively did.
+   *
+   * @param on_resolved Callback invoked with the resolved enabled state
+   *
+   * Reference: issue #45 suggested fix
+   */
+  void with_resolved_enabled_state(std::function<void(bool enabled)> on_resolved);
+  
+  /**
    * Send configuration commit packet.
    * Required after control operations to persist state changes.
    * Reference: control.py::_send_configuration_commit() lines 1038-1048
