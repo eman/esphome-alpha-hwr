@@ -204,6 +204,12 @@ public:
   // just-powered-up pump has time to be ready before encryption is requested.
   // 0 = disabled (immediate reconnect; the default/legacy behavior).
   void set_reconnect_settle_time(uint32_t ms) { this->reconnect_settle_ms_ = ms; }
+  // Interval (ms) for periodic control state polling to detect out-of-band pump
+  // state changes (e.g., internal schedule execution, manual button press).
+  // 0 = disabled (default is 30 seconds; fixes issue #54).
+  void set_control_state_poll_interval(uint32_t ms) { 
+    control_state_poll_interval_ms_ = ms; 
+  }
 
   void setup() override;
   void loop() override;
@@ -243,6 +249,9 @@ private:
   uint32_t reconnect_settle_ms_{0};   // Post-disconnect reconnect hold-off (ms)
   bool reconnect_settling_{false};    // True while holding off reconnect after a disconnect
   bool reconnect_timer_armed_{false}; // True once the settle timer has started this episode
+
+  uint32_t control_state_poll_interval_ms_{30000};  // Control state poll interval (ms); default 30s (fixes #54)
+  uint32_t last_control_state_poll_time_{0};        // Timestamp of last control state poll
 
   void authenticate();
   void trigger_initial_data_reads();

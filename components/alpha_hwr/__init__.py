@@ -44,6 +44,7 @@ CONF_HEAD_RATE = "head_rate"
 CONF_PAIRING_STATUS = "pairing_status"
 CONF_ENABLE_PAIRING = "enable_pairing"
 CONF_RECONNECT_SETTLE_TIME = "reconnect_settle_time"
+CONF_CONTROL_STATE_POLL_INTERVAL = "control_state_poll_interval"
 CONF_ALARMS = "alarms"
 CONF_WARNINGS = "warnings"
 CONF_SCHEDULE = "schedule"
@@ -77,6 +78,9 @@ CONFIG_SCHEMA = cv.Schema(
         cv.Optional(
             CONF_RECONNECT_SETTLE_TIME, default="2s"
         ): cv.positive_time_period_milliseconds,
+        cv.Optional(
+            CONF_CONTROL_STATE_POLL_INTERVAL, default="30s"
+        ): cv.time_period_milliseconds,
         cv.Optional(CONF_FLOW): sensor.sensor_schema(
             unit_of_measurement="m³/h",
             accuracy_decimals=3,
@@ -385,3 +389,9 @@ async def to_code(config):
     if CONF_PUMP_LAST_LINK_FAILURE in config:
         sens = await text_sensor.new_text_sensor(config[CONF_PUMP_LAST_LINK_FAILURE])
         cg.add(var.set_pump_last_link_failure_text_sensor(sens))
+
+    # Set control state polling interval (fixes issue #54)
+    if CONF_CONTROL_STATE_POLL_INTERVAL in config:
+        cg.add(var.set_control_state_poll_interval(
+            config[CONF_CONTROL_STATE_POLL_INTERVAL]
+        ))

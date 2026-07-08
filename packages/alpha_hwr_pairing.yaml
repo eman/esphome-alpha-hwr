@@ -63,8 +63,8 @@ text_sensor:
 alpha_hwr:
    id: pump
    ble_client_id: hwr_pump_client
-   enable_pairing: true  # Enable BLE pairing for enhanced telemetry
-   
+   enable_pairing: true  # Enable BLE pairing for enhanced telemetry and control
+    
    # Pairing Status
    pairing_status:
      name: "Pairing Status"

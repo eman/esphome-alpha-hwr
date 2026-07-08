@@ -327,6 +327,7 @@ For example, if `esphome.name: hwr-pump`, then Home Assistant service names use
 
 ## References
 
+- **Configuration**: [docs/configuration.md](docs/configuration.md)
 - Protocol docs: <https://eman.github.io/alpha-hwr/reimplementation/>
 - Python reference implementation: <https://github.com/eman/alpha-hwr>
 - ESPHome BLE client docs: <https://esphome.io/components/ble_client/>

@@ -504,6 +504,38 @@ void AlphaHwrComponent::update() {
     this->set_timeout("schedule_poll", 500,
                       [this]() { schedule_service_.poll_state(); });
 
+    // Periodic control state polling (fixes #54): detect out-of-band pump state
+    // changes (e.g., internal schedule execution, manual button press, external
+    // app control). Scheduled via set_timeout() with 1000ms delay after telemetry
+    // polls to minimize BLE traffic collisions.
+    if (control_state_poll_interval_ms_ > 0) {
+      uint32_t now = millis();
+      
+      // Handle millis() rollover (every ~49 days)
+      if (now < last_control_state_poll_time_) {
+        ESP_LOGD(TAG, "millis() rollover detected, resetting control state poll timer");
+        last_control_state_poll_time_ = 0;
+      }
+
+      if (last_control_state_poll_time_ == 0 ||
+          (now - last_control_state_poll_time_) >= control_state_poll_interval_ms_) {
+        last_control_state_poll_time_ = now;
+        
+        // Schedule the control state readback after telemetry poll completes
+        // (1000ms delay to avoid collision with schedule poll at 500ms)
+        this->set_timeout("control_state_poll", 1000, [this]() {
+          ESP_LOGD(TAG, "Polling control state to detect out-of-band changes (issue #54)");
+          control_service_.get_mode_async([](bool success, services::ControlMode mode) {
+            if (success) {
+              ESP_LOGD(TAG, "Control state poll succeeded (mode=%d)", static_cast<uint8_t>(mode));
+            } else {
+              ESP_LOGW(TAG, "Control state poll failed");
+            }
+          });
+        });
+      }
+    }
+
     // Check and perform daily time sync if needed
     check_and_sync_time();
 
