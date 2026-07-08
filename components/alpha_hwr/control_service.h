@@ -435,7 +435,7 @@ class ControlService {
     bool pump_enabled_valid_{false}; // Whether pump_enabled_ has been determined
     std::function<void(std::function<void()>, uint32_t)> schedule_callback_;
     std::function<void(ControlMode, uint8_t, float)> mode_change_callback_;
-     std::function<void()> config_commit_callback_;
+    std::function<void()> config_commit_callback_;
     
     // Per-mode setpoint cache (issue #51): each mode stores only its own value,
     // eliminating cross-mode contamination bugs that arose from the old shared

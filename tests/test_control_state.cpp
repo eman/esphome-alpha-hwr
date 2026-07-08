@@ -62,13 +62,25 @@ enum class ControlMode : uint8_t {
 /**
  * Minimal state tracker that mirrors the pump_enabled_ logic
  * in ControlService. This is the exact same logic extracted for testing.
+ *
+ * Updated for issue #51 / PR #57: the old single cached_setpoint field has
+ * been replaced with four per-mode fields matching the production refactor.
+ * Each mode reads and writes only its own slot, so a value set in one mode
+ * can never influence start() under a different mode.
  */
 struct PumpEnabledState {
   bool pump_enabled{false};
   bool pump_enabled_valid{false};
   ControlMode current_mode{ControlMode::NONE};
   bool mode_valid{false};
-  float cached_setpoint{NAN};  // Mirrors ControlService::cached_setpoint_ (display units)
+
+  // Per-mode setpoint caches (issue #51): mirrors the four independent fields
+  // in ControlService (cached_pressure_setpoint_, cached_proportional_setpoint_,
+  // cached_speed_setpoint_, cached_flow_setpoint_). NAN = not yet written.
+  float cached_pressure_setpoint{NAN};      // CONSTANT_PRESSURE: meters
+  float cached_proportional_setpoint{NAN};  // PROPORTIONAL_PRESSURE: meters
+  float cached_speed_setpoint{NAN};         // CONSTANT_SPEED: RPM
+  float cached_flow_setpoint{NAN};          // CONSTANT_FLOW: m³/h
 
   // Records the setpoint actually sent to send_control_request() by the last
   // start() call, so tests can assert on it. NAN means "no setpoint was
@@ -88,30 +100,45 @@ struct PumpEnabledState {
     pump_enabled_valid = true;
   }
 
-  // Mirrors ControlService::start() (fix for #43: reuse cached setpoint
-  // instead of always relying on the mode's hardcoded default suffix).
-  // Also schedules post-command readback (fixes #52).
+  // Helper: return the cached setpoint for `target`, or NAN if none.
+  // Mirrors the mode→field resolver in ControlService::start().
+  float get_cached_for_mode(ControlMode target) const {
+    switch (target) {
+      case ControlMode::CONSTANT_PRESSURE:     return cached_pressure_setpoint;
+      case ControlMode::PROPORTIONAL_PRESSURE: return cached_proportional_setpoint;
+      case ControlMode::CONSTANT_SPEED:        return cached_speed_setpoint;
+      case ControlMode::CONSTANT_FLOW:         return cached_flow_setpoint;
+      default:                                 return NAN;
+    }
+  }
+
+  // Mirrors ControlService::start() after the #43 fix and the #51 refactor.
+  // Per-mode fields mean no NAN-clearing is needed when mode != 255 —
+  // the new mode's slot has its own storage and a previous mode's value
+  // can never contaminate it. Also schedules post-command readback (#52).
   bool start(uint8_t mode = 255) {
     if (mode != 255) {
       current_mode = static_cast<ControlMode>(mode);
       mode_valid = true;
-      // Clear any setpoint cached for the previous mode -- it's not valid
-      // for the newly-requested mode. Mirrors ControlService::start().
-      cached_setpoint = NAN;
+      // Per-mode fields (issue #51): no NAN-clearing needed — each mode has
+      // its own storage, so a previous mode's value can never contaminate.
     }
 
     ControlMode target = current_mode;
 
-    // Only reuse cached_setpoint when no explicit mode override was given,
-    // a cached setpoint exists, and the target mode is one where
-    // cached_setpoint is known to hold a plain setpoint float.
+    // Reuse the per-mode cached setpoint when no explicit mode override was
+    // given and the target mode is one of the four scalar-setpoint modes.
+    // Issue #51: read from the mode-specific field — cross-mode contamination
+    // is structurally impossible with per-mode storage.
     float start_setpoint = NAN;
-    if (mode == 255 && !std::isnan(cached_setpoint) &&
-        (target == ControlMode::CONSTANT_PRESSURE || target == ControlMode::PROPORTIONAL_PRESSURE ||
-         target == ControlMode::CONSTANT_SPEED || target == ControlMode::CONSTANT_FLOW)) {
-      start_setpoint = cached_setpoint;
-      if (target == ControlMode::CONSTANT_PRESSURE || target == ControlMode::PROPORTIONAL_PRESSURE) {
-        start_setpoint *= 9806.65f;
+    if (mode == 255) {
+      float cached = get_cached_for_mode(target);
+      if (!std::isnan(cached)) {
+        start_setpoint = cached;
+        if (target == ControlMode::CONSTANT_PRESSURE ||
+            target == ControlMode::PROPORTIONAL_PRESSURE) {
+          start_setpoint *= 9806.65f;
+        }
       }
     }
     last_sent_setpoint = start_setpoint;
@@ -754,7 +781,7 @@ void test_start_reuses_cached_speed_setpoint() {
   PumpEnabledState state;
   state.current_mode = ControlMode::CONSTANT_SPEED;
   state.mode_valid = true;
-  state.cached_setpoint = 2000.0f;  // User configured 2000 RPM
+  state.cached_speed_setpoint = 2000.0f;  // User configured 2000 RPM
 
   state.start();  // mode=255 → use current mode
 
@@ -773,7 +800,7 @@ void test_start_converts_pressure_setpoint() {
   PumpEnabledState state;
   state.current_mode = ControlMode::CONSTANT_PRESSURE;
   state.mode_valid = true;
-  state.cached_setpoint = 4.0f;  // User configured 4.0 m
+  state.cached_pressure_setpoint = 4.0f;  // User configured 4.0 m
 
   state.start();
 
@@ -793,7 +820,7 @@ void test_start_falls_back_without_cached_setpoint() {
   PumpEnabledState state;
   state.current_mode = ControlMode::CONSTANT_SPEED;
   state.mode_valid = true;
-  // cached_setpoint left as NAN (nothing read from pump yet)
+  // cached_speed_setpoint left as NAN (nothing read from pump yet)
 
   state.start();
 
@@ -802,57 +829,115 @@ void test_start_falls_back_without_cached_setpoint() {
 }
 
 // ============================================================================
-// Test: explicit mode override does not reuse a stale cached setpoint
+// Test: explicit mode override uses only the new mode's own cache slot
+// (issue #51: per-mode storage; no stale cross-mode contamination possible)
 // ============================================================================
 void test_start_with_mode_override_ignores_stale_setpoint() {
-  std::cout << "\n=== Testing start(mode) Ignores Stale Cached Setpoint ===" << std::endl;
+  std::cout << "\n=== Testing start(mode) Uses New Mode's Own Cache Slot (#51) ===" << std::endl;
 
   PumpEnabledState state;
   state.current_mode = ControlMode::CONSTANT_SPEED;
   state.mode_valid = true;
-  state.cached_setpoint = 2000.0f;  // Cached for CONSTANT_SPEED
+  state.cached_speed_setpoint = 2000.0f;     // Cached for CONSTANT_SPEED
+  // Pressure slot is still NAN — no setpoint stored for this mode yet.
 
-  // Switch to a different mode with an explicit override
+  // Switch to Constant Pressure via explicit override.
   state.start(static_cast<uint8_t>(ControlMode::CONSTANT_PRESSURE));
 
+  // start(mode) goes through the mode == 255 branch? No: the explicit
+  // override sets mode != 255, so start_setpoint stays NAN (we only
+  // resolve the cache when restarting the *current* mode with mode=255).
   TEST_ASSERT(std::isnan(state.last_sent_setpoint),
-              "Mode override: stale Constant Speed setpoint is not reused for the new mode");
+              "#51: mode override with empty pressure slot → no setpoint sent (no cross-mode leak)");
   TEST_ASSERT(state.current_mode == ControlMode::CONSTANT_PRESSURE,
               "Mode override: mode updated to CONSTANT_PRESSURE");
 }
 
 // ============================================================================
-// Test: a later start() (mode=255) after a mode override does not resend a
-// stale cached setpoint under the new mode (regression for review feedback
-// on #43/PR #47: start(mode) didn't clear cached_setpoint_, so a subsequent
-// start() could reuse an unrelated value -- e.g. a pressure setpoint in
-// meters resent as if it were a speed setpoint in RPM).
+// Test: per-mode isolation — a later start(255) in Mode B does not resend
+// any setpoint cached for Mode A (issue #51 core correctness assertion).
+//
+// This replaces the old NAN-clearing test: with per-mode storage the
+// isolation is structural — Mode A's slot is a different field from Mode B's
+// slot, so there is nothing to clear and nothing to leak.
 // ============================================================================
 void test_start_after_mode_override_does_not_resend_stale_setpoint() {
-  std::cout << "\n=== Testing start() After Mode Override Doesn't Resend Stale Setpoint ===" << std::endl;
+  std::cout << "\n=== Testing start() After Mode Override Uses Correct Per-Mode Cache (#51) ===" << std::endl;
 
   PumpEnabledState state;
   state.current_mode = ControlMode::CONSTANT_PRESSURE;
   state.mode_valid = true;
-  state.cached_setpoint = 4.0f;  // Cached pressure setpoint (meters)
+  state.cached_pressure_setpoint = 4.0f;   // Cached for CONSTANT_PRESSURE
+  // Speed slot deliberately left NAN — nothing configured for Constant Speed.
 
-  // Explicit mode override to Constant Speed -- must clear the stale
-  // pressure setpoint so it can't leak into the new mode.
+  // Explicit mode override to Constant Speed.
   state.start(static_cast<uint8_t>(ControlMode::CONSTANT_SPEED));
+  // start(mode != 255) skips the cache-reuse branch entirely.
   TEST_ASSERT(std::isnan(state.last_sent_setpoint),
-              "Mode override start(): no setpoint resent yet (nothing cached for Constant Speed)");
+              "#51: mode override start() sends no setpoint when the new mode's slot is empty");
 
-  // A later start() with mode=255 (e.g. re-enabling the pump) must NOT
-  // resend the old 4.0 (meters) value reinterpreted as a Constant Speed
-  // (RPM) setpoint.
+  // A subsequent start(255) must use only the Constant Speed slot, which is
+  // still NAN — the 4.0 m pressure value must never appear here.
   state.start();
   TEST_ASSERT(std::isnan(state.last_sent_setpoint),
-              "Subsequent start(): stale pressure setpoint (4.0 m) is not resent as a bogus "
-              "Constant Speed setpoint after a mode override");
+              "#51: subsequent start(255) does not reuse the old pressure setpoint under Constant Speed");
 }
 
 // ============================================================================
-// Test: DHW On/Off and Temperature Range never reuse cached_setpoint
+// Test: cross-mode isolation — Constant Speed setpoint does not affect
+// Constant Pressure start() and vice versa (issue #51)
+// ============================================================================
+void test_start_per_mode_isolation_speed_vs_pressure() {
+  std::cout << "\n=== Testing Per-Mode Cache Isolation: Speed vs Pressure (#51) ===" << std::endl;
+
+  PumpEnabledState state;
+  state.mode_valid = true;
+  // Populate both per-mode slots independently.
+  state.cached_speed_setpoint = 2000.0f;       // CONSTANT_SPEED: 2000 RPM
+  state.cached_pressure_setpoint = 4.0f;       // CONSTANT_PRESSURE: 4.0 m
+
+  // Restart as Constant Speed: should send exactly 2000 RPM.
+  state.current_mode = ControlMode::CONSTANT_SPEED;
+  state.start();
+  TEST_ASSERT_EQ(state.last_sent_setpoint, 2000.0f,
+                 "#51: CONSTANT_SPEED start() sends its own cached 2000 RPM, not pressure meters");
+
+  // Restart as Constant Pressure: should send 4.0 m converted to Pa.
+  state.current_mode = ControlMode::CONSTANT_PRESSURE;
+  state.start();
+  float expected_pa = 4.0f * 9806.65f;
+  TEST_ASSERT(std::fabs(state.last_sent_setpoint - expected_pa) < 0.01f,
+              "#51: CONSTANT_PRESSURE start() sends its own cached 4.0 m → Pa, not RPM");
+}
+
+// ============================================================================
+// Test: cross-mode isolation — Proportional Pressure and Constant Flow each
+// have their own independent slot (issue #51)
+// ============================================================================
+void test_start_per_mode_isolation_proportional_and_flow() {
+  std::cout << "\n=== Testing Per-Mode Cache Isolation: Proportional Pressure and Constant Flow (#51) ===" << std::endl;
+
+  PumpEnabledState state;
+  state.mode_valid = true;
+  state.cached_proportional_setpoint = 3.0f;  // PROPORTIONAL_PRESSURE: 3.0 m
+  state.cached_flow_setpoint = 1.5f;           // CONSTANT_FLOW: 1.5 m³/h
+
+  // Proportional Pressure should send 3.0 m converted to Pa.
+  state.current_mode = ControlMode::PROPORTIONAL_PRESSURE;
+  state.start();
+  float expected_prop_pa = 3.0f * 9806.65f;
+  TEST_ASSERT(std::fabs(state.last_sent_setpoint - expected_prop_pa) < 0.01f,
+              "#51: PROPORTIONAL_PRESSURE start() sends its own 3.0 m → Pa, not flow value");
+
+  // Constant Flow should send 1.5 m³/h (no Pa conversion).
+  state.current_mode = ControlMode::CONSTANT_FLOW;
+  state.start();
+  TEST_ASSERT(std::fabs(state.last_sent_setpoint - 1.5f) < 0.001f,
+              "#51: CONSTANT_FLOW start() sends its own 1.5 m³/h, not pressure meters");
+}
+
+// ============================================================================
+// Test: DHW On/Off and Temperature Range never have cached setpoints
 // ============================================================================
 void test_start_dhw_and_temp_range_unaffected() {
   std::cout << "\n=== Testing DHW On/Off and Temperature Range Unaffected by Fix ===" << std::endl;
@@ -863,12 +948,16 @@ void test_start_dhw_and_temp_range_unaffected() {
     PumpEnabledState state;
     state.current_mode = mode;
     state.mode_valid = true;
-    state.cached_setpoint = 1234.5f;  // Should never be reused for these modes
+    // Populate all scalar slots — none should ever surface for these modes.
+    state.cached_pressure_setpoint = 1234.5f;
+    state.cached_proportional_setpoint = 1234.5f;
+    state.cached_speed_setpoint = 1234.5f;
+    state.cached_flow_setpoint = 1234.5f;
 
     state.start();
 
     TEST_ASSERT(std::isnan(state.last_sent_setpoint),
-                "Special mode: cached_setpoint is never reused (default suffix still used)");
+                "Special mode: no scalar setpoint cache is reused (default suffix still used)");
   }
 }
 
@@ -960,6 +1049,9 @@ int main() {
   test_start_falls_back_without_cached_setpoint();
   test_start_with_mode_override_ignores_stale_setpoint();
   test_start_after_mode_override_does_not_resend_stale_setpoint();
+  // Issue #51: per-mode isolation assertions
+  test_start_per_mode_isolation_speed_vs_pressure();
+  test_start_per_mode_isolation_proportional_and_flow();
   test_start_dhw_and_temp_range_unaffected();
   test_start_schedules_readback();
   test_stop_schedules_readback();
