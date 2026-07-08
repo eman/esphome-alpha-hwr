@@ -312,6 +312,11 @@ bool ControlService::start(uint8_t mode) {
   // Reference: control.py::start() lines 183-206
   if (mode != 255) {
     current_mode_ = static_cast<ControlMode>(mode);
+    // Clear any setpoint cached for the previous mode -- it's not valid for
+    // the newly-requested mode (e.g. a pressure value in meters must not be
+    // reused as a speed value in RPM by a later start() call). Mirrors the
+    // same clear in set_mode().
+    cached_setpoint_ = NAN;
   }
   
   ControlMode target = current_mode_;

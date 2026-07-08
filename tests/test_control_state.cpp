@@ -89,6 +89,9 @@ struct PumpEnabledState {
     if (mode != 255) {
       current_mode = static_cast<ControlMode>(mode);
       mode_valid = true;
+      // Clear any setpoint cached for the previous mode -- it's not valid
+      // for the newly-requested mode. Mirrors ControlService::start().
+      cached_setpoint = NAN;
     }
 
     ControlMode target = current_mode;
@@ -474,6 +477,36 @@ void test_start_with_mode_override_ignores_stale_setpoint() {
 }
 
 // ============================================================================
+// Test: a later start() (mode=255) after a mode override does not resend a
+// stale cached setpoint under the new mode (regression for review feedback
+// on #43/PR #47: start(mode) didn't clear cached_setpoint_, so a subsequent
+// start() could reuse an unrelated value -- e.g. a pressure setpoint in
+// meters resent as if it were a speed setpoint in RPM).
+// ============================================================================
+void test_start_after_mode_override_does_not_resend_stale_setpoint() {
+  std::cout << "\n=== Testing start() After Mode Override Doesn't Resend Stale Setpoint ===" << std::endl;
+
+  PumpEnabledState state;
+  state.current_mode = ControlMode::CONSTANT_PRESSURE;
+  state.mode_valid = true;
+  state.cached_setpoint = 4.0f;  // Cached pressure setpoint (meters)
+
+  // Explicit mode override to Constant Speed -- must clear the stale
+  // pressure setpoint so it can't leak into the new mode.
+  state.start(static_cast<uint8_t>(ControlMode::CONSTANT_SPEED));
+  TEST_ASSERT(std::isnan(state.last_sent_setpoint),
+              "Mode override start(): no setpoint resent yet (nothing cached for Constant Speed)");
+
+  // A later start() with mode=255 (e.g. re-enabling the pump) must NOT
+  // resend the old 4.0 (meters) value reinterpreted as a Constant Speed
+  // (RPM) setpoint.
+  state.start();
+  TEST_ASSERT(std::isnan(state.last_sent_setpoint),
+              "Subsequent start(): stale pressure setpoint (4.0 m) is not resent as a bogus "
+              "Constant Speed setpoint after a mode override");
+}
+
+// ============================================================================
 // Test: DHW On/Off and Temperature Range never reuse cached_setpoint
 // ============================================================================
 void test_start_dhw_and_temp_range_unaffected() {
@@ -521,6 +554,7 @@ int main() {
   test_start_converts_pressure_setpoint();
   test_start_falls_back_without_cached_setpoint();
   test_start_with_mode_override_ignores_stale_setpoint();
+  test_start_after_mode_override_does_not_resend_stale_setpoint();
   test_start_dhw_and_temp_range_unaffected();
 
   std::cout << "\n===========================================================" << std::endl;
