@@ -157,11 +157,18 @@ class ControlService {
    * - Flag byte = 0x00 for start operation
    * - Sends configuration commit after start
    * - Requires authenticated session
-   * 
+   * - When called with mode=255 (use current mode) and a setpoint has
+   *   already been cached for CONSTANT_PRESSURE, PROPORTIONAL_PRESSURE,
+   *   CONSTANT_SPEED, or CONSTANT_FLOW, that cached setpoint is resent
+   *   instead of the mode's hardcoded default suffix (fixes #43: enabling
+   *   the pump no longer forces it to a fixed ~3671 RPM). If no cached
+   *   setpoint is available yet, or an explicit mode override is passed,
+   *   the default suffix is used (unchanged behavior).
+   *
    * Example:
    *   control.start();  // Start with current mode
    *   control.start(static_cast<uint8_t>(ControlMode::CONSTANT_PRESSURE));  // Start with specific mode
-   * 
+   *
    * Reference: control.py::start() lines 165-234
    */
   bool start(uint8_t mode = 255);

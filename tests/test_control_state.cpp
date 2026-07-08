@@ -13,6 +13,7 @@
 #include <cstdint>
 #include <cstring>
 #include <string>
+#include <cmath>
 
 // Test result tracking (same framework as test_protocol.cpp)
 int tests_passed = 0;
@@ -66,6 +67,13 @@ struct PumpEnabledState {
   bool pump_enabled_valid{false};
   ControlMode current_mode{ControlMode::NONE};
   bool mode_valid{false};
+  float cached_setpoint{NAN};  // Mirrors ControlService::cached_setpoint_ (display units)
+
+  // Records the setpoint actually sent to send_control_request() by the last
+  // start() call, so tests can assert on it. NAN means "no setpoint was
+  // passed" (i.e. send_control_request() fell back to the mode's default
+  // suffix, reproducing the #43 hardcoded-3671 bug if left unfixed).
+  float last_sent_setpoint{NAN};
 
   // Mirrors ControlService::update_mode_from_notification()
   void update_from_notification(uint8_t mode, uint8_t operation_mode) {
@@ -75,12 +83,30 @@ struct PumpEnabledState {
     pump_enabled_valid = true;
   }
 
-  // Mirrors ControlService::start()
+  // Mirrors ControlService::start() (fix for #43: reuse cached setpoint
+  // instead of always relying on the mode's hardcoded default suffix).
   bool start(uint8_t mode = 255) {
     if (mode != 255) {
       current_mode = static_cast<ControlMode>(mode);
       mode_valid = true;
     }
+
+    ControlMode target = current_mode;
+
+    // Only reuse cached_setpoint when no explicit mode override was given,
+    // a cached setpoint exists, and the target mode is one where
+    // cached_setpoint is known to hold a plain setpoint float.
+    float start_setpoint = NAN;
+    if (mode == 255 && !std::isnan(cached_setpoint) &&
+        (target == ControlMode::CONSTANT_PRESSURE || target == ControlMode::PROPORTIONAL_PRESSURE ||
+         target == ControlMode::CONSTANT_SPEED || target == ControlMode::CONSTANT_FLOW)) {
+      start_setpoint = cached_setpoint;
+      if (target == ControlMode::CONSTANT_PRESSURE || target == ControlMode::PROPORTIONAL_PRESSURE) {
+        start_setpoint *= 9806.65f;
+      }
+    }
+    last_sent_setpoint = start_setpoint;
+
     pump_enabled = true;
     pump_enabled_valid = true;
     return true;
@@ -372,6 +398,103 @@ void test_mode_read_updates_enabled() {
 }
 
 // ============================================================================
+// Test: start() reuses cached Constant Speed setpoint (fixes #43)
+// ============================================================================
+void test_start_reuses_cached_speed_setpoint() {
+  std::cout << "\n=== Testing start() Reuses Cached Constant Speed Setpoint (#43) ===" << std::endl;
+
+  PumpEnabledState state;
+  state.current_mode = ControlMode::CONSTANT_SPEED;
+  state.mode_valid = true;
+  state.cached_setpoint = 2000.0f;  // User configured 2000 RPM
+
+  state.start();  // mode=255 → use current mode
+
+  TEST_ASSERT(!std::isnan(state.last_sent_setpoint),
+              "#43: start() sends a setpoint instead of falling back to default suffix");
+  TEST_ASSERT_EQ(state.last_sent_setpoint, 2000.0f,
+                 "#43: start() sends the cached 2000 RPM setpoint, not hardcoded 3671");
+}
+
+// ============================================================================
+// Test: start() converts cached Constant Pressure setpoint (meters) to Pascals
+// ============================================================================
+void test_start_converts_pressure_setpoint() {
+  std::cout << "\n=== Testing start() Converts Cached Pressure Setpoint (m -> Pa) ===" << std::endl;
+
+  PumpEnabledState state;
+  state.current_mode = ControlMode::CONSTANT_PRESSURE;
+  state.mode_valid = true;
+  state.cached_setpoint = 4.0f;  // User configured 4.0 m
+
+  state.start();
+
+  float expected_pa = 4.0f * 9806.65f;
+  TEST_ASSERT(!std::isnan(state.last_sent_setpoint),
+              "Pressure: start() sends a setpoint instead of the default suffix");
+  TEST_ASSERT(std::fabs(state.last_sent_setpoint - expected_pa) < 0.01f,
+              "Pressure: cached 4.0 m setpoint is converted to Pascals before sending");
+}
+
+// ============================================================================
+// Test: start() falls back to default suffix when no setpoint is cached yet
+// ============================================================================
+void test_start_falls_back_without_cached_setpoint() {
+  std::cout << "\n=== Testing start() Fallback When No Cached Setpoint (Regression Guard) ===" << std::endl;
+
+  PumpEnabledState state;
+  state.current_mode = ControlMode::CONSTANT_SPEED;
+  state.mode_valid = true;
+  // cached_setpoint left as NAN (nothing read from pump yet)
+
+  state.start();
+
+  TEST_ASSERT(std::isnan(state.last_sent_setpoint),
+              "Fallback: no cached setpoint -> no setpoint override sent (unchanged behavior)");
+}
+
+// ============================================================================
+// Test: explicit mode override does not reuse a stale cached setpoint
+// ============================================================================
+void test_start_with_mode_override_ignores_stale_setpoint() {
+  std::cout << "\n=== Testing start(mode) Ignores Stale Cached Setpoint ===" << std::endl;
+
+  PumpEnabledState state;
+  state.current_mode = ControlMode::CONSTANT_SPEED;
+  state.mode_valid = true;
+  state.cached_setpoint = 2000.0f;  // Cached for CONSTANT_SPEED
+
+  // Switch to a different mode with an explicit override
+  state.start(static_cast<uint8_t>(ControlMode::CONSTANT_PRESSURE));
+
+  TEST_ASSERT(std::isnan(state.last_sent_setpoint),
+              "Mode override: stale Constant Speed setpoint is not reused for the new mode");
+  TEST_ASSERT(state.current_mode == ControlMode::CONSTANT_PRESSURE,
+              "Mode override: mode updated to CONSTANT_PRESSURE");
+}
+
+// ============================================================================
+// Test: DHW On/Off and Temperature Range never reuse cached_setpoint
+// ============================================================================
+void test_start_dhw_and_temp_range_unaffected() {
+  std::cout << "\n=== Testing DHW On/Off and Temperature Range Unaffected by Fix ===" << std::endl;
+
+  ControlMode special_modes[] = {ControlMode::DHW_ON_OFF, ControlMode::TEMPERATURE_RANGE};
+
+  for (auto mode : special_modes) {
+    PumpEnabledState state;
+    state.current_mode = mode;
+    state.mode_valid = true;
+    state.cached_setpoint = 1234.5f;  // Should never be reused for these modes
+
+    state.start();
+
+    TEST_ASSERT(std::isnan(state.last_sent_setpoint),
+                "Special mode: cached_setpoint is never reused (default suffix still used)");
+  }
+}
+
+// ============================================================================
 // Main
 // ============================================================================
 int main() {
@@ -394,6 +517,11 @@ int main() {
   test_all_modes_auto_enabled();
   test_all_modes_stop_disabled();
   test_mode_read_updates_enabled();
+  test_start_reuses_cached_speed_setpoint();
+  test_start_converts_pressure_setpoint();
+  test_start_falls_back_without_cached_setpoint();
+  test_start_with_mode_override_ignores_stale_setpoint();
+  test_start_dhw_and_temp_range_unaffected();
 
   std::cout << "\n===========================================================" << std::endl;
   std::cout << "  Test Results" << std::endl;
