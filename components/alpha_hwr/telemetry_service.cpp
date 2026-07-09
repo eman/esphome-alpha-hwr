@@ -296,9 +296,11 @@ void TelemetryService::handle_passive_notification(const uint8_t* data, size_t l
         ESP_LOGI(TAG, "Control Mode Status: mode=%d, op_mode=%d, setpoint=%.2f, source=%d",
                  control_mode, operation_mode, setpoint, control_source);
         
-        // Update ControlService with the mode from passive notification
+        // Update ControlService with the mode and control_source from passive notification.
+        // Fix #53: pass control_source so the Remote Mode switch reflects actual pump state.
         if (control_service_) {
-          control_service_->update_mode_from_notification(control_mode, operation_mode, setpoint);
+          control_service_->update_mode_from_notification(control_mode, operation_mode, setpoint,
+                                                         control_source);
         } else {
           ESP_LOGW(TAG, "Control service not set, cannot update mode");
         }

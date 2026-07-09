@@ -83,7 +83,8 @@ void ControlService::check_flow_setpoint_scale(float previous_setpoint, float ne
   }
 }
 
-void ControlService::update_mode_from_notification(uint8_t mode, uint8_t operation_mode, float setpoint) {
+void ControlService::update_mode_from_notification(uint8_t mode, uint8_t operation_mode, float setpoint,
+                                                   uint8_t control_source) {
   // Update internal state
   current_mode_ = static_cast<ControlMode>(mode);
   mode_valid_ = true;  // Mark mode as valid - we received it from the pump
@@ -111,17 +112,38 @@ void ControlService::update_mode_from_notification(uint8_t mode, uint8_t operati
   // AUTO (0) or USER_DEFINED (4) = enabled, STOP (1) = disabled
   pump_enabled_ = (operation_mode != static_cast<uint8_t>(OperationMode::STOP));
   pump_enabled_valid_ = true;
+
+  // Fix #53: update remote mode state from the pump's control_source byte.
+  // Reference: Python control.py — is_remote = (control_source == 2).
+  //   2 = Remote/Digital (BMS or ESPHome controlling the pump)
+  //   1 = Local/Panel    (physical panel is in control)
+  // Only update on the two known values; treat 0 or any unexpected byte as
+  // "unknown" and leave the current state unchanged so a stale reading from
+  // the pump cannot incorrectly clear a state that was confirmed via ACK.
+  if (control_source == 2) {
+    is_remote_mode_enabled_ = true;
+    ESP_LOGD(TAG, "Remote mode: pump reports control_source=2 (Remote/Digital) → enabled");
+  } else if (control_source == 1) {
+    is_remote_mode_enabled_ = false;
+    ESP_LOGD(TAG, "Remote mode: pump reports control_source=1 (Local/Panel) → disabled");
+  } else if (control_source != 0xFF) {
+    // 0xFF is our own sentinel meaning "caller didn't pass control_source".
+    // Any other unexpected value is logged but does not change the cached state.
+    ESP_LOGD(TAG, "Remote mode: control_source=0x%02X unrecognized — state unchanged (was %s)",
+             control_source, is_remote_mode_enabled_ ? "enabled" : "disabled");
+  }
   
   float display_setpoint = get_setpoint_for_mode(current_mode_);
-  ESP_LOGI(TAG, "Control mode from notification: %s (op_mode=%d, setpoint=%.4f, raw=%.4f, enabled=%s)",
+  ESP_LOGI(TAG, "Control mode from notification: %s (op_mode=%d, setpoint=%.4f, raw=%.4f, enabled=%s, remote=%s)",
            get_mode_name(current_mode_), operation_mode, display_setpoint, setpoint,
-           pump_enabled_ ? "YES" : "NO");
+           pump_enabled_ ? "YES" : "NO", is_remote_mode_enabled_ ? "YES" : "NO");
   
   // Notify callback if set
   if (mode_change_callback_) {
     mode_change_callback_(current_mode_, operation_mode, display_setpoint);
   }
 }
+
 
 void ControlService::read_setpoints_from_pump() {
   if (!mode_valid_) {
@@ -294,6 +316,20 @@ bool ControlService::get_mode_async(std::function<void(bool, ControlMode)> on_co
               // Derive pump enabled state from operation_mode
               pump_enabled_ = (operation_mode != static_cast<uint8_t>(OperationMode::STOP));
               pump_enabled_valid_ = true;
+              
+              // Fix #53: update remote mode state from control_source.
+              // Reference: Python control.py — is_remote = (control_source == 2).
+              //   2 = Remote/Digital, 1 = Local/Panel; unknown values leave state unchanged.
+              if (control_source == 2) {
+                is_remote_mode_enabled_ = true;
+                ESP_LOGD(TAG, "Remote mode: explicit read control_source=2 (Remote/Digital) → enabled");
+              } else if (control_source == 1) {
+                is_remote_mode_enabled_ = false;
+                ESP_LOGD(TAG, "Remote mode: explicit read control_source=1 (Local/Panel) → disabled");
+              } else {
+                ESP_LOGD(TAG, "Remote mode: explicit read control_source=0x%02X unrecognized — state unchanged",
+                         control_source);
+              }
               
               // Extract and cache setpoint into the mode-specific field (issue #51).
               // Per-mode storage eliminates cross-mode contamination.
