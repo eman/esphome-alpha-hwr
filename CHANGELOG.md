@@ -100,6 +100,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   including for DHW On/Off, Temperature Range, and AutoAdapt modes
   (issue [#43](https://github.com/eman/esphome-alpha-hwr/issues/43),
   PR [#47](https://github.com/eman/esphome-alpha-hwr/pull/47)).
+- **Cross-mode setpoint contamination caused wrong setpoint on mode switches** —
+  `ControlService` used a single shared `cached_setpoint_` field across all
+  scalar control modes. Switching from, say, Constant Speed (2000 RPM) to
+  Constant Pressure meant that 2000 was briefly the "pressure" cache, and a
+  subsequent `start()` would convert it to Pascals and send ~19.6 MPa to the
+  pump. Replaced the shared field with four independent per-mode caches
+  (`cached_pressure_setpoint_`, `cached_proportional_setpoint_`,
+  `cached_speed_setpoint_`, `cached_flow_setpoint_`); each mode reads and
+  writes only its own slot, so a value set in one mode can never contaminate
+  another. The mode-transition NAN-clearing workaround in `start()` is no
+  longer needed and has been removed. Public getters on `ControlService` and
+  the `AlphaHwrComponent` facade, plus the four number-entity lambdas in
+  `packages/alpha_hwr_controls.yaml`, updated accordingly
+  (issue [#51](https://github.com/eman/esphome-alpha-hwr/issues/51),
+  PR [#57](https://github.com/eman/esphome-alpha-hwr/pull/57)).
 - **Memory leak in schedule "read all layers" async chain** —
   `ScheduleService::read_entries_async(-1, ...)` drove its layer-by-layer read
   loop with a self-referential `std::shared_ptr<std::function>`. `Transport::reset()`

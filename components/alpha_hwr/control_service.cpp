@@ -84,56 +84,42 @@ void ControlService::check_flow_setpoint_scale(float previous_setpoint, float ne
 }
 
 void ControlService::update_mode_from_notification(uint8_t mode, uint8_t operation_mode, float setpoint) {
-  // Capture the mode we were in *before* this update, so the Constant Flow
-  // branch below can tell a mode transition (stale cross-mode setpoint,
-  // must clear) apart from steady-state operation (keep the last known-good
-  // client-commanded value).
-  ControlMode previous_mode = current_mode_;
-  
   // Update internal state
   current_mode_ = static_cast<ControlMode>(mode);
   mode_valid_ = true;  // Mark mode as valid - we received it from the pump
   cached_operation_mode_ = operation_mode;
   
-  float previous_setpoint = cached_setpoint_;
-  
-  // Cache setpoint from notification — this is the same data Python's get_mode() reads
-  // from Object 86 Sub 6. Apply unit conversion for pressure modes (Pa → meters).
-  // Reference: control.py::get_mode() lines 428-434
-  if (current_mode_ == ControlMode::CONSTANT_PRESSURE ||
-      current_mode_ == ControlMode::PROPORTIONAL_PRESSURE) {
-    cached_setpoint_ = setpoint / 9806.65f;
+  // Cache setpoint from notification — write to the mode-specific field (issue #51).
+  // Per-mode storage eliminates cross-mode contamination; no NAN-clearing needed.
+  // Reference: control.py::get_mode() lines 428-434 (Pa → meters for pressure modes).
+  if (current_mode_ == ControlMode::CONSTANT_PRESSURE) {
+    cached_pressure_setpoint_ = setpoint / 9806.65f;
+  } else if (current_mode_ == ControlMode::PROPORTIONAL_PRESSURE) {
+    cached_proportional_setpoint_ = setpoint / 9806.65f;
   } else if (current_mode_ == ControlMode::CONSTANT_FLOW) {
-    // Fix #44: this register doesn't reliably carry the flow setpoint (see
-    // check_flow_setpoint_scale() above), so don't let it clobber the last
-    // known-good, client-commanded value.
-    if (previous_mode != ControlMode::CONSTANT_FLOW) {
-      // Just transitioned into Constant Flow from a different mode --
-      // cached_setpoint_ belongs to that other mode's units (RPM, meters,
-      // etc.) and must not leak in as a bogus flow value. Reset to NAN
-      // until the user actually calls set_constant_flow_async().
-      ESP_LOGD(TAG, "Entered Constant Flow from %s; clearing stale cross-mode cached setpoint",
-               get_mode_name(previous_mode));
-      cached_setpoint_ = NAN;
-      previous_setpoint = NAN;  // don't flag a scale "jump" against the cleared value
-    }
-    check_flow_setpoint_scale(previous_setpoint, setpoint, setpoint);
-  } else {
-    cached_setpoint_ = setpoint;
+    // Fix #44: Object 86/Sub 6 unreliable for CONSTANT_FLOW — do not update
+    // cached_flow_setpoint_ here. Only client-side writes in set_constant_flow_async()
+    // populate it. No cross-mode contamination possible (per-mode fields, issue #51).
+    check_flow_setpoint_scale(cached_flow_setpoint_, setpoint, setpoint);
+  } else if (current_mode_ == ControlMode::CONSTANT_SPEED) {
+    cached_speed_setpoint_ = setpoint;
   }
+  // Other modes (AUTO_ADAPT_*, DHW_ON_OFF, TEMPERATURE_RANGE, etc.) don't use
+  // a scalar setpoint cache — temperature range uses cached_temp_min_/max_ instead.
   
   // Derive pump enabled state from operation_mode:
   // AUTO (0) or USER_DEFINED (4) = enabled, STOP (1) = disabled
   pump_enabled_ = (operation_mode != static_cast<uint8_t>(OperationMode::STOP));
   pump_enabled_valid_ = true;
   
+  float display_setpoint = get_setpoint_for_mode(current_mode_);
   ESP_LOGI(TAG, "Control mode from notification: %s (op_mode=%d, setpoint=%.4f, raw=%.4f, enabled=%s)",
-           get_mode_name(current_mode_), operation_mode, cached_setpoint_, setpoint,
+           get_mode_name(current_mode_), operation_mode, display_setpoint, setpoint,
            pump_enabled_ ? "YES" : "NO");
   
   // Notify callback if set
   if (mode_change_callback_) {
-    mode_change_callback_(current_mode_, operation_mode, cached_setpoint_);
+    mode_change_callback_(current_mode_, operation_mode, display_setpoint);
   }
 }
 
@@ -182,7 +168,7 @@ void ControlService::read_setpoints_from_pump() {
           
           // Trigger mode change callback to update UI
           if (mode_change_callback_) {
-            mode_change_callback_(current_mode_, cached_operation_mode_, cached_setpoint_);
+            mode_change_callback_(current_mode_, cached_operation_mode_, get_setpoint_for_mode(current_mode_));
           }
         }
       }, 5000);
@@ -202,18 +188,25 @@ void ControlService::read_setpoints_from_pump() {
           // Restore expected mode (don't let stale response overwrite our set_mode)
           current_mode_ = expected_mode;
           mode_valid_ = true;
-          cached_setpoint_ = NAN;
+          // NAN the expected mode's per-mode field to signal "not yet read"
+          // (CONSTANT_FLOW excluded — client-write is the source of truth, issue #44)
+          switch (expected_mode) {
+            case ControlMode::CONSTANT_PRESSURE: cached_pressure_setpoint_ = NAN; break;
+            case ControlMode::PROPORTIONAL_PRESSURE: cached_proportional_setpoint_ = NAN; break;
+            case ControlMode::CONSTANT_SPEED: cached_speed_setpoint_ = NAN; break;
+            default: break;
+          }
           if (mode_change_callback_) {
-            mode_change_callback_(current_mode_, cached_operation_mode_, cached_setpoint_);
+            mode_change_callback_(current_mode_, cached_operation_mode_, get_setpoint_for_mode(current_mode_));
           }
           // Retry after additional delay
           if (schedule_callback_) {
             schedule_callback_([this]() {
               get_mode_async([this](bool ok, ControlMode m) {
                 if (ok) {
-                  ESP_LOGD(TAG, "Retry setpoint read: %.4f (mode: %s)", cached_setpoint_, get_mode_name(m));
+                  ESP_LOGD(TAG, "Retry setpoint read: %.4f (mode: %s)", get_setpoint_for_mode(m), get_mode_name(m));
                   if (mode_change_callback_) {
-                    mode_change_callback_(current_mode_, cached_operation_mode_, cached_setpoint_);
+                    mode_change_callback_(current_mode_, cached_operation_mode_, get_setpoint_for_mode(current_mode_));
                   }
                 } else {
                   ESP_LOGW(TAG, "Retry setpoint read failed (timeout)");
@@ -223,7 +216,7 @@ void ControlService::read_setpoints_from_pump() {
           }
         } else {
           ESP_LOGI(TAG, "Setpoint read from pump: %.4f (mode: %s)", 
-                   cached_setpoint_, get_mode_name(mode));
+                   get_setpoint_for_mode(mode), get_mode_name(mode));
         }
       } else {
         ESP_LOGW(TAG, "Failed to read setpoint via Object 86 Sub 6 (timeout)");
@@ -294,10 +287,6 @@ bool ControlService::get_mode_async(std::function<void(bool, ControlMode)> on_co
 
             // Validate control mode value
             if (control_mode_byte <= static_cast<uint8_t>(ControlMode::NONE)) {
-              // Capture the mode we were in *before* this update -- see
-              // update_mode_from_notification() for why this matters for
-              // Constant Flow's stale cross-mode setpoint handling.
-              ControlMode previous_mode = current_mode_;
               current_mode_ = static_cast<ControlMode>(control_mode_byte);
               mode_valid_ = true;
               cached_operation_mode_ = operation_mode;
@@ -306,40 +295,32 @@ bool ControlService::get_mode_async(std::function<void(bool, ControlMode)> on_co
               pump_enabled_ = (operation_mode != static_cast<uint8_t>(OperationMode::STOP));
               pump_enabled_valid_ = true;
               
-              // Extract and cache setpoint (big-endian float at offset+3)
+              // Extract and cache setpoint into the mode-specific field (issue #51).
+              // Per-mode storage eliminates cross-mode contamination.
               if (payload_len >= (size_t)(offset + 7)) {
-                float previous_setpoint = cached_setpoint_;
                 float raw_setpoint = protocol::decode_float_be(&payload[offset + 3]);
                 
-                if (current_mode_ == ControlMode::CONSTANT_PRESSURE || 
-                    current_mode_ == ControlMode::PROPORTIONAL_PRESSURE) {
-                  // Convert pressure setpoints from Pascals to meters
-                  cached_setpoint_ = raw_setpoint / 9806.65f;
+                if (current_mode_ == ControlMode::CONSTANT_PRESSURE) {
+                  cached_pressure_setpoint_ = raw_setpoint / 9806.65f;
+                } else if (current_mode_ == ControlMode::PROPORTIONAL_PRESSURE) {
+                  cached_proportional_setpoint_ = raw_setpoint / 9806.65f;
                 } else if (current_mode_ == ControlMode::CONSTANT_FLOW) {
-                  // Fix #44: Object 86/Sub 6 doesn't reliably carry the flow
-                  // setpoint (see check_flow_setpoint_scale()); keep the last
-                  // known-good, client-commanded value instead of this readback.
-                  if (previous_mode != ControlMode::CONSTANT_FLOW) {
-                    // Just transitioned into Constant Flow -- clear any
-                    // stale cross-mode setpoint (RPM, meters, etc.) instead
-                    // of letting it leak in as a bogus flow value.
-                    ESP_LOGD(TAG, "Entered Constant Flow from %s; clearing stale cross-mode cached setpoint",
-                             get_mode_name(previous_mode));
-                    cached_setpoint_ = NAN;
-                    previous_setpoint = NAN;  // don't flag a scale "jump" against the cleared value
-                  }
-                  check_flow_setpoint_scale(previous_setpoint, raw_setpoint, raw_setpoint);
-                } else {
-                  cached_setpoint_ = raw_setpoint;
+                  // Fix #44: Object 86/Sub 6 unreliable for CONSTANT_FLOW — do not update
+                  // cached_flow_setpoint_ here. Only client-side writes populate it.
+                  // No cross-mode contamination possible (per-mode fields, issue #51).
+                  check_flow_setpoint_scale(cached_flow_setpoint_, raw_setpoint, raw_setpoint);
+                } else if (current_mode_ == ControlMode::CONSTANT_SPEED) {
+                  cached_speed_setpoint_ = raw_setpoint;
                 }
+                // Other modes don't use a scalar setpoint cache.
               }
               
               ESP_LOGI(TAG, "Control mode updated to %d (%s), setpoint=%.2f", 
-                control_mode_byte, get_mode_name(current_mode_), cached_setpoint_);
+                control_mode_byte, get_mode_name(current_mode_), get_setpoint_for_mode(current_mode_));
               
               // Notify mode change
               if (mode_change_callback_) {
-                mode_change_callback_(current_mode_, operation_mode, cached_setpoint_);
+                mode_change_callback_(current_mode_, operation_mode, get_setpoint_for_mode(current_mode_));
               }
               
               if (on_complete) {
@@ -378,44 +359,41 @@ bool ControlService::start(uint8_t mode) {
   // Reference: control.py::start() lines 183-206
   if (mode != 255) {
     current_mode_ = static_cast<ControlMode>(mode);
-    // Clear any setpoint cached for the previous mode -- it's not valid for
-    // the newly-requested mode (e.g. a pressure value in meters must not be
-    // reused as a speed value in RPM by a later start() call). Mirrors the
-    // same clear in set_mode().
-    cached_setpoint_ = NAN;
+    // Per-mode fields (issue #51): no NAN-clearing needed — each mode has its
+    // own storage, so a previous mode's value can never contaminate this mode.
   }
   
   ControlMode target = current_mode_;
 
   // Resolve the setpoint to send with the start command.
   //
-  // Bug (#43): send_control_request() falls back to CLASS10_CONTROL_MAP's
+  // Fix #43: send_control_request() falls back to CLASS10_CONTROL_MAP's
   // default suffix when no setpoint is given, which decodes to a hardcoded
-  // 3671.0 for CONSTANT_PRESSURE/PROPORTIONAL_PRESSURE/CONSTANT_SPEED/
+  // ~3671.0 for CONSTANT_PRESSURE/PROPORTIONAL_PRESSURE/CONSTANT_SPEED/
   // CONSTANT_FLOW. Reuse the pump's actual last-known setpoint instead, so
   // enabling the pump doesn't clobber the user's configured setpoint.
   //
-  // Only reuse cached_setpoint_ when:
-  // - no explicit mode override was requested (a cached value from a prior
-  //   mode is not valid for a newly-requested mode), and
-  // - the target mode is one where cached_setpoint_ is known to hold a
-  //   plain setpoint float in pump-native units. DHW_ON_OFF and
-  //   TEMPERATURE_RANGE use special-purpose suffix encodings (not a plain
-  //   setpoint), and AUTO_ADAPT_* setpoint semantics are undocumented, so
-  //   those keep using the default suffix (unchanged behavior).
+  // Issue #51: read from the mode-specific field — no cross-mode contamination
+  // possible. DHW_ON_OFF, TEMPERATURE_RANGE, and AUTO_ADAPT_* keep using the
+  // default suffix (unchanged behavior; those modes don't have a scalar setpoint cache).
   float start_setpoint = NAN;
-  if (mode == 255 && !std::isnan(cached_setpoint_) &&
-      (target == ControlMode::CONSTANT_PRESSURE || target == ControlMode::PROPORTIONAL_PRESSURE ||
-       target == ControlMode::CONSTANT_SPEED || target == ControlMode::CONSTANT_FLOW)) {
-    // cached_setpoint_ is stored in display units (meters for pressure
-    // modes); convert back to raw pump units (Pascals) before sending.
-    start_setpoint = cached_setpoint_;
-    if (target == ControlMode::CONSTANT_PRESSURE || target == ControlMode::PROPORTIONAL_PRESSURE) {
-      start_setpoint *= 9806.65f;
+  if (mode == 255) {
+    switch (target) {
+      case ControlMode::CONSTANT_PRESSURE:     start_setpoint = cached_pressure_setpoint_; break;
+      case ControlMode::PROPORTIONAL_PRESSURE: start_setpoint = cached_proportional_setpoint_; break;
+      case ControlMode::CONSTANT_SPEED:        start_setpoint = cached_speed_setpoint_; break;
+      case ControlMode::CONSTANT_FLOW:         start_setpoint = cached_flow_setpoint_; break;
+      default: break;
     }
-    ESP_LOGD(TAG, "Reusing cached setpoint on start: %.4f (raw units)", start_setpoint);
-  } else {
-    ESP_LOGD(TAG, "No cached setpoint to reuse on start; using mode default suffix");
+    if (!std::isnan(start_setpoint)) {
+      // Stored in display units (meters for pressure); convert to pump-native units (Pascals)
+      if (target == ControlMode::CONSTANT_PRESSURE || target == ControlMode::PROPORTIONAL_PRESSURE) {
+        start_setpoint *= 9806.65f;
+      }
+      ESP_LOGD(TAG, "Reusing cached setpoint on start: %.4f (raw units)", start_setpoint);
+    } else {
+      ESP_LOGD(TAG, "No cached setpoint to reuse on start; using mode default suffix");
+    }
   }
 
   if (!send_control_request(target, true, start_setpoint)) {
@@ -542,8 +520,8 @@ bool ControlService::set_mode(ControlMode mode) {
 
     current_mode_ = mode;
     mode_valid_ = true;
-    // Clear stale setpoint from previous mode
-    cached_setpoint_ = NAN;
+    // Per-mode fields (issue #51): no NAN-clearing needed — each mode retains
+    // its own cached value independently.
 
     if (mode_change_callback_) {
       mode_change_callback_(current_mode_, 0, 0.0f);
@@ -686,6 +664,16 @@ const char *ControlService::get_mode_name(ControlMode mode) {
       return "Unknown";
     default:
       return "Unknown";
+  }
+}
+
+float ControlService::get_setpoint_for_mode(ControlMode mode) const {
+  switch (mode) {
+    case ControlMode::CONSTANT_PRESSURE:     return cached_pressure_setpoint_;
+    case ControlMode::PROPORTIONAL_PRESSURE: return cached_proportional_setpoint_;
+    case ControlMode::CONSTANT_SPEED:        return cached_speed_setpoint_;
+    case ControlMode::CONSTANT_FLOW:         return cached_flow_setpoint_;
+    default:                                 return NAN;
   }
 }
 
@@ -832,13 +820,13 @@ void ControlService::set_constant_pressure_async(float value_m, std::function<vo
     if (schedule_callback_) {
       schedule_callback_([this, value_pa, value_m, callback]() {
         set_class10_setpoint(value_pa, SUB_PRESSURE_SETPOINT);
-        cached_setpoint_ = value_m;
+        cached_pressure_setpoint_ = value_m;
         ESP_LOGI(TAG, "✓ Constant pressure set to %.2f m (%.0f Pa)", value_m, value_pa);
         if (callback) callback(true);
       }, 400);
     } else {
       set_class10_setpoint(value_pa, SUB_PRESSURE_SETPOINT);
-      cached_setpoint_ = value_m;
+      cached_pressure_setpoint_ = value_m;
       if (callback) callback(true);
     }
   });
@@ -875,13 +863,13 @@ void ControlService::set_constant_speed_async(float value_rpm, std::function<voi
     if (schedule_callback_) {
       schedule_callback_([this, value_rpm, callback]() {
         set_class10_setpoint(value_rpm, SUB_SPEED_SETPOINT);
-        cached_setpoint_ = value_rpm;
+        cached_speed_setpoint_ = value_rpm;
         ESP_LOGI(TAG, "✓ Constant speed set to %.0f RPM", value_rpm);
         if (callback) callback(true);
       }, 400);
     } else {
       set_class10_setpoint(value_rpm, SUB_SPEED_SETPOINT);
-      cached_setpoint_ = value_rpm;
+      cached_speed_setpoint_ = value_rpm;
       if (callback) callback(true);
     }
   });
@@ -918,13 +906,13 @@ void ControlService::set_constant_flow_async(float value_m3h, std::function<void
     if (schedule_callback_) {
       schedule_callback_([this, value_m3h, callback]() {
         set_class10_setpoint(value_m3h, SUB_FLOW_SETPOINT);
-        cached_setpoint_ = value_m3h;
+        cached_flow_setpoint_ = value_m3h;
         ESP_LOGI(TAG, "✓ Constant flow set to %.2f m³/h", value_m3h);
         if (callback) callback(true);
       }, 400);
     } else {
       set_class10_setpoint(value_m3h, SUB_FLOW_SETPOINT);
-      cached_setpoint_ = value_m3h;
+      cached_flow_setpoint_ = value_m3h;
       if (callback) callback(true);
     }
   });
@@ -995,10 +983,10 @@ void ControlService::set_temperature_range_async(float min_temp, float max_temp,
       
       this->transport_.send_apdu_command(apdu, 24);
       
-      // Cache temperature range values
+      // Cache temperature range values (no per-mode scalar setpoint for TEMPERATURE_RANGE;
+      // cached_temp_min_/max_ serve that role — issue #51)
       cached_temp_min_ = min_temp;
       cached_temp_max_ = max_temp;
-      cached_setpoint_ = min_temp;
       cached_autoadapt_ = autoadapt_enabled ? 1 : 0;
       
       // Send configuration commit (transport queue handles ordering)
@@ -1054,13 +1042,13 @@ void ControlService::set_proportional_pressure_async(float value_m, std::functio
     if (schedule_callback_) {
       schedule_callback_([this, value_pa, value_m, callback]() {
         set_class10_setpoint(value_pa, SUB_PRESSURE_SETPOINT);
-        cached_setpoint_ = value_m;
+        cached_proportional_setpoint_ = value_m;
         ESP_LOGI(TAG, "✓ Proportional pressure set to %.2f m (%.0f Pa)", value_pa / 9806.65f, value_pa);
         if (callback) callback(true);
       }, 400);
     } else {
       set_class10_setpoint(value_pa, SUB_PRESSURE_SETPOINT);
-      cached_setpoint_ = value_m;
+      cached_proportional_setpoint_ = value_m;
       if (callback) callback(true);
     }
   });

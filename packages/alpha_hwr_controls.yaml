@@ -239,7 +239,7 @@ number:
     lambda: |-
       if (id(pump).get_control_mode() != esphome::alpha_hwr::services::ControlMode::CONSTANT_PRESSURE)
         return NAN;
-      float sp = id(pump).get_cached_setpoint();
+      float sp = id(pump).get_cached_pressure_setpoint();
       return std::isnan(sp) ? NAN : sp;
     set_action:
       - lambda: |-
@@ -268,7 +268,7 @@ number:
     lambda: |-
       if (id(pump).get_control_mode() != esphome::alpha_hwr::services::ControlMode::CONSTANT_SPEED)
         return NAN;
-      float sp = id(pump).get_cached_setpoint();
+      float sp = id(pump).get_cached_speed_setpoint();
       return std::isnan(sp) ? NAN : sp;
     set_action:
       - lambda: |-
@@ -298,7 +298,7 @@ number:
     lambda: |-
       if (id(pump).get_control_mode() != esphome::alpha_hwr::services::ControlMode::CONSTANT_FLOW)
         return NAN;
-      float sp = id(pump).get_cached_setpoint();
+      float sp = id(pump).get_cached_flow_setpoint();
       return std::isnan(sp) ? NAN : sp;
     set_action:
       - lambda: |-
@@ -397,7 +397,7 @@ number:
     lambda: |-
       if (id(pump).get_control_mode() != esphome::alpha_hwr::services::ControlMode::PROPORTIONAL_PRESSURE)
         return NAN;
-      float sp = id(pump).get_cached_setpoint();
+      float sp = id(pump).get_cached_proportional_setpoint();
       return std::isnan(sp) ? NAN : sp;
     set_action:
       - lambda: |-
