@@ -278,7 +278,7 @@ bool ControlService::get_mode_async(std::function<void(bool, ControlMode)> on_co
    apdu[3] = 0x00;  // SubID 7 high byte
    apdu[4] = 0x07;  // SubID 7 low byte
    
-  // Send with response matching for Object 86 Sub 6 response
+  // Send with response matching for Object 86 Sub 7 response
   // The pump responds with OpSpec 0x0E notification: bytes 6-7 = Sub 0x0001, bytes 8-9 = Obj 0x2F01
     this->transport_.send_apdu_command(
       apdu, 5, 
