@@ -2,11 +2,11 @@
 # Compiles and runs host-based tests without ESP32 dependencies
 
 CXX ?= g++
-CXXFLAGS = -std=c++11 -Wall -Wextra -O2 -I.
+CXXFLAGS = -std=c++17 -Wall -Wextra -O2 -I. -I./mocks -I../
 LDFLAGS =
 
 # Test executables
-TESTS = test_protocol test_control_state test_dhw_demand_logic test_transport_matching
+TESTS = test_protocol test_control_state test_dhw_demand_logic test_transport_matching test_transport_fsm test_schedule_service
 
 # Default target
 all: $(TESTS)
@@ -23,6 +23,13 @@ test_dhw_demand_logic: test_dhw_demand_logic.cpp
 
 test_transport_matching: test_transport_matching.cpp
 	$(CXX) $(CXXFLAGS) test_transport_matching.cpp -o test_transport_matching $(LDFLAGS)
+
+test_transport_fsm: test_transport_fsm.cpp ../components/alpha_hwr/transport.cpp ../components/alpha_hwr/frame_builder.cpp ../components/alpha_hwr/frame_parser.cpp ../components/alpha_hwr/codec.cpp
+	$(CXX) $(CXXFLAGS) test_transport_fsm.cpp ../components/alpha_hwr/transport.cpp ../components/alpha_hwr/frame_builder.cpp ../components/alpha_hwr/frame_parser.cpp ../components/alpha_hwr/codec.cpp -o test_transport_fsm $(LDFLAGS)
+
+test_schedule_service: test_schedule_service.cpp ../components/alpha_hwr/schedule_service.cpp ../components/alpha_hwr/transport.cpp ../components/alpha_hwr/session.cpp ../components/alpha_hwr/frame_builder.cpp ../components/alpha_hwr/frame_parser.cpp ../components/alpha_hwr/codec.cpp
+	$(CXX) $(CXXFLAGS) test_schedule_service.cpp ../components/alpha_hwr/schedule_service.cpp ../components/alpha_hwr/transport.cpp ../components/alpha_hwr/session.cpp ../components/alpha_hwr/frame_builder.cpp ../components/alpha_hwr/frame_parser.cpp ../components/alpha_hwr/codec.cpp -o test_schedule_service $(LDFLAGS)
+
 
 # Run tests
 test: $(TESTS)
@@ -45,6 +52,16 @@ test: $(TESTS)
 	@echo "Running Transport Matching Tests..."
 	@echo "=========================================="
 	@./test_transport_matching
+	@echo ""
+	@echo "=========================================="
+	@echo "Running Transport FSM Tests..."
+	@echo "=========================================="
+	@./test_transport_fsm
+	@echo ""
+	@echo "=========================================="
+	@echo "Running Schedule Service Tests..."
+	@echo "=========================================="
+	@./test_schedule_service
 
 # Alternative targets for specific compilers
 test-gcc: CXX = g++
