@@ -297,10 +297,17 @@ class ControlService {
    /**
     * Get whether remote mode is enabled.
     * 
-    * Reflects the pump's actual control_source state when available (updated
-    * from every Object 86/Sub 6 notification and explicit read where
-    * control_source == 2 = Remote/Digital or 1 = Local/Panel). Falls back to
-    * tracking enable/disable command ACKs when control_source is unknown.
+    * Reflects the pump's actual control_source state when available. Updated
+    * from two code paths, both of which carry the same payload format
+    * ([control_source][operation_mode][control_mode][setpoint]):
+    *   1. Passive Control Mode Status notifications (Obj 0x2F01 / Sub 0x0001,
+    *      OpSpec 0x0E) — received automatically after authentication.
+    *   2. Explicit Object 86 / Sub 6 read callback — triggered by the periodic
+    *      control-state poll (issue #54).
+    * When control_source == 2 (Remote/Digital) the flag is set true; when
+    * control_source == 1 (Local/Panel) it is set false. Unknown values leave
+    * the current state unchanged. Falls back to command-ACK tracking
+    * (handle_remote_mode_ack) when control_source is unrecognized.
     * 
     * @return True if remote control is enabled, false if in auto/local mode
     */

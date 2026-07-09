@@ -13,10 +13,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   The switch was declared `optimistic: false` (implying it tracks the pump's
   real state) but was driven solely by `is_remote_mode_enabled_`, a flag set
   only when our own enable/disable commands received a clean ACK. The pump's
-  `control_source` byte — present in every Object 86/Sub 6 passive notification
-  and in the explicit mode-read response — was parsed and logged but never
-  applied to the cached state, so the switch would show stale data after a
-  reconnect, a panel reset, or any external tool taking/releasing remote control.
+  `control_source` byte — present in the passive Control Mode Status
+  notification (Obj 0x2F01 / Sub 0x0001, OpSpec 0x0E, sent automatically
+  after authentication) and in the response to the explicit Object 86 / Sub 6
+  read (triggered by the periodic control-state poll, issue #54) — was parsed
+  and logged but never applied to the cached state, so the switch would show
+  stale data after a reconnect, a panel reset, or any external tool
+  taking/releasing remote control.
   `update_mode_from_notification()` and the `get_mode_async` read callback now
   update `is_remote_mode_enabled_` when `control_source` is a recognized value
   (`2` = Remote/Digital, `1` = Local/Panel, matching the Python reference
