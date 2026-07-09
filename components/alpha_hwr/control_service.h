@@ -281,16 +281,35 @@ class ControlService {
     * (OpSpec 0x0E, Object 0x2F01, Sub 1) containing control mode data.
     * The pump sends these notifications automatically during/after authentication.
     * 
+    * Updates is_remote_mode_enabled_ when control_source == 2 (Remote/Digital)
+    * or control_source == 1 (Local/Panel). Unknown values (e.g. 0) are ignored
+    * so a stale or unrecognized byte can't incorrectly clear a confirmed remote state.
+    * Reference: Python control.py — is_remote = (control_source == 2).
+    * 
     * @param mode Control mode byte from passive notification
     * @param operation_mode Operation mode byte (AUTO/STOP/USER_DEFINED)
     * @param setpoint Setpoint value from notification
+    * @param control_source Source byte from pump (2=Remote/Digital, 1=Local/Panel, 0=unknown)
     */
-  void update_mode_from_notification(uint8_t mode, uint8_t operation_mode, float setpoint);
+  void update_mode_from_notification(uint8_t mode, uint8_t operation_mode, float setpoint,
+                                     uint8_t control_source = 0xFF);
    
    /**
     * Get whether remote mode is enabled.
     * 
-    * @return True if remote control is enabled, false if in auto mode
+    * Reflects the pump's actual control_source state when available. Updated
+    * from two code paths, both of which carry the same payload format
+    * ([control_source][operation_mode][control_mode][setpoint]):
+    *   1. Passive Control Mode Status notifications (Obj 0x2F01 / Sub 0x0001,
+    *      OpSpec 0x0E) — received automatically after authentication.
+    *   2. Explicit Object 86 / Sub 6 read callback — triggered by the periodic
+    *      control-state poll (issue #54).
+    * When control_source == 2 (Remote/Digital) the flag is set true; when
+    * control_source == 1 (Local/Panel) it is set false. Unknown values leave
+    * the current state unchanged. Falls back to command-ACK tracking
+    * (handle_remote_mode_ack) when control_source is unrecognized.
+    * 
+    * @return True if remote control is enabled, false if in auto/local mode
     */
    bool get_remote_enabled() const { return is_remote_mode_enabled_; }
    

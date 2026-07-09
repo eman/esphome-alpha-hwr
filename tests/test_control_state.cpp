@@ -229,6 +229,19 @@ struct RemoteModeState {
     }
     // ack_byte != 0x00 (e.g. 0x01 "rejected"): leave state unchanged
   }
+
+  // Mirrors the control_source → is_remote_mode_enabled_ logic added in
+  // ControlService::update_mode_from_notification() and the get_mode_async
+  // callback (fix #53). Only updates on known values (2=Remote, 1=Local);
+  // unknown values leave the current state unchanged.
+  void update_remote_from_notification(uint8_t control_source) {
+    if (control_source == 2) {
+      is_remote_mode_enabled = true;   // Remote/Digital
+    } else if (control_source == 1) {
+      is_remote_mode_enabled = false;  // Local/Panel
+    }
+    // 0 or any other byte: leave state unchanged (conservative guard)
+  }
 };
 
 /**
@@ -587,6 +600,84 @@ void test_remote_mode_timeout_leaves_state_unchanged() {
   state.handle_ack(/*enabling=*/true, /*got_response=*/false, /*ack_byte=*/0x00);
   TEST_ASSERT_EQ(state.is_remote_mode_enabled, false,
                  "#46: no response (timeout) does not falsely report remote mode as enabled");
+}
+
+// ============================================================================
+// Test: control_source == 2 (Remote/Digital) sets remote mode enabled (#53)
+// ============================================================================
+void test_notification_control_source_2_sets_remote_enabled() {
+  std::cout << "\n=== Testing control_source=2 Sets Remote Enabled (#53) ===" << std::endl;
+
+  RemoteModeState state;
+  // Initially not remote; pump notification should flip it.
+  TEST_ASSERT_EQ(state.is_remote_mode_enabled, false, "Precondition: remote disabled");
+
+  state.update_remote_from_notification(/*control_source=*/2);
+
+  TEST_ASSERT_EQ(state.is_remote_mode_enabled, true,
+                 "#53: control_source=2 (Remote/Digital) → is_remote_mode_enabled set true");
+}
+
+// ============================================================================
+// Test: control_source == 1 (Local/Panel) clears remote mode enabled (#53)
+// ============================================================================
+void test_notification_control_source_1_clears_remote_enabled() {
+  std::cout << "\n=== Testing control_source=1 Clears Remote Enabled (#53) ===" << std::endl;
+
+  RemoteModeState state;
+  // Start with remote enabled (e.g. via a previous ACK).
+  state.is_remote_mode_enabled = true;
+
+  state.update_remote_from_notification(/*control_source=*/1);
+
+  TEST_ASSERT_EQ(state.is_remote_mode_enabled, false,
+                 "#53: control_source=1 (Local/Panel) → is_remote_mode_enabled cleared");
+}
+
+// ============================================================================
+// Test: unknown control_source (0) leaves remote state unchanged (#53)
+// The reporter always saw 0 before the opcode fix (PR #50). A 0 must never
+// overwrite a state that was confirmed by a clean command ACK.
+// ============================================================================
+void test_notification_control_source_0_leaves_state_unchanged() {
+  std::cout << "\n=== Testing control_source=0 Leaves Remote State Unchanged (#53) ===" << std::endl;
+
+  // Case A: was enabled — must stay enabled.
+  {
+    RemoteModeState state;
+    state.is_remote_mode_enabled = true;
+    state.update_remote_from_notification(/*control_source=*/0);
+    TEST_ASSERT_EQ(state.is_remote_mode_enabled, true,
+                   "#53: control_source=0 does not clear a confirmed remote-enabled state");
+  }
+  // Case B: was disabled — must stay disabled.
+  {
+    RemoteModeState state;
+    state.is_remote_mode_enabled = false;
+    state.update_remote_from_notification(/*control_source=*/0);
+    TEST_ASSERT_EQ(state.is_remote_mode_enabled, false,
+                   "#53: control_source=0 does not set a disabled remote-mode state");
+  }
+}
+
+// ============================================================================
+// Test: notification control_source supersedes previous ACK-based state (#53)
+// A confirmed-remote state (via ACK) must be overwritten when the pump later
+// reports control_source=1 (e.g. user presses local panel button).
+// ============================================================================
+void test_notification_control_source_overrides_ack_state() {
+  std::cout << "\n=== Testing Notification control_source Supersedes ACK State (#53) ===" << std::endl;
+
+  RemoteModeState state;
+  // Simulate a successful enable-remote ACK.
+  state.handle_ack(/*enabling=*/true, /*got_response=*/true, /*ack_byte=*/0x00);
+  TEST_ASSERT_EQ(state.is_remote_mode_enabled, true,
+                 "Precondition: ACK confirmed remote mode enabled");
+
+  // Pump then sends a notification with control_source=1 (user pressed panel).
+  state.update_remote_from_notification(/*control_source=*/1);
+  TEST_ASSERT_EQ(state.is_remote_mode_enabled, false,
+                 "#53: panel button press (control_source=1) correctly clears remote state");
 }
 
 // ============================================================================
@@ -1033,6 +1124,11 @@ int main() {
   test_remote_mode_clean_ack_confirms_state();
   test_remote_mode_rejected_ack_leaves_state_unchanged();
   test_remote_mode_timeout_leaves_state_unchanged();
+  // Issue #53: control_source-based remote state tracking
+  test_notification_control_source_2_sets_remote_enabled();
+  test_notification_control_source_1_clears_remote_enabled();
+  test_notification_control_source_0_leaves_state_unchanged();
+  test_notification_control_source_overrides_ack_state();
   test_set_mode_does_not_force_enable_when_off();
   test_set_mode_preserves_enabled_when_on();
   test_resolve_enabled_state_aborts_when_unknown();

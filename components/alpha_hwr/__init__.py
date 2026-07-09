@@ -80,7 +80,7 @@ CONFIG_SCHEMA = cv.Schema(
         ): cv.positive_time_period_milliseconds,
         cv.Optional(
             CONF_CONTROL_STATE_POLL_INTERVAL, default="30s"
-        ): cv.time_period_milliseconds,
+        ): cv.positive_time_period_milliseconds,
         cv.Optional(CONF_FLOW): sensor.sensor_schema(
             unit_of_measurement="m³/h",
             accuracy_decimals=3,
