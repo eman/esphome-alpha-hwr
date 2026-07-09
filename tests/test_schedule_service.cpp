@@ -1,6 +1,7 @@
 #include <iostream>
 #include <vector>
 #include <cstdint>
+#include <cstdio>
 #include "../components/alpha_hwr/schedule_service.h"
 #include "../components/alpha_hwr/transport.h"
 #include "../components/alpha_hwr/session.h"
@@ -41,7 +42,7 @@ void test_schedule_write_payload() {
   bool success = service.write_entries(entries, 1);
   TEST_ASSERT(success, "write_entries() accepted the schedule");
 
-  // Run the FSM to dispatch all chunks (53 bytes total -> 3 chunks)
+  // Run the FSM to dispatch all chunks (59 bytes total -> 3 chunks)
   mock_millis += 50;
   transport.loop();
   mock_millis += 51;

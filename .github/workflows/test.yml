@@ -11,9 +11,9 @@ jobs:
     runs-on: ubuntu-latest
     
     steps:
-    - uses: actions/checkout@v4
-    
-    - name: Run C++ Unit Tests
-      run: |
-        cd tests
-        make test
+      - uses: actions/checkout@v4
+      
+      - name: Run C++ Unit Tests
+        run: |
+          cd tests
+          make test
