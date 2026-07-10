@@ -195,11 +195,12 @@ void ControlService::read_setpoints_from_pump() {
         }
       }, 5000);
   } else {
-    // For non-temperature modes, read Object 86 Sub 6 to get current setpoint.
+    // For non-temperature modes, read Object 86 Sub 7 to get current state.
+    // Sub 7 is the prioritized status object (after remote/local/alarm logic).
     // This is the same read Python's get_mode() uses.
     // Reference: control.py::get_mode() line 398
     // Use 3s delay to ensure stale passive notifications have been consumed
-    ESP_LOGD(TAG, "Reading setpoint via Object 86 Sub 6 (get_mode)...");
+    ESP_LOGD(TAG, "Reading state via Object 86 Sub 7 (get_mode)...");
     ControlMode expected_mode = current_mode_;
     get_mode_async([this, expected_mode](bool success, ControlMode mode) {
       if (success) {
@@ -241,7 +242,7 @@ void ControlService::read_setpoints_from_pump() {
                    get_setpoint_for_mode(mode), get_mode_name(mode));
         }
       } else {
-        ESP_LOGW(TAG, "Failed to read setpoint via Object 86 Sub 6 (timeout)");
+        ESP_LOGW(TAG, "Failed to read state via Object 86 Sub 7 (timeout)");
       }
     });
   }
@@ -257,10 +258,11 @@ bool ControlService::get_mode_async(std::function<void(bool, ControlMode)> on_co
     return false;
   }
 
-  ESP_LOGD(TAG, "Reading current control mode from pump (Object 86, SubID 6)...");
+  ESP_LOGD(TAG, "Reading current control mode from pump (Object 86, SubID 7)...");
 
    // Build Class 10 READ request: [0x0A][0x03][Obj][Sub-H][Sub-L]
-   // Object 86 (0x56), SubID 6 (0x0006)
+   // Object 86 (0x56), SubID 7 (0x0007) - overall_operation_prioritized_request_obj
+   // Reference: GENI profile - this is the read-only prioritized status after remote/local/alarm logic
    // Reference: control.py::_read_class10_object() lines 76-85
    //
    // IMPORTANT: The pump responds with a PASSIVE NOTIFICATION (OpSpec 0x0E), not a direct response!
@@ -268,14 +270,15 @@ bool ControlService::get_mode_async(std::function<void(bool, ControlMode)> on_co
    // We need to do the same here - accept any Class 10 packet, not just exact Object/Sub ID matches.
    //
    // Response format: [00 00 XX][control_source][operation_mode][control_mode][setpoint(4 bytes)]
+   // Where control_source now reflects the prioritized state (remote vs local control).
    uint8_t apdu[5];
    apdu[0] = 0x0A;  // Class 10
    apdu[1] = 0x03;  // OpSpec: READ (INFO)
    apdu[2] = 0x56;  // Object 86 (1 byte!)
-   apdu[3] = 0x00;  // SubID 6 high byte
-   apdu[4] = 0x06;  // SubID 6 low byte
+   apdu[3] = 0x00;  // SubID 7 high byte
+   apdu[4] = 0x07;  // SubID 7 low byte
    
-  // Send with response matching for Object 86 Sub 6 response
+  // Send with response matching for Object 86 Sub 7 response
   // The pump responds with OpSpec 0x0E notification: bytes 6-7 = Sub 0x0001, bytes 8-9 = Obj 0x2F01
     this->transport_.send_apdu_command(
       apdu, 5, 
@@ -317,17 +320,18 @@ bool ControlService::get_mode_async(std::function<void(bool, ControlMode)> on_co
               pump_enabled_ = (operation_mode != static_cast<uint8_t>(OperationMode::STOP));
               pump_enabled_valid_ = true;
               
-              // Fix #53: update remote mode state from control_source.
-              // Reference: Python control.py — is_remote = (control_source == 2).
-              //   2 = Remote/Digital, 1 = Local/Panel; unknown values leave state unchanged.
+              // Fix #53: Update remote mode state from control_source.
+              // Sub 7 is the prioritized status object that reflects the actual remote/local state
+              // after evaluation of remote/local/alarm influence.
+              // Reference: GENI profile - control_source: 2 = Remote/Digital, 1 = Local/Panel.
               if (control_source == 2) {
                 is_remote_mode_enabled_ = true;
-                ESP_LOGD(TAG, "Remote mode: explicit read control_source=2 (Remote/Digital) → enabled");
+                ESP_LOGD(TAG, "Remote mode: Sub 7 prioritized read control_source=2 (Remote/Digital) → enabled");
               } else if (control_source == 1) {
                 is_remote_mode_enabled_ = false;
-                ESP_LOGD(TAG, "Remote mode: explicit read control_source=1 (Local/Panel) → disabled");
+                ESP_LOGD(TAG, "Remote mode: Sub 7 prioritized read control_source=1 (Local/Panel) → disabled");
               } else {
-                ESP_LOGD(TAG, "Remote mode: explicit read control_source=0x%02X unrecognized — state unchanged",
+                ESP_LOGD(TAG, "Remote mode: Sub 7 prioritized read control_source=0x%02X unrecognized — state unchanged",
                          control_source);
               }
               
