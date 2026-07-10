@@ -1019,11 +1019,9 @@ void ControlService::set_temperature_range_async(float min_temp, float max_temp,
       // Payload (14 bytes)
       apdu[11] = autoadapt_enabled ? 0x01 : 0x00; // DeltaTempEnabled
       protocol::encode_float_be(min_temp, &apdu[12]);
+      protocol::encode_float_be(max_temp, &apdu[16]);
       
-      apdu[16] = 0x00;
-      apdu[17] = 0x00;
-      apdu[18] = 0x00;
-      apdu[19] = 0x16;
+      // Default time limits / constants
       apdu[20] = 0x00;
       apdu[21] = 0x00;
       apdu[22] = 0x00;

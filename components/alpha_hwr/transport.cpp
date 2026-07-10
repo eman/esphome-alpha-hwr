@@ -379,7 +379,7 @@ bool Transport::try_dispatch_response(const uint8_t* data, size_t len) {
          (cmd.packet[6] == 0x01 && cmd.packet[7] == 0xAE && cmd.packet[8] == 0x00 && cmd.packet[9] == 91) || // new format SubID 430 Obj 91
          (cmd.packet[6] == 0x56 && cmd.packet[7] == 0x00 && cmd.packet[8] == 0x06 && cmd.packet[9] == 0x01))) {  // Sub 5600 Obj 0601 (mode write)
       uint8_t err_code = (len >= 7) ? data[6] : 0xFF;
-      ESP_LOGI(TAG, "Matched short Class 10 ACK (OpSpec 0x%02X) for Obj 91/Sub 430 write. ErrCode=0x%02X", data[5], err_code);
+      ESP_LOGI(TAG, "Matched short Class 10 ACK (OpSpec 0x%02X) for Class 10 SET write. ErrCode=0x%02X", data[5], err_code);
       if (cmd.callback) {
         bool success = (data[5] == 0x01) || (data[5] == 0x81 && err_code == 0x00);
         cmd.callback(success, data, len);

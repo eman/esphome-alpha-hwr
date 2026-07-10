@@ -336,7 +336,7 @@ number:
           float max_temp = id(pump).get_cached_temp_max();
           if (std::isnan(max_temp)) max_temp = x + 10.0f;  // Reasonable default if max not yet read
           int8_t aa = id(pump).get_cached_autoadapt();
-          bool autoadapt = (aa == 1);
+          bool autoadapt = (aa != 0); // Default to true if unknown (-1)
           
           ESP_LOGI("number", "Setting temperature range: %.1f°C - %.1f°C", x, max_temp);
           id(pump).set_temperature_range(x, max_temp, autoadapt, [](bool success) {
@@ -372,7 +372,7 @@ number:
           float min_temp = id(pump).get_cached_temp_min();
           if (std::isnan(min_temp)) min_temp = x - 10.0f;  // Reasonable default if min not yet read
           int8_t aa = id(pump).get_cached_autoadapt();
-          bool autoadapt = (aa == 1);
+          bool autoadapt = (aa != 0); // Default to true if unknown (-1)
           
           ESP_LOGI("number", "Setting temperature range: %.1f°C - %.1f°C", min_temp, x);
           id(pump).set_temperature_range(min_temp, x, autoadapt, [](bool success) {
