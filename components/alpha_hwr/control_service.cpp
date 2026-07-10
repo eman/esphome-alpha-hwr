@@ -999,40 +999,46 @@ void ControlService::set_temperature_range_async(float min_temp, float max_temp,
     }
     
     // Step 2: Write temperature range to Object 91, Sub-ID 430
-    // Payload format (Type 1012): [DeltaTempEnabled(1)][MinTemp(4)][MaxTemp(4)]
-    //                              [MinOff(1)][MaxOff(1)][MinOn(1)][MaxOn(1)]
-    //                              [TimeLimitsEnabled(1)]
-    // The GENI profile for ALPHA HWR 52.7 advertises Type 1012 version 2 with
-    // fixed size 14 (includes TimeLimitsEnabled). Using 13 bytes can be
-    // accepted syntactically but ignored by the pump.
-    auto write_temp_range = [this, min_temp, max_temp, autoadapt_enabled, callback]() {
-      uint8_t struct_data[14];
-      struct_data[0] = autoadapt_enabled ? 0x01 : 0x00;
-      protocol::encode_float_be(min_temp, &struct_data[1]);
-      protocol::encode_float_be(max_temp, &struct_data[5]);
-      struct_data[9] = 0x05;
-      struct_data[10] = 0x3C;
-      struct_data[11] = 0x01;
-      struct_data[12] = 0x1E;
-      struct_data[13] = 0x01;  // time_limits_enabled
 
-      // Captured GO-app write format for Obj 91 / Sub 430:
-      // [Class][OpSpec=0x97][ObjID][SubH][SubL][TypeH][TypeL][TypeVer]
-      // [SizeH][SizeM][SizeL][Data(14)]
+    auto write_temp_range = [this, min_temp, max_temp, autoadapt_enabled, callback]() {
+      // Build APDU manually to match exactly what Grundfos GO app sends
+      // App sends: [Class 10] [OpSpec 0x97] [ObjID 91] [SubH 01] [SubL AE] [TypeH 03] [TypeL F4] [Reserved 02] [Size 00 00 0E] [Data...]
       uint8_t apdu[25];
       apdu[0] = 0x0A;     // Class 10
-      apdu[1] = 0x97;     // OpSpec observed in capture for Type 1012 writes
-      apdu[2] = 91;       // Object 91
-      apdu[3] = 0x01;     // Sub-ID high (0x01AE = 430)
+      apdu[1] = 0x97;     // OpSpec 0x97 = SET + 23 bytes (1 Obj + 2 Sub + 2 Type + 1 Res + 3 Size + 14 Data)
+      apdu[2] = 0x5B;     // Obj-ID (91 = 0x005B, encoded as 1 byte in this specific packet type)
+      apdu[3] = 0x01;     // Sub-ID high (430 = 0x01AE)
       apdu[4] = 0xAE;     // Sub-ID low
-      apdu[5] = 0x03;     // Type 1012 high byte
-      apdu[6] = 0xF4;     // Type 1012 low byte
-      apdu[7] = 0x02;     // Type version (captured)
-      apdu[8] = 0x00;     // Size byte 1 (24-bit)
-      apdu[9] = 0x00;     // Size byte 2 (24-bit)
-      apdu[10] = 0x0E;    // Size byte 3 = 14 bytes
-      memcpy(&apdu[11], struct_data, 14);
+      apdu[5] = 0x03;     // Type Code High (1012 = 0x03F4)
+      apdu[6] = 0xF4;     // Type Code Low
+      apdu[7] = 0x02;     // Reserved
+      apdu[8] = 0x00;     // Size High
+      apdu[9] = 0x00;     // Size Mid
+      apdu[10] = 0x0E;    // Size Low (14 bytes)
 
+      // Payload (14 bytes)
+      apdu[11] = autoadapt_enabled ? 0x01 : 0x00; // DeltaTempEnabled
+      protocol::encode_float_be(min_temp, &apdu[12]);
+      
+      apdu[16] = 0x00;
+      apdu[17] = 0x00;
+      apdu[18] = 0x00;
+      apdu[19] = 0x16;
+      apdu[20] = 0x00;
+      apdu[21] = 0x00;
+      apdu[22] = 0x00;
+      apdu[23] = 0x16;
+      apdu[24] = 0x00;
+
+      // Log the full APDU for debugging
+      char apdu_hex[100] = {0};
+      for (int i = 0; i < 25 && i < sizeof(apdu_hex)/3; i++) {
+        sprintf(apdu_hex + (i * 3), "%02X ", apdu[i]);
+      }
+      ESP_LOGI(TAG, "write_temp_range APDU: %s", apdu_hex);
+
+      // Pass expect_obj_id=0, expect_sub_id=0 for response matching because
+      // the pump responds with a short ACK (OpSpec 0x01) without Obj/Sub fields
       this->transport_.send_apdu_command(
           apdu, 25, 0, 0,
           [this, callback](bool success, const uint8_t * /*data*/, size_t /*len*/) {
@@ -1050,7 +1056,7 @@ void ControlService::set_temperature_range_async(float min_temp, float max_temp,
 
             if (callback) callback(true);
           },
-          1000);
+          3000); // 3000ms timeout
     };
     
     ESP_LOGI(TAG, "Temperature range write queued: %.1f-%.1f°C (AutoAdapt: %s)",
