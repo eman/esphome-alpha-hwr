@@ -108,8 +108,10 @@ switch:
       - lambda: |-
           float min_temp = id(pump).get_cached_temp_min();
           float max_temp = id(pump).get_cached_temp_max();
-          if (std::isnan(min_temp)) min_temp = 35.0f;
-          if (std::isnan(max_temp)) max_temp = 45.0f;
+          if (std::isnan(min_temp) || std::isnan(max_temp)) {
+            ESP_LOGE("switch", "Cannot change AutoAdapt: temperature range not yet cached from pump");
+            return;
+          }
           
           ESP_LOGI("switch", "Enabling Temperature AutoAdapt");
           id(pump).set_temperature_range(min_temp, max_temp, true, [](bool success) {
@@ -123,8 +125,10 @@ switch:
       - lambda: |-
           float min_temp = id(pump).get_cached_temp_min();
           float max_temp = id(pump).get_cached_temp_max();
-          if (std::isnan(min_temp)) min_temp = 35.0f;
-          if (std::isnan(max_temp)) max_temp = 45.0f;
+          if (std::isnan(min_temp) || std::isnan(max_temp)) {
+            ESP_LOGE("switch", "Cannot change AutoAdapt: temperature range not yet cached from pump");
+            return;
+          }
           
           ESP_LOGI("switch", "Disabling Temperature AutoAdapt");
           id(pump).set_temperature_range(min_temp, max_temp, false, [](bool success) {
@@ -334,9 +338,16 @@ number:
     set_action:
       - lambda: |-
           float max_temp = id(pump).get_cached_temp_max();
-          if (std::isnan(max_temp)) max_temp = x + 10.0f;  // Reasonable default if max not yet read
+          if (std::isnan(max_temp)) {
+            ESP_LOGE("number", "Cannot change min temp: max temp not yet cached from pump");
+            return;
+          }
           int8_t aa = id(pump).get_cached_autoadapt();
-          bool autoadapt = (aa != 0); // Default to true if unknown (-1)
+          if (aa == -1) {
+            ESP_LOGE("number", "Cannot change min temp: autoadapt state not yet cached from pump");
+            return;
+          }
+          bool autoadapt = (aa != 0);
           
           ESP_LOGI("number", "Setting temperature range: %.1f°C - %.1f°C", x, max_temp);
           id(pump).set_temperature_range(x, max_temp, autoadapt, [](bool success) {
@@ -370,9 +381,16 @@ number:
     set_action:
       - lambda: |-
           float min_temp = id(pump).get_cached_temp_min();
-          if (std::isnan(min_temp)) min_temp = x - 10.0f;  // Reasonable default if min not yet read
+          if (std::isnan(min_temp)) {
+            ESP_LOGE("number", "Cannot change max temp: min temp not yet cached from pump");
+            return;
+          }
           int8_t aa = id(pump).get_cached_autoadapt();
-          bool autoadapt = (aa != 0); // Default to true if unknown (-1)
+          if (aa == -1) {
+            ESP_LOGE("number", "Cannot change max temp: autoadapt state not yet cached from pump");
+            return;
+          }
+          bool autoadapt = (aa != 0);
           
           ESP_LOGI("number", "Setting temperature range: %.1f°C - %.1f°C", min_temp, x);
           id(pump).set_temperature_range(min_temp, x, autoadapt, [](bool success) {
