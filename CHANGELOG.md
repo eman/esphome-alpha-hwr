@@ -18,6 +18,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **Temperature Range writes could report success without persisting pump values** —
+  `ControlService::set_temperature_range_async()` queued the Object 91/Sub 430
+  write as fire-and-forget while the preceding mode-switch control request
+  still auto-scheduled an early commit. That commit could run before the
+  Object 91 write completed, leaving the pump on its previous/default stored
+  range while Home Assistant still reported success. Temperature range writes
+  now (1) disable the step-1 auto-commit for multi-step setters, (2) wait
+  through a response/timeout window before committing, and (3) trigger a
+  readback so cache reflects the pump's persisted state
+  (plus Class 10 short ACK dispatch for the Obj 91/Sub 430 write path, and
+  no success callback when the write ACK is missing),
+  (issue [#65](https://github.com/eman/esphome-alpha-hwr/issues/65)).
+
 - **Remote Mode switch reflected local intent rather than actual pump state** —
   The switch was declared `optimistic: false` (implying it tracks the pump's
   real state) but was driven solely by `is_remote_mode_enabled_`, a flag set

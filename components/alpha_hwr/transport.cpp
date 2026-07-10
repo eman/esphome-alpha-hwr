@@ -363,6 +363,25 @@ bool Transport::try_dispatch_response(const uint8_t* data, size_t len) {
                queued_class, data[4]);
       return false;
     }
+
+    // Some ALPHA HWR Class 10 SET commands (notably Object 91/Sub 430
+    // temperature-range writes using OpSpec 0x97) are ACKed with a short
+    // Class 10 OpSpec 0x01 frame that does not carry Obj/Sub fields.
+    // Handle that before the generic len>=12 DataObject parser below.
+    if (queued_class == 0x0A && len >= 6 && data[4] == 0x0A && data[5] == 0x01 &&
+        cmd.expect_obj_id == 0x0000 && cmd.expect_sub_id == 0x0000 &&
+        cmd.packet.size() > 8 &&
+        cmd.packet[5] == 0x97 &&  // queued OpSpec
+        cmd.packet[6] == 91 &&    // queued Object ID
+        cmd.packet[7] == 0x01 && cmd.packet[8] == 0xAE) {  // queued Sub-ID 430
+      ESP_LOGV(TAG, "Matched short Class 10 ACK (OpSpec 0x01) for Obj 91/Sub 430 write");
+      if (cmd.callback) {
+        cmd.callback(true, data, len);
+      }
+      this->command_queue_.pop_front();
+      this->state_ = State::IDLE;
+      return true;
+    }
   }
 
   // Early safety check: packet must contain at least header (10 bytes) + CRC (2 bytes)
