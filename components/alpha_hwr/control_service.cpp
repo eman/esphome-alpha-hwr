@@ -328,8 +328,10 @@ bool ControlService::get_mode_async(std::function<void(bool, ControlMode)> on_co
                 is_remote_mode_enabled_ = true;
                 ESP_LOGD(TAG, "Remote mode: Sub 7 prioritized read control_source=2 (Remote/Digital) → enabled");
               } else if (control_source == 1) {
-                is_remote_mode_enabled_ = false;
-                ESP_LOGD(TAG, "Remote mode: Sub 7 prioritized read control_source=1 (Local/Panel) → disabled");
+                // Sub 7 can transiently report Local/Panel even after a recent
+                // successful remote-enable ACK. Avoid clearing remote mode from
+                // this path to prevent flapping that blocks follow-up writes.
+                ESP_LOGD(TAG, "Remote mode: Sub 7 prioritized read control_source=1 (Local/Panel) — state unchanged");
               } else {
                 ESP_LOGD(TAG, "Remote mode: Sub 7 prioritized read control_source=0x%02X unrecognized — state unchanged",
                          control_source);
@@ -731,7 +733,8 @@ void ControlService::send_configuration_commit() {
 }
 
 
-bool ControlService::send_control_request(ControlMode mode, bool start, float setpoint) {
+bool ControlService::send_control_request(ControlMode mode, bool start, float setpoint,
+                                          bool queue_commit) {
   // Reference: control.py::_send_control_request() lines 233-284
   // Payload: [2F 01 00 00 07 00][Flag][Mode][Suffix/Setpoint(4)]
 
@@ -770,10 +773,12 @@ bool ControlService::send_control_request(ControlMode mode, bool start, float se
   apdu[5] = 0x01;  // Obj ID low
   memcpy(&apdu[6], payload, 12);
 
-  // Send command and schedule configuration commit
+  // Send command and optionally schedule configuration commit.
+  // Multi-step setters (mode switch + dedicated write) disable this here and
+  // issue a single commit after the step-2 write.
   this->transport_.send_apdu_command(apdu, 18);
 
-  if (schedule_callback_) {
+  if (queue_commit && schedule_callback_) {
     schedule_callback_([this]() { this->send_configuration_commit(); }, 200);
   }
 
@@ -849,7 +854,7 @@ void ControlService::set_constant_pressure_async(float value_m, std::function<vo
       return;
     }
     // Step 1: Update overall operation request (Sub 6)
-    if (!send_control_request(ControlMode::CONSTANT_PRESSURE, enabled, value_pa)) {
+    if (!send_control_request(ControlMode::CONSTANT_PRESSURE, enabled, value_pa, false)) {
       ESP_LOGE(TAG, "Failed to send control request for constant pressure");
       if (callback) callback(false);
       return;
@@ -893,7 +898,7 @@ void ControlService::set_constant_speed_async(float value_rpm, std::function<voi
       return;
     }
     // Step 1: Update overall operation request (Sub 6)
-    if (!send_control_request(ControlMode::CONSTANT_SPEED, enabled, value_rpm)) {
+    if (!send_control_request(ControlMode::CONSTANT_SPEED, enabled, value_rpm, false)) {
       ESP_LOGE(TAG, "Failed to send control request for constant speed");
       if (callback) callback(false);
       return;
@@ -936,7 +941,7 @@ void ControlService::set_constant_flow_async(float value_m3h, std::function<void
       return;
     }
     // Step 1: Update overall operation request (Sub 6)
-    if (!send_control_request(ControlMode::CONSTANT_FLOW, enabled, value_m3h)) {
+    if (!send_control_request(ControlMode::CONSTANT_FLOW, enabled, value_m3h, false)) {
       ESP_LOGE(TAG, "Failed to send control request for constant flow");
       if (callback) callback(false);
       return;
@@ -987,51 +992,69 @@ void ControlService::set_temperature_range_async(float min_temp, float max_temp,
     }
     // Step 1: Switch mode and set baseline (Sub 6) with min_temp as setpoint
     // Reference: control.py::set_temperature_range_control() line 924
-    if (!send_control_request(ControlMode::TEMPERATURE_RANGE, enabled, min_temp)) {
+    if (!send_control_request(ControlMode::TEMPERATURE_RANGE, enabled, min_temp, false)) {
       ESP_LOGE(TAG, "Failed to switch to TEMPERATURE_RANGE mode");
       if (callback) callback(false);
       return;
     }
     
     // Step 2: Write temperature range to Object 91, Sub-ID 430
-    // Reference: control.py::set_temperature_range_control() lines 930-955
-    // Payload format (Type 1012): [DeltaTempEnabled(1)][MinTemp(4)][MaxTemp(4)][TimeLimits(4)]
+
     auto write_temp_range = [this, min_temp, max_temp, autoadapt_enabled, callback]() {
-      uint8_t struct_data[13];
-      struct_data[0] = autoadapt_enabled ? 0x01 : 0x00;
-      protocol::encode_float_be(min_temp, &struct_data[1]);
-      protocol::encode_float_be(max_temp, &struct_data[5]);
-      struct_data[9] = 0x05;
-      struct_data[10] = 0x3C;
-      struct_data[11] = 0x01;
-      struct_data[12] = 0x1E;
-      
-      // APDU: [Class][OpSpec][ObjID][SubH][SubL][Reserved][Type(3)][Size(2)][Data(13)]
-      uint8_t apdu[24];
+      // Build APDU manually to match exactly what Grundfos GO app sends
+      // App sends: [Class 10] [OpSpec 0x97] [ObjID 91] [SubH 01] [SubL AE] [TypeH 03] [TypeL F4] [Reserved 02] [Size 00 00 0E] [Data...]
+      uint8_t apdu[25];
       apdu[0] = 0x0A;     // Class 10
-      apdu[1] = 0xB3;     // OpSpec 0xB3
-      apdu[2] = 91;       // Object 91
-      apdu[3] = 0x01;     // Sub-ID high (0x01AE = 430)
+      apdu[1] = 0x97;     // OpSpec 0x97 = SET + 23 bytes (1 Obj + 2 Sub + 2 Type + 1 Res + 3 Size + 14 Data)
+      apdu[2] = 0x5B;     // Obj-ID (91 = 0x005B, encoded as 1 byte in this specific packet type)
+      apdu[3] = 0x01;     // Sub-ID high (430 = 0x01AE)
       apdu[4] = 0xAE;     // Sub-ID low
-      apdu[5] = 0x00;     // Reserved
-      apdu[6] = 0xF4;     // Type 1012 byte 1
-      apdu[7] = 0x03;     // Type 1012 byte 2
-      apdu[8] = 0x00;     // Type 1012 byte 3
-      apdu[9] = 0x00;     // Size high byte
-      apdu[10] = 0x0D;    // Size low byte (13 bytes)
-      memcpy(&apdu[11], struct_data, 13);
+      apdu[5] = 0x03;     // Type Code High (1012 = 0x03F4)
+      apdu[6] = 0xF4;     // Type Code Low
+      apdu[7] = 0x02;     // Reserved
+      apdu[8] = 0x00;     // Size High
+      apdu[9] = 0x00;     // Size Mid
+      apdu[10] = 0x0E;    // Size Low (14 bytes)
+
+      // Payload (14 bytes)
+      apdu[11] = autoadapt_enabled ? 0x01 : 0x00; // DeltaTempEnabled
+      protocol::encode_float_be(min_temp, &apdu[12]);
+      protocol::encode_float_be(max_temp, &apdu[16]);
       
-      this->transport_.send_apdu_command(apdu, 24);
-      
-      // Cache temperature range values (no per-mode scalar setpoint for TEMPERATURE_RANGE;
-      // cached_temp_min_/max_ serve that role — issue #51)
-      cached_temp_min_ = min_temp;
-      cached_temp_max_ = max_temp;
-      cached_autoadapt_ = autoadapt_enabled ? 1 : 0;
-      
-      // Send configuration commit (transport queue handles ordering)
-      this->send_configuration_commit();
-      if (callback) callback(true);
+      // Default time limits / constants
+      apdu[20] = 0x00;
+      apdu[21] = 0x00;
+      apdu[22] = 0x00;
+      apdu[23] = 0x16;
+      apdu[24] = 0x00;
+
+      // Log the full APDU for debugging
+      char apdu_hex[100] = {0};
+      for (int i = 0; i < 25 && i < sizeof(apdu_hex)/3; i++) {
+        sprintf(apdu_hex + (i * 3), "%02X ", apdu[i]);
+      }
+      ESP_LOGI(TAG, "write_temp_range APDU: %s", apdu_hex);
+
+      // Pass expect_obj_id=0, expect_sub_id=0 for response matching because
+      // the pump responds with a short ACK (OpSpec 0x01) without Obj/Sub fields
+      this->transport_.send_apdu_command(
+          apdu, 25, 0, 0,
+          [this, callback](bool success, const uint8_t * /*data*/, size_t /*len*/) {
+            if (!success) {
+              ESP_LOGE(TAG, "Temperature range write failed (no ACK), skipping commit");
+              if (callback) callback(false);
+              return;
+            }
+
+            this->send_configuration_commit();
+
+            if (schedule_callback_) {
+              schedule_callback_([this]() { this->read_setpoints_from_pump(); }, 1200);
+            }
+
+            if (callback) callback(true);
+          },
+          3000); // 3000ms timeout
     };
     
     ESP_LOGI(TAG, "Temperature range write queued: %.1f-%.1f°C (AutoAdapt: %s)",
@@ -1071,7 +1094,7 @@ void ControlService::set_proportional_pressure_async(float value_m, std::functio
       return;
     }
     // Step 1: Update overall operation request (Sub 6) with Pa value
-    if (!send_control_request(ControlMode::PROPORTIONAL_PRESSURE, enabled, value_pa)) {
+    if (!send_control_request(ControlMode::PROPORTIONAL_PRESSURE, enabled, value_pa, false)) {
       ESP_LOGE(TAG, "Failed to send control request for proportional pressure");
       if (callback) callback(false);
       return;
@@ -1117,7 +1140,7 @@ void ControlService::set_cycle_time_control_async(uint8_t on_minutes, uint8_t of
     }
     // Step 1: Switch mode via send_control_request(DHW_ON_OFF)
     // Reference: control.py::set_cycle_time_control() lines 1006-1007
-    if (!send_control_request(ControlMode::DHW_ON_OFF, enabled)) {
+    if (!send_control_request(ControlMode::DHW_ON_OFF, enabled, NAN, false)) {
       ESP_LOGE(TAG, "Failed to switch to DHW_ON_OFF mode");
       if (callback) callback(false);
       return;

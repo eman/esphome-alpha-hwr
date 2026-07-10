@@ -562,7 +562,8 @@ class ControlService {
    * 
    * Reference: control.py::_send_control_request() lines 233-284
    */
-  bool send_control_request(ControlMode mode, bool start, float setpoint = NAN);
+  bool send_control_request(ControlMode mode, bool start, float setpoint = NAN,
+                            bool queue_commit = true);
   
   /**
    * Set a Class 10 setpoint value (OpSpec 0x84 = SET + 4 bytes).
