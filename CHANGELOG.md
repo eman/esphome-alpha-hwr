@@ -30,6 +30,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   (plus Class 10 short ACK dispatch for the Obj 91/Sub 430 write path, and
   no success callback when the write ACK is missing),
   (issue [#65](https://github.com/eman/esphome-alpha-hwr/issues/65)).
+- **Changing Temperature Range Min/Max silently re-enabled AutoAdapt** —
+  The `Temperature Range Min` and `Temperature Range Max` number entities
+  hardcoded `autoadapt = true` in their `set_action` lambdas, so adjusting
+  either bound always turned AutoAdapt back on even if the
+  `Temperature AutoAdapt` switch had just been turned off. Both setters now
+  use the pump's cached AutoAdapt state (`get_cached_autoadapt()`) when
+  writing the temperature range, preserving the current switch state while
+  updating range bounds
+  (issue [#64](https://github.com/eman/esphome-alpha-hwr/issues/64)).
 
 - **Remote Mode switch reflected local intent rather than actual pump state** —
   The switch was declared `optimistic: false` (implying it tracks the pump's
