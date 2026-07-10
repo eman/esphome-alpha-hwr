@@ -641,9 +641,9 @@ bool ControlService::enable_remote_mode() {
 
    ESP_LOGI(TAG, "Disabling remote mode (Auto)...");
 
-   // Class 3: 03 81 06 (OpSpec 0x81 = SET; command ID 6 = disable remote / Auto).
+   // Class 3: 03 81 08 (OpSpec 0x81 = SET; command ID 8 = disable remote / Auto).
    // Fix #46: was 0xC1 (INFO) -- see enable_remote_mode() for details.
-   const uint8_t apdu[3] = {0x03, 0x81, 0x06};
+   const uint8_t apdu[3] = {0x03, 0x81, 0x08};
    
    // Send command and wait for the ACK -- see enable_remote_mode().
    this->transport_.send_apdu_command(apdu, 3, 0, 0,
