@@ -492,7 +492,27 @@ bool ControlService::stop(uint8_t mode) {
     target = static_cast<ControlMode>(mode);
   }
   
-  if (!send_control_request(target, false)) {
+  float stop_setpoint = NAN;
+  if (mode == 255) {
+    switch (target) {
+      case ControlMode::CONSTANT_PRESSURE:     stop_setpoint = cached_pressure_setpoint_; break;
+      case ControlMode::PROPORTIONAL_PRESSURE: stop_setpoint = cached_proportional_setpoint_; break;
+      case ControlMode::CONSTANT_SPEED:        stop_setpoint = cached_speed_setpoint_; break;
+      case ControlMode::CONSTANT_FLOW:         stop_setpoint = cached_flow_setpoint_; break;
+      default: break;
+    }
+    if (!std::isnan(stop_setpoint)) {
+      // Stored in display units (meters for pressure); convert to pump-native units (Pascals)
+      if (target == ControlMode::CONSTANT_PRESSURE || target == ControlMode::PROPORTIONAL_PRESSURE) {
+        stop_setpoint *= 9806.65f;
+      }
+      ESP_LOGD(TAG, "Reusing cached setpoint on stop: %.4f (raw units)", stop_setpoint);
+    } else {
+      ESP_LOGD(TAG, "No cached setpoint to reuse on stop; using mode default suffix");
+    }
+  }
+
+  if (!send_control_request(target, false, stop_setpoint)) {
     ESP_LOGE(TAG, "Failed to send stop command");
     return false;
   }
@@ -555,7 +575,25 @@ bool ControlService::set_mode(ControlMode mode) {
     // Always use send_control_request() which handles all modes via Class 10
     // (defaults to mode_byte 0x02 for modes not in CLASS10_CONTROL_MAP)
     // Reference: control.py::set_mode() lines 345-366
-    if (!send_control_request(mode, enabled)) {
+    float mode_setpoint = NAN;
+    switch (mode) {
+      case ControlMode::CONSTANT_PRESSURE:     mode_setpoint = cached_pressure_setpoint_; break;
+      case ControlMode::PROPORTIONAL_PRESSURE: mode_setpoint = cached_proportional_setpoint_; break;
+      case ControlMode::CONSTANT_SPEED:        mode_setpoint = cached_speed_setpoint_; break;
+      case ControlMode::CONSTANT_FLOW:         mode_setpoint = cached_flow_setpoint_; break;
+      default: break;
+    }
+    if (!std::isnan(mode_setpoint)) {
+      // Stored in display units (meters for pressure); convert to pump-native units (Pascals)
+      if (mode == ControlMode::CONSTANT_PRESSURE || mode == ControlMode::PROPORTIONAL_PRESSURE) {
+        mode_setpoint *= 9806.65f;
+      }
+      ESP_LOGD(TAG, "Reusing cached setpoint on set_mode: %.4f (raw units)", mode_setpoint);
+    } else {
+      ESP_LOGD(TAG, "No cached setpoint to reuse on set_mode; using mode default suffix");
+    }
+
+    if (!send_control_request(mode, enabled, mode_setpoint)) {
       ESP_LOGW(TAG, "Failed to send control request for mode %d", mode_val);
       return;
     }

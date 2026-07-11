@@ -259,18 +259,8 @@ bool ScheduleService::send_configuration_commit() {
     memcpy(structure_bytes, this->overview_structure_, 10);
     ESP_LOGD(TAG, "Using cached ClockProgramOverview structure for commit");
   } else {
-    // Fallback to proper ALPHA HWR default values
-    ESP_LOGW(TAG, "No cached overview for commit - using default values");
-    structure_bytes[0] = 0x8C; // max_nof_actions = 140
-    structure_bytes[1] = 0x23; // max_nof_single_events = 35
-    structure_bytes[2] = 0x05; // max_nof_alternative_events_per_day = 5
-    structure_bytes[3] = 0x05; // max_nof_events_per_day = 5
-    structure_bytes[4] = 0x00; // clock_program_enabled (preserve current)
-    structure_bytes[5] = 0x01; // default_action = START
-    structure_bytes[6] = 0x00; // base_set_point (float32 = 0.0)
-    structure_bytes[7] = 0x00;
-    structure_bytes[8] = 0x00;
-    structure_bytes[9] = 0x00;
+    ESP_LOGW(TAG, "Cannot commit configuration: ClockProgramOverview not yet cached. Ignoring commit to prevent corruption.");
+    return false;
   }
 
   // Build APDU: Class 10 SET command for Object 84, SubID 1
