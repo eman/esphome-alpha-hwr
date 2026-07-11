@@ -50,6 +50,8 @@ ble_client:
   - mac_address: ${mac_address}
     id: hwr_pump_client
 
+api:
+
 time:
   - platform: homeassistant
     id: hwr_time

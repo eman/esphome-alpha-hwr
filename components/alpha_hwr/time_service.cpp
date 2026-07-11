@@ -71,6 +71,7 @@ void TimeService::get_clock_async(std::function<void(ESPTime)> callback) {
 }
 
 void TimeService::set_clock_async(std::function<void(bool)> callback) {
+#ifdef USE_TIME
   if (!time_id_) {
     ESP_LOGE(TAG, "time_id not configured - cannot sync clock");
     callback(false);
@@ -79,6 +80,13 @@ void TimeService::set_clock_async(std::function<void(bool)> callback) {
 
   // Get current local time from ESPHome time component
   ESPTime now = time_id_->now();
+#else
+  ESP_LOGE(TAG, "time component not enabled in ESPHome - cannot sync clock");
+  callback(false);
+  return;
+  ESPTime now; // Dummy to avoid compile error below
+#endif
+
   if (!now.is_valid() || now.year < 2021) {
     ESP_LOGE(TAG, "System time not available - cannot sync clock");
     callback(false);
@@ -188,31 +196,19 @@ ESPTime TimeService::parse_clock_response(const uint8_t *data, size_t len) {
   pump_time.day_of_year = 1;  // Not provided by pump
   
   // Calculate Unix timestamp treating pump time as local time in our configured timezone
-  if (time_id_) {
-    // Start with epoch local to initialize valid baseline (avoids is_valid() check failing)
-    ESPTime base = ESPTime::from_epoch_local(0);
-    base.year = year;
-    base.month = month;
-    base.day_of_month = day;
-    base.hour = hour;
-    base.minute = minute;
-    base.second = second;
-    
-    // Use ESPHome's timezone engine to parse these local fields into a UTC timestamp
-    base.recalc_timestamp_local();
-    pump_time.timestamp = base.timestamp;
-  } else {
-    // Fallback if no time_id is configured (assume UTC)
-    struct tm tm_pump = {};
-    tm_pump.tm_year = year - 1900;
-    tm_pump.tm_mon = month - 1;
-    tm_pump.tm_mday = day;
-    tm_pump.tm_hour = hour;
-    tm_pump.tm_min = minute;
-    tm_pump.tm_sec = second;
-    tm_pump.tm_isdst = -1;
-    pump_time.timestamp = mktime(&tm_pump);
-  }
+  // Start with epoch local to initialize valid baseline (avoids is_valid() check failing)
+  ESPTime base = ESPTime::from_epoch_local(0);
+  base.year = year;
+  base.month = month;
+  base.day_of_month = day;
+  base.hour = hour;
+  base.minute = minute;
+  base.second = second;
+  
+  // Use ESPHome's timezone engine to parse these local fields into a UTC timestamp
+  // (Works in static context because ESPTime timezone configuration is global in ESPHome)
+  base.recalc_timestamp_local();
+  pump_time.timestamp = base.timestamp;
   
   ESP_LOGD(TAG, "ESPTime created: timestamp=%ld, is_valid=%d", 
            pump_time.timestamp, pump_time.is_valid());

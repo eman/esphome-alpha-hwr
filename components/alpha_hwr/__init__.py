@@ -6,6 +6,7 @@ from esphome.components import (
     binary_sensor,
     text_sensor,
     esp32_ble_tracker,
+    time,
 )
 from esphome.const import (
     CONF_ID,
