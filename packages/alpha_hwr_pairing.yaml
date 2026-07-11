@@ -35,7 +35,7 @@
 # ==============================================================================
 
 external_components:
-  - source: github://eman/esphome-alpha-hwr@v0.8.0
+  - source: github://eman/esphome-alpha-hwr@v0.9.0
     components: [alpha_hwr, dhw_demand]
 
 esp32_ble_tracker:
