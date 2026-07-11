@@ -39,6 +39,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   (plus Class 10 short ACK dispatch for the Obj 91/Sub 430 write path, and
   no success callback when the write ACK is missing),
   (issue [#65](https://github.com/eman/esphome-alpha-hwr/issues/65)).
+- **Missing entities on reconnect / startup race conditions** —
+  Added `sync_cache_async` orchestration during the authentication handshake 
+  which polls Object 86 and Object 91 before the pump is marked as "Ready". 
+  This ensures that all configuration bounds and telemetry entities instantly 
+  populate when the pump connects, completely eliminating stale `0`/`NaN` gaps 
+  and the need for manual polling
+  (issue [#67](https://github.com/eman/esphome-alpha-hwr/issues/67)).
+- **Multi-parameter writes scrambled defaults due to missing cache** —
+  Because `sync_cache_async` now guarantees internal telemetry bounds (like 
+  AutoAdapt and Cycle Times) are populated before writes are permitted, 
+  multi-parameter setters (e.g. Temperature Range or AutoAdapt toggle) no longer
+  rely on uninitialized dummy defaults `0`. The setters reuse genuine pump 
+  values for unchanged fields, preventing unintended resets or scrambled schedules
+  (issue [#70](https://github.com/eman/esphome-alpha-hwr/issues/70)).
 - **Changing Temperature Range Min/Max silently re-enabled AutoAdapt** —
   The `Temperature Range Min` and `Temperature Range Max` number entities
   hardcoded `autoadapt = true` in their `set_action` lambdas, so adjusting

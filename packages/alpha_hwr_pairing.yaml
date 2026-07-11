@@ -68,6 +68,8 @@ alpha_hwr:
    # Pairing Status
    pairing_status:
      name: "Pairing Status"
+   ready_status:
+     name: "Pump Ready"
 
    # Pump Link Status (coarse connection health) + latched last-failure detail
    pump_link_status:
