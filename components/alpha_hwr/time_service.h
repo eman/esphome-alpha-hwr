@@ -3,6 +3,9 @@
 #include "esphome/core/component.h"
 #include "esphome/core/log.h"
 #include "esphome/core/time.h"
+#ifdef USE_TIME
+#include "esphome/components/time/real_time_clock.h"
+#endif
 #include "transport.h"
 #include <ctime>
 
@@ -34,6 +37,10 @@ class TimeService {
    * @param transport Transport layer for BLE communication
    */
   explicit TimeService(core::Transport *transport) : transport_(transport) {}
+  
+#ifdef USE_TIME
+  void set_time_id(time::RealTimeClock *time_id) { time_id_ = time_id; }
+#endif
 
   /**
    * @brief Read the pump's internal real-time clock.
@@ -69,8 +76,9 @@ class TimeService {
 
  private:
   core::Transport *transport_;
-
-
+#ifdef USE_TIME
+  time::RealTimeClock *time_id_{nullptr};
+#endif
 
   /**
    * @brief Parse clock response data.
