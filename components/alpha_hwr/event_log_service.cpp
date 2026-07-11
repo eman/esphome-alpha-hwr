@@ -108,7 +108,7 @@ void EventLogService::read_entries_async(
       // Entry responses use OpSpec 0x14 with bytes 6-7=0x0000, 8-9=0xF402
       // Must allow register-read matching since OpSpec 0x14 is normally filtered
       static constexpr uint16_t ENTRY_MATCH_SUB = 0xF402;
-      this->transport_.send_apdu_command(apdu, 5, 0, ENTRY_MATCH_SUB,
+      this->transport_.send_apdu_command(apdu, 5, ENTRY_MATCH_SUB, 0,
           [this, idx, entries, on_complete, count, read_next](
               bool success, const uint8_t *payload, size_t payload_len) {
         if (success) {
