@@ -249,7 +249,7 @@ public:
    *
    * @return True if successfully disabled, false otherwise
    *
-   * Protocol: Same as enable() but sets byte 4 to 0x00
+   * Protocol: Same as enable_schedule() but sets byte 4 to 0x00
    */
   bool disable_schedule();
 
