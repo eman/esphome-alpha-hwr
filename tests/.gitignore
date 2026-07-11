@@ -5,6 +5,8 @@ calc_test_crcs
 verify_crc
 test_dhw_demand_logic
 test_transport_matching
+test_transport_fsm
+test_schedule_service
 
 # Object files
 *.o
