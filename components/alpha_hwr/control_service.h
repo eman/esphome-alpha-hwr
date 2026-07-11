@@ -362,6 +362,19 @@ class ControlService {
             cached_cycle_time_off_ != -1;
    }
 
+   /**
+    * Invalidate all cached control data.
+    */
+   void invalidate_cache() {
+     mode_valid_ = false;
+     pump_enabled_valid_ = false;
+     cached_autoadapt_ = -1;
+     cached_temp_min_ = NAN;
+     cached_temp_max_ = NAN;
+     cached_cycle_time_on_ = -1;
+     cached_cycle_time_off_ = -1;
+   }
+
    // ========== Setpoint Configuration Methods ==========
    
    /**

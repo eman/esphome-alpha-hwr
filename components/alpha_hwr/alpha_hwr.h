@@ -244,6 +244,9 @@ public:
   }
 
 private:
+  // Helper for retrying the initial cache sync
+  void do_control_cache_sync(uint32_t gen);
+
   ble_client::BLEClient *parent_ = nullptr;
 
   bool pairing_enabled_ =

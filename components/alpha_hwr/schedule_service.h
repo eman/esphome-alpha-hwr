@@ -418,6 +418,11 @@ public:
    * @return True if cached state is valid, false if no state has been read yet
    */
   bool is_overview_cache_valid() const { return overview_cached_; }
+  
+  /**
+   * Invalidate all cached schedule data.
+   */
+  void invalidate_cache() { overview_cached_ = false; }
 
   /**
    * Format single events as display string.

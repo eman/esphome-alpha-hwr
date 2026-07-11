@@ -60,6 +60,11 @@ void AlphaHwrComponent::setup() {
     // Reset initial-read flag so device info, clock sync, etc. are re-fetched
     // after reconnect (pump may have rebooted).
     this->initial_data_read_done_ = false;
+    
+    // Invalidate caches so old values don't falsely satisfy ready gating
+    this->control_service_.invalidate_cache();
+    this->schedule_service_.invalidate_cache();
+    
     if (this->ready_sensor_) {
       this->ready_sensor_->publish_state(false);
     }
@@ -483,9 +488,23 @@ void AlphaHwrComponent::trigger_initial_data_reads() {
 
   // Query control mode, setpoints, config, and cycle time bounds
   this->set_timeout(5000, [this, gen]() {
+    this->do_control_cache_sync(gen);
+  });
+}
+
+void AlphaHwrComponent::do_control_cache_sync(uint32_t gen) {
+  if (gen != this->read_chain_gen_) return;
+  ESP_LOGD(TAG, "Syncing full control cache (Mode, Setpoints, Config)...");
+  this->control_service_.sync_cache_async([this, gen](bool success) {
     if (gen != this->read_chain_gen_) return;
-    ESP_LOGD(TAG, "Syncing full control cache (Mode, Setpoints, Config)...");
-    this->control_service_.sync_cache_async();
+    if (success) {
+      ESP_LOGD(TAG, "Control cache sync complete");
+    } else {
+      ESP_LOGW(TAG, "Control cache sync failed, retrying in 5s");
+      this->set_timeout(5000, [this, gen]() {
+        this->do_control_cache_sync(gen);
+      });
+    }
   });
 }
 
