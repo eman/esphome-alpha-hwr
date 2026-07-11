@@ -126,7 +126,7 @@ class DeviceInfoService {
    *   - start_count: Total number of pump starts (uint32 BE, offset 0)
    *   - operating_time: Total operating seconds (uint32 BE, offset 8) → hours
    *
-   * @param on_complete Callback(bool success, DeviceStatistics)
+   * @param on_complete Callback(bool success, uint32_t start_count, float operating_hours)
    *
    * Reference: device_info.py::read_statistics() lines 302-367
    */

@@ -113,6 +113,8 @@ bool DeviceInfoService::read_device_info_async(std::function<void(bool)> on_comp
       }
       on_string_read_complete();
     });
+
+  return true;
 }
 
 void DeviceInfoService::read_class7_string_async(uint8_t string_id, 
