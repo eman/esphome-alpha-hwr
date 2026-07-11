@@ -167,7 +167,7 @@ void Transport::send_apdu_command(const uint8_t* apdu, size_t apdu_len,
 
   std::vector<uint8_t> packet(packet_raw, packet_raw + packet_len);
   
-  this->send_command(packet, expect_obj_id, expect_sub_id, callback, timeout_ms, allow_register_read);
+  this->send_command(packet, expect_obj_id, expect_sub_id, callback, timeout_ms, allow_register_read, expect_short_ack);
 }
 
 bool Transport::is_frame_start(uint8_t byte) {
@@ -398,8 +398,8 @@ bool Transport::try_dispatch_response(const uint8_t* data, size_t len) {
   }
   
   // Extract payload: skip header (10 bytes) and CRC (2 bytes)
-  const uint8_t* payload = data + 10;
-  size_t payload_len = len - 12;
+  const uint8_t* payload = (len >= 12) ? (data + 10) : nullptr;
+  size_t payload_len = (len >= 12) ? (len - 12) : 0;
 
   // Extract identifiers from the response packet
   uint8_t opspec = (len > 5) ? data[5] : 0x00;
@@ -497,7 +497,7 @@ bool Transport::try_dispatch_response(const uint8_t* data, size_t len) {
       matched = (packet_obj_id == cmd.expect_obj_id && (packet_sub_id == cmd.expect_sub_id || packet_sub_id == 0));
       
       // BACKUP MATCH: If ObjID doesn't match but SubID matches our expected ObjID (swapped)
-      if (!matched && packet_sub_id == cmd.expect_obj_id) {
+      if (!matched && cmd.expect_obj_id != 0 && packet_sub_id == cmd.expect_obj_id) {
         matched = true;
       }
     }
@@ -507,7 +507,7 @@ bool Transport::try_dispatch_response(const uint8_t* data, size_t len) {
     // the standard Obj/Sub IDs in the payload header. Python reference simply accepted it 
     // via a wildcard match and sliced at byte 10. We explicitly handle this case here to 
     // avoid wildcard matching other packets.
-    if (!matched && cmd.expect_obj_id == 91 && cmd.expect_sub_id == 430 && opspec == 0x15) {
+    if (!matched && cmd.expect_obj_id == 91 && cmd.expect_sub_id == 430 && opspec == 0x15 && len >= 12) {
       matched = true;
       payload = data + 10;
       payload_len = len - 12; // len - 10(header) - 2(CRC)
