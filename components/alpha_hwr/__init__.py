@@ -42,6 +42,7 @@ CONF_CURRENT = "current"
 CONF_INLET_PRESSURE = "inlet_pressure"
 CONF_HEAD_RATE = "head_rate"
 CONF_PAIRING_STATUS = "pairing_status"
+CONF_READY_STATUS = "ready_status"
 CONF_ENABLE_PAIRING = "enable_pairing"
 CONF_RECONNECT_SETTLE_TIME = "reconnect_settle_time"
 CONF_CONTROL_STATE_POLL_INTERVAL = "control_state_poll_interval"
@@ -155,6 +156,9 @@ CONFIG_SCHEMA = cv.Schema(
         ),
         cv.Optional(CONF_PAIRING_STATUS): binary_sensor.binary_sensor_schema(
             device_class=DEVICE_CLASS_CONNECTIVITY,
+        ),
+        cv.Optional(CONF_READY_STATUS): binary_sensor.binary_sensor_schema(
+            icon="mdi:check-network-outline",
         ),
         cv.Optional(CONF_ALARMS): text_sensor.text_sensor_schema(
             icon="mdi:alert-circle",
@@ -309,6 +313,10 @@ async def to_code(config):
     if CONF_PAIRING_STATUS in config:
         sens = await binary_sensor.new_binary_sensor(config[CONF_PAIRING_STATUS])
         cg.add(var.set_pairing_status_binary_sensor(sens))
+
+    if CONF_READY_STATUS in config:
+        sens = await binary_sensor.new_binary_sensor(config[CONF_READY_STATUS])
+        cg.add(var.set_ready_binary_sensor(sens))
 
     if CONF_ALARMS in config:
         sens = await text_sensor.new_text_sensor(config[CONF_ALARMS])

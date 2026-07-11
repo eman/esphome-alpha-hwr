@@ -145,107 +145,72 @@ void ControlService::update_mode_from_notification(uint8_t mode, uint8_t operati
 }
 
 
-void ControlService::read_setpoints_from_pump() {
-  if (!mode_valid_) {
-    ESP_LOGW(TAG, "Cannot read setpoints: mode not yet known");
-    return;
-  }
+void ControlService::sync_cache_async(std::function<void(bool)> callback) {
+  ESP_LOGD(TAG, "Syncing full control cache...");
+  ControlMode expected_mode = mode_valid_ ? current_mode_ : ControlMode::NONE;
   
-  ESP_LOGD(TAG, "Reading setpoints for mode: %s", get_mode_name(current_mode_));
-  
-  // For Temperature Range mode, read Object 91 Sub 430 for min/max temps + autoadapt
-  if (current_mode_ == ControlMode::TEMPERATURE_RANGE) {
-    ESP_LOGD(TAG, "Reading temperature range from Object 91 Sub 430...");
+  get_mode_async([this, expected_mode, callback](bool success, ControlMode mode) {
+    if (!success) {
+      ESP_LOGW(TAG, "Failed to sync control state (get_mode failed)");
+      if (callback) callback(false);
+      return;
+    }
     
-    uint8_t apdu[5];
-    apdu[0] = 0x0A;  // Class 10
-    apdu[1] = 0x03;  // OpSpec: READ
-    apdu[2] = 91;    // Object 91
-    apdu[3] = 0x01;  // Sub 430 high byte (430 = 0x01AE)
-    apdu[4] = 0xAE;  // Sub 430 low byte
+    if (expected_mode != ControlMode::NONE && mode != expected_mode) {
+      ESP_LOGW(TAG, "Pump returned stale mode %s (expected %s), retrying in 2s...",
+               get_mode_name(mode), get_mode_name(expected_mode));
+      // Restore expected mode
+      current_mode_ = expected_mode;
+      mode_valid_ = true;
+      switch (expected_mode) {
+        case ControlMode::CONSTANT_PRESSURE: cached_pressure_setpoint_ = NAN; break;
+        case ControlMode::PROPORTIONAL_PRESSURE: cached_proportional_setpoint_ = NAN; break;
+        case ControlMode::CONSTANT_SPEED: cached_speed_setpoint_ = NAN; break;
+        default: break;
+      }
+      if (mode_change_callback_) {
+        mode_change_callback_(current_mode_, cached_operation_mode_, get_setpoint_for_mode(current_mode_));
+      }
+      if (schedule_callback_) {
+        schedule_callback_([this, callback]() { this->sync_cache_async(callback); }, 2000);
+      } else {
+        if (callback) callback(false);
+      }
+      return; // Stop here, retry will continue
+    }
     
-    // Use wildcard matching (0, 0) like Python reference's match_class10_response,
-    // because the pump responds with OpSpec 0x15 whose frame layout doesn't follow
-    // the standard [ObjH][ObjL][SubH][SubL] order that explicit matching expects.
+    // Now read Obj 91 Sub 430 for Temp Range, AutoAdapt, and Cycle Time
+    uint8_t apdu[5] = {0x0A, 0x03, 91, 0x01, 0xAE};
     this->transport_.send_apdu_command(apdu, 5, 0, 0,
-      [this](bool ok, const uint8_t* payload, size_t payload_len) {
+      [this, callback](bool ok, const uint8_t* payload, size_t payload_len) {
         if (!ok || payload_len < 12) {
-          ESP_LOGW(TAG, "Failed to read temp range (success=%d, len=%zu)", ok, payload_len);
+          ESP_LOGW(TAG, "Failed to sync config bounds (success=%d, len=%zu)", ok, payload_len);
+          if (callback) callback(false);
           return;
         }
         
-        // Skip 3-byte header [00 00 XX] if present
-        int offset = 0;
-        if (payload_len >= 3 && payload[0] == 0x00 && payload[1] == 0x00) {
-          offset = 3;
-        }
+        int offset = (payload_len >= 3 && payload[0] == 0x00 && payload[1] == 0x00) ? 3 : 0;
         
         if (payload_len >= (size_t)(offset + 9)) {
-          // [delta_enabled(1)][min_temp(4 float BE)][max_temp(4 float BE)]
           cached_autoadapt_ = payload[offset] ? 1 : 0;
           cached_temp_min_ = protocol::decode_float_be(&payload[offset + 1]);
           cached_temp_max_ = protocol::decode_float_be(&payload[offset + 5]);
-          ESP_LOGI(TAG, "Temperature range: min=%.1f, max=%.1f, autoadapt=%s", 
-                   cached_temp_min_, cached_temp_max_, cached_autoadapt_ ? "ON" : "OFF");
           
-          // Trigger mode change callback to update UI
-          if (mode_change_callback_) {
-            mode_change_callback_(current_mode_, cached_operation_mode_, get_setpoint_for_mode(current_mode_));
+          if (payload_len >= (size_t)(offset + 13)) {
+            cached_cycle_time_off_ = payload[offset + 9];
+            if (payload_len >= (size_t)(offset + 16)) {
+              cached_cycle_time_on_ = payload[offset + 12];
+            }
           }
         }
+        
+        if (mode_change_callback_) {
+          mode_change_callback_(current_mode_, cached_operation_mode_, get_setpoint_for_mode(current_mode_));
+        }
+        
+        if (callback) callback(true);
       }, 5000);
-  } else {
-    // For non-temperature modes, read Object 86 Sub 7 to get current state.
-    // Sub 7 is the prioritized status object (after remote/local/alarm logic).
-    // This is the same read Python's get_mode() uses.
-    // Reference: control.py::get_mode() line 398
-    // Use 3s delay to ensure stale passive notifications have been consumed
-    ESP_LOGD(TAG, "Reading state via Object 86 Sub 7 (get_mode)...");
-    ControlMode expected_mode = current_mode_;
-    get_mode_async([this, expected_mode](bool success, ControlMode mode) {
-      if (success) {
-        // Check if pump returned a stale mode (not yet updated after set_mode)
-        if (mode != expected_mode) {
-          ESP_LOGW(TAG, "Pump returned stale mode %s (expected %s), retrying in 2s...",
-                   get_mode_name(mode), get_mode_name(expected_mode));
-          // Restore expected mode (don't let stale response overwrite our set_mode)
-          current_mode_ = expected_mode;
-          mode_valid_ = true;
-          // NAN the expected mode's per-mode field to signal "not yet read"
-          // (CONSTANT_FLOW excluded — client-write is the source of truth, issue #44)
-          switch (expected_mode) {
-            case ControlMode::CONSTANT_PRESSURE: cached_pressure_setpoint_ = NAN; break;
-            case ControlMode::PROPORTIONAL_PRESSURE: cached_proportional_setpoint_ = NAN; break;
-            case ControlMode::CONSTANT_SPEED: cached_speed_setpoint_ = NAN; break;
-            default: break;
-          }
-          if (mode_change_callback_) {
-            mode_change_callback_(current_mode_, cached_operation_mode_, get_setpoint_for_mode(current_mode_));
-          }
-          // Retry after additional delay
-          if (schedule_callback_) {
-            schedule_callback_([this]() {
-              get_mode_async([this](bool ok, ControlMode m) {
-                if (ok) {
-                  ESP_LOGD(TAG, "Retry setpoint read: %.4f (mode: %s)", get_setpoint_for_mode(m), get_mode_name(m));
-                  if (mode_change_callback_) {
-                    mode_change_callback_(current_mode_, cached_operation_mode_, get_setpoint_for_mode(current_mode_));
-                  }
-                } else {
-                  ESP_LOGW(TAG, "Retry setpoint read failed (timeout)");
-                }
-              });
-            }, 5000);
-          }
-        } else {
-          ESP_LOGI(TAG, "Setpoint read from pump: %.4f (mode: %s)", 
-                   get_setpoint_for_mode(mode), get_mode_name(mode));
-        }
-      } else {
-        ESP_LOGW(TAG, "Failed to read state via Object 86 Sub 7 (timeout)");
-      }
-    });
-  }
+  });
 }
 
 bool ControlService::get_mode_async(std::function<void(bool, ControlMode)> on_complete) {
@@ -609,7 +574,7 @@ bool ControlService::set_mode(ControlMode mode) {
 
     // Read setpoints for the new mode after delay (pump needs time to update passive notifications)
     if (schedule_callback_) {
-      schedule_callback_([this]() { read_setpoints_from_pump(); }, 5000);
+      schedule_callback_([this]() { sync_cache_async(nullptr); }, 5000);
     }
 
     // Log what flag was sent, not an assertion about the resulting pump
@@ -1083,7 +1048,7 @@ void ControlService::set_temperature_range_async(float min_temp, float max_temp,
             this->send_configuration_commit();
 
             if (schedule_callback_) {
-              schedule_callback_([this]() { this->read_setpoints_from_pump(); }, 1200);
+              schedule_callback_([this]() { this->sync_cache_async(nullptr); }, 1200);
             }
 
             if (callback) callback(true);
