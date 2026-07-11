@@ -589,7 +589,7 @@ class ControlService {
    * 
    * Reference: control.py::_send_control_request() lines 233-284
    */
-  bool send_control_request(ControlMode mode, bool start, float setpoint = NAN,
+  bool send_control_request(ControlMode mode, bool start_pump, float setpoint = NAN,
                             bool queue_commit = true);
   
   /**

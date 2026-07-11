@@ -186,7 +186,7 @@ void HistoryService::read_cycle_timestamps_async(
     // Skip 3-byte header if present [00 00 XX]
     const uint8_t *data = payload;
     size_t data_len = payload_len;
-    if (data_len > 3 && data[0] == 0x00 && data[1] == 0x00) {
+    if (data[0] == 0x00 && data[1] == 0x00) {
       data += 3;
       data_len -= 3;
     }

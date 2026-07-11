@@ -485,14 +485,14 @@ public:
 
   // Schedule service access methods (for ESPHome buttons/lambdas)
   bool enable_schedule() {
-    bool success = schedule_service_.enable();
+    bool success = schedule_service_.enable_schedule();
     if (success) {
       this->publish_schedule_json();
     }
     return success;
   }
   bool disable_schedule() {
-    bool success = schedule_service_.disable();
+    bool success = schedule_service_.disable_schedule();
     if (success) {
       this->publish_schedule_json();
     }

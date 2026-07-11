@@ -40,11 +40,10 @@ bool DeviceInfoService::read_device_info_async(std::function<void(bool)> on_comp
   completion_callback_ = on_complete;
   
   // Queue all 5 string reads
-  bool success = true;
   
-  // Product name (ID 1)
-  success &= read_class7_string_async(STRING_ID_PRODUCT_NAME, 
-    [this](bool ok, const char* value) {
+  // Read Product Name (ID 1)
+  read_class7_string_async(STRING_ID_PRODUCT_NAME,
+      [this](bool ok, const char* value) {
       if (ok && value) {
         product_name_ = value;
         // Fix: Python prepends "A" if result is "LPHA HWR"
@@ -59,9 +58,9 @@ bool DeviceInfoService::read_device_info_async(std::function<void(bool)> on_comp
       on_string_read_complete();
     });
   
-  // Serial number (ID 9)
-  success &= read_class7_string_async(STRING_ID_SERIAL,
-    [this](bool ok, const char* value) {
+  // Read Serial Number (ID 9)
+  read_class7_string_async(STRING_ID_SERIAL,
+      [this](bool ok, const char* value) {
       if (ok && value) {
         serial_number_ = value;
         // Fix: Python prepends "1" if result starts with "0"
@@ -76,9 +75,9 @@ bool DeviceInfoService::read_device_info_async(std::function<void(bool)> on_comp
       on_string_read_complete();
     });
   
-  // Software version (ID 50)
-  success &= read_class7_string_async(STRING_ID_SOFTWARE_VERSION,
-    [this](bool ok, const char* value) {
+  // Read Software Version (ID 50)
+  read_class7_string_async(STRING_ID_SOFTWARE_VERSION,
+      [this](bool ok, const char* value) {
       if (ok && value) {
         software_version_ = value;
         ESP_LOGD(TAG, "Software version: %s", software_version_.c_str());
@@ -89,9 +88,9 @@ bool DeviceInfoService::read_device_info_async(std::function<void(bool)> on_comp
       on_string_read_complete();
     });
   
-  // Hardware version (ID 52)
-  success &= read_class7_string_async(STRING_ID_HARDWARE_VERSION,
-    [this](bool ok, const char* value) {
+  // Read Hardware Version (ID 52)
+  read_class7_string_async(STRING_ID_HARDWARE_VERSION,
+      [this](bool ok, const char* value) {
       if (ok && value) {
         hardware_version_ = value;
         ESP_LOGD(TAG, "Hardware version: %s", hardware_version_.c_str());
@@ -102,9 +101,9 @@ bool DeviceInfoService::read_device_info_async(std::function<void(bool)> on_comp
       on_string_read_complete();
     });
   
-  // BLE version (ID 58)
-  success &= read_class7_string_async(STRING_ID_BLE_VERSION,
-    [this](bool ok, const char* value) {
+  // Read BLE Version (ID 58)
+  read_class7_string_async(STRING_ID_BLE_VERSION,
+      [this](bool ok, const char* value) {
       if (ok && value) {
         ble_version_ = value;
         ESP_LOGD(TAG, "BLE version: %s", ble_version_.c_str());
@@ -114,11 +113,11 @@ bool DeviceInfoService::read_device_info_async(std::function<void(bool)> on_comp
       }
       on_string_read_complete();
     });
-  
-  return success;
+
+  return true;
 }
 
-bool DeviceInfoService::read_class7_string_async(uint8_t string_id, 
+void DeviceInfoService::read_class7_string_async(uint8_t string_id, 
                                                    std::function<void(bool, const char*)> on_complete) {
   // Build Class 7 ReadString APDU: [0x07][0x01][StringID]
   uint8_t apdu[3] = {0x07, 0x01, string_id};
@@ -179,8 +178,6 @@ bool DeviceInfoService::read_class7_string_async(uint8_t string_id,
     },
     3000  // 3 second timeout
   );
-  
-  return true;
 }
 
 void DeviceInfoService::on_string_read_complete() {

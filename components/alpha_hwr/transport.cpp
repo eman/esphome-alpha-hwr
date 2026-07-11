@@ -402,17 +402,15 @@ bool Transport::try_dispatch_response(const uint8_t* data, size_t len) {
   size_t payload_len = (len >= 12) ? (len - 12) : 0;
 
   // Extract identifiers from the response packet
-  uint8_t opspec = (len > 5) ? data[5] : 0x00;
-  uint16_t packet_sub_id = (len > 7) ? (data[6] << 8) | data[7] : 0;
-  uint16_t packet_obj_id = (len > 9) ? (data[8] << 8) | data[9] : 0;
+  uint8_t opspec = data[5];
+  uint16_t packet_sub_id = (data[6] << 8) | data[7];
+  uint16_t packet_obj_id = (data[8] << 8) | data[9];
 
   // Log incoming packets at verbose level when waiting for a command response
   if (this->state_ == State::AWAITING_RESPONSE && !this->command_queue_.empty()) {
     auto &cmd = this->command_queue_.front();
-    if (len > 5) {
-      ESP_LOGV(TAG, "[AWAITING] Packet received: len=%d, Class=%02X, OpSpec=%02X, Sub=%d, Obj=%d (waiting for Obj %d Sub %d)",
-               len, (len > 4 ? data[4] : 0xFF), opspec, packet_sub_id, packet_obj_id, cmd.expect_obj_id, cmd.expect_sub_id);
-    }
+    ESP_LOGV(TAG, "[AWAITING] Packet received: len=%d, Class=%02X, OpSpec=%02X, Sub=%d, Obj=%d (waiting for Obj %d Sub %d)",
+             len, data[4], opspec, packet_sub_id, packet_obj_id, cmd.expect_obj_id, cmd.expect_sub_id);
   }
 
   // 1. Check if we are waiting for a command response
@@ -429,7 +427,7 @@ bool Transport::try_dispatch_response(const uint8_t* data, size_t len) {
     
     // This IS a Class 10 response. Now check if it matches our expected Object/Sub ID
     // Extract OpSpec
-    opspec = (len > 5) ? data[5] : 0x00;
+    opspec = data[5];
     
     // Determine packet structure based on OpSpec
     bool is_register_read = (opspec == 0x30 || opspec == 0x2B || opspec == 0x14 || 
@@ -549,7 +547,7 @@ bool Transport::try_dispatch_response(const uint8_t* data, size_t len) {
   }
 
   // Extract OpSpec to see what kind of response this is
-  opspec = (len > 5) ? data[5] : 0x00;
+  opspec = data[5];
 
   packet_obj_id = 0;
   packet_sub_id = 0;
@@ -565,13 +563,8 @@ bool Transport::try_dispatch_response(const uint8_t* data, size_t len) {
   }
   
   // Parse as DataObject format
-  if (len > 9) {
-    packet_obj_id = (data[6] << 8) | data[7];  // Object ID is 16-bit big-endian at bytes 6-7
-    packet_sub_id = (data[8] << 8) | data[9];  // Sub-ID is 16-bit big-endian at bytes 8-9
-  } else {
-    ESP_LOGV(TAG, "Packet too short to extract Object/SubID");
-    return false;
-  }
+  packet_obj_id = (data[6] << 8) | data[7];  // Object ID is 16-bit big-endian at bytes 6-7
+  packet_sub_id = (data[8] << 8) | data[9];  // Sub-ID is 16-bit big-endian at bytes 8-9
 
   ESP_LOGV(TAG, "DataObject response: OpSpec=0x%02X, Object %d SubID %d (checking %d handlers)",
            opspec, packet_obj_id, packet_sub_id, pending_handlers_.size());
