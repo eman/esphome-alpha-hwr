@@ -741,7 +741,7 @@ void ControlService::send_configuration_commit() {
 }
 
 
-bool ControlService::send_control_request(ControlMode mode, bool start, float setpoint,
+bool ControlService::send_control_request(ControlMode mode, bool start_pump, float setpoint,
                                           bool queue_commit) {
   // Reference: control.py::_send_control_request() lines 233-284
   // Payload: [2F 01 00 00 07 00][Flag][Mode][Suffix/Setpoint(4)]
@@ -760,7 +760,7 @@ bool ControlService::send_control_request(ControlMode mode, bool start, float se
   payload[3] = 0x00;
   payload[4] = 0x07;
   payload[5] = 0x00;
-  payload[6] = start ? 0x00 : 0x01;  // 0=Start, 1=Stop
+  payload[6] = start_pump ? 0x00 : 0x01;  // 0=Start, 1=Stop
   payload[7] = mapping.mode_byte;
 
   if (!std::isnan(setpoint)) {

@@ -126,7 +126,7 @@ class DeviceInfoService {
    *   - start_count: Total number of pump starts (uint32 BE, offset 0)
    *   - operating_time: Total operating seconds (uint32 BE, offset 8) → hours
    *
-   * @param on_complete Callback(bool success, uint32_t start_count, float operating_hours)
+   * @param on_complete Callback(bool success, DeviceStatistics)
    *
    * Reference: device_info.py::read_statistics() lines 302-367
    */
@@ -153,7 +153,6 @@ class DeviceInfoService {
    * 
    * @param string_id String ID to read (1=product, 9=serial, 50=sw, 52=hw, 58=ble)
    * @param on_complete Callback function(bool success, const char* value)
-   * @return True if read request was queued successfully
    * 
    * Protocol Notes:
    * - APDU: [0x07][0x01][StringID]
@@ -161,7 +160,8 @@ class DeviceInfoService {
    * 
    * Reference: base.py::_read_class7_string() lines 121-160
    */
-  bool read_class7_string_async(uint8_t string_id, std::function<void(bool, const char*)> on_complete);
+  void read_class7_string_async(uint8_t string_id, 
+                                std::function<void(bool, const char*)> on_complete);
 
   /**
    * Handle completion of a single string read.

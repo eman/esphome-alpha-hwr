@@ -81,10 +81,10 @@ void TimeService::set_clock_async(std::function<void(bool)> callback) {
   // Get current local time from ESPHome time component
   ESPTime now = time_id_->now();
 #else
+  ESPTime now; // Dummy to avoid compile error below
   ESP_LOGE(TAG, "time component not enabled in ESPHome - cannot sync clock");
   callback(false);
   return;
-  ESPTime now; // Dummy to avoid compile error below
 #endif
 
   if (!now.is_valid() || now.year < 2021) {

@@ -167,9 +167,8 @@ bool ScheduleService::poll_state() {
   return true;
 }
 
-bool ScheduleService::enable() { return this->set_state(true); }
-
-bool ScheduleService::disable() { return this->set_state(false); }
+bool ScheduleService::enable_schedule() { return this->set_state(true); }
+bool ScheduleService::disable_schedule() { return this->set_state(false); }
 
 bool ScheduleService::set_state(bool enable) {
   if (!this->session_.is_ready()) {
@@ -225,10 +224,7 @@ bool ScheduleService::set_state(bool enable) {
   memcpy(apdu + 11, structure_bytes, 10);
 
   // Write command
-  if (!this->write_class10_command(apdu, 21)) {
-    ESP_LOGE(TAG, "Failed to write schedule enable/disable command");
-    return false;
-  }
+  this->write_class10_command(apdu, 21);
 
   ESP_LOGI(TAG, "Schedule %s command sent", enable ? "enable" : "disable");
 
@@ -280,11 +276,8 @@ bool ScheduleService::send_configuration_commit() {
   // Append the 10-byte structure
   memcpy(apdu + 11, structure_bytes, 10);
 
-  // Send configuration commit (fire-and-forget, no response expected)
-  if (!this->write_class10_command(apdu, 21)) {
-    ESP_LOGE(TAG, "Failed to send configuration commit");
-    return false;
-  }
+  // Write configuration commit
+  this->write_class10_command(apdu, 21);
 
   ESP_LOGD(TAG, "Configuration commit sent successfully");
   return true;
@@ -373,14 +366,13 @@ bool ScheduleService::read_entries_async(
 
     struct ReadAllState {
       ScheduleService *service;
-      uint8_t current_layer;
+      uint8_t current_layer = 0;
       std::vector<ScheduleEntry> all_entries;
       std::function<void(bool success, const std::vector<ScheduleEntry> &)> on_complete;
     };
 
     auto state = std::make_shared<ReadAllState>();
     state->service = this;
-    state->current_layer = 0;
     state->on_complete = on_complete;
 
     auto read_next_layer = [](auto& self, std::shared_ptr<ReadAllState> st) -> void {
@@ -521,11 +513,8 @@ bool ScheduleService::write_entries(const std::vector<ScheduleEntry> &entries,
   uint8_t apdu[53]; // 11 header bytes + 42 data bytes
   build_schedule_apdu(entries, layer, apdu);
 
-  // Send write command
-  if (!this->write_class10_command(apdu, sizeof(apdu))) {
-    ESP_LOGE(TAG, "Failed to write schedule to layer %d", layer);
-    return false;
-  }
+  // Write chunk
+  this->write_class10_command(apdu, sizeof(apdu));
 
   ESP_LOGI(TAG, "Schedule written successfully to layer %d", layer);
   return true;
@@ -765,12 +754,10 @@ bool ScheduleService::validate_entries(
 // For Phase 7, only write operations (enable/disable/write_entries) are
 // supported Read operations (get_state/read_entries) will be added in Phase 8
 
-bool ScheduleService::write_class10_command(const uint8_t *apdu,
+void ScheduleService::write_class10_command(const uint8_t *apdu,
                                             size_t apdu_len) {
   // Build GENI frame and queue the packet with pacing and non-blocking wait
   this->transport_.send_apdu_command(apdu, apdu_len);
-
-  return true;
 }
 
 // -------------------------------------------------------------------------

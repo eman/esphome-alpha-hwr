@@ -238,7 +238,7 @@ public:
    * - Modifies byte 4 (clock_program_enabled) to 0x01
    * - Writes back complete 10-byte structure
    */
-  bool enable();
+  bool enable_schedule();
 
   /**
    * Disable the internal schedule.
@@ -251,7 +251,7 @@ public:
    *
    * Protocol: Same as enable() but sets byte 4 to 0x00
    */
-  bool disable();
+  bool disable_schedule();
 
   // -------------------------------------------------------------------------
   // Schedule Entry Operations
@@ -557,7 +557,7 @@ protected:
   // Internal Helper Methods
   // -------------------------------------------------------------------------
 
-  bool write_class10_command(const uint8_t *apdu, size_t apdu_len);
+  void write_class10_command(const uint8_t *apdu, size_t apdu_len);
   bool set_state(bool enable);
 
   /**
