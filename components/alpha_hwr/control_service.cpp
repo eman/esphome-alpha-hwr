@@ -293,10 +293,8 @@ bool ControlService::get_mode_async(std::function<void(bool, ControlMode)> on_co
                 is_remote_mode_enabled_ = true;
                 ESP_LOGD(TAG, "Remote mode: Sub 7 prioritized read control_source=2 (Remote/Digital) → enabled");
               } else if (control_source == 1) {
-                // Sub 7 can transiently report Local/Panel even after a recent
-                // successful remote-enable ACK. Avoid clearing remote mode from
-                // this path to prevent flapping that blocks follow-up writes.
-                ESP_LOGD(TAG, "Remote mode: Sub 7 prioritized read control_source=1 (Local/Panel) — state unchanged");
+                is_remote_mode_enabled_ = false;
+                ESP_LOGD(TAG, "Remote mode: Sub 7 prioritized read control_source=1 (Local/Panel) → disabled");
               } else {
                 ESP_LOGD(TAG, "Remote mode: Sub 7 prioritized read control_source=0x%02X unrecognized — state unchanged",
                          control_source);
@@ -1053,7 +1051,7 @@ void ControlService::set_temperature_range_async(float min_temp, float max_temp,
 
             if (callback) callback(true);
           },
-          3000); // 3000ms timeout
+          3000, false, true); // 3000ms timeout, no register read, expect short ACK
     };
     
     ESP_LOGI(TAG, "Temperature range write queued: %.1f-%.1f°C (AutoAdapt: %s)",
