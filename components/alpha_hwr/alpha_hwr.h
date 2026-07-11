@@ -7,6 +7,7 @@
 #ifdef USE_TEXT_SENSOR
 #include "esphome/components/text_sensor/text_sensor.h"
 #endif
+#include "esphome/components/time/real_time_clock.h"
 #include "auth.h"
 #include "ble_connection_manager.h"
 #include "codec.h"
@@ -202,6 +203,10 @@ public:
   void set_clock_diff_sensor(sensor::Sensor *sensor) {
     clock_diff_sensor_ = sensor;
   }
+  void set_time_id(time::RealTimeClock *time_id) {
+    time_id_ = time_id;
+    time_service_.set_time_id(time_id);
+  }
   void set_pairing_enabled(bool enabled) { pairing_enabled_ = enabled; }
   // Delay (ms) after a disconnect before allowing reconnection, so a
   // just-powered-up pump has time to be ready before encryption is requested.
@@ -329,6 +334,7 @@ private:
   sensor::Sensor *start_count_sensor_{nullptr};
   sensor::Sensor *operating_hours_sensor_{nullptr};
   sensor::Sensor *clock_diff_sensor_{nullptr};
+  time::RealTimeClock *time_id_{nullptr};
 
   // Tracks whether the post-auth data read chain has been triggered.
   // Ensures device info, event log, history, etc. are read even when

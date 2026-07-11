@@ -50,9 +50,14 @@ ble_client:
   - mac_address: ${mac_address}
     id: hwr_pump_client
 
+time:
+  - platform: homeassistant
+    id: hwr_time
+
 alpha_hwr:
   id: pump
   ble_client_id: hwr_pump_client
+  time_id: hwr_time
   flow:
     name: "Flow Rate"
   head:

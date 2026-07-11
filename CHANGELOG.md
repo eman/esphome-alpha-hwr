@@ -22,6 +22,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   rely on uninitialized dummy defaults `0`. The setters reuse genuine pump 
   values for unchanged fields, preventing unintended resets or scrambled schedules
   (issue [#70](https://github.com/eman/esphome-alpha-hwr/issues/70)).
+- **Clock Drift reports exact timezone offset (-25,200s)** —
+  Fixed an issue where the C-library `mktime` fell back to UTC parsing when reading the pump's RTC. The integration now correctly requests `time_id` and leverages ESPHome's internal `ESPTime` engine to accurately interpret the pump's local timezone
+  (issue [#76](https://github.com/eman/esphome-alpha-hwr/issues/76)).
 
 ## [0.9.0] - 2026-07-10
 

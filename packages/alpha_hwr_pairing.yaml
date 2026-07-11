@@ -60,9 +60,14 @@ ble_client:
 # Ensure text_sensor component is included in build
 text_sensor:
 
+time:
+  - platform: homeassistant
+    id: hwr_time
+
 alpha_hwr:
    id: pump
    ble_client_id: hwr_pump_client
+   time_id: hwr_time
    enable_pairing: true  # Enable BLE pairing for enhanced telemetry and control
     
    # Pairing Status

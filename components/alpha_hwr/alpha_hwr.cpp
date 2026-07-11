@@ -402,7 +402,7 @@ void AlphaHwrComponent::trigger_initial_data_reads() {
     // First read the pump clock to measure drift
     this->time_service_.get_clock_async([this](ESPTime pump_time) {
       if (pump_time.is_valid()) {
-        time_t now = ::time(nullptr);
+        time_t now = this->time_id_ ? this->time_id_->now().timestamp : ::time(nullptr);
         // Calculate drift (Pump Time - System Time)
         // If pump is ahead, diff is positive. If pump is behind, diff is
         // negative.
@@ -430,10 +430,14 @@ void AlphaHwrComponent::trigger_initial_data_reads() {
           // Update last sync time sensor
 #ifdef USE_TEXT_SENSOR
           if (this->last_clock_sync_sensor_) {
-            time_t now = ::time(nullptr);
-            const struct tm *tm_info = localtime(&now);
             char buf[32];
-            strftime(buf, sizeof(buf), "%Y-%m-%d %H:%M:%S", tm_info);
+            if (this->time_id_) {
+              this->time_id_->now().strftime(buf, sizeof(buf), "%Y-%m-%d %H:%M:%S");
+            } else {
+              time_t now = ::time(nullptr);
+              const struct tm *tm_info = localtime(&now);
+              strftime(buf, sizeof(buf), "%Y-%m-%d %H:%M:%S", tm_info);
+            }
             this->last_clock_sync_sensor_->publish_state(buf);
           }
 #endif
@@ -593,7 +597,7 @@ void AlphaHwrComponent::check_and_sync_time() {
   if (last_time_sync_timestamp_ == 0 ||
       (now - last_time_sync_timestamp_) >= TIME_SYNC_INTERVAL_MS) {
     // Check if system time is available via SNTP
-    time_t current_time = ::time(nullptr);
+    time_t current_time = this->time_id_ ? this->time_id_->now().timestamp : ::time(nullptr);
     if (current_time < 1609459200) { // Before 2021-01-01 means time not synced
       ESP_LOGD(TAG,
                "System time not synced via SNTP yet, skipping pump clock sync");
@@ -609,10 +613,14 @@ void AlphaHwrComponent::check_and_sync_time() {
         // Update last sync time sensor
 #ifdef USE_TEXT_SENSOR
         if (this->last_clock_sync_sensor_) {
-          time_t now = ::time(nullptr);
-          const struct tm *tm_info = localtime(&now);
           char buf[32];
-          strftime(buf, sizeof(buf), "%Y-%m-%d %H:%M:%S", tm_info);
+          if (this->time_id_) {
+            this->time_id_->now().strftime(buf, sizeof(buf), "%Y-%m-%d %H:%M:%S");
+          } else {
+            time_t now = ::time(nullptr);
+            const struct tm *tm_info = localtime(&now);
+            strftime(buf, sizeof(buf), "%Y-%m-%d %H:%M:%S", tm_info);
+          }
           this->last_clock_sync_sensor_->publish_state(buf);
         }
 #endif
@@ -679,7 +687,7 @@ void AlphaHwrComponent::read_pump_clock() {
 
   time_service_.get_clock_async([this](ESPTime pump_time) {
     if (pump_time.is_valid()) {
-      time_t now = ::time(nullptr);
+      time_t now = this->time_id_ ? this->time_id_->now().timestamp : ::time(nullptr);
       double diff = difftime(pump_time.timestamp, now);
 
       ESP_LOGI(TAG, "Pump clock read successful: %04d-%02d-%02d %02d:%02d:%02d",

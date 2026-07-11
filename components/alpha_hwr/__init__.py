@@ -66,11 +66,13 @@ CONF_CLOCK_DIFF = "clock_diff"
 CONF_LAST_CLOCK_SYNC = "last_clock_sync"
 CONF_PUMP_LINK_STATUS = "pump_link_status"
 CONF_PUMP_LAST_LINK_FAILURE = "pump_last_link_failure"
+CONF_TIME_ID = "time_id"
 
 CONFIG_SCHEMA = cv.Schema(
     {
         cv.GenerateID(): cv.declare_id(AlphaHwrComponent),
         cv.Required("ble_client_id"): cv.use_id(ble_client.BLEClient),
+        cv.Optional(CONF_TIME_ID): cv.use_id(time.RealTimeClock),
         cv.Optional(CONF_ENABLE_PAIRING, default=False): cv.boolean,
         # 2s default: covers the pump's measured post-boot vulnerability window
         # (bounded at 320-720ms, during which an encryption request fails with
@@ -251,6 +253,10 @@ async def to_code(config):
     ble_client_var = await cg.get_variable(config["ble_client_id"])
     var = cg.new_Pvariable(config[CONF_ID], ble_client_var)
     await cg.register_component(var, config)
+
+    if CONF_TIME_ID in config:
+        time_ = await cg.get_variable(config[CONF_TIME_ID])
+        cg.add(var.set_time_id(time_))
 
     # Set pairing enabled flag
     cg.add(var.set_pairing_enabled(config[CONF_ENABLE_PAIRING]))
