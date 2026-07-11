@@ -357,7 +357,9 @@ class ControlService {
             pump_enabled_valid_ &&
             cached_autoadapt_ != -1 &&
             !std::isnan(cached_temp_min_) &&
-            cached_cycle_time_on_ != -1;
+            !std::isnan(cached_temp_max_) &&
+            cached_cycle_time_on_ != -1 &&
+            cached_cycle_time_off_ != -1;
    }
 
    // ========== Setpoint Configuration Methods ==========
