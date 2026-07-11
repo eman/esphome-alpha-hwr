@@ -259,7 +259,7 @@ bool ScheduleService::send_configuration_commit() {
     memcpy(structure_bytes, this->overview_structure_, 10);
     ESP_LOGD(TAG, "Using cached ClockProgramOverview structure for commit");
   } else {
-    ESP_LOGE(TAG, "Cannot commit configuration: ClockProgramOverview not yet cached. Ignoring commit to prevent corruption.");
+    ESP_LOGW(TAG, "Cannot commit configuration: ClockProgramOverview not yet cached. Ignoring commit to prevent corruption.");
     return false;
   }
 

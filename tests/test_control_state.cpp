@@ -156,7 +156,25 @@ struct PumpEnabledState {
 
   // Mirrors ControlService::stop()
   // Also schedules post-command readback (fixes #52).
-  bool stop(uint8_t /* mode */ = 255) {
+  bool stop(uint8_t mode = 255) {
+    ControlMode target = current_mode;
+    if (mode != 255) {
+      target = static_cast<ControlMode>(mode);
+    }
+
+    float stop_setpoint = NAN;
+    if (mode == 255) {
+      float cached = get_cached_for_mode(target);
+      if (!std::isnan(cached)) {
+        stop_setpoint = cached;
+        if (target == ControlMode::CONSTANT_PRESSURE ||
+            target == ControlMode::PROPORTIONAL_PRESSURE) {
+          stop_setpoint *= 9806.65f;
+        }
+      }
+    }
+    last_sent_setpoint = stop_setpoint;
+
     pump_enabled = false;
     pump_enabled_valid = true;
 
@@ -203,6 +221,18 @@ struct PumpEnabledState {
       aborted_due_to_unknown_state = true;
       return false;
     }
+    
+    float mode_setpoint = NAN;
+    float cached = get_cached_for_mode(mode);
+    if (!std::isnan(cached)) {
+      mode_setpoint = cached;
+      if (mode == ControlMode::CONSTANT_PRESSURE ||
+          mode == ControlMode::PROPORTIONAL_PRESSURE) {
+        mode_setpoint *= 9806.65f;
+      }
+    }
+    last_sent_setpoint = mode_setpoint;
+
     last_sent_enabled_flag = resolution.enabled;
     current_mode = mode;
     mode_valid = true;
@@ -864,6 +894,46 @@ void test_other_modes_still_trust_register() {
 }
 
 // ============================================================================
+// Test: stop() reuses cached setpoint to prevent default overwrite (#67)
+// ============================================================================
+void test_stop_reuses_cached_setpoint() {
+  std::cout << "\n=== Testing stop() Reuses Cached Setpoint (#67) ===" << std::endl;
+
+  PumpEnabledState state;
+  state.current_mode = ControlMode::CONSTANT_PRESSURE;
+  state.cached_pressure_setpoint = 4.5f; // 4.5m
+  
+  state.stop();
+  // 4.5 * 9806.65 = 44129.925
+  TEST_ASSERT(std::abs(state.last_sent_setpoint - 44129.925f) < 0.1f,
+              "#67: stop() correctly passes the cached setpoint (in Pascals) for pressure modes");
+
+  // Speed mode
+  state.current_mode = ControlMode::CONSTANT_SPEED;
+  state.cached_speed_setpoint = 2500.0f;
+  state.stop();
+  TEST_ASSERT_EQ(state.last_sent_setpoint, 2500.0f,
+                 "#67: stop() correctly passes the cached setpoint for speed mode");
+}
+
+// ============================================================================
+// Test: set_mode() reuses cached setpoint to prevent default overwrite (#67/#70)
+// ============================================================================
+void test_set_mode_reuses_cached_setpoint() {
+  std::cout << "\n=== Testing set_mode() Reuses Cached Setpoint (#67/#70) ===" << std::endl;
+
+  PumpEnabledState state;
+  state.pump_enabled_valid = true;
+  state.pump_enabled = true;
+  state.cached_flow_setpoint = 1.2f;
+
+  state.set_mode(ControlMode::CONSTANT_FLOW);
+  
+  TEST_ASSERT_EQ(state.last_sent_setpoint, 1.2f,
+                 "set_mode() correctly passes the cached setpoint for the new mode");
+}
+
+// ============================================================================
 // Test: start() reuses cached Constant Speed setpoint (fixes #43)
 // ============================================================================
 void test_start_reuses_cached_speed_setpoint() {
@@ -1149,6 +1219,8 @@ int main() {
   test_start_per_mode_isolation_speed_vs_pressure();
   test_start_per_mode_isolation_proportional_and_flow();
   test_start_dhw_and_temp_range_unaffected();
+  test_stop_reuses_cached_setpoint();
+  test_set_mode_reuses_cached_setpoint();
   test_start_schedules_readback();
   test_stop_schedules_readback();
 
