@@ -406,15 +406,19 @@ void AlphaHwrComponent::trigger_initial_data_reads() {
 #ifdef USE_TIME
         if (this->time_id_) now = this->time_id_->now().timestamp;
 #endif
-        // Calculate drift (Pump Time - System Time)
-        // If pump is ahead, diff is positive. If pump is behind, diff is
-        // negative.
-        double diff = difftime(pump_time.timestamp, now);
+        if (now > 1609459200) {
+          // Calculate drift (Pump Time - System Time)
+          // If pump is ahead, diff is positive. If pump is behind, diff is
+          // negative.
+          double diff = difftime(pump_time.timestamp, now);
 
-        ESP_LOGI(TAG, "Pump clock drift before sync: %.0f seconds", diff);
+          ESP_LOGI(TAG, "Pump clock drift before sync: %.0f seconds", diff);
 
-        if (this->clock_diff_sensor_) {
-          this->clock_diff_sensor_->publish_state(diff);
+          if (this->clock_diff_sensor_) {
+            this->clock_diff_sensor_->publish_state(diff);
+          }
+        } else {
+          ESP_LOGI(TAG, "System time not synced yet; skipping drift calculation");
         }
       } else {
         ESP_LOGW(TAG, "Could not read pump clock for drift measurement");
@@ -725,15 +729,22 @@ void AlphaHwrComponent::read_pump_clock() {
 #ifdef USE_TIME
       if (this->time_id_) now = this->time_id_->now().timestamp;
 #endif
-      double diff = difftime(pump_time.timestamp, now);
+      if (now > 1609459200) {
+        double diff = difftime(pump_time.timestamp, now);
 
-      ESP_LOGI(TAG, "Pump clock read successful: %04d-%02d-%02d %02d:%02d:%02d",
-               pump_time.year, pump_time.month, pump_time.day_of_month,
-               pump_time.hour, pump_time.minute, pump_time.second);
-      ESP_LOGI(TAG, "Clock drift: %.0f seconds", diff);
+        ESP_LOGI(TAG, "Pump clock read successful: %04d-%02d-%02d %02d:%02d:%02d",
+                 pump_time.year, pump_time.month, pump_time.day_of_month,
+                 pump_time.hour, pump_time.minute, pump_time.second);
+        ESP_LOGI(TAG, "Clock drift: %.0f seconds", diff);
 
-      if (this->clock_diff_sensor_) {
-        this->clock_diff_sensor_->publish_state(diff);
+        if (this->clock_diff_sensor_) {
+          this->clock_diff_sensor_->publish_state(diff);
+        }
+      } else {
+        ESP_LOGW(TAG, "System time not synced yet; cannot calculate drift");
+        if (this->clock_diff_sensor_) {
+          this->clock_diff_sensor_->publish_state(NAN);
+        }
       }
     } else {
       ESP_LOGW(TAG, "Pump clock read failed or returned invalid time");
