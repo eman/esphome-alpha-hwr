@@ -181,7 +181,7 @@ void ControlService::sync_cache_async(std::function<void(bool)> callback) {
     
     // Now read Obj 91 Sub 430 for Temp Range, AutoAdapt, and Cycle Time
     uint8_t apdu[5] = {0x0A, 0x03, 91, 0x01, 0xAE};
-    this->transport_.send_apdu_command(apdu, 5, 0, 0,
+    this->transport_.send_apdu_command(apdu, 5, 91, 430,
       [this, callback](bool ok, const uint8_t* payload, size_t payload_len) {
         if (!ok || payload_len < 12) {
           ESP_LOGW(TAG, "Failed to sync config bounds (success=%d, len=%zu)", ok, payload_len);
@@ -196,9 +196,9 @@ void ControlService::sync_cache_async(std::function<void(bool)> callback) {
           cached_temp_min_ = protocol::decode_float_be(&payload[offset + 1]);
           cached_temp_max_ = protocol::decode_float_be(&payload[offset + 5]);
           
-          if (payload_len >= (size_t)(offset + 13)) {
+          if (payload_len >= (size_t)(offset + 10)) {
             cached_cycle_time_off_ = payload[offset + 9];
-            if (payload_len >= (size_t)(offset + 16)) {
+            if (payload_len >= (size_t)(offset + 13)) {
               cached_cycle_time_on_ = payload[offset + 12];
             }
           }

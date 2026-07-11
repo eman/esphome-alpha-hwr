@@ -390,9 +390,9 @@ bool Transport::try_dispatch_response(const uint8_t* data, size_t len) {
     }
   }
 
-  // Early safety check: packet must contain at least header (10 bytes) + CRC (2 bytes)
-  if (len < 12) {
-    ESP_LOGV(TAG, "Packet too short (%zu bytes, need >= 12) to be a valid response", len);
+  // Early safety check: packet must contain at least minimum header (9 bytes) + CRC (2 bytes)
+  if (len < 11) {
+    ESP_LOGV(TAG, "Packet too short (%zu bytes, need >= 11) to be a valid response", len);
     return false;
   }
   
@@ -443,14 +443,42 @@ bool Transport::try_dispatch_response(const uint8_t* data, size_t len) {
      }
     
     // This is a Class 10 DataObject response. Extract Object/Sub IDs
-    // Frame structure: [STX][LEN][DST][SRC][Class][OpSpec][ObjH][ObjL][SubH][SubL]...[CRC]
-    // So bytes 6-7 are Object ID (2 bytes, big-endian), bytes 8-9 are Sub-ID (2 bytes, big-endian)
-    if (len > 9) {
-      packet_obj_id = (data[6] << 8) | data[7];  // Object ID is at bytes 6-7
-      packet_sub_id = (data[8] << 8) | data[9];  // Sub-ID is at bytes 8-9
+    // Frame structure depends on OpSpec!
+    // OpSpec 0x0E (Passive Notif): [SubH][SubL][ObjH][ObjL][Payload...]
+    // OpSpec 0x02 (Positive ACK):  [Obj(1 byte)][SubH][SubL][Payload...]
+    if (opspec == 0x0E || opspec == 0x01) {
+      if (len >= 10) {
+        // Here GENI defines bytes 6-7 as SubID, 8-9 as ObjID.
+        // We will store them correctly to avoid confusion, even though older code might have them swapped.
+        packet_sub_id = (data[6] << 8) | data[7];
+        packet_obj_id = (data[8] << 8) | data[9];
+        // The payload starts at data + 10 for these!
+        // But our global payload extraction above did data + 10. We will keep it.
+      } else {
+        ESP_LOGV(TAG, "DataObject 0x0E packet too short to extract IDs");
+        return false;
+      }
+    } else if (opspec == 0x02) {
+      if (len >= 9) {
+        packet_obj_id = data[6];                     // 1 byte ObjID
+        packet_sub_id = (data[7] << 8) | data[8];    // 2 bytes SubID
+        // Note: Payload starts at data + 9!
+        // So we MUST override the payload extraction for this opspec!
+        payload = data + 9;
+        payload_len = len - 11; // len - header(9) - CRC(2)
+      } else {
+        ESP_LOGV(TAG, "DataObject 0x02 packet too short to extract IDs");
+        return false;
+      }
     } else {
-      ESP_LOGV(TAG, "DataObject packet too short to extract IDs");
-      return false;
+      // Fallback for other opspecs (e.g. 0x90, 0x97 short ACKs already handled above, etc)
+      // Assume 2-byte Sub, 2-byte Obj for safety if >= 10
+      if (len >= 10) {
+        packet_sub_id = (data[6] << 8) | data[7];
+        packet_obj_id = (data[8] << 8) | data[9];
+      } else {
+        return false;
+      }
     }
     
     // Now check if this matches our expected Object/Sub ID
@@ -471,6 +499,18 @@ bool Transport::try_dispatch_response(const uint8_t* data, size_t len) {
       if (!matched && packet_sub_id == cmd.expect_obj_id) {
         matched = true;
       }
+    }
+    
+    // SPECIAL CASE WORKAROUND: Object 91 Sub 430 (Cache Sync)
+    // The pump responds to this read request with OpSpec 0x15, which does NOT carry 
+    // the standard Obj/Sub IDs in the payload header. Python reference simply accepted it 
+    // via a wildcard match and sliced at byte 10. We explicitly handle this case here to 
+    // avoid wildcard matching other packets.
+    if (!matched && cmd.expect_obj_id == 91 && cmd.expect_sub_id == 430 && opspec == 0x15) {
+      matched = true;
+      payload = data + 10;
+      payload_len = len - 12; // len - 10(header) - 2(CRC)
+      ESP_LOGV(TAG, "Matched Object 91 Sub 430 using OpSpec 0x15 workaround");
     }
 
     if (matched) {
