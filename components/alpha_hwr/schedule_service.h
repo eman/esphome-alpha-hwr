@@ -422,7 +422,14 @@ public:
   /**
    * Invalidate all cached schedule data.
    */
-  void invalidate_cache() { overview_cached_ = false; }
+  void invalidate_cache() {
+    overview_cached_ = false;
+    schedule_state_cached_ = false;
+    single_events_cached_ = false;
+    for (int i = 0; i < 5; i++) {
+      layer_cached_[i] = false;
+    }
+  }
 
   /**
    * Format single events as display string.

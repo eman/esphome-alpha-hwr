@@ -208,7 +208,14 @@ void ControlService::sync_cache_async(std::function<void(bool)> callback) {
           mode_change_callback_(current_mode_, cached_operation_mode_, get_setpoint_for_mode(current_mode_));
         }
         
-        if (callback) callback(true);
+        if (callback) {
+          bool valid = is_cache_valid();
+          if (!valid) {
+            ESP_LOGW(TAG, "Cache sync completed but required fields are missing (autoadapt=%d, temp_min=%.1f, temp_max=%.1f, cycle_on=%d, cycle_off=%d)",
+                     cached_autoadapt_, cached_temp_min_, cached_temp_max_, cached_cycle_time_on_, cached_cycle_time_off_);
+          }
+          callback(valid);
+        }
       }, 5000);
   });
 }

@@ -146,7 +146,7 @@ class Transport {
     uint32_t timestamp_ms{0};
     bool waiting_for_response{false};
     bool allow_register_read{false};  // When true, don't filter register-read OpSpecs
-    bool expect_short_ack{false};     // When true, only match a Class 10 short ACK (5 bytes)
+    bool expect_short_ack{false};     // When true, disables the Class 10 wildcard matching path
   };
 
   Transport();

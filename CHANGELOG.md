@@ -10,11 +10,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Fixed
 
 - **Missing entities on reconnect / startup race conditions** —
-  Added `sync_cache_async` orchestration during the authentication handshake 
+  Added `sync_cache_async` orchestration after the session is READY 
   which polls Object 86 and Object 91 before the pump is marked as "Ready". 
-  This ensures that all configuration bounds and telemetry entities instantly 
-  populate when the pump connects, completely eliminating stale `0`/`NaN` gaps 
-  and the need for manual polling
+  This ensures that all configuration bounds and telemetry entities populate when 
+  the pump connects, eliminating stale `0`/`NaN` gaps and the need for manual polling
   (issue [#67](https://github.com/eman/esphome-alpha-hwr/issues/67)).
 - **Multi-parameter writes scrambled defaults due to missing cache** —
   Because `sync_cache_async` now guarantees internal telemetry bounds (like 
