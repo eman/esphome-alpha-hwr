@@ -343,11 +343,37 @@ class ControlService {
    int8_t get_cached_autoadapt() const { return cached_autoadapt_; }
    
    /**
-    * Read current mode, setpoint, and temperature range from pump.
-    * Queries Object 86 Sub 6 and (for temp range) Object 91 Sub 430.
+    * Synchronize all cached control data from the pump.
+    * Queries Object 86 Sub 7 (Mode) and Object 91 Sub 430 (Temp range/cycle time).
     * Results are cached and accessible via getters.
     */
-   void read_setpoints_from_pump();
+   void sync_cache_async(std::function<void(bool)> callback = nullptr);
+
+   /**
+    * Check if all required control cache values are valid.
+    */
+   bool is_cache_valid() const {
+     return mode_valid_ &&
+            pump_enabled_valid_ &&
+            cached_autoadapt_ != -1 &&
+            !std::isnan(cached_temp_min_) &&
+            !std::isnan(cached_temp_max_) &&
+            cached_cycle_time_on_ != -1 &&
+            cached_cycle_time_off_ != -1;
+   }
+
+   /**
+    * Invalidate all cached control data.
+    */
+   void invalidate_cache() {
+     mode_valid_ = false;
+     pump_enabled_valid_ = false;
+     cached_autoadapt_ = -1;
+     cached_temp_min_ = NAN;
+     cached_temp_max_ = NAN;
+     cached_cycle_time_on_ = -1;
+     cached_cycle_time_off_ = -1;
+   }
 
    // ========== Setpoint Configuration Methods ==========
    
@@ -471,7 +497,8 @@ class ControlService {
     float cached_temp_max_{NAN};           // Temperature range max (Object 91 Sub 430)
     uint8_t cached_operation_mode_{0xFF};  // Operation mode from notification
     int8_t cached_autoadapt_{-1};           // AutoAdapt state (-1=unknown, 0=off, 1=on)
-  
+    int8_t cached_cycle_time_on_{-1};       // Cycle time ON minutes
+    int8_t cached_cycle_time_off_{-1};      // Cycle time OFF minutes  
   // Sub-ID constants for setpoint registers (Reference: control.py lines 137-141)
   static constexpr uint16_t SUB_SPEED_SETPOINT = 13;
   static constexpr uint16_t SUB_PRESSURE_SETPOINT = 15;

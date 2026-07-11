@@ -414,6 +414,24 @@ public:
   }
 
   /**
+   * Check if schedule overview has been read from pump.
+   * @return True if cached state is valid, false if no state has been read yet
+   */
+  bool is_overview_cache_valid() const { return overview_cached_; }
+  
+  /**
+   * Invalidate all cached schedule data.
+   */
+  void invalidate_cache() {
+    overview_cached_ = false;
+    schedule_state_cached_ = false;
+    single_events_cached_ = false;
+    for (int i = 0; i < 5; i++) {
+      layer_cached_[i] = false;
+    }
+  }
+
+  /**
    * Format single events as display string.
    */
   std::string format_single_events_display() const;

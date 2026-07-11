@@ -129,8 +129,8 @@ void Transport::loop() {
 }
 
 void Transport::send_command(const std::vector<uint8_t>& packet, uint16_t expect_obj_id, 
-                            uint16_t expect_sub_id, CommandCallback callback, 
-                            uint32_t timeout_ms, bool allow_register_read) {
+                             uint16_t expect_sub_id, CommandCallback callback, uint32_t timeout_ms,
+                             bool allow_register_read, bool expect_short_ack) {
   Command cmd;
   cmd.packet = packet;
   cmd.expect_obj_id = expect_obj_id;
@@ -138,6 +138,7 @@ void Transport::send_command(const std::vector<uint8_t>& packet, uint16_t expect
   cmd.callback = callback;
   cmd.timeout_ms = timeout_ms;
   cmd.allow_register_read = allow_register_read;
+  cmd.expect_short_ack = expect_short_ack;
   
   this->command_queue_.push_back(cmd);
   ESP_LOGV(TAG, "Command queued (queue size: %zu)", this->command_queue_.size());
@@ -146,7 +147,7 @@ void Transport::send_command(const std::vector<uint8_t>& packet, uint16_t expect
 void Transport::send_apdu_command(const uint8_t* apdu, size_t apdu_len,
                                   uint16_t expect_obj_id, uint16_t expect_sub_id,
                                   CommandCallback callback, uint32_t timeout_ms,
-                                  bool allow_register_read) {
+                                  bool allow_register_read, bool expect_short_ack) {
   uint8_t packet_raw[256];
   // build_geni_packet uses SERVICE_ID_HIGH (0xE7) and SOURCE_ADDRESS (0xF8) automatically
   size_t packet_len = protocol::build_geni_packet(
@@ -166,7 +167,7 @@ void Transport::send_apdu_command(const uint8_t* apdu, size_t apdu_len,
 
   std::vector<uint8_t> packet(packet_raw, packet_raw + packet_len);
   
-  this->send_command(packet, expect_obj_id, expect_sub_id, callback, timeout_ms, allow_register_read);
+  this->send_command(packet, expect_obj_id, expect_sub_id, callback, timeout_ms, allow_register_read, expect_short_ack);
 }
 
 bool Transport::is_frame_start(uint8_t byte) {
@@ -390,15 +391,15 @@ bool Transport::try_dispatch_response(const uint8_t* data, size_t len) {
     }
   }
 
-  // Early safety check: packet must contain at least header (10 bytes) + CRC (2 bytes)
-  if (len < 12) {
-    ESP_LOGV(TAG, "Packet too short (%zu bytes, need >= 12) to be a valid response", len);
+  // Early safety check: packet must contain at least minimum header (9 bytes) + CRC (2 bytes)
+  if (len < 11) {
+    ESP_LOGV(TAG, "Packet too short (%zu bytes, need >= 11) to be a valid response", len);
     return false;
   }
   
   // Extract payload: skip header (10 bytes) and CRC (2 bytes)
-  const uint8_t* payload = data + 10;
-  size_t payload_len = len - 12;
+  const uint8_t* payload = (len >= 12) ? (data + 10) : nullptr;
+  size_t payload_len = (len >= 12) ? (len - 12) : 0;
 
   // Extract identifiers from the response packet
   uint8_t opspec = (len > 5) ? data[5] : 0x00;
@@ -443,14 +444,42 @@ bool Transport::try_dispatch_response(const uint8_t* data, size_t len) {
      }
     
     // This is a Class 10 DataObject response. Extract Object/Sub IDs
-    // Frame structure: [STX][LEN][DST][SRC][Class][OpSpec][ObjH][ObjL][SubH][SubL]...[CRC]
-    // So bytes 6-7 are Object ID (2 bytes, big-endian), bytes 8-9 are Sub-ID (2 bytes, big-endian)
-    if (len > 9) {
-      packet_obj_id = (data[6] << 8) | data[7];  // Object ID is at bytes 6-7
-      packet_sub_id = (data[8] << 8) | data[9];  // Sub-ID is at bytes 8-9
+    // Frame structure depends on OpSpec!
+    // OpSpec 0x0E (Passive Notif): [SubH][SubL][ObjH][ObjL][Payload...]
+    // OpSpec 0x02 (Positive ACK):  [Obj(1 byte)][SubH][SubL][Payload...]
+    if (opspec == 0x0E || opspec == 0x01) {
+      if (len >= 10) {
+        // Here GENI defines bytes 6-7 as SubID, 8-9 as ObjID.
+        // We will store them correctly to avoid confusion, even though older code might have them swapped.
+        packet_sub_id = (data[6] << 8) | data[7];
+        packet_obj_id = (data[8] << 8) | data[9];
+        // The payload starts at data + 10 for these!
+        // But our global payload extraction above did data + 10. We will keep it.
+      } else {
+        ESP_LOGV(TAG, "DataObject 0x0E packet too short to extract IDs");
+        return false;
+      }
+    } else if (opspec == 0x02) {
+      if (len >= 9) {
+        packet_obj_id = data[6];                     // 1 byte ObjID
+        packet_sub_id = (data[7] << 8) | data[8];    // 2 bytes SubID
+        // Note: Payload starts at data + 9!
+        // So we MUST override the payload extraction for this opspec!
+        payload = data + 9;
+        payload_len = len - 11; // len - header(9) - CRC(2)
+      } else {
+        ESP_LOGV(TAG, "DataObject 0x02 packet too short to extract IDs");
+        return false;
+      }
     } else {
-      ESP_LOGV(TAG, "DataObject packet too short to extract IDs");
-      return false;
+      // Fallback for other opspecs (e.g. 0x90, 0x97 short ACKs already handled above, etc)
+      // Assume 2-byte Sub, 2-byte Obj for safety if >= 10
+      if (len >= 10) {
+        packet_sub_id = (data[6] << 8) | data[7];
+        packet_obj_id = (data[8] << 8) | data[9];
+      } else {
+        return false;
+      }
     }
     
     // Now check if this matches our expected Object/Sub ID
@@ -459,7 +488,7 @@ bool Transport::try_dispatch_response(const uint8_t* data, size_t len) {
     // WILDCARD MATCH: If expect_obj_id == 0, accept ANY Class 10 packet
     // This is used for Object 86 Sub 6 reads, which receive passive notifications (OpSpec 0x0E)
     // Reference: Python base.py::match_class10_response only checks p[4] == 0x0A
-    if (cmd.expect_obj_id == 0x0000 && cmd.expect_sub_id == 0x0000) {
+    if (cmd.expect_obj_id == 0x0000 && cmd.expect_sub_id == 0x0000 && !cmd.expect_short_ack) {
       matched = true;
       ESP_LOGV(TAG, "Wildcard match: accepting any Class 10 packet (OpSpec=0x%02X, Obj=%d, Sub=%d)",
                opspec, packet_obj_id, packet_sub_id);
@@ -468,9 +497,21 @@ bool Transport::try_dispatch_response(const uint8_t* data, size_t len) {
       matched = (packet_obj_id == cmd.expect_obj_id && (packet_sub_id == cmd.expect_sub_id || packet_sub_id == 0));
       
       // BACKUP MATCH: If ObjID doesn't match but SubID matches our expected ObjID (swapped)
-      if (!matched && packet_sub_id == cmd.expect_obj_id) {
+      if (!matched && cmd.expect_obj_id != 0 && packet_sub_id == cmd.expect_obj_id) {
         matched = true;
       }
+    }
+    
+    // SPECIAL CASE WORKAROUND: Object 91 Sub 430 (Cache Sync)
+    // The pump responds to this read request with OpSpec 0x15, which does NOT carry 
+    // the standard Obj/Sub IDs in the payload header. Python reference simply accepted it 
+    // via a wildcard match and sliced at byte 10. We explicitly handle this case here to 
+    // avoid wildcard matching other packets.
+    if (!matched && cmd.expect_obj_id == 91 && cmd.expect_sub_id == 430 && opspec == 0x15 && len >= 12) {
+      matched = true;
+      payload = data + 10;
+      payload_len = len - 12; // len - 10(header) - 2(CRC)
+      ESP_LOGV(TAG, "Matched Object 91 Sub 430 using OpSpec 0x15 workaround");
     }
 
     if (matched) {

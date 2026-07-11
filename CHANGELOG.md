@@ -7,6 +7,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- **Missing entities on reconnect / startup race conditions** —
+  Added `sync_cache_async` orchestration after the session is READY 
+  which polls Object 86 and Object 91 before the pump is marked as "Ready". 
+  This ensures that all configuration bounds and telemetry entities populate when 
+  the pump connects, eliminating stale `0`/`NaN` gaps and the need for manual polling
+  (issue [#67](https://github.com/eman/esphome-alpha-hwr/issues/67)).
+- **Multi-parameter writes scrambled defaults due to missing cache** —
+  Because `sync_cache_async` now guarantees internal telemetry bounds (like 
+  AutoAdapt and Cycle Times) are populated before writes are permitted, 
+  multi-parameter setters (e.g. Temperature Range or AutoAdapt toggle) no longer
+  rely on uninitialized dummy defaults `0`. The setters reuse genuine pump 
+  values for unchanged fields, preventing unintended resets or scrambled schedules
+  (issue [#70](https://github.com/eman/esphome-alpha-hwr/issues/70)).
+
 ## [0.9.0] - 2026-07-10
 
 ### Added

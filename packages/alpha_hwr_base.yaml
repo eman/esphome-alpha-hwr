@@ -63,3 +63,6 @@ alpha_hwr:
     name: "Motor Speed"
   power:
     name: "Power Consumption"
+  ready_status:
+    name: "Pump Ready"
+    id: pump_ready

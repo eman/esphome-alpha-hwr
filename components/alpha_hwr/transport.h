@@ -146,6 +146,7 @@ class Transport {
     uint32_t timestamp_ms{0};
     bool waiting_for_response{false};
     bool allow_register_read{false};  // When true, don't filter register-read OpSpecs
+    bool expect_short_ack{false};     // When true, disables the Class 10 wildcard matching path
   };
 
   Transport();
@@ -169,7 +170,8 @@ class Transport {
    */
   void send_command(const std::vector<uint8_t>& packet, uint16_t expect_obj_id = 0, 
                     uint16_t expect_sub_id = 0, CommandCallback callback = nullptr, 
-                    uint32_t timeout_ms = 3000, bool allow_register_read = false);
+                    uint32_t timeout_ms = 3000, bool allow_register_read = false,
+                    bool expect_short_ack = false);
 
   /**
    * Helper to build and queue a command directly from an APDU.
@@ -179,7 +181,8 @@ class Transport {
   void send_apdu_command(const uint8_t* apdu, size_t apdu_len,
                          uint16_t expect_obj_id = 0, uint16_t expect_sub_id = 0,
                          CommandCallback callback = nullptr,
-                         uint32_t timeout_ms = 3000, bool allow_register_read = false);
+                         uint32_t timeout_ms = 3000, bool allow_register_read = false,
+                         bool expect_short_ack = false);
 
   /**
    * Set callback for complete packets.

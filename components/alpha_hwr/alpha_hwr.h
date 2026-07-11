@@ -136,6 +136,9 @@ public:
   void set_pairing_status_binary_sensor(binary_sensor::BinarySensor *sensor) {
     pairing_status_sensor_ = sensor;
   }
+  void set_ready_binary_sensor(binary_sensor::BinarySensor *sensor) {
+    ready_sensor_ = sensor;
+  }
 #ifdef USE_TEXT_SENSOR
   void set_alarms_text_sensor(text_sensor::TextSensor *sensor) {
     sensor_publisher_.set_alarms_text_sensor(sensor);
@@ -241,6 +244,9 @@ public:
   }
 
 private:
+  // Helper for retrying the initial cache sync
+  void do_control_cache_sync(uint32_t gen);
+
   ble_client::BLEClient *parent_ = nullptr;
 
   bool pairing_enabled_ =
@@ -294,6 +300,7 @@ private:
 
   // Pairing status sensor (separate from telemetry)
   binary_sensor::BinarySensor *pairing_status_sensor_{nullptr};
+  binary_sensor::BinarySensor *ready_sensor_{nullptr};
 #ifdef USE_TEXT_SENSOR
   // Schedule display sensor
   text_sensor::TextSensor *schedule_text_sensor_{nullptr};
@@ -359,37 +366,66 @@ private:
   std::string link_last_failure_published_;
 
 public:
+  // Cache coherence and gating
+  bool is_state_synchronized() const;
+  bool check_ready(const char *action_name) const {
+    if (!this->is_state_synchronized()) {
+      ESP_LOGW("alpha_hwr", "Command rejected: pump state is not yet fully synchronized (%s)", action_name);
+      return false;
+    }
+    return true;
+  }
+
   // Control service access methods (for ESPHome switches/buttons)
-  bool pump_start() { return control_service_.start(); }
-  bool pump_stop() { return control_service_.stop(); }
+  bool pump_start() { 
+    if (!check_ready("start")) return false;
+    return control_service_.start(); 
+  }
+  bool pump_stop() { 
+    if (!check_ready("stop")) return false;
+    return control_service_.stop(); 
+  }
   bool set_control_mode(services::ControlMode mode) {
+    if (!check_ready("set_control_mode")) return false;
     return control_service_.set_mode(mode);
   }
-  bool enable_remote() { return control_service_.enable_remote_mode(); }
-  bool disable_remote() { return control_service_.disable_remote_mode(); }
+  bool enable_remote() { 
+    if (!check_ready("enable_remote")) return false;
+    return control_service_.enable_remote_mode(); 
+  }
+  bool disable_remote() { 
+    if (!check_ready("disable_remote")) return false;
+    return control_service_.disable_remote_mode(); 
+  }
 
   // Setpoint configuration methods (for ESPHome number entities)
   void set_constant_pressure(float value_m,
                              std::function<void(bool)> callback) {
+    if (!check_ready("set_constant_pressure")) { if (callback) callback(false); return; }
     control_service_.set_constant_pressure_async(value_m, callback);
   }
   void set_constant_speed(float value_rpm, std::function<void(bool)> callback) {
+    if (!check_ready("set_constant_speed")) { if (callback) callback(false); return; }
     control_service_.set_constant_speed_async(value_rpm, callback);
   }
   void set_constant_flow(float value_m3h, std::function<void(bool)> callback) {
+    if (!check_ready("set_constant_flow")) { if (callback) callback(false); return; }
     control_service_.set_constant_flow_async(value_m3h, callback);
   }
   void set_temperature_range(float min_temp, float max_temp, bool autoadapt,
                              std::function<void(bool)> callback) {
+    if (!check_ready("set_temperature_range")) { if (callback) callback(false); return; }
     control_service_.set_temperature_range_async(min_temp, max_temp, autoadapt,
                                                  callback);
   }
   void set_proportional_pressure(float value_m,
                                  std::function<void(bool)> callback) {
+    if (!check_ready("set_proportional_pressure")) { if (callback) callback(false); return; }
     control_service_.set_proportional_pressure_async(value_m, callback);
   }
   void set_cycle_time_control(uint8_t on_minutes, uint8_t off_minutes,
                               std::function<void(bool)> callback) {
+    if (!check_ready("set_cycle_time_control")) { if (callback) callback(false); return; }
     control_service_.set_cycle_time_control_async(on_minutes, off_minutes,
                                                   callback);
   }
@@ -464,15 +500,18 @@ public:
   }
   bool write_schedule_entries(const std::vector<ScheduleEntry> &entries,
                               uint8_t layer = 0) {
+    if (!check_ready("write_schedule_entries")) return false;
     return schedule_service_.write_entries(entries, layer);
   }
   bool write_schedule_entries_async(const std::vector<ScheduleEntry> &entries,
                                     uint8_t layer,
                                     std::function<void(bool)> on_complete) {
+    if (!check_ready("write_schedule_entries_async")) { if (on_complete) on_complete(false); return false; }
     return schedule_service_.write_entries_async(entries, layer, on_complete);
   }
   void clear_schedule_entry(const std::string &day, uint8_t layer = 0,
                             std::function<void(bool)> on_complete = nullptr) {
+    if (!check_ready("clear_schedule_entry")) { if (on_complete) on_complete(false); return; }
     schedule_service_.clear_entry(day, layer, on_complete);
   }
   bool get_schedule_display_string(const std::vector<ScheduleEntry> &entries,
@@ -488,6 +527,7 @@ public:
   void set_schedule_entry(uint8_t layer, uint8_t day_index,
                           const ScheduleEntry &entry,
                           std::function<void(bool)> on_complete) {
+    if (!check_ready("set_schedule_entry")) { if (on_complete) on_complete(false); return; }
     schedule_service_.set_entry_async(
         layer, day_index, entry, [this, on_complete](bool success) {
           if (success) {
@@ -500,6 +540,7 @@ public:
   }
   void clear_schedule_entry_async(uint8_t layer, uint8_t day_index,
                                   std::function<void(bool)> on_complete) {
+    if (!check_ready("clear_schedule_entry_async")) { if (on_complete) on_complete(false); return; }
     schedule_service_.clear_entry_async(
         layer, day_index, [this, on_complete](bool success) {
           if (success) {
