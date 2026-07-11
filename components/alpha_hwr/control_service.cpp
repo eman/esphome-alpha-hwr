@@ -641,9 +641,9 @@ bool ControlService::enable_remote_mode() {
 
    ESP_LOGI(TAG, "Disabling remote mode (Auto)...");
 
-   // Class 3: 03 81 06 (OpSpec 0x81 = SET; command ID 6 = disable remote / Auto).
+   // Class 3: 03 81 08 (OpSpec 0x81 = SET; command ID 8 = disable remote / Auto).
    // Fix #46: was 0xC1 (INFO) -- see enable_remote_mode() for details.
-   const uint8_t apdu[3] = {0x03, 0x81, 0x06};
+   const uint8_t apdu[3] = {0x03, 0x81, 0x08};
    
    // Send command and wait for the ACK -- see enable_remote_mode().
    this->transport_.send_apdu_command(apdu, 3, 0, 0,
@@ -1029,11 +1029,7 @@ void ControlService::set_temperature_range_async(float min_temp, float max_temp,
       apdu[24] = 0x00;
 
       // Log the full APDU for debugging
-      char apdu_hex[100] = {0};
-      for (int i = 0; i < 25 && i < sizeof(apdu_hex)/3; i++) {
-        sprintf(apdu_hex + (i * 3), "%02X ", apdu[i]);
-      }
-      ESP_LOGI(TAG, "write_temp_range APDU: %s", apdu_hex);
+      ESP_LOGI(TAG, "write_temp_range APDU: %s", format_hex_pretty(apdu, 25).c_str());
 
       // Pass expect_obj_id=0, expect_sub_id=0 for response matching because
       // the pump responds with a short ACK (OpSpec 0x01) without Obj/Sub fields

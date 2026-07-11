@@ -18,6 +18,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **Remote Mode lockout and spontaneous start** —
+  Fixed `disable_remote_mode` to correctly send a `LOCAL` (0x08) command rather than a
+  `START` (0x06) command, which caused the pump to spontaneously run when disabling remote mode.
+  Also removed the automatic `enable_remote()` call from the `pump_enabled` switch, which was
+  causing the pump to ignore all commands for ~40 seconds after being turned on
+  (issue [#66](https://github.com/eman/esphome-alpha-hwr/issues/66)).
+
 - **Temperature Range writes could report success without persisting pump values** —
   `ControlService::set_temperature_range_async()` queued the Object 91/Sub 430
   write as fire-and-forget while the preceding mode-switch control request

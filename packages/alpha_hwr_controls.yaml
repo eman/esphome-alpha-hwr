@@ -37,8 +37,7 @@ switch:
       return id(pump).is_pump_enabled();
     turn_on_action:
       - lambda: |-
-          ESP_LOGI("switch", "Enabling pump (enabling remote mode first)...");
-          id(pump).enable_remote();
+          ESP_LOGI("switch", "Enabling pump...");
           id(pump).pump_start();
           // Immediate UI feedback
           id(pump_enabled_switch).publish_state(true);
