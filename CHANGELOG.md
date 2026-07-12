@@ -7,6 +7,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- **Event log read timeout** —
+  Fixed an issue in `EventLogService` where the expected Object and Sub-ID fields were swapped for the event log read command, causing the transport layer to drop the response and time out.
+
 ## [0.10.0] - 2026-07-11
 
 ### Fixed
