@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+## [0.10.1] - 2026-07-11
+
 ### Fixed
 
 - **Event log read timeout** —
