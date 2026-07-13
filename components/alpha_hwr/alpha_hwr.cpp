@@ -19,6 +19,9 @@ void AlphaHwrComponent::setup() {
                 "==================");
 
   this->link_boot_ms_ = millis();  // Pump Link Status: mark the startup window
+  
+  // Restore cached flow setpoint from flash (for issue #81)
+  this->control_service_.init_preferences(0x08F10B);
 
   // Initialize BLE connection manager
   ble_manager_.set_ble_client(parent_);

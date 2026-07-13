@@ -6,6 +6,9 @@
 #include "session.h"
 #include "codec.h"
 #include "frame_builder.h"
+#include "esphome/components/ble_client/ble_client.h"
+#include "esphome/core/helpers.h"
+#include "esphome/core/preferences.h"
 
 namespace esphome {
 namespace alpha_hwr {
@@ -133,6 +136,12 @@ class ControlService {
      * preserves the cached ClockProgramOverview (including schedule_enabled).
      */
     void set_config_commit_callback(std::function<void()> callback) { config_commit_callback_ = callback; }
+
+   /**
+    * Initialize preferences for restoring flow setpoint across reboots.
+    * Called from component setup.
+    */
+   void init_preferences(uint32_t hash);
    
    /**
     * Set callback for control mode change notifications.
@@ -496,6 +505,8 @@ class ControlService {
     float cached_temp_min_{NAN};           // Temperature range min (Object 91 Sub 430)
     float cached_temp_max_{NAN};           // Temperature range max (Object 91 Sub 430)
     uint8_t cached_operation_mode_{0xFF};  // Operation mode from notification
+    
+    ESPPreferenceObject flow_setpoint_pref_; // For persisting flow setpoint across reboots
     int8_t cached_autoadapt_{-1};           // AutoAdapt state (-1=unknown, 0=off, 1=on)
     int8_t cached_cycle_time_on_{-1};       // Cycle time ON minutes
     int8_t cached_cycle_time_off_{-1};      // Cycle time OFF minutes  

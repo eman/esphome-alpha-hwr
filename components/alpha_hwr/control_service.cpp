@@ -59,7 +59,16 @@ void ControlService::set_schedule_callback(std::function<void(std::function<void
 
 void ControlService::set_mode_change_callback(std::function<void(ControlMode, uint8_t, float)> callback) {
    mode_change_callback_ = callback;
- }
+}
+
+void ControlService::init_preferences(uint32_t hash) {
+  this->flow_setpoint_pref_ = global_preferences->make_preference<float>(hash);
+  float restored;
+  if (this->flow_setpoint_pref_.load(&restored)) {
+    ESP_LOGI(TAG, "Restored Constant Flow setpoint from flash: %.2f m³/h", restored);
+    this->cached_flow_setpoint_ = restored;
+  }
+}
 
 void ControlService::check_flow_setpoint_scale(float previous_setpoint, float new_setpoint, float raw_register_value) {
   // See issue #44: bench-verified on 2026-07-08 — Object 86/Sub 6 in Constant
@@ -953,12 +962,14 @@ void ControlService::set_constant_flow_async(float value_m3h, std::function<void
       schedule_callback_([this, value_m3h, callback]() {
         set_class10_setpoint(value_m3h, SUB_FLOW_SETPOINT);
         cached_flow_setpoint_ = value_m3h;
+        this->flow_setpoint_pref_.save(&cached_flow_setpoint_);
         ESP_LOGI(TAG, "✓ Constant flow set to %.2f m³/h", value_m3h);
         if (callback) callback(true);
       }, 400);
     } else {
       set_class10_setpoint(value_m3h, SUB_FLOW_SETPOINT);
       cached_flow_setpoint_ = value_m3h;
+      this->flow_setpoint_pref_.save(&cached_flow_setpoint_);
       if (callback) callback(true);
     }
   });
