@@ -875,6 +875,10 @@ void ControlService::set_constant_pressure_async(float value_m, std::function<vo
         set_class10_setpoint(value_pa, SUB_PRESSURE_SETPOINT);
         cached_pressure_setpoint_ = value_m;
         ESP_LOGI(TAG, "✓ Constant pressure set to %.2f m (%.0f Pa)", value_m, value_pa);
+        
+        // Read back after 1.2s to confirm the value the pump actually stored (fixes #82)
+        schedule_callback_([this]() { this->sync_cache_async(nullptr); }, 1200);
+        
         if (callback) callback(true);
       }, 400);
     } else {
@@ -918,6 +922,10 @@ void ControlService::set_constant_speed_async(float value_rpm, std::function<voi
         set_class10_setpoint(value_rpm, SUB_SPEED_SETPOINT);
         cached_speed_setpoint_ = value_rpm;
         ESP_LOGI(TAG, "✓ Constant speed set to %.0f RPM", value_rpm);
+        
+        // Read back after 1.2s to confirm the value the pump actually stored (fixes #82)
+        schedule_callback_([this]() { this->sync_cache_async(nullptr); }, 1200);
+        
         if (callback) callback(true);
       }, 400);
     } else {
@@ -1111,6 +1119,10 @@ void ControlService::set_proportional_pressure_async(float value_m, std::functio
         set_class10_setpoint(value_pa, SUB_PRESSURE_SETPOINT);
         cached_proportional_setpoint_ = value_m;
         ESP_LOGI(TAG, "✓ Proportional pressure set to %.2f m (%.0f Pa)", value_pa / 9806.65f, value_pa);
+        
+        // Read back after 1.2s to confirm the value the pump actually stored (fixes #82)
+        schedule_callback_([this]() { this->sync_cache_async(nullptr); }, 1200);
+        
         if (callback) callback(true);
       }, 400);
     } else {
