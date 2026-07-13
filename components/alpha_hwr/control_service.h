@@ -332,7 +332,7 @@ class ControlService {
    float get_cached_pressure_setpoint() const { return cached_pressure_setpoint_; }
    float get_cached_proportional_setpoint() const { return cached_proportional_setpoint_; }
    float get_cached_speed_setpoint() const { return cached_speed_setpoint_; }
-   float get_cached_flow_setpoint() const { return cached_flow_setpoint_; }
+   float get_cached_flow_setpoint() const { return std::isnan(cached_flow_setpoint_) ? 1.0f : cached_flow_setpoint_; }
    /** Get cached temperature range min (NAN if not yet read). */
    float get_cached_temp_min() const { return cached_temp_min_; }
    /** Get cached temperature range max (NAN if not yet read). */
@@ -486,13 +486,13 @@ class ControlService {
     // eliminating cross-mode contamination bugs that arose from the old shared
     // cached_setpoint_ field. NAN = not yet read from pump.
     //
-    // #81 / #44: Readback is broken, so initialize to 1.0f to prevent UI lag
-    // and to prevent send_control_request from using the default suffix (~3671 m3/h)
-    // which causes the pump to reject the mode switch.
+    // #81 / #44: Readback is broken, so get_cached_flow_setpoint() and
+    // get_setpoint_for_mode() fall back to 1.0f. The internal cache remains
+    // NAN until a client write so scale-check warnings are properly suppressed.
     float cached_pressure_setpoint_{NAN};       // CONSTANT_PRESSURE: meters of water column
     float cached_proportional_setpoint_{NAN};   // PROPORTIONAL_PRESSURE: meters
     float cached_speed_setpoint_{NAN};           // CONSTANT_SPEED: RPM
-    float cached_flow_setpoint_{1.0f};            // CONSTANT_FLOW: m³/h (client-write only)
+    float cached_flow_setpoint_{NAN};            // CONSTANT_FLOW: m³/h (client-write only)
     float cached_temp_min_{NAN};           // Temperature range min (Object 91 Sub 430)
     float cached_temp_max_{NAN};           // Temperature range max (Object 91 Sub 430)
     uint8_t cached_operation_mode_{0xFF};  // Operation mode from notification

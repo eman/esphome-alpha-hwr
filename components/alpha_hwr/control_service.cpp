@@ -545,14 +545,7 @@ bool ControlService::set_mode(ControlMode mode) {
     // Always use send_control_request() which handles all modes via Class 10
     // (defaults to mode_byte 0x02 for modes not in CLASS10_CONTROL_MAP)
     // Reference: control.py::set_mode() lines 345-366
-    float mode_setpoint = NAN;
-    switch (mode) {
-      case ControlMode::CONSTANT_PRESSURE:     mode_setpoint = cached_pressure_setpoint_; break;
-      case ControlMode::PROPORTIONAL_PRESSURE: mode_setpoint = cached_proportional_setpoint_; break;
-      case ControlMode::CONSTANT_SPEED:        mode_setpoint = cached_speed_setpoint_; break;
-      case ControlMode::CONSTANT_FLOW:         mode_setpoint = cached_flow_setpoint_; break;
-      default: break;
-    }
+    float mode_setpoint = get_setpoint_for_mode(mode);
     if (!std::isnan(mode_setpoint)) {
       // Stored in display units (meters for pressure); convert to pump-native units (Pascals)
       if (mode == ControlMode::CONSTANT_PRESSURE || mode == ControlMode::PROPORTIONAL_PRESSURE) {
@@ -722,7 +715,7 @@ float ControlService::get_setpoint_for_mode(ControlMode mode) const {
     case ControlMode::CONSTANT_PRESSURE:     return cached_pressure_setpoint_;
     case ControlMode::PROPORTIONAL_PRESSURE: return cached_proportional_setpoint_;
     case ControlMode::CONSTANT_SPEED:        return cached_speed_setpoint_;
-    case ControlMode::CONSTANT_FLOW:         return cached_flow_setpoint_;
+    case ControlMode::CONSTANT_FLOW:         return std::isnan(cached_flow_setpoint_) ? 1.0f : cached_flow_setpoint_;
     default:                                 return NAN;
   }
 }
