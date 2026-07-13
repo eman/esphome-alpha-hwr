@@ -2,7 +2,7 @@
 
 ## [Unreleased]
 ### Fixed
-- Fixed an issue where the pump would reject a change to Constant Flow mode by setting a valid default flow setpoint (1.0 m³/h). This also resolves a UI bug where the Constant Flow setpoint slider remained disabled/Unknown ([#81](https://github.com/eman/esphome-alpha-hwr/issues/81)).
+- Fixed an issue where the pump would reject a change to Constant Flow mode by setting a valid default flow setpoint (1.0 m³/h). To prevent this default from overwriting user setpoints after a reboot, the C++ component now persists the last commanded Constant Flow setpoint in the ESP32's flash memory. This also resolves a UI bug where the Constant Flow setpoint slider remained disabled/Unknown ([#81](https://github.com/eman/esphome-alpha-hwr/issues/81)).
 
 ## [0.10.1] - 2026-07-11
 

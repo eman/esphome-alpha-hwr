@@ -9,6 +9,7 @@
 #include "esphome/components/ble_client/ble_client.h"
 #include "esphome/core/helpers.h"
 #include "esphome/core/preferences.h"
+#include <cmath>
 
 namespace esphome {
 namespace alpha_hwr {
@@ -341,6 +342,7 @@ class ControlService {
    float get_cached_pressure_setpoint() const { return cached_pressure_setpoint_; }
    float get_cached_proportional_setpoint() const { return cached_proportional_setpoint_; }
    float get_cached_speed_setpoint() const { return cached_speed_setpoint_; }
+   // Returns 1.0f if the setpoint is NAN (e.g. uninitialized and not in flash) to prevent mode-switch failure
    float get_cached_flow_setpoint() const { return std::isnan(cached_flow_setpoint_) ? 1.0f : cached_flow_setpoint_; }
    /** Get cached temperature range min (NAN if not yet read). */
    float get_cached_temp_min() const { return cached_temp_min_; }
