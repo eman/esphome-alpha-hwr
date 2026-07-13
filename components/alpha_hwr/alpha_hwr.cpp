@@ -20,6 +20,10 @@ void AlphaHwrComponent::setup() {
 
   this->link_boot_ms_ = millis();  // Pump Link Status: mark the startup window
 
+  if (this->ready_sensor_) {
+    this->ready_sensor_->publish_state(false);
+  }
+
   // Initialize BLE connection manager
   ble_manager_.set_ble_client(parent_);
   ble_manager_.set_pairing_enabled(pairing_enabled_);
