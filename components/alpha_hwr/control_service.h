@@ -554,19 +554,6 @@ class ControlService {
   void with_resolved_enabled_state(std::function<void(bool resolved, bool enabled)> on_resolved);
 
   /**
-   * Diagnostic log for issue #44: bench-verified (2026-07-08) that Constant
-   * Flow mode's Object 86/Sub 6 setpoint readback returns a fixed value
-   * (~0.000694 m³/h) regardless of the actual commanded setpoint (tested
-   * 0.2/2.0/8.0 m³/h — all identical). Because of this, cached_setpoint_ is no
-   * longer updated from this register while in CONSTANT_FLOW mode (see call
-   * sites); this function only logs when a large jump would have occurred, in
-   * case a different pump/firmware revision behaves differently.
-   *
-   * @param previous_setpoint cached_setpoint_ before this update (display units)
-   * @param new_setpoint value that would have been cached had the register been trusted
-   * @param raw_register_value Raw float as read from Object 86/Sub 6, pre-conversion
-   */
-  void check_flow_setpoint_scale(float previous_setpoint, float new_setpoint, float raw_register_value);
   
   /**
    * Send configuration commit packet.
