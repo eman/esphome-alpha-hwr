@@ -928,8 +928,9 @@ void ControlService::set_constant_flow_async(float value_m3h, std::function<void
       if (callback) callback(false);
       return;
     }
+    float value_m3s = value_m3h / 3600.0f;
     // Step 1: Update overall operation request (Sub 6)
-    if (!send_control_request(ControlMode::CONSTANT_FLOW, enabled, value_m3h / 3600.0f, false)) {
+    if (!send_control_request(ControlMode::CONSTANT_FLOW, enabled, value_m3s, false)) {
       ESP_LOGE(TAG, "Failed to send control request for constant flow");
       if (callback) callback(false);
       return;
@@ -937,14 +938,14 @@ void ControlService::set_constant_flow_async(float value_m3h, std::function<void
     
     // Step 2: Update specific flow setpoint (Sub 39)
     if (schedule_callback_) {
-      schedule_callback_([this, value_m3h, callback]() {
-        set_class10_setpoint(value_m3h / 3600.0f, SUB_FLOW_SETPOINT);
+      schedule_callback_([this, value_m3h, value_m3s, callback]() {
+        set_class10_setpoint(value_m3s, SUB_FLOW_SETPOINT);
         cached_flow_setpoint_ = value_m3h;
         ESP_LOGI(TAG, "✓ Constant flow set to %.2f m³/h", value_m3h);
         if (callback) callback(true);
       }, 400);
     } else {
-      set_class10_setpoint(value_m3h / 3600.0f, SUB_FLOW_SETPOINT);
+      set_class10_setpoint(value_m3s, SUB_FLOW_SETPOINT);
       cached_flow_setpoint_ = value_m3h;
       if (callback) callback(true);
     }

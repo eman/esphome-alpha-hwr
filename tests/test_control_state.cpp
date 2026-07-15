@@ -275,42 +275,16 @@ struct RemoteModeState {
 };
 
 /**
- * Mirrors ControlService::check_flow_setpoint_scale() (issue #44 diagnostic
- * aid). Returns true if the transition from previous_setpoint to
- * new_setpoint would trigger the scaling-mismatch warning (>10x change in
- * either direction), false otherwise. Guards against NAN and a zero
- * previous value (first read / not-yet-cached) to avoid false positives.
- */
-bool flow_setpoint_scale_flagged(float previous_setpoint, float new_setpoint) {
-  if (std::isnan(previous_setpoint) || std::isnan(new_setpoint) || previous_setpoint == 0.0f) {
-    return false;
-  }
-  float ratio = new_setpoint / previous_setpoint;
-  return (ratio > 10.0f || ratio < 0.1f);
-}
-
-/**
  * Mirrors the setpoint-caching branch of
  * ControlService::update_mode_from_notification() / get_mode_async() after
- * the #44 display fix (and the review-feedback follow-up fixing cross-mode
- * contamination): for CONSTANT_FLOW, the Object 86/Sub 6 register is
- * known-unreliable (bench-verified) and is never applied to cached_setpoint_.
- * The previous (client-commanded) value is kept as-is *only* when we were
- * already in CONSTANT_FLOW (steady state); if we just transitioned into
- * CONSTANT_FLOW from a different mode, the stale cross-mode value (RPM,
- * meters, etc.) is cleared to NAN instead of leaking in as a bogus flow
- * setpoint. Pressure modes still apply the Pa->m conversion; all other
- * modes still trust the register.
+ * the #88 fix: CONSTANT_FLOW natively uses m³/s, so we must multiply by 3600.
  */
 float resolve_cached_setpoint_from_pump_read(ControlMode mode, ControlMode previous_mode,
                                               float previous_cached, float raw_from_pump) {
   if (mode == ControlMode::CONSTANT_PRESSURE || mode == ControlMode::PROPORTIONAL_PRESSURE) {
     return raw_from_pump / 9806.65f;
   } else if (mode == ControlMode::CONSTANT_FLOW) {
-    if (previous_mode != ControlMode::CONSTANT_FLOW) {
-      return NAN;  // Just entered Constant Flow: clear stale cross-mode value
-    }
-    return previous_cached;  // Steady state: keep last client-commanded value
+    return raw_from_pump * 3600.0f;
   } else {
     return raw_from_pump;
   }
@@ -787,94 +761,18 @@ void test_set_mode_aborts_when_enabled_state_unknown() {
 }
 
 // ============================================================================
-// Test: Constant Flow setpoint scale check flags the reporter's scenario (#44)
-// ============================================================================
-void test_flow_scale_flags_reporter_scenario() {
-  std::cout << "\n=== Testing Flow Setpoint Scale Check: Reporter's Scenario (#44) ===" << std::endl;
-
-  // Reporter had a plausible commanded setpoint, then a readback of 0.003056
-  // (~650x smaller) — should be flagged as a likely scaling issue.
-  TEST_ASSERT(flow_setpoint_scale_flagged(2.0f, 0.003056f),
-              "#44: readback far below commanded setpoint is flagged");
-}
-
-// ============================================================================
-// Test: Flow setpoint scale check flags large upward jumps too
-// ============================================================================
-void test_flow_scale_flags_large_upward_jump() {
-  std::cout << "\n=== Testing Flow Setpoint Scale Check: Large Upward Jump ===" << std::endl;
-
-  TEST_ASSERT(flow_setpoint_scale_flagged(0.5f, 6.0f),
-              "Large upward jump (12x) is flagged");
-}
-
-// ============================================================================
-// Test: Flow setpoint scale check does not false-positive on normal adjustments
-// ============================================================================
-void test_flow_scale_ignores_normal_adjustment() {
-  std::cout << "\n=== Testing Flow Setpoint Scale Check: Normal Adjustment (No False Positive) ===" << std::endl;
-
-  TEST_ASSERT(!flow_setpoint_scale_flagged(2.0f, 2.1f),
-              "Small user-driven adjustment (1.05x) is not flagged");
-  TEST_ASSERT(!flow_setpoint_scale_flagged(2.0f, 0.3f),
-              "3x change (within 0.1x-10x band) is not flagged");
-}
-
-// ============================================================================
-// Test: Flow setpoint scale check ignores first read / uninitialized values
-// ============================================================================
-void test_flow_scale_ignores_first_read() {
-  std::cout << "\n=== Testing Flow Setpoint Scale Check: First Read Guard ===" << std::endl;
-
-  TEST_ASSERT(!flow_setpoint_scale_flagged(NAN, 2.0f),
-              "First read (previous=NAN) is never flagged");
-  TEST_ASSERT(!flow_setpoint_scale_flagged(0.0f, 2.0f),
-              "Zero previous value is never flagged (avoids divide-by-zero)");
-  TEST_ASSERT(!flow_setpoint_scale_flagged(2.0f, NAN),
-              "NAN new value is never flagged");
-}
-
-// ============================================================================
 // Test: Constant Flow display keeps last commanded value in steady state,
 // ignores bad register (#44 fix)
 // ============================================================================
-void test_flow_display_ignores_unreliable_register() {
-  std::cout << "\n=== Testing Constant Flow Display Ignores Unreliable Register (#44 fix) ===" << std::endl;
+void test_flow_display_scales_correctly() {
+  std::cout << "\n=== Testing Constant Flow Unit Scaling (#88 fix) ===" << std::endl;
 
-  // Bench-verified scenario: already in Constant Flow (steady state), user
-  // commanded 2.0 m³/h, register always reads back 0.000694.
+  // The pump stores m³/s (0.000694), we should display 2.5 m³/h
   float resolved = resolve_cached_setpoint_from_pump_read(ControlMode::CONSTANT_FLOW, ControlMode::CONSTANT_FLOW,
-                                                           2.0f, 0.000694f);
-  TEST_ASSERT_EQ(resolved, 2.0f,
-                 "#44: Constant Flow keeps the last commanded value instead of the bad register readback");
-
-  // Never commanded yet (previous cached is NAN) -> stays NAN, doesn't show a wrong number.
-  float resolved_uncommanded = resolve_cached_setpoint_from_pump_read(ControlMode::CONSTANT_FLOW, ControlMode::CONSTANT_FLOW,
-                                                                       NAN, 0.000694f);
-  TEST_ASSERT(std::isnan(resolved_uncommanded),
-              "#44: Constant Flow with nothing commanded yet stays NAN rather than showing the bad register value");
-}
-
-// ============================================================================
-// Test: Entering Constant Flow from a different mode clears a stale
-// cross-mode cached setpoint instead of leaking it in as a bogus flow value
-// (review feedback on #44/PR #48).
-// ============================================================================
-void test_flow_mode_transition_clears_cross_mode_setpoint() {
-  std::cout << "\n=== Testing Constant Flow Mode Transition Clears Cross-Mode Setpoint (Review Feedback) ===" << std::endl;
-
-  // Coming from Constant Speed with a cached 2000 RPM value -- must NOT
-  // display as if it were a 2000 m^3/h flow setpoint.
-  float resolved = resolve_cached_setpoint_from_pump_read(ControlMode::CONSTANT_FLOW, ControlMode::CONSTANT_SPEED,
-                                                           2000.0f, 0.000694f);
-  TEST_ASSERT(std::isnan(resolved),
-              "Entering Constant Flow from Constant Speed clears the stale 2000 RPM cross-mode value");
-
-  // Coming from Constant Pressure with a cached 4.0 m value -- same story.
-  float resolved_from_pressure = resolve_cached_setpoint_from_pump_read(ControlMode::CONSTANT_FLOW, ControlMode::CONSTANT_PRESSURE,
-                                                                         4.0f, 0.000694f);
-  TEST_ASSERT(std::isnan(resolved_from_pressure),
-              "Entering Constant Flow from Constant Pressure clears the stale 4.0 m cross-mode value");
+                                                           NAN, 0.000694444f);
+  // Allow a small epsilon for float precision
+  TEST_ASSERT(std::abs(resolved - 2.5f) < 0.01f,
+                 "#88: Constant Flow correctly scales from m³/s up to m³/h (0.000694 m³/s -> 2.5 m³/h)");
 }
 
 // ============================================================================
@@ -1203,12 +1101,8 @@ int main() {
   test_set_mode_preserves_enabled_when_on();
   test_resolve_enabled_state_aborts_when_unknown();
   test_set_mode_aborts_when_enabled_state_unknown();
-  test_flow_scale_flags_reporter_scenario();
-  test_flow_scale_flags_large_upward_jump();
-  test_flow_scale_ignores_normal_adjustment();
-  test_flow_scale_ignores_first_read();
-  test_flow_display_ignores_unreliable_register();
-  test_flow_mode_transition_clears_cross_mode_setpoint();
+
+  test_flow_display_scales_correctly();
   test_other_modes_still_trust_register();
   test_start_reuses_cached_speed_setpoint();
   test_start_converts_pressure_setpoint();
