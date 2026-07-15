@@ -554,6 +554,13 @@ class ControlService {
   void with_resolved_enabled_state(std::function<void(bool resolved, bool enabled)> on_resolved);
 
   /**
+   * Resolve a specific mode's setpoint before sending a control request to 
+   * prevent clobbering the pump's NVM with default suffixes (issue #83).
+   * If the setpoint is already cached, it invokes the callback synchronously.
+   * If it is NAN, it triggers a targeted Class 10 read to the mode's specific
+   * register (e.g., Obj 86 Sub 13 for Constant Speed).
+   */
+  void with_resolved_setpoint(ControlMode mode, std::function<void(bool resolved, float setpoint)> on_resolved);
   
   /**
    * Send configuration commit packet.
