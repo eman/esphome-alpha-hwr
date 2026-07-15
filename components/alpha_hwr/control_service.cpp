@@ -368,35 +368,17 @@ bool ControlService::start(uint8_t mode) {
   ESP_LOGI(TAG, "Starting pump...");
 
   // Resolve target mode (255 = use current mode)
-  // Reference: control.py::start() lines 183-206
+  ControlMode target = current_mode_;
   if (mode != 255) {
-    current_mode_ = static_cast<ControlMode>(mode);
-    // Per-mode fields (issue #51): no NAN-clearing needed — each mode has its
-    // own storage, so a previous mode's value can never contaminate this mode.
+    target = static_cast<ControlMode>(mode);
   }
   
-  ControlMode target = current_mode_;
-
-  // Resolve the setpoint to send with the start command.
-  //
-  // Fix #43: send_control_request() falls back to CLASS10_CONTROL_MAP's
-  // default suffix when no setpoint is given, which decodes to a hardcoded
-  // ~3671.0 for CONSTANT_PRESSURE/PROPORTIONAL_PRESSURE/CONSTANT_SPEED/
-  // CONSTANT_FLOW. Reuse the pump's actual last-known setpoint instead, so
-  // enabling the pump doesn't clobber the user's configured setpoint.
-  //
-  // Issue #51: read from the mode-specific field — no cross-mode contamination
-  // possible. DHW_ON_OFF, TEMPERATURE_RANGE, and AUTO_ADAPT_* keep using the
-  // default suffix (unchanged behavior; those modes don't have a scalar setpoint cache).
-  float start_setpoint = NAN;
-  if (mode == 255) {
-    switch (target) {
-      case ControlMode::CONSTANT_PRESSURE:     start_setpoint = cached_pressure_setpoint_; break;
-      case ControlMode::PROPORTIONAL_PRESSURE: start_setpoint = cached_proportional_setpoint_; break;
-      case ControlMode::CONSTANT_SPEED:        start_setpoint = cached_speed_setpoint_; break;
-      case ControlMode::CONSTANT_FLOW:         start_setpoint = cached_flow_setpoint_; break;
-      default: break;
+  with_resolved_setpoint(target, [this, target, mode](bool resolved, float start_setpoint) {
+    if (!resolved) {
+      ESP_LOGE(TAG, "Aborting start command: could not determine stored setpoint to prevent clobbering");
+      return;
     }
+
     if (!std::isnan(start_setpoint)) {
       // Stored in display units (meters for pressure); convert to pump-native units (Pascals)
       if (target == ControlMode::CONSTANT_PRESSURE || target == ControlMode::PROPORTIONAL_PRESSURE) {
@@ -406,43 +388,41 @@ bool ControlService::start(uint8_t mode) {
     } else {
       ESP_LOGD(TAG, "No cached setpoint to reuse on start; using mode default suffix");
     }
-  }
 
-  if (!send_control_request(target, true, start_setpoint)) {
-    ESP_LOGE(TAG, "Failed to send start command");
-    return false;
-  }
-
-  // Update mode state if a specific mode was requested
-  if (mode != 255) {
-    mode_valid_ = true;
-    if (mode_change_callback_) {
-      mode_change_callback_(current_mode_, 0, 0.0f);
+    if (!send_control_request(target, true, start_setpoint)) {
+      ESP_LOGE(TAG, "Failed to send start command");
+      return;
     }
-  }
 
-  // Pump is now enabled (user started it)
-  pump_enabled_ = true;
-  pump_enabled_valid_ = true;
+    // Update mode state if a specific mode was requested
+    if (mode != 255) {
+      current_mode_ = static_cast<ControlMode>(mode);
+      mode_valid_ = true;
+      if (mode_change_callback_) {
+        mode_change_callback_(current_mode_, 0, 0.0f);
+      }
+    }
 
-  // Schedule a post-command readback after ~500ms to ensure cached state is
-  // synchronized with pump's actual state (fixes #52). The pump does not send
-  // unsolicited notifications after start/stop commands, so the non-optimistic
-  // Pump Enabled switch won't update from cache until the next telemetry poll
-  // or a readback occurs. Reporter bench-tested ~500ms delay and confirmed it
-  // works reliably.
-  if (schedule_callback_) {
-    schedule_callback_([this]() {
-      ESP_LOGD(TAG, "Post-command readback after start (issue #52)");
-      get_mode_async([](bool success, ControlMode /*mode*/) {
-        if (!success) {
-          ESP_LOGW(TAG, "Post-command readback failed after start");
-        }
-      });
-    }, 500);
-  }
+    // Pump is now enabled (user started it)
+    pump_enabled_ = true;
+    pump_enabled_valid_ = true;
 
-  ESP_LOGI(TAG, "Pump start command sent (mode=%d)", static_cast<uint8_t>(target));
+    // Schedule a post-command readback after ~500ms to ensure cached state is
+    // synchronized with pump's actual state (fixes #52).
+    if (schedule_callback_) {
+      schedule_callback_([this]() {
+        ESP_LOGD(TAG, "Post-command readback after start (issue #52)");
+        get_mode_async([](bool success, ControlMode /*mode*/) {
+          if (!success) {
+            ESP_LOGW(TAG, "Post-command readback failed after start");
+          }
+        });
+      }, 500);
+    }
+
+    ESP_LOGI(TAG, "Pump start command sent (mode=%d)", static_cast<uint8_t>(target));
+  });
+
   return true;
 }
 
@@ -456,21 +436,17 @@ bool ControlService::stop(uint8_t mode) {
   ESP_LOGI(TAG, "Stopping pump...");
 
   // Resolve target mode (255 = use current mode)
-  // Reference: control.py::stop() lines 208-231
   ControlMode target = current_mode_;
   if (mode != 255) {
     target = static_cast<ControlMode>(mode);
   }
   
-  float stop_setpoint = NAN;
-  if (mode == 255) {
-    switch (target) {
-      case ControlMode::CONSTANT_PRESSURE:     stop_setpoint = cached_pressure_setpoint_; break;
-      case ControlMode::PROPORTIONAL_PRESSURE: stop_setpoint = cached_proportional_setpoint_; break;
-      case ControlMode::CONSTANT_SPEED:        stop_setpoint = cached_speed_setpoint_; break;
-      case ControlMode::CONSTANT_FLOW:         stop_setpoint = cached_flow_setpoint_; break;
-      default: break;
+  with_resolved_setpoint(target, [this, target, mode](bool resolved, float stop_setpoint) {
+    if (!resolved) {
+      ESP_LOGE(TAG, "Aborting stop command: could not determine stored setpoint to prevent clobbering");
+      return;
     }
+
     if (!std::isnan(stop_setpoint)) {
       // Stored in display units (meters for pressure); convert to pump-native units (Pascals)
       if (target == ControlMode::CONSTANT_PRESSURE || target == ControlMode::PROPORTIONAL_PRESSURE) {
@@ -480,36 +456,32 @@ bool ControlService::stop(uint8_t mode) {
     } else {
       ESP_LOGD(TAG, "No cached setpoint to reuse on stop; using mode default suffix");
     }
-  }
 
-  if (!send_control_request(target, false, stop_setpoint)) {
-    ESP_LOGE(TAG, "Failed to send stop command");
-    return false;
-  }
+    if (!send_control_request(target, false, stop_setpoint)) {
+      ESP_LOGE(TAG, "Failed to send stop command");
+      return;
+    }
 
-  // NOTE: Python reference does NOT update _current_mode in stop()
-  // Pump is now disabled (user stopped it)
-  pump_enabled_ = false;
-  pump_enabled_valid_ = true;
+    // Pump is now disabled (user stopped it)
+    pump_enabled_ = false;
+    pump_enabled_valid_ = true;
 
-  // Schedule a post-command readback after ~500ms to ensure cached state is
-  // synchronized with pump's actual state (fixes #52). The pump does not send
-  // unsolicited notifications after start/stop commands, so the non-optimistic
-  // Pump Enabled switch won't update from cache until the next telemetry poll
-  // or a readback occurs. Reporter bench-tested ~500ms delay and confirmed it
-  // works reliably.
-  if (schedule_callback_) {
-    schedule_callback_([this]() {
-      ESP_LOGD(TAG, "Post-command readback after stop (issue #52)");
-      get_mode_async([](bool success, ControlMode /*mode*/) {
-        if (!success) {
-          ESP_LOGW(TAG, "Post-command readback failed after stop");
-        }
-      });
-    }, 500);
-  }
+    // Schedule a post-command readback after ~500ms to ensure cached state is
+    // synchronized with pump's actual state (fixes #52).
+    if (schedule_callback_) {
+      schedule_callback_([this]() {
+        ESP_LOGD(TAG, "Post-command readback after stop (issue #52)");
+        get_mode_async([](bool success, ControlMode /*mode*/) {
+          if (!success) {
+            ESP_LOGW(TAG, "Post-command readback failed after stop");
+          }
+        });
+      }, 500);
+    }
 
-  ESP_LOGI(TAG, "Pump stop command sent (mode=%d)", static_cast<uint8_t>(target));
+    ESP_LOGI(TAG, "Pump stop command sent (mode=%d)", static_cast<uint8_t>(target));
+  });
+
   return true;
 }
 
@@ -526,66 +498,48 @@ bool ControlService::set_mode(ControlMode mode) {
   // Fix #45: send the pump's actual current enabled state instead of
   // hardcoding "true" (start), so switching modes never implicitly
   // force-enables the pump while it's off.
-  //
-  // NOTE: with_resolved_enabled_state() usually resolves synchronously (when
-  // pump_enabled_valid_ is already known), but can fall back to an async
-  // get_mode_async() read-back. Since this function's bool return can't
-  // reflect a result that isn't known yet, we return true optimistically
-  // here (consistent with start()/stop(), which already return true after
-  // just queueing a transport command) and log any failure from within the
-  // callback instead.
-  with_resolved_enabled_state([this, mode, mode_val](bool resolved, bool enabled) {
-    if (!resolved) {
-      // Enabled state genuinely unknown even after a read-back attempt --
-      // abort rather than guessing (either guess risks force-enabling or
-      // force-disabling the pump).
+  with_resolved_enabled_state([this, mode, mode_val](bool resolved_enabled, bool enabled) {
+    if (!resolved_enabled) {
+      // Enabled state genuinely unknown even after a read-back attempt
       ESP_LOGE(TAG, "Aborting mode change to %d: could not determine pump enabled state", mode_val);
       return;
     }
-    // Always use send_control_request() which handles all modes via Class 10
-    // (defaults to mode_byte 0x02 for modes not in CLASS10_CONTROL_MAP)
-    // Reference: control.py::set_mode() lines 345-366
-    float mode_setpoint = NAN;
-    switch (mode) {
-      case ControlMode::CONSTANT_PRESSURE:     mode_setpoint = cached_pressure_setpoint_; break;
-      case ControlMode::PROPORTIONAL_PRESSURE: mode_setpoint = cached_proportional_setpoint_; break;
-      case ControlMode::CONSTANT_SPEED:        mode_setpoint = cached_speed_setpoint_; break;
-      case ControlMode::CONSTANT_FLOW:         mode_setpoint = cached_flow_setpoint_; break;
-      default: break;
-    }
-    if (!std::isnan(mode_setpoint)) {
-      // Stored in display units (meters for pressure); convert to pump-native units (Pascals)
-      if (mode == ControlMode::CONSTANT_PRESSURE || mode == ControlMode::PROPORTIONAL_PRESSURE) {
-        mode_setpoint *= 9806.65f;
+
+    with_resolved_setpoint(mode, [this, mode, mode_val, enabled](bool resolved_setpoint, float mode_setpoint) {
+      if (!resolved_setpoint) {
+        ESP_LOGE(TAG, "Aborting mode change to %d: could not determine stored setpoint to prevent clobbering", mode_val);
+        return;
       }
-      ESP_LOGD(TAG, "Reusing cached setpoint on set_mode: %.4f (raw units)", mode_setpoint);
-    } else {
-      ESP_LOGD(TAG, "No cached setpoint to reuse on set_mode; using mode default suffix");
-    }
 
-    if (!send_control_request(mode, enabled, mode_setpoint)) {
-      ESP_LOGW(TAG, "Failed to send control request for mode %d", mode_val);
-      return;
-    }
+      if (!std::isnan(mode_setpoint)) {
+        // Stored in display units (meters for pressure); convert to pump-native units (Pascals)
+        if (mode == ControlMode::CONSTANT_PRESSURE || mode == ControlMode::PROPORTIONAL_PRESSURE) {
+          mode_setpoint *= 9806.65f;
+        }
+        ESP_LOGD(TAG, "Reusing cached setpoint on set_mode: %.4f (raw units)", mode_setpoint);
+      } else {
+        ESP_LOGD(TAG, "No cached setpoint to reuse on set_mode; using mode default suffix");
+      }
 
-    current_mode_ = mode;
-    mode_valid_ = true;
-    // Per-mode fields (issue #51): no NAN-clearing needed — each mode retains
-    // its own cached value independently.
+      if (!send_control_request(mode, enabled, mode_setpoint)) {
+        ESP_LOGW(TAG, "Failed to send control request for mode %d", mode_val);
+        return;
+      }
 
-    if (mode_change_callback_) {
-      mode_change_callback_(current_mode_, 0, 0.0f);
-    }
+      current_mode_ = mode;
+      mode_valid_ = true;
 
-    // Read setpoints for the new mode after delay (pump needs time to update passive notifications)
-    if (schedule_callback_) {
-      schedule_callback_([this]() { sync_cache_async(nullptr); }, 5000);
-    }
+      if (mode_change_callback_) {
+        mode_change_callback_(current_mode_, 0, 0.0f);
+      }
 
-    // Log what flag was sent, not an assertion about the resulting pump
-    // state (the pump's actual state could differ if it changes elsewhere
-    // between this send and any later read-back).
-    ESP_LOGI(TAG, "Mode set to %s (sent enabled=%s)", get_mode_name(mode), enabled ? "true" : "false");
+      // Read setpoints for the new mode after delay (pump needs time to update passive notifications)
+      if (schedule_callback_) {
+        schedule_callback_([this]() { sync_cache_async(nullptr); }, 5000);
+      }
+
+      ESP_LOGI(TAG, "Mode set to %s (sent enabled=%s)", get_mode_name(mode), enabled ? "true" : "false");
+    });
   });
 
   return true;
@@ -686,6 +640,68 @@ void ControlService::with_resolved_enabled_state(std::function<void(bool resolve
     }
     on_resolved(true, pump_enabled_);
   });
+}
+
+void ControlService::with_resolved_setpoint(ControlMode mode, std::function<void(bool resolved, float setpoint)> on_resolved) {
+  float cached = get_setpoint_for_mode(mode);
+  
+  if (!std::isnan(cached)) {
+    on_resolved(true, cached);
+    return;
+  }
+
+  uint16_t sub_id = 0;
+  switch (mode) {
+    case ControlMode::CONSTANT_PRESSURE:
+    case ControlMode::PROPORTIONAL_PRESSURE:
+      sub_id = SUB_PRESSURE_SETPOINT;
+      break;
+    case ControlMode::CONSTANT_SPEED:
+      sub_id = SUB_SPEED_SETPOINT;
+      break;
+    default:
+      // Modes without a scalar setpoint don't get clobbered by default suffix.
+      on_resolved(true, NAN);
+      return;
+  }
+
+  ESP_LOGD(TAG, "Setpoint for mode %s unknown; reading from pump (Obj 86, Sub %d) before sending control request...", get_mode_name(mode), sub_id);
+
+  uint8_t apdu[5];
+  apdu[0] = 0x0A;  // Class 10
+  apdu[1] = 0x03;  // OpSpec: READ (INFO)
+  apdu[2] = 0x56;  // Object 86 (1 byte Obj ID format)
+  apdu[3] = (sub_id >> 8) & 0xFF;
+  apdu[4] = sub_id & 0xFF;
+
+  this->transport_.send_apdu_command(
+    apdu, 5, sub_id, 86,
+    [this, mode, on_resolved](bool success, const uint8_t* payload, size_t payload_len) {
+      if (!success) {
+        ESP_LOGW(TAG, "Could not determine setpoint for mode %s before control request; aborting to prevent clobbering stored value", get_mode_name(mode));
+        on_resolved(false, NAN);
+        return;
+      }
+      
+      int offset = (payload_len >= 3 && payload[0] == 0x00 && payload[1] == 0x00) ? 3 : 0;
+      if (payload_len >= (size_t)(offset + 4)) {
+        float raw_setpoint = protocol::decode_float_be(&payload[offset]);
+        
+        if (mode == ControlMode::CONSTANT_PRESSURE) {
+          this->cached_pressure_setpoint_ = raw_setpoint / 9806.65f;
+          on_resolved(true, this->cached_pressure_setpoint_);
+        } else if (mode == ControlMode::PROPORTIONAL_PRESSURE) {
+          this->cached_proportional_setpoint_ = raw_setpoint / 9806.65f;
+          on_resolved(true, this->cached_proportional_setpoint_);
+        } else if (mode == ControlMode::CONSTANT_SPEED) {
+          this->cached_speed_setpoint_ = raw_setpoint;
+          on_resolved(true, raw_setpoint);
+        }
+      } else {
+        ESP_LOGW(TAG, "Response payload too short for setpoint read; aborting command");
+        on_resolved(false, NAN);
+      }
+    }, 5000);
 }
 
 const char *ControlService::get_mode_name(ControlMode mode) {

@@ -554,6 +554,15 @@ class ControlService {
   void with_resolved_enabled_state(std::function<void(bool resolved, bool enabled)> on_resolved);
 
   /**
+   * Resolve a specific mode's setpoint before sending a control request to 
+   * prevent clobbering the pump's NVM with default suffixes (issue #83).
+   * If the setpoint is already cached, it invokes the callback synchronously.
+   * If it is NAN, it triggers a targeted Class 10 read to the mode's specific
+   * register (e.g., Obj 86 Sub 13 for Constant Speed).
+   */
+  void with_resolved_setpoint(ControlMode mode, std::function<void(bool resolved, float setpoint)> on_resolved);
+
+  /**
    * Diagnostic log for issue #44: bench-verified (2026-07-08) that Constant
    * Flow mode's Object 86/Sub 6 setpoint readback returns a fixed value
    * (~0.000694 m³/h) regardless of the actual commanded setpoint (tested
