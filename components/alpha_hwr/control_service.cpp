@@ -659,6 +659,10 @@ void ControlService::with_resolved_setpoint(ControlMode mode, std::function<void
     case ControlMode::CONSTANT_SPEED:
       sub_id = SUB_SPEED_SETPOINT;
       break;
+    case ControlMode::CONSTANT_FLOW:
+      ESP_LOGW(TAG, "Cannot resolve unknown CONSTANT_FLOW setpoint (Obj 86 Sub 6 is unreliable). Aborting to prevent NVM clobbering.");
+      on_resolved(false, NAN);
+      return;
     default:
       // Modes without a scalar setpoint don't get clobbered by default suffix.
       on_resolved(true, NAN);
@@ -675,7 +679,7 @@ void ControlService::with_resolved_setpoint(ControlMode mode, std::function<void
   apdu[4] = sub_id & 0xFF;
 
   this->transport_.send_apdu_command(
-    apdu, 5, sub_id, 86,
+    apdu, 5, 86, sub_id,
     [this, mode, on_resolved](bool success, const uint8_t* payload, size_t payload_len) {
       if (!success) {
         ESP_LOGW(TAG, "Could not determine setpoint for mode %s before control request; aborting to prevent clobbering stored value", get_mode_name(mode));
