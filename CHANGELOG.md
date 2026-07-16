@@ -4,6 +4,19 @@
 
 ## [0.10.3] - 2026-07-16
 
+### Fixed
+
+- **Class 10 SET Command Queue Stalls** —
+  Fixed an issue where all SET commands (Mode, Setpoints, Schedule writes, Time Sync) were unnecessarily waiting 3 seconds for a full data payload when the pump only replies with a 1-byte Short ACK (`0x01`). Now uses `expect_short_ack=true` to instantly free the transport queue, eliminating 3-second UI hangs on every button press.
+- **Schedule Sync Queue Freeze (15-105 seconds)** —
+  Fixed a major stall where attempting to sync the schedule (5 layers + 35 single events) while the schedule was disabled (e.g., in Constant Flow mode) would cause the pump to silently drop all 40 packets. This previously resulted in a compounding 3-second timeout per packet (up to 2 minutes of queue freeze).
+  - The schedule sync now checks the cached state and instantly aborts if the schedule is disabled.
+  - Reduced the timeout of the periodic `poll_state` command (`Obj 84 Sub 1`) to 1000ms and configured it to assume the schedule is disabled upon timeout, ensuring the rest of the schedule sync properly short-circuits.
+- **Double Callback Recursion Unwinding** —
+  Fixed a subtle bug in `read_entries_async` where a synchronous abort of a disabled layer returned `false` after already invoking the success callback. This previously caused the sequential promise chain to unwind recursively, logging duplicated "Failed to queue read" warnings and triggering redundant Home Assistant UI updates.
+- **Compiler Warnings** —
+  Fixed `%u` format strings for `uint32_t` by casting to `unsigned long` and using `%lu` for cross-platform ESP32 compatibility. Increased `snprintf` buffer for time strings to avoid GCC truncation warnings.
+
 ## [0.10.2] - 2026-07-16
 
 ### Fixed
