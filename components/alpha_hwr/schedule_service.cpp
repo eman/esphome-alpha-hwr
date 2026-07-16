@@ -139,7 +139,7 @@ bool ScheduleService::poll_state() {
 
   // IMPORTANT: Pump responds with SubID 0, not SubID 1 that we requested!
   this->transport_.send_apdu_command(
-      apdu, 5, 0xDA01, 0,
+      apdu, 5, 0, 0,
       [this](bool success, const uint8_t *payload, size_t payload_len) {
         if (!success) {
           ESP_LOGW(TAG, "Failed to poll schedule state (timeout)");
@@ -311,7 +311,7 @@ bool ScheduleService::read_entries(std::vector<ScheduleEntry> *entries,
   apdu[4] = sub_id & 0xFF;
 
   this->transport_.send_apdu_command(
-      apdu, 5, 0xDE01, 0,
+      apdu, 5, 0, 0,
       [this, entries, layer](bool success, const uint8_t *payload,
                              size_t payload_len) {
         if (!success) {
@@ -437,7 +437,7 @@ bool ScheduleService::read_entries_async(
   apdu[4] = sub_id & 0xFF;
 
   this->transport_.send_apdu_command(
-      apdu, 5, 0xDE01, 0,
+      apdu, 5, 0, 0,
       [this, on_complete, layer](bool success, const uint8_t *payload,
                                  size_t payload_len) {
         ESP_LOGD(TAG,
@@ -567,7 +567,7 @@ bool ScheduleService::write_entries_async(
   ESP_LOGI(TAG, "Queueing async schedule write for layer %d...", layer);
 
   this->transport_.send_apdu_command(
-      apdu, sizeof(apdu), 0xDE01, 0,
+      apdu, sizeof(apdu), 0, 0,
       [on_complete, layer](bool success, const uint8_t *data, size_t len) {
         if (success) {
           ESP_LOGI(TAG, "Async write completed with ACK for layer %d", layer);
@@ -867,7 +867,7 @@ void ScheduleService::write_cached_layer_async(
   ESP_LOGI(TAG, "Writing cached layer %d to pump...", layer);
 
   this->transport_.send_apdu_command(
-      apdu, sizeof(apdu), 0xDE01, 0,
+      apdu, sizeof(apdu), 0, 0,
       [this, on_complete, layer](bool success, const uint8_t *data,
                                  size_t len) {
         // Send configuration commit after write
@@ -920,7 +920,7 @@ void ScheduleService::read_single_events_async(
     apdu[4] = sub_id & 0xFF;
 
     this->transport_.send_apdu_command(
-      apdu, 5, 0xDC01, 0,
+      apdu, 5, 0, 0,
         [this, idx, events, on_complete, max_events,
          read_next](bool success, const uint8_t *payload, size_t payload_len) {
           if (success && payload_len >= 13) {
@@ -969,7 +969,7 @@ void ScheduleService::write_single_event_async(
   event.to_bytes(apdu + 11);
 
   this->transport_.send_apdu_command(
-      apdu, sizeof(apdu), 0xDC01, 0,
+      apdu, sizeof(apdu), 0, 0,
       [this, on_complete, event](bool success, const uint8_t *data,
                                  size_t len) {
         this->send_configuration_commit();
