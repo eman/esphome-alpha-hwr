@@ -2,6 +2,17 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- **Constant Flow Setpoint scaling and readback** —
+  Fixed a unit mismatch where the pump's native `m³/s` Constant Flow setpoint was being passed to Home Assistant as `m³/h` without conversion. This caused the readback to display as `0.000694 m³/h` instead of `2.5 m³/h`, and caused the pump to silently reject all writes because `2.5 m³/s` (`9000 m³/h`) was severely out of range. 
+  (fixes [#88](https://github.com/eman/esphome-alpha-hwr/issues/88), fixes [#81](https://github.com/eman/esphome-alpha-hwr/issues/81), roots-causes [#44](https://github.com/eman/esphome-alpha-hwr/issues/44), PR #90).
+- **Constant Flow abort bug** —
+  Fixed an issue in `with_resolved_setpoint` where `CONSTANT_FLOW` changes would hard-abort instead of proceeding with the setpoint write.
+- **Transport Sub-ID Matching bug** —
+  Fixed `send_apdu_command` calls in the control service that were inadvertently passing the Object ID as the Sub ID due to reversed argument order.
+- **Prevent NVM Clobbering** —
+  Introduced `with_resolved_setpoint` to query the pump for its active setpoint if it isn't cached locally. This prevents `send_control_request` from falling back to hardcoded default suffixes that clobbered the pump's NVRAM when turning it on or changing modes (fixes [#83](https://github.com/eman/esphome-alpha-hwr/issues/83), PR #89).
 ## [0.10.1] - 2026-07-11
 
 ### Fixed

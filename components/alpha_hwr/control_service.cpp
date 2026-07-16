@@ -61,28 +61,6 @@ void ControlService::set_mode_change_callback(std::function<void(ControlMode, ui
    mode_change_callback_ = callback;
  }
 
-void ControlService::check_flow_setpoint_scale(float previous_setpoint, float new_setpoint, float raw_register_value) {
-  // See issue #44: bench-verified on 2026-07-08 — Object 86/Sub 6 in Constant
-  // Flow mode returns the exact same raw value (~0.000694 m³/h) regardless of
-  // the actual commanded setpoint (tested 0.2/2.0/8.0 m³/h, all read back
-  // identically). This register is confirmed NOT a reliable source of truth
-  // for this mode's setpoint, so update_mode_from_notification()/get_mode_async()
-  // no longer apply its value to cached_setpoint_ for CONSTANT_FLOW — this is
-  // now purely a diagnostic log (kept in case a future pump/firmware revision
-  // behaves differently) rather than something that gates a behavior change.
-  if (std::isnan(previous_setpoint) || std::isnan(new_setpoint) || previous_setpoint == 0.0f) {
-    return;
-  }
-  float ratio = new_setpoint / previous_setpoint;
-  if (ratio > 10.0f || ratio < 0.1f) {
-    ESP_LOGW(TAG,
-      "Constant Flow setpoint readback changed by %.1fx (last known=%.4f m³/h, raw register=%.6f m³/h) — "
-      "Object 86/Sub 6 is known-unreliable for this mode (see #44); ignoring and keeping last "
-      "client-commanded value",
-      ratio, previous_setpoint, raw_register_value);
-  }
-}
-
 void ControlService::update_mode_from_notification(uint8_t mode, uint8_t operation_mode, float setpoint,
                                                    uint8_t control_source) {
   // Update internal state
@@ -98,10 +76,7 @@ void ControlService::update_mode_from_notification(uint8_t mode, uint8_t operati
   } else if (current_mode_ == ControlMode::PROPORTIONAL_PRESSURE) {
     cached_proportional_setpoint_ = setpoint / 9806.65f;
   } else if (current_mode_ == ControlMode::CONSTANT_FLOW) {
-    // Fix #44: Object 86/Sub 6 unreliable for CONSTANT_FLOW — do not update
-    // cached_flow_setpoint_ here. Only client-side writes in set_constant_flow_async()
-    // populate it. No cross-mode contamination possible (per-mode fields, issue #51).
-    check_flow_setpoint_scale(cached_flow_setpoint_, setpoint, setpoint);
+    cached_flow_setpoint_ = setpoint * 3600.0f;
   } else if (current_mode_ == ControlMode::CONSTANT_SPEED) {
     cached_speed_setpoint_ = setpoint;
   }
@@ -317,10 +292,7 @@ bool ControlService::get_mode_async(std::function<void(bool, ControlMode)> on_co
                 } else if (current_mode_ == ControlMode::PROPORTIONAL_PRESSURE) {
                   cached_proportional_setpoint_ = raw_setpoint / 9806.65f;
                 } else if (current_mode_ == ControlMode::CONSTANT_FLOW) {
-                  // Fix #44: Object 86/Sub 6 unreliable for CONSTANT_FLOW — do not update
-                  // cached_flow_setpoint_ here. Only client-side writes populate it.
-                  // No cross-mode contamination possible (per-mode fields, issue #51).
-                  check_flow_setpoint_scale(cached_flow_setpoint_, raw_setpoint, raw_setpoint);
+                  cached_flow_setpoint_ = raw_setpoint * 3600.0f;
                 } else if (current_mode_ == ControlMode::CONSTANT_SPEED) {
                   cached_speed_setpoint_ = raw_setpoint;
                 }
@@ -378,11 +350,14 @@ bool ControlService::start(uint8_t mode) {
       ESP_LOGE(TAG, "Aborting start command: could not determine stored setpoint to prevent clobbering");
       return;
     }
+    }
 
     if (!std::isnan(start_setpoint)) {
       // Stored in display units (meters for pressure); convert to pump-native units (Pascals)
       if (target == ControlMode::CONSTANT_PRESSURE || target == ControlMode::PROPORTIONAL_PRESSURE) {
         start_setpoint *= 9806.65f;
+      } else if (target == ControlMode::CONSTANT_FLOW) {
+        start_setpoint /= 3600.0f;
       }
       ESP_LOGD(TAG, "Reusing cached setpoint on start: %.4f (raw units)", start_setpoint);
     } else {
@@ -451,6 +426,8 @@ bool ControlService::stop(uint8_t mode) {
       // Stored in display units (meters for pressure); convert to pump-native units (Pascals)
       if (target == ControlMode::CONSTANT_PRESSURE || target == ControlMode::PROPORTIONAL_PRESSURE) {
         stop_setpoint *= 9806.65f;
+      } else if (target == ControlMode::CONSTANT_FLOW) {
+        stop_setpoint /= 3600.0f;
       }
       ESP_LOGD(TAG, "Reusing cached setpoint on stop: %.4f (raw units)", stop_setpoint);
     } else {
@@ -504,7 +481,6 @@ bool ControlService::set_mode(ControlMode mode) {
       ESP_LOGE(TAG, "Aborting mode change to %d: could not determine pump enabled state", mode_val);
       return;
     }
-
     with_resolved_setpoint(mode, [this, mode, mode_val, enabled](bool resolved_setpoint, float mode_setpoint) {
       if (!resolved_setpoint) {
         ESP_LOGE(TAG, "Aborting mode change to %d: could not determine stored setpoint to prevent clobbering", mode_val);
@@ -515,6 +491,8 @@ bool ControlService::set_mode(ControlMode mode) {
         // Stored in display units (meters for pressure); convert to pump-native units (Pascals)
         if (mode == ControlMode::CONSTANT_PRESSURE || mode == ControlMode::PROPORTIONAL_PRESSURE) {
           mode_setpoint *= 9806.65f;
+        } else if (mode == ControlMode::CONSTANT_FLOW) {
+          mode_setpoint /= 3600.0f;
         }
         ESP_LOGD(TAG, "Reusing cached setpoint on set_mode: %.4f (raw units)", mode_setpoint);
       } else {
@@ -660,9 +638,8 @@ void ControlService::with_resolved_setpoint(ControlMode mode, std::function<void
       sub_id = SUB_SPEED_SETPOINT;
       break;
     case ControlMode::CONSTANT_FLOW:
-      ESP_LOGW(TAG, "Cannot resolve unknown CONSTANT_FLOW setpoint (Obj 86 Sub 6 is unreliable). Aborting to prevent NVM clobbering.");
-      on_resolved(false, NAN);
-      return;
+      sub_id = SUB_FLOW_SETPOINT;
+      break;
     default:
       // Modes without a scalar setpoint don't get clobbered by default suffix.
       on_resolved(true, NAN);
@@ -700,6 +677,9 @@ void ControlService::with_resolved_setpoint(ControlMode mode, std::function<void
         } else if (mode == ControlMode::CONSTANT_SPEED) {
           this->cached_speed_setpoint_ = raw_setpoint;
           on_resolved(true, raw_setpoint);
+        } else if (mode == ControlMode::CONSTANT_FLOW) {
+          this->cached_flow_setpoint_ = raw_setpoint * 3600.0f;
+          on_resolved(true, this->cached_flow_setpoint_);
         }
       } else {
         ESP_LOGW(TAG, "Response payload too short for setpoint read; aborting command");
@@ -976,8 +956,9 @@ void ControlService::set_constant_flow_async(float value_m3h, std::function<void
       if (callback) callback(false);
       return;
     }
+    float value_m3s = value_m3h / 3600.0f;
     // Step 1: Update overall operation request (Sub 6)
-    if (!send_control_request(ControlMode::CONSTANT_FLOW, enabled, value_m3h, false)) {
+    if (!send_control_request(ControlMode::CONSTANT_FLOW, enabled, value_m3s, false)) {
       ESP_LOGE(TAG, "Failed to send control request for constant flow");
       if (callback) callback(false);
       return;
@@ -985,14 +966,14 @@ void ControlService::set_constant_flow_async(float value_m3h, std::function<void
     
     // Step 2: Update specific flow setpoint (Sub 39)
     if (schedule_callback_) {
-      schedule_callback_([this, value_m3h, callback]() {
-        set_class10_setpoint(value_m3h, SUB_FLOW_SETPOINT);
+      schedule_callback_([this, value_m3h, value_m3s, callback]() {
+        set_class10_setpoint(value_m3s, SUB_FLOW_SETPOINT);
         cached_flow_setpoint_ = value_m3h;
         ESP_LOGI(TAG, "✓ Constant flow set to %.2f m³/h", value_m3h);
         if (callback) callback(true);
       }, 400);
     } else {
-      set_class10_setpoint(value_m3h, SUB_FLOW_SETPOINT);
+      set_class10_setpoint(value_m3s, SUB_FLOW_SETPOINT);
       cached_flow_setpoint_ = value_m3h;
       if (callback) callback(true);
     }
