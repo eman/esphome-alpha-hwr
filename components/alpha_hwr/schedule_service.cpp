@@ -360,6 +360,15 @@ bool ScheduleService::read_entries_async(
     return false;
   }
 
+  // If the pump schedule is disabled (e.g., pump is in Constant Flow mode),
+  // the pump drops Obj 84 Sub 1000+ reads entirely, which freezes the queue
+  // for 3 seconds per layer (15 seconds total). Abort early to prevent this.
+  if (this->schedule_state_cached_ && !this->schedule_enabled_) {
+    ESP_LOGD(TAG, "Schedule is disabled; skipping layer read to prevent pump timeout.");
+    if (on_complete) on_complete(true, std::vector<ScheduleEntry>{});
+    return false;
+  }
+
   // Special handling for layer=-1: read all layers
   if (layer == -1) {
     ESP_LOGD(TAG, "Reading schedule entries from all layers (async)...");
@@ -886,6 +895,15 @@ void ScheduleService::read_single_events_async(
     ESP_LOGE(TAG, "Cannot read single events: session not ready");
     if (on_complete)
       on_complete(false, std::vector<SingleEvent>{});
+    return;
+  }
+
+  // If the schedule is disabled, the pump drops Obj 84 Sub 900+ reads entirely.
+  // We must abort early to prevent stalling the queue for 105 seconds (35 slots * 3s).
+  if (this->schedule_state_cached_ && !this->schedule_enabled_) {
+    ESP_LOGD(TAG, "Schedule is disabled; skipping single events read to prevent pump timeout.");
+    if (on_complete)
+      on_complete(true, std::vector<SingleEvent>{});
     return;
   }
 
