@@ -142,7 +142,12 @@ bool ScheduleService::poll_state() {
       apdu, 5, 84, 1,
       [this](bool success, const uint8_t *payload, size_t payload_len) {
         if (!success) {
-          ESP_LOGW(TAG, "Failed to poll schedule state (timeout)");
+          ESP_LOGW(TAG, "Failed to poll schedule state (timeout). Assuming schedule is disabled by pump mode.");
+          this->schedule_enabled_ = false;
+          this->schedule_state_cached_ = true;
+          if (this->state_change_callback_) {
+            this->state_change_callback_(false);
+          }
           return;
         }
 
@@ -162,7 +167,8 @@ bool ScheduleService::poll_state() {
           ESP_LOGW(TAG, "Schedule state response too short (%zu bytes)",
                    payload_len);
         }
-      });
+      },
+      false, 1000);
 
   return true;
 }
