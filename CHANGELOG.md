@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+## [0.10.2] - 2026-07-16
+
 ### Fixed
 
 - **Constant Flow Setpoint scaling and readback** —

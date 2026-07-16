@@ -35,8 +35,8 @@ substitutions:
   dhw_charge_entity:      sensor.your_dhw_charge              # ← CHANGE to your DHW charge entity
 
 packages:
-  alpha_hwr: github://eman/esphome-alpha-hwr/packages/alpha_hwr_pairing.yaml@v0.10.1
-  dhw_demand: github://eman/esphome-alpha-hwr/packages/dhw_demand_detector.yaml@v0.10.1
+  alpha_hwr: github://eman/esphome-alpha-hwr/packages/alpha_hwr_pairing.yaml@v0.10.2
+  dhw_demand: github://eman/esphome-alpha-hwr/packages/dhw_demand_detector.yaml@v0.10.2
 
 # Override component source to use local development files instead of GitHub cache.
 # Remove or comment this block when deploying from the published GitHub packages.
