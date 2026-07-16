@@ -350,7 +350,6 @@ bool ControlService::start(uint8_t mode) {
       ESP_LOGE(TAG, "Aborting start command: could not determine stored setpoint to prevent clobbering");
       return;
     }
-    }
 
     if (!std::isnan(start_setpoint)) {
       // Stored in display units (meters for pressure); convert to pump-native units (Pascals)
