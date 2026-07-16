@@ -372,7 +372,7 @@ bool ScheduleService::read_entries_async(
   if (this->schedule_state_cached_ && !this->schedule_enabled_) {
     ESP_LOGD(TAG, "Schedule is disabled; skipping layer read to prevent pump timeout.");
     if (on_complete) on_complete(true, std::vector<ScheduleEntry>{});
-    return false;
+    return true; // MUST return true since we invoked the callback
   }
 
   // Special handling for layer=-1: read all layers
