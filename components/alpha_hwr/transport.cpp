@@ -371,17 +371,23 @@ bool Transport::try_dispatch_response(const uint8_t* data, size_t len) {
     // Object 0601/Sub 5600 mode writes using OpSpec 0x90) are ACKed with a short
     // Class 10 OpSpec 0x01 frame that does not carry Obj/Sub fields.
     // Handle that before the generic len>=12 DataObject parser below.
-    if (queued_class == 0x0A && len >= 6 && data[4] == 0x0A && (data[5] == 0x01 || data[5] == 0x81) &&
-        cmd.expect_short_ack) {
+    if (queued_class == 0x0A && len >= 6 && data[4] == 0x0A && (data[5] == 0x01 || data[5] == 0x81)) {
       uint8_t err_code = (len >= 7) ? data[6] : 0xFF;
-      ESP_LOGI(TAG, "Matched short Class 10 ACK (OpSpec 0x%02X) for Class 10 SET write. ErrCode=0x%02X", data[5], err_code);
-      if (cmd.callback) {
-        bool success = (data[5] == 0x01) || (data[5] == 0x81 && err_code == 0x00);
-        cmd.callback(success, data, len);
+      bool is_negative_ack = (data[5] == 0x81 && err_code != 0x00);
+      
+      // If we explicitly expect a short ACK, or if the pump explicitly rejected our command 
+      // with a Negative ACK (e.g. Schedule reads when in Constant Flow mode).
+      if (cmd.expect_short_ack || is_negative_ack) {
+        ESP_LOGI(TAG, "Matched short Class 10 ACK (OpSpec 0x%02X) for Class 10 %s. ErrCode=0x%02X", 
+                 data[5], (cmd.expect_short_ack ? "SET write" : "command"), err_code);
+        if (cmd.callback) {
+          bool success = !is_negative_ack;
+          cmd.callback(success, data, len);
+        }
+        this->command_queue_.pop_front();
+        this->state_ = State::IDLE;
+        return true;
       }
-      this->command_queue_.pop_front();
-      this->state_ = State::IDLE;
-      return true;
     }
   }
 
