@@ -783,7 +783,8 @@ bool ControlService::send_control_request(ControlMode mode, bool start_pump, flo
   // Send command and optionally schedule configuration commit.
   // Multi-step setters (mode switch + dedicated write) disable this here and
   // issue a single commit after the step-2 write.
-  this->transport_.send_apdu_command(apdu, 18);
+  // We expect a short ACK (OpSpec 0x01) for Class 10 SET commands.
+  this->transport_.send_apdu_command(apdu, 18, 0, 0, nullptr, 3000, false, true);
 
   if (queue_commit && schedule_callback_) {
     schedule_callback_([this]() { this->send_configuration_commit(); }, 200);
@@ -805,7 +806,7 @@ void ControlService::set_class10_setpoint(float value, uint16_t sub_id, uint16_t
   apdu[5] = obj_id & 0xFF;
   protocol::encode_float_be(value, &apdu[6]);
 
-  this->transport_.send_apdu_command(apdu, 10);
+  this->transport_.send_apdu_command(apdu, 10, 0, 0, nullptr, 3000, false, true);
 
   // Schedule configuration commit after setpoint write
   if (schedule_callback_) {
@@ -1197,7 +1198,7 @@ void ControlService::set_cycle_time_control_async(uint8_t on_minutes, uint8_t of
       apdu[5] = 0x5B;    // Obj-ID low
       memcpy(&apdu[6], data, 11);
       
-      this->transport_.send_apdu_command(apdu, 17);
+      this->transport_.send_apdu_command(apdu, 17, 0, 0, nullptr, 3000, false, true);
       this->send_configuration_commit();
       
       ESP_LOGI(TAG, "✓ Cycle time set: %d min ON, %d min OFF", on_minutes, off_minutes);

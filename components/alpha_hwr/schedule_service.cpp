@@ -753,8 +753,8 @@ bool ScheduleService::validate_entries(
 
 void ScheduleService::write_class10_command(const uint8_t *apdu,
                                             size_t apdu_len) {
-  // Build GENI frame and queue the packet with pacing and non-blocking wait
-  this->transport_.send_apdu_command(apdu, apdu_len);
+  // Class 10 SET writes (including schedule writes) are acknowledged with a short OpSpec 0x01 ACK
+  this->transport_.send_apdu_command(apdu, apdu_len, 0, 0, nullptr, 3000, false, true);
 }
 
 // -------------------------------------------------------------------------
@@ -988,7 +988,7 @@ void ScheduleService::write_single_event_async(
         if (on_complete)
           on_complete(true);
       },
-      3000);
+      3000, false, true);
 }
 
 void ScheduleService::clear_single_event_async(

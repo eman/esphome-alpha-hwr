@@ -134,7 +134,7 @@ void TimeService::set_clock_async(std::function<void(bool)> callback) {
   ESP_LOGD(TAG, "Clock SET sending %d bytes APDU", (int)sizeof(apdu));
   
   // Send the write command as fire-and-forget, then verify by reading back.
-  transport_->send_apdu_command(apdu, sizeof(apdu));
+  transport_->send_apdu_command(apdu, sizeof(apdu), 0, 0, nullptr, 3000, false, true);
   
   // Schedule verification read after 500ms to allow pump to apply the time
   if (callback) {
