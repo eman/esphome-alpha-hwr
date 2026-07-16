@@ -168,7 +168,7 @@ bool ScheduleService::poll_state() {
                    payload_len);
         }
       },
-      false, 1000);
+      1000);
 
   return true;
 }
