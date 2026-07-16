@@ -942,8 +942,8 @@ void ScheduleService::read_single_events_async(
             SingleEvent ev = SingleEvent::from_bytes(payload + 3, idx);
             if (ev.enabled) {
               events->push_back(ev);
-              ESP_LOGD(TAG, "Single event slot %d: active (%u - %u)", idx,
-                       ev.begin_timestamp, ev.end_timestamp);
+              ESP_LOGD(TAG, "Single event slot %d: active (%lu - %lu)", idx,
+                       (unsigned long)ev.begin_timestamp, (unsigned long)ev.end_timestamp);
             }
           }
           // Read next slot
@@ -965,9 +965,9 @@ void ScheduleService::write_single_event_async(
   }
 
   uint16_t sub_id = 900 + event.index;
-  ESP_LOGI(TAG, "Writing single event to slot %d (SubID %d): %s %u-%u",
+  ESP_LOGI(TAG, "Writing single event to slot %d (SubID %d): %s %lu-%lu",
            event.index, sub_id, event.enabled ? "enabled" : "disabled",
-           event.begin_timestamp, event.end_timestamp);
+           (unsigned long)event.begin_timestamp, (unsigned long)event.end_timestamp);
 
   uint8_t apdu[21]; // 11 header + 10 data
   apdu[0] = 0x0A;

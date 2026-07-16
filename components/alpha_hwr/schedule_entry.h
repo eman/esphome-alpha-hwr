@@ -154,7 +154,7 @@ class ScheduleEntry {
    * Get formatted begin time (HH:MM).
    */
   std::string get_begin_time() const {
-    char buf[6];
+    char buf[16];
     snprintf(buf, sizeof(buf), "%02d:%02d", this->begin_hour_, this->begin_minute_);
     return std::string(buf);
   }
@@ -163,7 +163,7 @@ class ScheduleEntry {
    * Get formatted end time (HH:MM).
    */
   std::string get_end_time() const {
-    char buf[6];
+    char buf[16];
     snprintf(buf, sizeof(buf), "%02d:%02d", this->end_hour_, this->end_minute_);
     return std::string(buf);
   }
