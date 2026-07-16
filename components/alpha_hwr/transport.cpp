@@ -372,7 +372,7 @@ bool Transport::try_dispatch_response(const uint8_t* data, size_t len) {
     // Class 10 OpSpec 0x01 frame that does not carry Obj/Sub fields.
     // Handle that before the generic len>=12 DataObject parser below.
     if (queued_class == 0x0A && len >= 6 && data[4] == 0x0A && (data[5] == 0x01 || data[5] == 0x81) &&
-        (cmd.expect_short_ack || (cmd.expect_obj_id == 0x0000 && cmd.expect_sub_id == 0x0000))) {
+        cmd.expect_short_ack) {
       uint8_t err_code = (len >= 7) ? data[6] : 0xFF;
       ESP_LOGI(TAG, "Matched short Class 10 ACK (OpSpec 0x%02X) for Class 10 SET write. ErrCode=0x%02X", data[5], err_code);
       if (cmd.callback) {
@@ -451,7 +451,7 @@ bool Transport::try_dispatch_response(const uint8_t* data, size_t len) {
         ESP_LOGV(TAG, "DataObject 0x0E packet too short to extract IDs");
         return false;
       }
-    } else if (opspec == 0x02) {
+    } else if (opspec == 0x02 || opspec == 0xB3) {
       if (len >= 9) {
         packet_obj_id = data[6];                     // 1 byte ObjID
         packet_sub_id = (data[7] << 8) | data[8];    // 2 bytes SubID

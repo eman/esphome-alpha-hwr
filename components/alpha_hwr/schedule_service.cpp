@@ -139,7 +139,7 @@ bool ScheduleService::poll_state() {
 
   // IMPORTANT: Pump responds with SubID 0, not SubID 1 that we requested!
   this->transport_.send_apdu_command(
-      apdu, 5, 0, 0,
+      apdu, 5, 84, 1,
       [this](bool success, const uint8_t *payload, size_t payload_len) {
         if (!success) {
           ESP_LOGW(TAG, "Failed to poll schedule state (timeout)");
@@ -311,7 +311,7 @@ bool ScheduleService::read_entries(std::vector<ScheduleEntry> *entries,
   apdu[4] = sub_id & 0xFF;
 
   this->transport_.send_apdu_command(
-      apdu, 5, 0, 0,
+      apdu, 5, 84, sub_id,
       [this, entries, layer](bool success, const uint8_t *payload,
                              size_t payload_len) {
         if (!success) {
@@ -437,7 +437,7 @@ bool ScheduleService::read_entries_async(
   apdu[4] = sub_id & 0xFF;
 
   this->transport_.send_apdu_command(
-      apdu, 5, 0, 0,
+      apdu, 5, 84, sub_id,
       [this, on_complete, layer](bool success, const uint8_t *payload,
                                  size_t payload_len) {
         ESP_LOGD(TAG,
@@ -564,27 +564,24 @@ bool ScheduleService::write_entries_async(
   uint8_t apdu[53]; // 11 header bytes + 42 data bytes
   build_schedule_apdu(entries, layer, apdu);
 
+  uint16_t sub_id = 1000 + layer;
   ESP_LOGI(TAG, "Queueing async schedule write for layer %d...", layer);
 
   this->transport_.send_apdu_command(
-      apdu, sizeof(apdu), 0, 0,
+      apdu, sizeof(apdu), 84, sub_id,
       [on_complete, layer](bool success, const uint8_t *data, size_t len) {
         if (success) {
           ESP_LOGI(TAG, "Async write completed with ACK for layer %d", layer);
         } else {
           ESP_LOGW(TAG,
-                   "Async write timeout/error for layer %d - treating as "
-                   "success (per Python reference: pump commits on timeout)",
+                   "Failed to write schedule entries for layer %d (timeout)",
                    layer);
         }
-        // NOTE: Always reports true to match Python reference behavior.
-        // The pump's two-phase commit often times out even on success because
-        // the ACK notification arrives outside the expected window.
         if (on_complete) {
-          on_complete(true);
+          on_complete(success);
         }
       },
-      3000);
+      3000, false, true);
 
   return true;
 }
@@ -867,16 +864,16 @@ void ScheduleService::write_cached_layer_async(
   ESP_LOGI(TAG, "Writing cached layer %d to pump...", layer);
 
   this->transport_.send_apdu_command(
-      apdu, sizeof(apdu), 0, 0,
+      apdu, sizeof(apdu), 84, sub_id,
       [this, on_complete, layer](bool success, const uint8_t *data,
                                  size_t len) {
         // Send configuration commit after write
         this->send_configuration_commit();
         ESP_LOGI(TAG, "Layer %d write + config commit sent", layer);
         if (on_complete)
-          on_complete(true);
+          on_complete(success);
       },
-      3000);
+      3000, false, true);
 }
 
 // -------------------------------------------------------------------------
@@ -920,7 +917,7 @@ void ScheduleService::read_single_events_async(
     apdu[4] = sub_id & 0xFF;
 
     this->transport_.send_apdu_command(
-      apdu, 5, 0, 0,
+      apdu, 5, 84, sub_id,
         [this, idx, events, on_complete, max_events,
          read_next](bool success, const uint8_t *payload, size_t payload_len) {
           if (success && payload_len >= 13) {
@@ -969,7 +966,7 @@ void ScheduleService::write_single_event_async(
   event.to_bytes(apdu + 11);
 
   this->transport_.send_apdu_command(
-      apdu, sizeof(apdu), 0, 0,
+      apdu, sizeof(apdu), 84, sub_id,
       [this, on_complete, event](bool success, const uint8_t *data,
                                  size_t len) {
         this->send_configuration_commit();
