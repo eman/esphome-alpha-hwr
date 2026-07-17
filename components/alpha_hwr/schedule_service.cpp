@@ -145,6 +145,7 @@ bool ScheduleService::poll_state() {
           ESP_LOGW(TAG, "Failed to poll schedule state (timeout). Assuming schedule is disabled by pump mode.");
           this->schedule_enabled_ = false;
           this->schedule_state_cached_ = true;
+          this->overview_cached_ = true; // MUST set this so is_fully_synced() can succeed!
           if (this->state_change_callback_) {
             this->state_change_callback_(false);
           }
