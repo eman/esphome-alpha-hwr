@@ -4,6 +4,16 @@
 
 ### Fixed
 
+- **Constant Flow setpoint entity showed the requested value, not the stored one** —
+  #82 added a 1.2s post-write readback so each setpoint entity reflects the value
+  the pump actually stored (e.g. when it clamps or rejects the request). Constant
+  Flow was the only setter still missing it — a leftover from when flow readback
+  was thought unreliable, which #88/#90 later showed was a write-units bug (m³/h
+  vs the pump's native m³/s). `set_constant_flow_async` now performs the same
+  readback as the other three modes, so the Constant Flow entity settles on the
+  pump's real stored/clamped value (fixes
+  [#96](https://github.com/eman/esphome-alpha-hwr/issues/96)).
+
 - **Cycle-time config could permanently block all commands** —
   `is_cache_valid()` — which gates `pump_ready` and every command (start/stop, mode
   change, setpoint writes, remote mode, schedule writes) — required the pump's
