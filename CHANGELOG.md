@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+## [0.11.0] - 2026-07-17
+
 ### Added
 
 - **"Component Version" diagnostic entity** —
