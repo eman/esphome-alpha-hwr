@@ -554,15 +554,6 @@ class ControlService {
   void with_resolved_enabled_state(std::function<void(bool resolved, bool enabled)> on_resolved);
 
   /**
-   * Resolve a specific mode's setpoint before sending a control request to 
-   * prevent clobbering the pump's NVM with default suffixes (issue #83).
-   * If the setpoint is already cached, it invokes the callback synchronously.
-   * If it is NAN, it triggers a targeted Class 10 read to the mode's specific
-   * register (e.g., Obj 86 Sub 13 for Constant Speed).
-   */
-  void with_resolved_setpoint(ControlMode mode, std::function<void(bool resolved, float setpoint)> on_resolved);
-  
-  /**
    * Send configuration commit packet.
    * Required after control operations to persist state changes.
    * Reference: control.py::_send_configuration_commit() lines 1038-1048
@@ -585,7 +576,23 @@ class ControlService {
    */
   bool send_control_request(ControlMode mode, bool start_pump, float setpoint = NAN,
                             bool queue_commit = true);
-  
+
+  /**
+   * Change the control mode without altering the mode's stored setpoint or the
+   * pump's enabled state. Writes GENI object 86 / sub-id 10
+   * (overall_control_mode_local_request_obj, on the wire Obj 0x0A01 / Sub 0x5600),
+   * which by its profile definition ignores control_source, operation_mode and
+   * set_point. The payload fills those with no-op sentinels
+   * (Undefined / NoCmd / NaN), so only control_mode is applied -- matching the
+   * Grundfos GO app. Unlike send_control_request()'s start/stop object (0x0601),
+   * this never overwrites the pump's setpoint (issue #97/#83) and never
+   * force-enables the pump (issue #45).
+   *
+   * @param mode Control mode to switch to
+   * @return True if the command was queued
+   */
+  bool send_set_mode_request(ControlMode mode);
+
   /**
    * Set a Class 10 setpoint value (OpSpec 0x84 = SET + 4 bytes).
    * 

@@ -218,8 +218,11 @@ select:
             return;
           }
           
-          bool result = id(pump).set_control_mode(mode);
-          ESP_LOGI("select", "Set mode result: %s", result ? "SUCCESS" : "FAILED");
+          // set_control_mode() returns after queueing the command; the actual
+          // send resolves asynchronously, so this only reports whether the
+          // request was accepted for dispatch (not that the pump applied it).
+          bool queued = id(pump).set_control_mode(mode);
+          ESP_LOGI("select", "Mode change %s: %s", queued ? "queued" : "rejected", x.c_str());
 
 # ========== Control Mode Setpoints ==========
 # Each control mode has specific setpoint parameters
