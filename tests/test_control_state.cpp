@@ -74,6 +74,14 @@ struct PumpEnabledState {
   ControlMode current_mode{ControlMode::NONE};
   bool mode_valid{false};
 
+  // Mode-command coordination (issue #91): mirrors ControlService. A mode command
+  // records the target as "pending"; readbacks keep the commanded mode until the
+  // pump confirms it, so an in-flight/stale read can't overwrite it.
+  ControlMode commanded_mode{ControlMode::NONE};
+  bool mode_command_pending{false};
+  int mode_confirm_attempts{0};
+  static constexpr int MAX_MODE_CONFIRM_ATTEMPTS = 4;
+
   // Per-mode setpoint caches (issue #51): mirrors the four independent fields
   // in ControlService (cached_pressure_setpoint_, cached_proportional_setpoint_,
   // cached_speed_setpoint_, cached_flow_setpoint_). NAN = not yet written.
@@ -92,12 +100,78 @@ struct PumpEnabledState {
   // is scheduled (fixes #52)
   std::function<void(uint32_t)> mock_schedule_callback;
 
-  // Mirrors ControlService::update_mode_from_notification()
+  // Mirrors ControlService::update_mode_from_notification() with the #91 guard:
+  // a notification for the OLD mode does not overwrite an in-flight command.
   void update_from_notification(uint8_t mode, uint8_t operation_mode) {
-    current_mode = static_cast<ControlMode>(mode);
-    mode_valid = true;
+    ControlMode reported = static_cast<ControlMode>(mode);
+    if (!(mode_command_pending && reported != commanded_mode)) {
+      mode_command_pending = false;
+      current_mode = reported;
+      mode_valid = true;
+    }
     pump_enabled = (operation_mode != static_cast<uint8_t>(OperationMode::STOP));
     pump_enabled_valid = true;
+  }
+
+  // Mirrors ControlService::cache_setpoint_for_mode(): store into the mode's own
+  // slot regardless of current_mode.
+  void cache_setpoint_for_mode(ControlMode mode, float raw) {
+    switch (mode) {
+      case ControlMode::CONSTANT_PRESSURE:     cached_pressure_setpoint = raw / 9806.65f; break;
+      case ControlMode::PROPORTIONAL_PRESSURE: cached_proportional_setpoint = raw / 9806.65f; break;
+      case ControlMode::CONSTANT_FLOW:         cached_flow_setpoint = raw * 3600.0f; break;
+      case ControlMode::CONSTANT_SPEED:        cached_speed_setpoint = raw; break;
+      default: break;
+    }
+  }
+
+  // Mirrors get_mode_async()'s response handler (issue #91): keep the commanded
+  // mode while a command is pending and the pump still reports the old mode;
+  // otherwise confirm/adopt the reported mode. Returns the mode the pump actually
+  // reported (what get_mode_async passes to its callback, so sync can see it).
+  ControlMode apply_readback(ControlMode reported, float raw_setpoint = NAN) {
+    // The reported mode's setpoint is cached into its own slot regardless of the
+    // pending guard, so bounded-retry recovery never lands on an unpopulated
+    // setpoint (issue #91).
+    if (!std::isnan(raw_setpoint)) {
+      cache_setpoint_for_mode(reported, raw_setpoint);
+    }
+    if (mode_command_pending && reported != commanded_mode) {
+      return reported;  // stale/in-flight: current_mode left untouched
+    }
+    mode_command_pending = false;
+    mode_confirm_attempts = 0;
+    current_mode = reported;
+    mode_valid = true;
+    return reported;
+  }
+
+  // Mirrors one pass of sync_cache_async(): capture expected, run the readback
+  // guard, then the bounded-retry mismatch handler. Returns true if settled
+  // (match or accepted), false if it scheduled another 2s retry.
+  bool sync_pass(ControlMode reported) {
+    ControlMode expected = mode_valid ? current_mode : ControlMode::NONE;
+    ControlMode got = apply_readback(reported);
+    if (expected != ControlMode::NONE && got != expected) {
+      if (mode_command_pending && mode_confirm_attempts < MAX_MODE_CONFIRM_ATTEMPTS) {
+        mode_confirm_attempts++;
+        return false;  // retry in 2s
+      }
+      mode_command_pending = false;
+      mode_confirm_attempts = 0;
+      current_mode = reported;
+      mode_valid = true;
+    }
+    return true;
+  }
+
+  // Mirrors ControlService::invalidate_cache() (called on disconnect): drops any
+  // in-flight mode command so a next-connection read can't false-confirm it.
+  void invalidate_cache() {
+    mode_valid = false;
+    pump_enabled_valid = false;
+    mode_command_pending = false;
+    mode_confirm_attempts = 0;
   }
 
   // Helper: return the cached setpoint for `target`, or NAN if none.
@@ -224,6 +298,10 @@ struct PumpEnabledState {
     // Intentionally does NOT touch pump_enabled or any stored setpoint.
     set_mode_wrote_setpoint = false;
     set_mode_wrote_enabled = false;
+    // Issue #91: record the commanded mode as pending.
+    commanded_mode = mode;
+    mode_command_pending = true;
+    mode_confirm_attempts = 0;
     current_mode = mode;
     mode_valid = true;
     return true;
@@ -862,6 +940,117 @@ void test_set_mode_uncached_scalar_mode_sends_not_aborts() {
 }
 
 // ============================================================================
+// Issue #91: mode-command coordination — a readback that lands before the pump
+// applies a mode command must not overwrite the commanded mode.
+// ============================================================================
+void test_mode_readback_stale_during_pending_is_ignored() {
+  std::cout << "\n=== Testing Stale Readback During Pending Command Is Ignored (#91) ===" << std::endl;
+
+  PumpEnabledState state;
+  state.current_mode = ControlMode::CONSTANT_SPEED;
+  state.mode_valid = true;
+
+  // User switches to Constant Flow; the command is now pending confirmation.
+  state.set_mode(ControlMode::CONSTANT_FLOW);
+  TEST_ASSERT(state.mode_command_pending, "#91: set_mode marks the command pending");
+  TEST_ASSERT(state.current_mode == ControlMode::CONSTANT_FLOW,
+              "#91: set_mode optimistically shows the commanded mode");
+
+  // The #54 poll (or a reconcile) reads the pump before it applied the command,
+  // so it reports the OLD mode. This must NOT overwrite the commanded mode.
+  ControlMode reported = state.apply_readback(ControlMode::CONSTANT_SPEED);
+  TEST_ASSERT(state.current_mode == ControlMode::CONSTANT_FLOW,
+              "#91: a stale readback does not overwrite the commanded mode");
+  TEST_ASSERT(state.mode_command_pending,
+              "#91: the command stays pending until the pump confirms it");
+  TEST_ASSERT(reported == ControlMode::CONSTANT_SPEED,
+              "#91: the readback still reports the pump's actual mode to callers");
+}
+
+void test_mode_readback_caches_reported_setpoint_while_pending() {
+  std::cout << "\n=== Testing Readback Caches Reported Mode's Setpoint While Pending (#91) ===" << std::endl;
+
+  PumpEnabledState state;
+  state.current_mode = ControlMode::CONSTANT_SPEED;
+  state.mode_valid = true;
+  state.set_mode(ControlMode::CONSTANT_FLOW);  // pending; pump still in Constant Speed
+
+  // A stale readback reports the pump still in Constant Speed at 1800 RPM. Even
+  // though current_mode is held at the commanded Constant Flow, the reported
+  // mode's setpoint must be cached so that if the command is never applied and
+  // sync recovery accepts Constant Speed, its setpoint is already populated.
+  state.apply_readback(ControlMode::CONSTANT_SPEED, 1800.0f);
+
+  TEST_ASSERT(state.current_mode == ControlMode::CONSTANT_FLOW,
+              "#91: current mode stays commanded during pending");
+  TEST_ASSERT_EQ(state.cached_speed_setpoint, 1800.0f,
+                 "#91: the reported mode's setpoint is cached even while pending (recovery-safe)");
+}
+
+void test_mode_readback_confirms_command() {
+  std::cout << "\n=== Testing Readback Confirms Commanded Mode (#91) ===" << std::endl;
+
+  PumpEnabledState state;
+  state.set_mode(ControlMode::CONSTANT_FLOW);
+
+  // The pump now reports the commanded mode -> confirmed, pending cleared.
+  state.apply_readback(ControlMode::CONSTANT_FLOW);
+  TEST_ASSERT(!state.mode_command_pending, "#91: a matching readback clears pending");
+  TEST_ASSERT(state.current_mode == ControlMode::CONSTANT_FLOW,
+              "#91: current mode is the confirmed mode");
+}
+
+void test_mode_out_of_band_readback_is_adopted() {
+  std::cout << "\n=== Testing Out-of-Band Readback Is Adopted (#54/#91) ===" << std::endl;
+
+  PumpEnabledState state;
+  state.current_mode = ControlMode::CONSTANT_SPEED;
+  state.mode_valid = true;
+  // No command pending: someone changed the mode on the pump directly.
+
+  state.apply_readback(ControlMode::TEMPERATURE_RANGE);
+  TEST_ASSERT(state.current_mode == ControlMode::TEMPERATURE_RANGE,
+              "#54: with no command pending, a readback adopts the pump's mode");
+  TEST_ASSERT(!state.mode_command_pending, "#54: no command was pending");
+}
+
+void test_mode_stuck_command_recovers_after_max_retries() {
+  std::cout << "\n=== Testing Stuck Command Recovers After Max Retries (#91) ===" << std::endl;
+
+  PumpEnabledState state;
+  state.current_mode = ControlMode::CONSTANT_SPEED;
+  state.mode_valid = true;
+  state.set_mode(ControlMode::CONSTANT_FLOW);  // pending; pump will never apply it
+
+  // Each sync pass reads the pump still in the old mode. The first
+  // MAX_MODE_CONFIRM_ATTEMPTS passes retry (keeping the commanded mode); the next
+  // one accepts the pump-reported mode so state reflects reality.
+  for (int i = 0; i < PumpEnabledState::MAX_MODE_CONFIRM_ATTEMPTS; i++) {
+    bool settled = state.sync_pass(ControlMode::CONSTANT_SPEED);
+    TEST_ASSERT_EQ(settled, false, "#91: mismatch schedules a retry while under the cap");
+    TEST_ASSERT(state.current_mode == ControlMode::CONSTANT_FLOW,
+                "#91: the commanded mode is held during retries");
+  }
+  bool settled = state.sync_pass(ControlMode::CONSTANT_SPEED);
+  TEST_ASSERT_EQ(settled, true, "#91: retries are bounded — it stops after the cap");
+  TEST_ASSERT(!state.mode_command_pending, "#91: pending is cleared on recovery");
+  TEST_ASSERT(state.current_mode == ControlMode::CONSTANT_SPEED,
+              "#91: after the cap, the pump-reported mode is accepted (no endless forcing)");
+}
+
+void test_mode_pending_cleared_on_disconnect() {
+  std::cout << "\n=== Testing Disconnect Clears Pending Command (#91) ===" << std::endl;
+
+  PumpEnabledState state;
+  state.set_mode(ControlMode::CONSTANT_FLOW);
+  TEST_ASSERT(state.mode_command_pending, "precondition: command pending");
+
+  state.invalidate_cache();  // disconnect
+  TEST_ASSERT(!state.mode_command_pending,
+              "#91: a disconnect drops the in-flight command so a next-connection read can't false-confirm it");
+}
+
+// ============================================================================
 // Test: start() reuses cached Constant Speed setpoint (fixes #43)
 // ============================================================================
 void test_start_reuses_cached_speed_setpoint() {
@@ -1146,6 +1335,13 @@ int main() {
   test_stop_reuses_cached_setpoint();
   test_set_mode_does_not_write_setpoint();
   test_set_mode_uncached_scalar_mode_sends_not_aborts();
+  // Issue #91: mode-command coordination
+  test_mode_readback_stale_during_pending_is_ignored();
+  test_mode_readback_caches_reported_setpoint_while_pending();
+  test_mode_readback_confirms_command();
+  test_mode_out_of_band_readback_is_adopted();
+  test_mode_stuck_command_recovers_after_max_retries();
+  test_mode_pending_cleared_on_disconnect();
   test_start_schedules_readback();
   test_stop_schedules_readback();
 
