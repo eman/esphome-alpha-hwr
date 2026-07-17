@@ -1077,12 +1077,12 @@ void test_parse_cycle_time_minutes_range() {
   TEST_ASSERT_EQ((int)parse_cycle_time_minutes(15), 15, "#94: byte 15 -> 15 (real pump OFF)");
   TEST_ASSERT_EQ((int)parse_cycle_time_minutes(60), 60, "#94: byte 60 -> 60");
 
-  // Out-of-range / sentinel-aliasing values map to -1 (unknown), never truncate.
+  // Out-of-range bytes are explicitly treated as unknown (-1), not stored raw.
   TEST_ASSERT_EQ((int)parse_cycle_time_minutes(0), -1, "#94: byte 0 (unconfigured) -> unknown, not a bogus valid value");
   TEST_ASSERT_EQ((int)parse_cycle_time_minutes(61), -1, "#94: byte 61 (above max) -> unknown");
-  TEST_ASSERT_EQ((int)parse_cycle_time_minutes(128), -1, "#94: byte 128 -> unknown (would have been negative)");
-  TEST_ASSERT_EQ((int)parse_cycle_time_minutes(254), -1, "#94: byte 254 -> unknown");
-  TEST_ASSERT_EQ((int)parse_cycle_time_minutes(0xFF), -1, "#94: byte 0xFF -> unknown, does NOT alias the -1 sentinel by truncation");
+  TEST_ASSERT_EQ((int)parse_cycle_time_minutes(128), -1, "#94: byte 128 -> unknown (raw store would have been a negative minute)");
+  TEST_ASSERT_EQ((int)parse_cycle_time_minutes(254), -1, "#94: byte 254 -> unknown (raw store would have been negative)");
+  TEST_ASSERT_EQ((int)parse_cycle_time_minutes(0xFF), -1, "#94: byte 0xFF -> explicitly unknown via range check (not by relying on signed truncation)");
 }
 
 void test_readiness_independent_of_cycle_time() {

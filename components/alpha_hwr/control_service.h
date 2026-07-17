@@ -344,10 +344,12 @@ class ControlService {
 
    /**
     * Decode a cycle-time minutes byte read from the pump (Object 91). Valid range
-    * is 1-60 (matches set_cycle_time_control_async); anything else -- 0, a 0xFF
-    * "unset" byte, or any out-of-range value -- maps to the -1 "unknown" sentinel
-    * rather than truncating a uint8_t into the int8_t field (e.g. 0xFF -> -1,
-    * which would alias the sentinel). See issue #94.
+    * is 1-60 (matches set_cycle_time_control_async); any other byte is treated as
+    * explicitly "unknown" and returned as the -1 sentinel. This range check is
+    * what makes the raw uint8_t safe to store in the int8_t field: without it,
+    * assigning the byte directly let a 0 pass as a bogus valid value, mapped bytes
+    * 128-254 to negative minutes, and relied on signed truncation for the 0xFF
+    * "unset" case. See issue #94.
     */
    static int8_t parse_cycle_time_minutes(uint8_t raw) {
      return (raw >= 1 && raw <= 60) ? static_cast<int8_t>(raw) : -1;

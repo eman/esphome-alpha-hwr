@@ -211,7 +211,11 @@ void ControlService::sync_cache_async(std::function<void(bool)> callback) {
           
           // Cycle-time config is optional for readiness (issue #94) and each byte
           // is range-validated (1-60) so a 0xFF/0/out-of-range value maps to the
-          // -1 "unknown" sentinel instead of truncating into it.
+          // -1 "unknown" sentinel instead of truncating into it. Reset to unknown
+          // first so a short payload that omits these bytes reports "unknown"
+          // rather than leaving stale values from a previous read.
+          cached_cycle_time_off_ = -1;
+          cached_cycle_time_on_ = -1;
           if (payload_len >= (size_t)(offset + 10)) {
             cached_cycle_time_off_ = parse_cycle_time_minutes(payload[offset + 9]);
             if (payload_len >= (size_t)(offset + 13)) {
