@@ -34,6 +34,21 @@
 # Bonding keys are stored in NVS flash for automatic reconnection.
 # ==============================================================================
 
+substitutions:
+  # This component's release version, surfaced as the "Component Version"
+  # diagnostic entity below (issue #95). Kept in sync automatically by
+  # tools/bump_version.sh, which rewrites it alongside the @vX.Y.Z package pin.
+  component_version: "0.10.3"
+
+esphome:
+  # Publish the (constant) component version once at boot (issue #95).
+  on_boot:
+    priority: -100
+    then:
+      - text_sensor.template.publish:
+          id: component_version_sensor
+          state: "${component_version}"
+
 external_components:
   - source: github://eman/esphome-alpha-hwr@v0.10.3
     components: [alpha_hwr, dhw_demand]
@@ -59,6 +74,16 @@ ble_client:
 
 # Ensure text_sensor component is included in build
 text_sensor:
+  # This ESPHome component's own version (issue #95). Distinct from the pump's
+  # Software/Hardware/BLE/Product Version entities below, which report the pump
+  # firmware. Recorded in Home Assistant history so the component version that
+  # produced any state is answerable after the fact.
+  - platform: template
+    name: "Component Version"
+    id: component_version_sensor
+    icon: "mdi:package-variant"
+    entity_category: diagnostic
+    update_interval: never  # constant value; published once at boot (see esphome.on_boot)
 
 api:
 

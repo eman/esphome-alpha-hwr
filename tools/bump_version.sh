@@ -75,6 +75,8 @@ FILES=(
 for file in "${FILES[@]}"; do
     if [ -f "$file" ]; then
         sed -i '' -E "s|@v[0-9]+\.[0-9]+\.[0-9]+|@${NEW_VERSION}|g" "$file"
+        # Keep the "Component Version" diagnostic substitution in sync (issue #95).
+        sed -i '' -E "s|(component_version: \")[0-9]+\.[0-9]+\.[0-9]+(\")|\1${VER_NO_V}\2|g" "$file"
         echo "  Updated $file"
     else
         echo "  Warning: $file not found! Skipping..."
