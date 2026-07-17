@@ -524,13 +524,17 @@ class ControlService {
     // eliminating cross-mode contamination bugs that arose from the old shared
     // cached_setpoint_ field. NAN = not yet read from pump.
     //
-    // NOTE: cached_flow_setpoint_ is populated ONLY by set_constant_flow_async()'s
-    // optimistic client-side write — Object 86/Sub 6 is confirmed unreliable for
-    // CONSTANT_FLOW (bench-tested, issue #44).
+    // NOTE: cached_flow_setpoint_ reads back from the pump like the other modes.
+    // Object 86 only *appeared* unreliable for CONSTANT_FLOW (issue #44) because
+    // the component wrote the setpoint in m³/h; the pump interpreted that as m³/s,
+    // rejected it as out of range, and kept its old value, so the register looked
+    // static. Once the write uses the pump's native m³/s (issue #88/#90), the pump
+    // stores the value and reports it back, and set_constant_flow_async() performs
+    // the same 1.2s post-write readback as the other setters (issue #96).
     float cached_pressure_setpoint_{NAN};       // CONSTANT_PRESSURE: meters of water column
     float cached_proportional_setpoint_{NAN};   // PROPORTIONAL_PRESSURE: meters
     float cached_speed_setpoint_{NAN};           // CONSTANT_SPEED: RPM
-    float cached_flow_setpoint_{NAN};            // CONSTANT_FLOW: m³/h (client-write only)
+    float cached_flow_setpoint_{NAN};            // CONSTANT_FLOW: m³/h
     float cached_temp_min_{NAN};           // Temperature range min (Object 91 Sub 430)
     float cached_temp_max_{NAN};           // Temperature range max (Object 91 Sub 430)
     uint8_t cached_operation_mode_{0xFF};  // Operation mode from notification
