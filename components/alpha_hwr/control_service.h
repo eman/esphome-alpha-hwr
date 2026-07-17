@@ -579,14 +579,15 @@ class ControlService {
 
   /**
    * Change the control mode without altering the mode's stored setpoint or the
-   * pump's enabled state. Writes GENI object 86 / sub-id 10
-   * (overall_control_mode_local_request_obj, on the wire Obj 0x0A01 / Sub 0x5600),
-   * which by its profile definition ignores control_source, operation_mode and
-   * set_point. The payload fills those with no-op sentinels
-   * (Undefined / NoCmd / NaN), so only control_mode is applied -- matching the
-   * Grundfos GO app. Unlike send_control_request()'s start/stop object (0x0601),
-   * this never overwrites the pump's setpoint (issue #97/#83) and never
-   * force-enables the pump (issue #45).
+   * pump's enabled state. Sends a Class 10 SET with APDU Sub=0x5600, Obj=0x0A01
+   * (this is the GENI overall_control_mode_local_request object -- id 86,
+   * sub-id 10 -- addressed with sub-id 10 in the high byte of the Obj field).
+   * Per its GENI profile that object ignores control_source, operation_mode and
+   * set_point, so the payload fills those with no-op sentinels
+   * (Undefined / NoCmd / NaN) and only control_mode is applied -- matching the
+   * Grundfos GO app. Unlike send_control_request()'s start/stop object
+   * (Sub=0x5600, Obj=0x0601), this never overwrites the pump's setpoint
+   * (issue #97/#83) and never force-enables the pump (issue #45).
    *
    * @param mode Control mode to switch to
    * @return True if the command was queued

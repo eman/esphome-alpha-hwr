@@ -764,6 +764,15 @@ bool ControlService::send_set_mode_request(ControlMode mode) {
   memcpy(&apdu[6], payload, 12);
 
   this->transport_.send_apdu_command(apdu, 18);
+
+  // Intentionally NO configuration commit here. send_configuration_commit()
+  // commits the ClockProgramOverview (the schedule), which is unrelated to the
+  // control mode -- the old set_mode path only scheduled it as a side effect of
+  // routing through send_control_request(). The mode change applies and persists
+  // on its own: the Grundfos GO app sends this same frame with no commit after it
+  // (BLE-capture confirmed), and on-device the new mode is reported back and
+  // survives a reconnect without any commit. Adding one would just re-commit the
+  // schedule on every mode switch.
   return true;
 }
 
