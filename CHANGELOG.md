@@ -2,8 +2,6 @@
 
 ## [Unreleased]
 
-## [0.10.3] - 2026-07-16
-
 ### Fixed
 
 - **Class 10 SET Command Queue Stalls** —
@@ -16,6 +14,8 @@
   Fixed a subtle bug in `read_entries_async` where a synchronous abort of a disabled layer returned `false` after already invoking the success callback. This previously caused the sequential promise chain to unwind recursively, logging duplicated "Failed to queue read" warnings and triggering redundant Home Assistant UI updates.
 - **Compiler Warnings** —
   Fixed `%u` format strings for `uint32_t` by casting to `unsigned long` and using `%lu` for cross-platform ESP32 compatibility. Increased `snprintf` buffer for time strings to avoid GCC truncation warnings.
+
+## [0.10.3] - 2026-07-16
 
 ## [0.10.2] - 2026-07-16
 
