@@ -500,19 +500,7 @@ bool Transport::try_dispatch_response(const uint8_t* data, size_t len) {
       }
     }
     
-    // SPECIAL CASE WORKAROUND: Object 84 (Schedules)
-    // Schedule read responses put ObjID (1 byte) at data[6] and SubID (2 bytes) at data[7..8].
-    // If the generic parser extracted this incorrectly, check the exact bytes here.
-    if (!matched && cmd.expect_obj_id == 84 && len >= 9 && data[6] == 84) {
-      uint16_t actual_sub = (data[7] << 8) | data[8];
-      if (actual_sub == cmd.expect_sub_id || actual_sub == 0) {
-        matched = true;
-        // Schedule parsers expect payload to start at data + 10!
-        payload = (len >= 10) ? (data + 10) : nullptr;
-        payload_len = (len >= 12) ? (len - 12) : 0;
-        ESP_LOGV(TAG, "Matched Object 84 schedule response via workaround");
-      }
-    }
+
     
     // SPECIAL CASE WORKAROUND: Object 91 Sub 430 (Cache Sync)
     // The pump responds to this read request with OpSpec 0x15, which does NOT carry 
