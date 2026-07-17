@@ -4,6 +4,19 @@
 
 ### Fixed
 
+- **Cycle-time config could permanently block all commands** —
+  `is_cache_valid()` — which gates `pump_ready` and every command (start/stop, mode
+  change, setpoint writes, remote mode, schedule writes) — required the pump's
+  cycle-time config (Object 91), but the parser only read those bytes when the
+  payload was long enough. A short or unusual Object 91 payload could leave the
+  cycle-time fields at their `-1` "unknown" sentinel, making the pump report
+  not-ready forever with every command silently rejected. Cycle-time config is no
+  longer part of readiness (it is not displayed anywhere; same rationale as
+  excluding the mode-specific setpoints). Separately, the cycle-time bytes are now
+  range-validated to 1–60 on read, so a `0xFF`/`0`/out-of-range value maps to
+  "unknown" instead of truncating a `uint8_t` into the `int8_t` sentinel. Both were
+  latent (real pumps return valid data); fixes
+  [#94](https://github.com/eman/esphome-alpha-hwr/issues/94).
 - **Uncoordinated `current_mode_` writes during mode switches** —
   A control-mode readback that landed after a mode command was issued but before
   the pump had applied it (most easily via the 30 s out-of-band poll, but also the
