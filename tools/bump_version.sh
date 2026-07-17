@@ -74,7 +74,11 @@ FILES=(
 
 for file in "${FILES[@]}"; do
     if [ -f "$file" ]; then
-        sed -i '' -E "s|@v[0-9]+\.[0-9]+\.[0-9]+|@${NEW_VERSION}|g" "$file"
+        # Use perl -pi (like the CHANGELOG edit above) rather than sed -i '' so the
+        # in-place edits are portable across BSD (macOS) and GNU (Linux) systems.
+        perl -pi -e "s|\@v[0-9]+\.[0-9]+\.[0-9]+|\@${NEW_VERSION}|g" "$file"
+        # Keep the "Component Version" diagnostic substitution in sync (issue #95).
+        perl -pi -e "s|(component_version: \")[0-9]+\.[0-9]+\.[0-9]+(\")|\${1}${VER_NO_V}\${2}|g" "$file"
         echo "  Updated $file"
     else
         echo "  Warning: $file not found! Skipping..."

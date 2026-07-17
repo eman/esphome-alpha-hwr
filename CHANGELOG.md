@@ -2,6 +2,16 @@
 
 ## [Unreleased]
 
+### Added
+
+- **"Component Version" diagnostic entity** —
+  A new diagnostic text sensor reports this ESPHome component's own release
+  version (distinct from the pump-firmware Software/Hardware/BLE/Product Version
+  entities). It is recorded in Home Assistant history, so the component version
+  that produced any state is answerable after the fact and on bug reports. The
+  value is kept in sync automatically by `tools/bump_version.sh`
+  (fixes [#95](https://github.com/eman/esphome-alpha-hwr/issues/95)).
+
 ### Fixed
 
 - **Constant Flow setpoint entity showed the requested value, not the stored one** —
