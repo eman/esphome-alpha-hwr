@@ -528,9 +528,10 @@ class ControlService {
     // Object 86 only *appeared* unreliable for CONSTANT_FLOW (issue #44) because
     // the component wrote the setpoint in m³/h; the pump interpreted that as m³/s,
     // rejected it as out of range, and kept its old value, so the register looked
-    // static. Once the write uses the pump's native m³/s (issue #88/#90), the pump
-    // stores the value and reports it back, and set_constant_flow_async() performs
-    // the same 1.2s post-write readback as the other setters (issue #96).
+    // static. Once the write uses the pump's native m³/s (investigated in #88,
+    // fixed in PR #90), the pump stores the value and reports it back, and
+    // set_constant_flow_async() performs the same 1.2s post-write readback as the
+    // other setters (issue #96).
     float cached_pressure_setpoint_{NAN};       // CONSTANT_PRESSURE: meters of water column
     float cached_proportional_setpoint_{NAN};   // PROPORTIONAL_PRESSURE: meters
     float cached_speed_setpoint_{NAN};           // CONSTANT_SPEED: RPM

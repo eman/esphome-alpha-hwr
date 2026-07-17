@@ -1028,8 +1028,8 @@ void ControlService::set_constant_flow_async(float value_m3h, std::function<void
         // Read back after 1.2s to confirm the value the pump actually stored, so
         // the entity reflects a clamped/rejected value instead of the request
         // (fixes #82/#96). Constant Flow reads back correctly now that the write
-        // uses the pump's native m³/s (fixed in #88); it was the only setter still
-        // missing this readback.
+        // uses the pump's native m³/s (investigated in #88, fixed in PR #90); it
+        // was the only setter still missing this readback.
         schedule_callback_([this]() { this->get_mode_async(nullptr); }, 1200);
 
         if (callback) callback(true);
