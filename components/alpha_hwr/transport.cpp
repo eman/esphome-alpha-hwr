@@ -457,16 +457,16 @@ bool Transport::try_dispatch_response(const uint8_t* data, size_t len) {
         ESP_LOGV(TAG, "DataObject 0x0E packet too short to extract IDs");
         return false;
       }
-    } else if (opspec == 0x02) {
+    } else if (opspec == 0x02 || opspec == 0x23) {
       if (len >= 9) {
         packet_obj_id = data[6];                     // 1 byte ObjID
         packet_sub_id = (data[7] << 8) | data[8];    // 2 bytes SubID
         // Note: Payload starts at data + 9!
-        // So we MUST override the payload extraction for this opspec!
-        payload = data + 9;
-        payload_len = len - 11; // len - header(9) - CRC(2)
+        // For short ACKs, there might be no payload
+        payload = (len >= 11) ? (data + 9) : nullptr;
+        payload_len = (len >= 11) ? (len - 11) : 0;
       } else {
-        ESP_LOGV(TAG, "DataObject 0x02 packet too short to extract IDs");
+        ESP_LOGV(TAG, "DataObject 0x02/0x23 packet too short to extract IDs");
         return false;
       }
     } else {
