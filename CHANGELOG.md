@@ -2,6 +2,36 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- **Three of six control modes could not be entered, and mode changes clobbered
+  the stored setpoint** —
+  On v0.10.3, selecting Constant Pressure, Proportional Pressure, or Constant Flow
+  did nothing and aborted after a 5-second timeout; Constant Speed only worked when
+  it was already the active mode. The root cause was that mode changes were sent as
+  a start/stop command (GENI `overall_operation_local_request`, wire Obj 0x0601)
+  that also writes the mode's *setpoint* — so the component either read the pump
+  first (a read that always timed out and aborted) or fell back to a default value
+  that durably overwrote the pump's stored setpoint (~3671 for Constant Speed).
+
+  Mode switching now uses the dedicated GENI control-mode object
+  (`overall_control_mode_local_request`, object 86 / sub-id 10, wire Obj 0x0A01),
+  exactly as the Grundfos GO app does. Per the pump's own GENI profile this object
+  changes only the control mode and ignores the run state and setpoint (the payload
+  carries `operation_mode = NoCmd` and `set_point = NaN`), so every mode is
+  reachable regardless of cache state and each mode's stored setpoint is preserved.
+  Confirmed on-device: switching into a mode with a cold cache now leaves its
+  setpoint intact (previously it was overwritten with the default). This also
+  inherently prevents a mode change from force-enabling the pump. Verified against
+  BLE captures and the pump's GENI profile descriptor
+  (fixes [#97](https://github.com/eman/esphome-alpha-hwr/issues/97), fixes
+  [#83](https://github.com/eman/esphome-alpha-hwr/issues/83), reinforces
+  [#45](https://github.com/eman/esphome-alpha-hwr/issues/45)).
+- **Misleading mode-change log** —
+  The mode dropdown logged `Set mode result: SUCCESS` ~5 seconds before the
+  asynchronous command actually resolved. It now logs that the change was *queued*,
+  not that the pump applied it (issue #97).
+
 ## [0.10.3] - 2026-07-16
 
 ## [0.10.2] - 2026-07-16

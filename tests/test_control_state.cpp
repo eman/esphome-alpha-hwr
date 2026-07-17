@@ -209,31 +209,21 @@ struct PumpEnabledState {
     return {false, false};  // Unknown: caller must abort, not guess
   }
 
-  // Mirrors ControlService::set_mode() after the #45 fix + review feedback:
-  // aborts (sends nothing, mode unchanged) when the enabled state can't be
-  // resolved, instead of guessing. Records what would have been sent as the
-  // start/stop flag so tests can assert on it.
-  bool last_sent_enabled_flag{false};
-  bool aborted_due_to_unknown_state{false};
+  // Mirrors ControlService::set_mode() after the #97/#83 fix: a mode change writes
+  // overall_control_mode_local_request (GENI obj 86 / sub-id 10, wire Obj 0x0A01)
+  // with operation_mode=NoCmd and set_point=NaN, so the pump changes ONLY the
+  // control mode. It therefore:
+  //   - never resolves or writes the enabled state (run state is preserved), so
+  //     it never aborts on an unknown enabled state and never force-enables (#45);
+  //   - never writes a setpoint, so each mode's stored setpoint is preserved and
+  //     can no longer be clobbered by a default suffix (#83).
+  // These flags let tests assert the mode change touched nothing but the mode.
+  bool set_mode_wrote_setpoint{false};
+  bool set_mode_wrote_enabled{false};
   bool set_mode(ControlMode mode) {
-    EnabledStateResolution resolution = resolve_enabled_state_for_control_request();
-    if (!resolution.resolved) {
-      aborted_due_to_unknown_state = true;
-      return false;
-    }
-    
-    float mode_setpoint = NAN;
-    float cached = get_cached_for_mode(mode);
-    if (!std::isnan(cached)) {
-      mode_setpoint = cached;
-      if (mode == ControlMode::CONSTANT_PRESSURE ||
-          mode == ControlMode::PROPORTIONAL_PRESSURE) {
-        mode_setpoint *= 9806.65f;
-      }
-    }
-    last_sent_setpoint = mode_setpoint;
-
-    last_sent_enabled_flag = resolution.enabled;
+    // Intentionally does NOT touch pump_enabled or any stored setpoint.
+    set_mode_wrote_setpoint = false;
+    set_mode_wrote_enabled = false;
     current_mode = mode;
     mode_valid = true;
     return true;
@@ -697,10 +687,10 @@ void test_set_mode_does_not_force_enable_when_off() {
 
   state.set_mode(ControlMode::CONSTANT_PRESSURE);
 
-  TEST_ASSERT_EQ(state.last_sent_enabled_flag, false,
-                 "#45: set_mode() sends enabled=false (not hardcoded true) when pump is off");
+  TEST_ASSERT_EQ(state.set_mode_wrote_enabled, false,
+                 "#45: set_mode() does not write the enabled state (mode change is not start/stop)");
   TEST_ASSERT_EQ(state.pump_enabled, false,
-                 "#45: pump_enabled stays false -- no desync from mode change alone");
+                 "#45: pump_enabled stays false -- a mode change never force-enables the pump");
 }
 
 // ============================================================================
@@ -715,8 +705,10 @@ void test_set_mode_preserves_enabled_when_on() {
 
   state.set_mode(ControlMode::CONSTANT_SPEED);
 
-  TEST_ASSERT_EQ(state.last_sent_enabled_flag, true,
-                 "#45: set_mode() sends enabled=true when the pump was already on");
+  TEST_ASSERT_EQ(state.pump_enabled, true,
+                 "#45: pump_enabled stays true -- a mode change preserves the running state");
+  TEST_ASSERT_EQ(state.set_mode_wrote_enabled, false,
+                 "#45: set_mode() leaves the enabled state untouched (operation_mode=NoCmd)");
 }
 
 // ============================================================================
@@ -739,25 +731,26 @@ void test_resolve_enabled_state_aborts_when_unknown() {
 }
 
 // ============================================================================
-// Test: set_mode() aborts entirely (sends nothing, mode unchanged) when the
-// enabled state is unknown -- guessing "false" would risk sending an
-// explicit STOP and force-disabling a pump that was actually running.
+// Test: set_mode() no longer depends on the enabled state. The new mode-change
+// command (Obj 0x0A01, operation_mode=NoCmd) leaves the run state untouched, so
+// it succeeds and changes the mode even when the enabled state is unknown --
+// there is nothing to guess and nothing to force-enable/disable (#97/#45).
 // ============================================================================
-void test_set_mode_aborts_when_enabled_state_unknown() {
-  std::cout << "\n=== Testing set_mode() Aborts When Enabled State Unknown (Review Feedback) ===" << std::endl;
+void test_set_mode_succeeds_when_enabled_state_unknown() {
+  std::cout << "\n=== Testing set_mode() Succeeds When Enabled State Unknown (#97) ===" << std::endl;
 
   PumpEnabledState state;
   state.current_mode = ControlMode::TEMPERATURE_RANGE;
   state.mode_valid = true;
-  // pump_enabled_valid left false: state genuinely unknown.
+  // pump_enabled_valid left false: enabled state genuinely unknown.
 
   bool result = state.set_mode(ControlMode::CONSTANT_SPEED);
 
-  TEST_ASSERT_EQ(result, false, "set_mode() reports failure when enabled state is unknown");
-  TEST_ASSERT_EQ(state.aborted_due_to_unknown_state, true,
-                 "set_mode() aborts instead of guessing true or false");
-  TEST_ASSERT(state.current_mode == ControlMode::TEMPERATURE_RANGE,
-              "set_mode() does not change the mode when it aborts");
+  TEST_ASSERT_EQ(result, true, "set_mode() succeeds without needing the enabled state");
+  TEST_ASSERT(state.current_mode == ControlMode::CONSTANT_SPEED,
+              "set_mode() changes the mode even when the enabled state is unknown");
+  TEST_ASSERT_EQ(state.set_mode_wrote_enabled, false,
+                 "set_mode() does not write the enabled state");
 }
 
 // ============================================================================
@@ -815,10 +808,13 @@ void test_stop_reuses_cached_setpoint() {
 }
 
 // ============================================================================
-// Test: set_mode() reuses cached setpoint to prevent default overwrite (#67/#70)
+// Test: set_mode() does not write a setpoint at all -- the mode change goes to
+// overall_control_mode_local_request (set_point ignored), so the pump keeps each
+// mode's stored setpoint. This is the fix for #83: a mode change can no longer
+// overwrite the stored value with a default (#67/#70/#83).
 // ============================================================================
-void test_set_mode_reuses_cached_setpoint() {
-  std::cout << "\n=== Testing set_mode() Reuses Cached Setpoint (#67/#70) ===" << std::endl;
+void test_set_mode_does_not_write_setpoint() {
+  std::cout << "\n=== Testing set_mode() Does Not Write a Setpoint (#83) ===" << std::endl;
 
   PumpEnabledState state;
   state.pump_enabled_valid = true;
@@ -826,9 +822,43 @@ void test_set_mode_reuses_cached_setpoint() {
   state.cached_flow_setpoint = 1.2f;
 
   state.set_mode(ControlMode::CONSTANT_FLOW);
-  
-  TEST_ASSERT_EQ(state.last_sent_setpoint, 1.2f,
-                 "set_mode() correctly passes the cached setpoint for the new mode");
+
+  TEST_ASSERT_EQ(state.set_mode_wrote_setpoint, false,
+                 "#83: set_mode() writes no setpoint (mode-change object ignores set_point)");
+  TEST_ASSERT_EQ(state.cached_flow_setpoint, 1.2f,
+                 "#83: set_mode() leaves the stored setpoint untouched (no clobber)");
+}
+
+// ============================================================================
+// Test: set_mode() into a scalar mode with a cold (NaN) cache still succeeds and
+// never clobbers. Regression guard for #97: v0.10.3 tried to read the setpoint
+// from the pump first (Obj 86 Sub 13/15/39), which always timed out and aborted,
+// making Constant Pressure/Proportional Pressure/Constant Flow (and Constant
+// Speed when not current) unreachable. The mode change now goes to the
+// control-mode object (set_point ignored), so it neither aborts nor clobbers.
+// ============================================================================
+void test_set_mode_uncached_scalar_mode_sends_not_aborts() {
+  std::cout << "\n=== Testing set_mode() Un-cached Scalar Mode Succeeds, No Clobber (#97) ===" << std::endl;
+
+  for (ControlMode mode : {ControlMode::CONSTANT_PRESSURE,
+                           ControlMode::PROPORTIONAL_PRESSURE,
+                           ControlMode::CONSTANT_SPEED,
+                           ControlMode::CONSTANT_FLOW}) {
+    PumpEnabledState state;
+    state.pump_enabled_valid = true;
+    state.pump_enabled = true;
+    // All per-mode setpoint caches remain NAN (cold cache — the normal state
+    // for any mode the pump is not currently in).
+
+    bool queued = state.set_mode(mode);
+
+    TEST_ASSERT_EQ(queued, true,
+                   "#97: set_mode() into an un-cached scalar mode is queued (not rejected)");
+    TEST_ASSERT_EQ(state.mode_valid, true,
+                   "#97: set_mode() applies the new mode");
+    TEST_ASSERT_EQ(state.set_mode_wrote_setpoint, false,
+                   "#97: set_mode() writes no setpoint on a cold cache (no clobber, no default suffix)");
+  }
 }
 
 // ============================================================================
@@ -1100,7 +1130,7 @@ int main() {
   test_set_mode_does_not_force_enable_when_off();
   test_set_mode_preserves_enabled_when_on();
   test_resolve_enabled_state_aborts_when_unknown();
-  test_set_mode_aborts_when_enabled_state_unknown();
+  test_set_mode_succeeds_when_enabled_state_unknown();
 
   test_flow_display_scales_correctly();
   test_other_modes_still_trust_register();
@@ -1114,7 +1144,8 @@ int main() {
   test_start_per_mode_isolation_proportional_and_flow();
   test_start_dhw_and_temp_range_unaffected();
   test_stop_reuses_cached_setpoint();
-  test_set_mode_reuses_cached_setpoint();
+  test_set_mode_does_not_write_setpoint();
+  test_set_mode_uncached_scalar_mode_sends_not_aborts();
   test_start_schedules_readback();
   test_stop_schedules_readback();
 

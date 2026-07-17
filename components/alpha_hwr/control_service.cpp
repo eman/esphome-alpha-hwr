@@ -17,6 +17,15 @@ static const char *TAG = "alpha_hwr.control";
 // Class 10 Control Mode Mapping
 // Maps ControlMode enum values (array index) to (ModeByte, SuffixBytes).
 // Reference: control.py _MODE_BYTE_MAP (lines 145-151) and _MODE_SUFFIX_MAP (lines 156-163)
+//
+// The 4-byte suffix is the set_point field written into the start/stop control
+// object (overall_operation_local_request, Obj 0x0601) when no explicit setpoint
+// is supplied. For the scalar-setpoint modes this suffix (45 65 70 00 = 3671.0)
+// is NOT inert -- bench-confirmed that writing it durably overwrites the pump's
+// stored setpoint. send_control_request() therefore sends a NaN "keep existing"
+// sentinel for those modes instead of this default (issue #83); the suffix here
+// is only used for modes that do not carry a scalar setpoint (DHW / temperature
+// range), whose values were taken from GO app captures.
 const ControlService::ControlModeMapping ControlService::CLASS10_CONTROL_MAP[] = {
     {0x00, {0x45, 0x65, 0x70, 0x00}},  // CONSTANT_PRESSURE (0)
     {0x01, {0x45, 0x65, 0x70, 0x00}},  // PROPORTIONAL_PRESSURE (1) - mode_byte 0x01, suffix from _MODE_SUFFIX_MAP
@@ -345,58 +354,54 @@ bool ControlService::start(uint8_t mode) {
     target = static_cast<ControlMode>(mode);
   }
   
-  with_resolved_setpoint(target, [this, target, mode](bool resolved, float start_setpoint) {
-    if (!resolved) {
-      ESP_LOGE(TAG, "Aborting start command: could not determine stored setpoint to prevent clobbering");
-      return;
+  // Reuse the mode's cached setpoint so enabling the pump doesn't change it. When
+  // the cache is cold, send_control_request() sends a NaN "keep existing" set_point
+  // for scalar modes rather than a clobbering default (issue #83).
+  float start_setpoint = get_setpoint_for_mode(target);
+  if (!std::isnan(start_setpoint)) {
+    // Stored in display units (meters for pressure); convert to pump-native units (Pascals)
+    if (target == ControlMode::CONSTANT_PRESSURE || target == ControlMode::PROPORTIONAL_PRESSURE) {
+      start_setpoint *= 9806.65f;
+    } else if (target == ControlMode::CONSTANT_FLOW) {
+      start_setpoint /= 3600.0f;
     }
+    ESP_LOGD(TAG, "Reusing cached setpoint on start: %.4f (raw units)", start_setpoint);
+  } else {
+    ESP_LOGD(TAG, "No cached setpoint to reuse on start; keeping the pump's stored setpoint");
+  }
 
-    if (!std::isnan(start_setpoint)) {
-      // Stored in display units (meters for pressure); convert to pump-native units (Pascals)
-      if (target == ControlMode::CONSTANT_PRESSURE || target == ControlMode::PROPORTIONAL_PRESSURE) {
-        start_setpoint *= 9806.65f;
-      } else if (target == ControlMode::CONSTANT_FLOW) {
-        start_setpoint /= 3600.0f;
-      }
-      ESP_LOGD(TAG, "Reusing cached setpoint on start: %.4f (raw units)", start_setpoint);
-    } else {
-      ESP_LOGD(TAG, "No cached setpoint to reuse on start; using mode default suffix");
+  if (!send_control_request(target, true, start_setpoint)) {
+    ESP_LOGE(TAG, "Failed to send start command");
+    return false;
+  }
+
+  // Update mode state if a specific mode was requested
+  if (mode != 255) {
+    current_mode_ = static_cast<ControlMode>(mode);
+    mode_valid_ = true;
+    if (mode_change_callback_) {
+      mode_change_callback_(current_mode_, 0, 0.0f);
     }
+  }
 
-    if (!send_control_request(target, true, start_setpoint)) {
-      ESP_LOGE(TAG, "Failed to send start command");
-      return;
-    }
+  // Pump is now enabled (user started it)
+  pump_enabled_ = true;
+  pump_enabled_valid_ = true;
 
-    // Update mode state if a specific mode was requested
-    if (mode != 255) {
-      current_mode_ = static_cast<ControlMode>(mode);
-      mode_valid_ = true;
-      if (mode_change_callback_) {
-        mode_change_callback_(current_mode_, 0, 0.0f);
-      }
-    }
+  // Schedule a post-command readback after ~500ms to ensure cached state is
+  // synchronized with pump's actual state (fixes #52).
+  if (schedule_callback_) {
+    schedule_callback_([this]() {
+      ESP_LOGD(TAG, "Post-command readback after start (issue #52)");
+      get_mode_async([](bool success, ControlMode /*mode*/) {
+        if (!success) {
+          ESP_LOGW(TAG, "Post-command readback failed after start");
+        }
+      });
+    }, 500);
+  }
 
-    // Pump is now enabled (user started it)
-    pump_enabled_ = true;
-    pump_enabled_valid_ = true;
-
-    // Schedule a post-command readback after ~500ms to ensure cached state is
-    // synchronized with pump's actual state (fixes #52).
-    if (schedule_callback_) {
-      schedule_callback_([this]() {
-        ESP_LOGD(TAG, "Post-command readback after start (issue #52)");
-        get_mode_async([](bool success, ControlMode /*mode*/) {
-          if (!success) {
-            ESP_LOGW(TAG, "Post-command readback failed after start");
-          }
-        });
-      }, 500);
-    }
-
-    ESP_LOGI(TAG, "Pump start command sent (mode=%d)", static_cast<uint8_t>(target));
-  });
-
+  ESP_LOGI(TAG, "Pump start command sent (mode=%d)", static_cast<uint8_t>(target));
   return true;
 }
 
@@ -415,49 +420,44 @@ bool ControlService::stop(uint8_t mode) {
     target = static_cast<ControlMode>(mode);
   }
   
-  with_resolved_setpoint(target, [this, target, mode](bool resolved, float stop_setpoint) {
-    if (!resolved) {
-      ESP_LOGE(TAG, "Aborting stop command: could not determine stored setpoint to prevent clobbering");
-      return;
+  // Reuse the mode's cached setpoint; a cold cache sends a NaN "keep existing"
+  // set_point for scalar modes rather than a clobbering default (see start()).
+  float stop_setpoint = get_setpoint_for_mode(target);
+  if (!std::isnan(stop_setpoint)) {
+    // Stored in display units (meters for pressure); convert to pump-native units (Pascals)
+    if (target == ControlMode::CONSTANT_PRESSURE || target == ControlMode::PROPORTIONAL_PRESSURE) {
+      stop_setpoint *= 9806.65f;
+    } else if (target == ControlMode::CONSTANT_FLOW) {
+      stop_setpoint /= 3600.0f;
     }
+    ESP_LOGD(TAG, "Reusing cached setpoint on stop: %.4f (raw units)", stop_setpoint);
+  } else {
+    ESP_LOGD(TAG, "No cached setpoint to reuse on stop; keeping the pump's stored setpoint");
+  }
 
-    if (!std::isnan(stop_setpoint)) {
-      // Stored in display units (meters for pressure); convert to pump-native units (Pascals)
-      if (target == ControlMode::CONSTANT_PRESSURE || target == ControlMode::PROPORTIONAL_PRESSURE) {
-        stop_setpoint *= 9806.65f;
-      } else if (target == ControlMode::CONSTANT_FLOW) {
-        stop_setpoint /= 3600.0f;
-      }
-      ESP_LOGD(TAG, "Reusing cached setpoint on stop: %.4f (raw units)", stop_setpoint);
-    } else {
-      ESP_LOGD(TAG, "No cached setpoint to reuse on stop; using mode default suffix");
-    }
+  if (!send_control_request(target, false, stop_setpoint)) {
+    ESP_LOGE(TAG, "Failed to send stop command");
+    return false;
+  }
 
-    if (!send_control_request(target, false, stop_setpoint)) {
-      ESP_LOGE(TAG, "Failed to send stop command");
-      return;
-    }
+  // Pump is now disabled (user stopped it)
+  pump_enabled_ = false;
+  pump_enabled_valid_ = true;
 
-    // Pump is now disabled (user stopped it)
-    pump_enabled_ = false;
-    pump_enabled_valid_ = true;
+  // Schedule a post-command readback after ~500ms to ensure cached state is
+  // synchronized with pump's actual state (fixes #52).
+  if (schedule_callback_) {
+    schedule_callback_([this]() {
+      ESP_LOGD(TAG, "Post-command readback after stop (issue #52)");
+      get_mode_async([](bool success, ControlMode /*mode*/) {
+        if (!success) {
+          ESP_LOGW(TAG, "Post-command readback failed after stop");
+        }
+      });
+    }, 500);
+  }
 
-    // Schedule a post-command readback after ~500ms to ensure cached state is
-    // synchronized with pump's actual state (fixes #52).
-    if (schedule_callback_) {
-      schedule_callback_([this]() {
-        ESP_LOGD(TAG, "Post-command readback after stop (issue #52)");
-        get_mode_async([](bool success, ControlMode /*mode*/) {
-          if (!success) {
-            ESP_LOGW(TAG, "Post-command readback failed after stop");
-          }
-        });
-      }, 500);
-    }
-
-    ESP_LOGI(TAG, "Pump stop command sent (mode=%d)", static_cast<uint8_t>(target));
-  });
-
+  ESP_LOGI(TAG, "Pump stop command sent (mode=%d)", static_cast<uint8_t>(target));
   return true;
 }
 
@@ -471,54 +471,31 @@ bool ControlService::set_mode(ControlMode mode) {
   uint8_t mode_val = static_cast<uint8_t>(mode);
   ESP_LOGI(TAG, "Setting control mode to %d (%s)...", mode_val, get_mode_name(mode));
 
-  // Fix #45: send the pump's actual current enabled state instead of
-  // hardcoding "true" (start), so switching modes never implicitly
-  // force-enables the pump while it's off.
-  with_resolved_enabled_state([this, mode, mode_val](bool resolved_enabled, bool enabled) {
-    if (!resolved_enabled) {
-      // Enabled state genuinely unknown even after a read-back attempt
-      ESP_LOGE(TAG, "Aborting mode change to %d: could not determine pump enabled state", mode_val);
-      return;
-    }
-    with_resolved_setpoint(mode, [this, mode, mode_val, enabled](bool resolved_setpoint, float mode_setpoint) {
-      if (!resolved_setpoint) {
-        ESP_LOGE(TAG, "Aborting mode change to %d: could not determine stored setpoint to prevent clobbering", mode_val);
-        return;
-      }
+  // Change the mode via the dedicated mode-change command (Obj 0x0A01, "set mode"
+  // flag, NaN suffix). Unlike the old start/stop write (Obj 0x0601 + default
+  // suffix), this preserves the mode's stored setpoint and the pump's enabled
+  // state, so it needs neither a setpoint nor an enabled-state read-back. This is
+  // exactly how the Grundfos GO app switches modes. Fixes #97 (all modes
+  // reachable), #83 (no setpoint clobber), and #45 (no implicit force-enable).
+  if (!send_set_mode_request(mode)) {
+    ESP_LOGW(TAG, "Failed to send mode change for mode %d", mode_val);
+    return false;
+  }
 
-      if (!std::isnan(mode_setpoint)) {
-        // Stored in display units (meters for pressure); convert to pump-native units (Pascals)
-        if (mode == ControlMode::CONSTANT_PRESSURE || mode == ControlMode::PROPORTIONAL_PRESSURE) {
-          mode_setpoint *= 9806.65f;
-        } else if (mode == ControlMode::CONSTANT_FLOW) {
-          mode_setpoint /= 3600.0f;
-        }
-        ESP_LOGD(TAG, "Reusing cached setpoint on set_mode: %.4f (raw units)", mode_setpoint);
-      } else {
-        ESP_LOGD(TAG, "No cached setpoint to reuse on set_mode; using mode default suffix");
-      }
+  current_mode_ = mode;
+  mode_valid_ = true;
 
-      if (!send_control_request(mode, enabled, mode_setpoint)) {
-        ESP_LOGW(TAG, "Failed to send control request for mode %d", mode_val);
-        return;
-      }
+  if (mode_change_callback_) {
+    mode_change_callback_(current_mode_, 0, 0.0f);
+  }
 
-      current_mode_ = mode;
-      mode_valid_ = true;
+  // Read setpoints for the new mode after a delay (pump needs time to update
+  // passive notifications).
+  if (schedule_callback_) {
+    schedule_callback_([this]() { sync_cache_async(nullptr); }, 5000);
+  }
 
-      if (mode_change_callback_) {
-        mode_change_callback_(current_mode_, 0, 0.0f);
-      }
-
-      // Read setpoints for the new mode after delay (pump needs time to update passive notifications)
-      if (schedule_callback_) {
-        schedule_callback_([this]() { sync_cache_async(nullptr); }, 5000);
-      }
-
-      ESP_LOGI(TAG, "Mode set to %s (sent enabled=%s)", get_mode_name(mode), enabled ? "true" : "false");
-    });
-  });
-
+  ESP_LOGI(TAG, "Mode set to %s", get_mode_name(mode));
   return true;
 }
 
@@ -619,74 +596,6 @@ void ControlService::with_resolved_enabled_state(std::function<void(bool resolve
   });
 }
 
-void ControlService::with_resolved_setpoint(ControlMode mode, std::function<void(bool resolved, float setpoint)> on_resolved) {
-  float cached = get_setpoint_for_mode(mode);
-  
-  if (!std::isnan(cached)) {
-    on_resolved(true, cached);
-    return;
-  }
-
-  uint16_t sub_id = 0;
-  switch (mode) {
-    case ControlMode::CONSTANT_PRESSURE:
-    case ControlMode::PROPORTIONAL_PRESSURE:
-      sub_id = SUB_PRESSURE_SETPOINT;
-      break;
-    case ControlMode::CONSTANT_SPEED:
-      sub_id = SUB_SPEED_SETPOINT;
-      break;
-    case ControlMode::CONSTANT_FLOW:
-      sub_id = SUB_FLOW_SETPOINT;
-      break;
-    default:
-      // Modes without a scalar setpoint don't get clobbered by default suffix.
-      on_resolved(true, NAN);
-      return;
-  }
-
-  ESP_LOGD(TAG, "Setpoint for mode %s unknown; reading from pump (Obj 86, Sub %d) before sending control request...", get_mode_name(mode), sub_id);
-
-  uint8_t apdu[5];
-  apdu[0] = 0x0A;  // Class 10
-  apdu[1] = 0x03;  // OpSpec: READ (INFO)
-  apdu[2] = 0x56;  // Object 86 (1 byte Obj ID format)
-  apdu[3] = (sub_id >> 8) & 0xFF;
-  apdu[4] = sub_id & 0xFF;
-
-  this->transport_.send_apdu_command(
-    apdu, 5, 86, sub_id,
-    [this, mode, on_resolved](bool success, const uint8_t* payload, size_t payload_len) {
-      if (!success) {
-        ESP_LOGW(TAG, "Could not determine setpoint for mode %s before control request; aborting to prevent clobbering stored value", get_mode_name(mode));
-        on_resolved(false, NAN);
-        return;
-      }
-      
-      int offset = (payload_len >= 3 && payload[0] == 0x00 && payload[1] == 0x00) ? 3 : 0;
-      if (payload_len >= (size_t)(offset + 4)) {
-        float raw_setpoint = protocol::decode_float_be(&payload[offset]);
-        
-        if (mode == ControlMode::CONSTANT_PRESSURE) {
-          this->cached_pressure_setpoint_ = raw_setpoint / 9806.65f;
-          on_resolved(true, this->cached_pressure_setpoint_);
-        } else if (mode == ControlMode::PROPORTIONAL_PRESSURE) {
-          this->cached_proportional_setpoint_ = raw_setpoint / 9806.65f;
-          on_resolved(true, this->cached_proportional_setpoint_);
-        } else if (mode == ControlMode::CONSTANT_SPEED) {
-          this->cached_speed_setpoint_ = raw_setpoint;
-          on_resolved(true, raw_setpoint);
-        } else if (mode == ControlMode::CONSTANT_FLOW) {
-          this->cached_flow_setpoint_ = raw_setpoint * 3600.0f;
-          on_resolved(true, this->cached_flow_setpoint_);
-        }
-      } else {
-        ESP_LOGW(TAG, "Response payload too short for setpoint read; aborting command");
-        on_resolved(false, NAN);
-      }
-    }, 5000);
-}
-
 const char *ControlService::get_mode_name(ControlMode mode) {
   switch (mode) {
     case ControlMode::CONSTANT_PRESSURE:
@@ -763,10 +672,20 @@ bool ControlService::send_control_request(ControlMode mode, bool start_pump, flo
   payload[7] = mapping.mode_byte;
 
   if (!std::isnan(setpoint)) {
-    // Encode setpoint as float32 BE in suffix position
+    // Encode setpoint as float32 BE in the set_point field
     protocol::encode_float_be(setpoint, &payload[8]);
+  } else if (mode == ControlMode::CONSTANT_PRESSURE || mode == ControlMode::PROPORTIONAL_PRESSURE ||
+             mode == ControlMode::CONSTANT_SPEED || mode == ControlMode::CONSTANT_FLOW) {
+    // Scalar-setpoint mode with no value to send (e.g. start/stop before the
+    // cache has synced). Send a NaN set_point so the pump keeps the mode's stored
+    // setpoint instead of overwriting it with the map default (~3671), which is a
+    // durable clobber (issue #83). NaN = "no change", matching the Grundfos GO app.
+    payload[8] = 0x7F;
+    payload[9] = 0xFF;
+    payload[10] = 0xFF;
+    payload[11] = 0xFF;
   } else {
-    // Use default suffix bytes from mode map
+    // Non-scalar modes (DHW / temperature range): use the captured default suffix.
     memcpy(&payload[8], mapping.suffix, 4);
   }
 
@@ -789,6 +708,71 @@ bool ControlService::send_control_request(ControlMode mode, bool start_pump, flo
     schedule_callback_([this]() { this->send_configuration_commit(); }, 200);
   }
 
+  return true;
+}
+
+bool ControlService::send_set_mode_request(ControlMode mode) {
+  // Change the control mode WITHOUT touching the mode's stored setpoint.
+  //
+  // Writes GENI Class 10 object 86 / sub-id 10 = overall_control_mode_local_request_obj,
+  // whose profile definition states it "only targets the control mode
+  // (control_source, operation_mode and set_point are all ignored)". Addressed on
+  // the wire as Obj 0x0A01 / Sub 0x5600 (the 0x0A high byte is sub-id 10), versus
+  // the start/stop object 86 / sub-id 6 = overall_operation_local_request_obj
+  // (Obj 0x0601), which DOES write set_point.
+  //
+  // The 12-byte payload is a type-303 OperationStatusRequest struct:
+  //   [2F 01][00 00][07] = type 303 + 7-byte struct length, then the struct:
+  //   [control_source=0x00 Undefined][operation_mode=0x06 NoCmd][control_mode=mode][set_point=NaN]
+  // control_source/operation_mode/set_point are filled with no-op sentinels
+  // (Undefined / NoCmd / NaN) so the pump changes ONLY the control mode, leaving
+  // the run state and each mode's stored setpoint untouched. This is exactly how
+  // the Grundfos GO app switches modes.
+  //
+  // Replaces the old set_mode path that wrote the start/stop object (0x0601) with
+  // a default suffix, which durably overwrote the setpoint with ~3671 on a cold
+  // cache (bench-confirmed). Bench-verified: switching into a cold-cache mode now
+  // preserves the stored setpoint. Fixes #97 (all modes reachable) and #83 (no
+  // clobber) together, and inherently avoids #45 (mode change is not start/stop).
+  ControlModeMapping mapping;
+  if (!get_class10_mapping(mode, mapping)) {
+    mapping.mode_byte = 0x02;  // default CONSTANT_SPEED, matching send_control_request()
+  }
+
+  uint8_t payload[12];
+  payload[0] = 0x2F;               // type 303 (0x012F, little-endian)
+  payload[1] = 0x01;
+  payload[2] = 0x00;
+  payload[3] = 0x00;
+  payload[4] = 0x07;               // 7-byte OperationStatusRequest struct follows
+  payload[5] = 0x00;               // control_source = Undefined (ignored)
+  payload[6] = 0x06;               // operation_mode = NoCmd (leave run state unchanged)
+  payload[7] = mapping.mode_byte;  // control_mode = target mode (the only field applied)
+  payload[8] = 0x7F;               // set_point = NaN -> keep the mode's stored setpoint
+  payload[9] = 0xFF;
+  payload[10] = 0xFF;
+  payload[11] = 0xFF;
+
+  // OpSpec 0x90 = SET + 16 bytes (4 IDs + 12 payload)
+  uint8_t apdu[18];
+  apdu[0] = 0x0A;  // Class 10
+  apdu[1] = 0x90;  // OpSpec: SET with length 16
+  apdu[2] = 0x56;  // Sub ID high (SUB_CONTROL = 0x5600)
+  apdu[3] = 0x00;  // Sub ID low
+  apdu[4] = 0x0A;  // Obj ID high (0x0A = sub-id 10 -> overall_control_mode_local_request_obj)
+  apdu[5] = 0x01;  // Obj ID low
+  memcpy(&apdu[6], payload, 12);
+
+  this->transport_.send_apdu_command(apdu, 18);
+
+  // Intentionally NO configuration commit here. send_configuration_commit()
+  // commits the ClockProgramOverview (the schedule), which is unrelated to the
+  // control mode -- the old set_mode path only scheduled it as a side effect of
+  // routing through send_control_request(). The mode change applies and persists
+  // on its own: the Grundfos GO app sends this same frame with no commit after it
+  // (BLE-capture confirmed), and on-device the new mode is reported back and
+  // survives a reconnect without any commit. Adding one would just re-commit the
+  // schedule on every mode switch.
   return true;
 }
 
