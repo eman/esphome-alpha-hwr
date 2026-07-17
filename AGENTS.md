@@ -8,10 +8,9 @@ Our mission is to provide a robust, reliable, and feature-rich ESPHome component
 
 ### core Objectives
 
-1. **Metric Parity**: Match the telemetry capabilities of the [Python Reference Implementation](https://github.com/eman/alpha-hwr).
-2. **Control Capability**: Implement bi-directional control (Start/Stop, Set Mode, Schedules) via BLE.
-3. **Stability**: Ensure the component is stable significantly longer than the transient connection times of a mobile app.
-4. **User Experience**: Provide "It Just Works" discovery and configuration for Home Assistant users.
+1. **Control Capability**: Implement bi-directional control (Start/Stop, Set Mode, Schedules) via BLE.
+2. **Stability**: Ensure the component is stable significantly longer than the transient connection times of a mobile app.
+3. **User Experience**: Provide "It Just Works" discovery and configuration for Home Assistant users.
 
 ### Strategic Principles
 
@@ -23,12 +22,11 @@ Our mission is to provide a robust, reliable, and feature-rich ESPHome component
 * **Simple Configuration**: The `hwr-pump-example.yaml` configuration should demonstrate best practices and be the reference for users. We prioritize good architecture over backward compatibility since this is a new library.
 * **No Regressions**: New features (e.g., adding schedule writing) must not break existing features (e.g., live flow rate reporting).
 
-## 2. Key References
+## 2. References
 
-Agents **MUST** consult these resources before making architectural decisions:
+Agents should consult these resources before making architectural decisions:
 
 * **Protocol Documentation**: [https://eman.github.io/alpha-hwr/reimplementation/](https://eman.github.io/alpha-hwr/reimplementation/) (The "Bible" for the GENI byte-level protocol).
-* **Python Reference Code**: [https://github.com/eman/alpha-hwr](https://github.com/eman/alpha-hwr) (If you need to know *how* to implement a sequence, look here first).
 * **ESPHome BLE Client**: [https://esphome.io/components/ble_client/](https://esphome.io/components/ble_client/)
 * **ESPHome Bluetooth Proxy**: [https://esphome.io/components/bluetooth_proxy/](https://esphome.io/components/bluetooth_proxy/)
 
@@ -86,34 +84,6 @@ Note: `hwr-pump-example.yaml` is for documentation and compilation testing only 
 
 The ESPHome component follows the same layered, service-based architecture as the [Python Reference Implementation](reference/alpha-hwr/src/alpha_hwr). This architecture separates concerns, improves testability, and makes the codebase maintainable.
 
-### Reference Implementation Structure
-
-The Python reference implementation organizes code into four layers:
-
-```
-alpha_hwr/
-├── client.py              # Main client facade (orchestration layer)
-├── models.py              # Data structures (TelemetryData, ScheduleEntry, etc.)
-├── core/                  # Foundation layer
-│   ├── transport.py       # BLE packet I/O, notification handling, transaction locking
-│   ├── session.py         # Connection state management (IDLE, AUTHENTICATING, CONNECTED)
-│   └── authentication.py  # Authentication handshake sequences
-├── protocol/              # Protocol layer (stateless)
-│   ├── codec.py           # Primitive encoding/decoding (float_be, uint16_be, etc.)
-│   ├── frame_builder.py   # Build GENI request packets
-│   ├── frame_parser.py    # Parse GENI response frames
-│   └── telemetry_decoder.py  # Decode telemetry from Class 10 DataObjects
-└── services/              # Business logic layer
-    ├── base.py            # Shared protocol helpers for all services
-    ├── telemetry.py       # Read sensor data (flow, pressure, power, temperature)
-    ├── control.py         # Start/stop pump, set modes and setpoints
-    ├── schedule.py        # Manage weekly pump schedules
-    ├── device_info.py     # Read device identification and statistics
-    ├── configuration.py   # Backup and restore pump configuration
-    ├── time.py            # Read and synchronize pump real-time clock
-    ├── history.py         # Read historical trend data
-    └── event_log.py       # Read pump event log entries
-```
 
 **Key Architectural Principles:**
 
