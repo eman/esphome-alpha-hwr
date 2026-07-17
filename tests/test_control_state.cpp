@@ -113,11 +113,29 @@ struct PumpEnabledState {
     pump_enabled_valid = true;
   }
 
+  // Mirrors ControlService::cache_setpoint_for_mode(): store into the mode's own
+  // slot regardless of current_mode.
+  void cache_setpoint_for_mode(ControlMode mode, float raw) {
+    switch (mode) {
+      case ControlMode::CONSTANT_PRESSURE:     cached_pressure_setpoint = raw / 9806.65f; break;
+      case ControlMode::PROPORTIONAL_PRESSURE: cached_proportional_setpoint = raw / 9806.65f; break;
+      case ControlMode::CONSTANT_FLOW:         cached_flow_setpoint = raw * 3600.0f; break;
+      case ControlMode::CONSTANT_SPEED:        cached_speed_setpoint = raw; break;
+      default: break;
+    }
+  }
+
   // Mirrors get_mode_async()'s response handler (issue #91): keep the commanded
   // mode while a command is pending and the pump still reports the old mode;
   // otherwise confirm/adopt the reported mode. Returns the mode the pump actually
   // reported (what get_mode_async passes to its callback, so sync can see it).
-  ControlMode apply_readback(ControlMode reported) {
+  ControlMode apply_readback(ControlMode reported, float raw_setpoint = NAN) {
+    // The reported mode's setpoint is cached into its own slot regardless of the
+    // pending guard, so bounded-retry recovery never lands on an unpopulated
+    // setpoint (issue #91).
+    if (!std::isnan(raw_setpoint)) {
+      cache_setpoint_for_mode(reported, raw_setpoint);
+    }
     if (mode_command_pending && reported != commanded_mode) {
       return reported;  // stale/in-flight: current_mode left untouched
     }
@@ -949,6 +967,26 @@ void test_mode_readback_stale_during_pending_is_ignored() {
               "#91: the readback still reports the pump's actual mode to callers");
 }
 
+void test_mode_readback_caches_reported_setpoint_while_pending() {
+  std::cout << "\n=== Testing Readback Caches Reported Mode's Setpoint While Pending (#91) ===" << std::endl;
+
+  PumpEnabledState state;
+  state.current_mode = ControlMode::CONSTANT_SPEED;
+  state.mode_valid = true;
+  state.set_mode(ControlMode::CONSTANT_FLOW);  // pending; pump still in Constant Speed
+
+  // A stale readback reports the pump still in Constant Speed at 1800 RPM. Even
+  // though current_mode is held at the commanded Constant Flow, the reported
+  // mode's setpoint must be cached so that if the command is never applied and
+  // sync recovery accepts Constant Speed, its setpoint is already populated.
+  state.apply_readback(ControlMode::CONSTANT_SPEED, 1800.0f);
+
+  TEST_ASSERT(state.current_mode == ControlMode::CONSTANT_FLOW,
+              "#91: current mode stays commanded during pending");
+  TEST_ASSERT_EQ(state.cached_speed_setpoint, 1800.0f,
+                 "#91: the reported mode's setpoint is cached even while pending (recovery-safe)");
+}
+
 void test_mode_readback_confirms_command() {
   std::cout << "\n=== Testing Readback Confirms Commanded Mode (#91) ===" << std::endl;
 
@@ -1299,6 +1337,7 @@ int main() {
   test_set_mode_uncached_scalar_mode_sends_not_aborts();
   // Issue #91: mode-command coordination
   test_mode_readback_stale_during_pending_is_ignored();
+  test_mode_readback_caches_reported_setpoint_while_pending();
   test_mode_readback_confirms_command();
   test_mode_out_of_band_readback_is_adopted();
   test_mode_stuck_command_recovers_after_max_retries();

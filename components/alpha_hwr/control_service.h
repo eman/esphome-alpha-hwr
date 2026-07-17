@@ -616,6 +616,14 @@ class ControlService {
   bool send_set_mode_request(ControlMode mode);
 
   /**
+   * Store a pump-native setpoint into the given mode's per-mode cache (issue #51),
+   * converting to display units. Keyed on the passed mode rather than
+   * current_mode_ so a readback can refresh the pump's actually-reported mode even
+   * while current_mode_ is held optimistically (issue #91).
+   */
+  void cache_setpoint_for_mode(ControlMode mode, float raw_setpoint);
+
+  /**
    * Set a Class 10 setpoint value (OpSpec 0x84 = SET + 4 bytes).
    * 
    * APDU: [0x0A][0x84][SubH][SubL][ObjH][ObjL][Float32BE]

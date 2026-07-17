@@ -76,6 +76,11 @@ void ControlService::update_mode_from_notification(uint8_t mode, uint8_t operati
   ControlMode reported = static_cast<ControlMode>(mode);
   cached_operation_mode_ = operation_mode;
 
+  // The setpoint belongs to the mode the pump is actually reporting, so cache it
+  // into that mode's own slot regardless of the pending guard below (issue #51/#91).
+  // Reference: control.py::get_mode() lines 428-434 (Pa → meters for pressure modes).
+  cache_setpoint_for_mode(reported, setpoint);
+
   // Issue #91: don't let a passive notification reporting the OLD mode overwrite
   // an in-flight mode command before the pump has applied it. Keep the commanded
   // mode until the notification reports it. (Notifications are rare, but this
@@ -87,21 +92,6 @@ void ControlService::update_mode_from_notification(uint8_t mode, uint8_t operati
     mode_command_pending_ = false;
     current_mode_ = reported;
     mode_valid_ = true;  // Mark mode as valid - we received it from the pump
-
-    // Cache setpoint from notification — write to the mode-specific field (issue #51).
-    // Per-mode storage eliminates cross-mode contamination; no NAN-clearing needed.
-    // Reference: control.py::get_mode() lines 428-434 (Pa → meters for pressure modes).
-    if (current_mode_ == ControlMode::CONSTANT_PRESSURE) {
-      cached_pressure_setpoint_ = setpoint / 9806.65f;
-    } else if (current_mode_ == ControlMode::PROPORTIONAL_PRESSURE) {
-      cached_proportional_setpoint_ = setpoint / 9806.65f;
-    } else if (current_mode_ == ControlMode::CONSTANT_FLOW) {
-      cached_flow_setpoint_ = setpoint * 3600.0f;
-    } else if (current_mode_ == ControlMode::CONSTANT_SPEED) {
-      cached_speed_setpoint_ = setpoint;
-    }
-    // Other modes (AUTO_ADAPT_*, DHW_ON_OFF, TEMPERATURE_RANGE, etc.) don't use
-    // a scalar setpoint cache — temperature range uses cached_temp_min_/max_ instead.
   }
 
   // Derive pump enabled state from operation_mode:
@@ -140,6 +130,20 @@ void ControlService::update_mode_from_notification(uint8_t mode, uint8_t operati
   }
 }
 
+void ControlService::cache_setpoint_for_mode(ControlMode mode, float raw_setpoint) {
+  // Store the pump-native setpoint into the mode's own per-mode cache, converted
+  // to display units (issue #51). Keyed on the given mode -- not current_mode_ --
+  // so a readback can populate the reported mode's cache even while current_mode_
+  // is being held optimistically (issue #91). Modes without a scalar setpoint
+  // (DHW / temperature range / auto adapt) have no slot and are left untouched.
+  switch (mode) {
+    case ControlMode::CONSTANT_PRESSURE:     cached_pressure_setpoint_ = raw_setpoint / 9806.65f; break;
+    case ControlMode::PROPORTIONAL_PRESSURE: cached_proportional_setpoint_ = raw_setpoint / 9806.65f; break;
+    case ControlMode::CONSTANT_FLOW:         cached_flow_setpoint_ = raw_setpoint * 3600.0f; break;
+    case ControlMode::CONSTANT_SPEED:        cached_speed_setpoint_ = raw_setpoint; break;
+    default: break;
+  }
+}
 
 void ControlService::sync_cache_async(std::function<void(bool)> callback) {
   ESP_LOGD(TAG, "Syncing full control cache...");
@@ -161,7 +165,8 @@ void ControlService::sync_cache_async(std::function<void(bool)> callback) {
         mode_confirm_attempts_++;
         ESP_LOGW(TAG, "Pump still reports %s (expected %s), retry %u/%u in 2s...",
                  get_mode_name(mode), get_mode_name(expected_mode),
-                 mode_confirm_attempts_, MAX_MODE_CONFIRM_ATTEMPTS);
+                 static_cast<unsigned>(mode_confirm_attempts_),
+                 static_cast<unsigned>(MAX_MODE_CONFIRM_ATTEMPTS));
         if (schedule_callback_) {
           schedule_callback_([this, callback]() { this->sync_cache_async(callback); }, 2000);
         } else if (callback) {
@@ -175,7 +180,8 @@ void ControlService::sync_cache_async(std::function<void(bool)> callback) {
       // command). Accept what the pump reports so state reflects reality instead
       // of endlessly forcing the commanded mode.
       ESP_LOGW(TAG, "Accepting pump-reported mode %s (expected %s) after %u attempt(s)",
-               get_mode_name(mode), get_mode_name(expected_mode), mode_confirm_attempts_);
+               get_mode_name(mode), get_mode_name(expected_mode),
+               static_cast<unsigned>(mode_confirm_attempts_));
       mode_command_pending_ = false;
       mode_confirm_attempts_ = 0;
       current_mode_ = mode;
@@ -315,14 +321,24 @@ bool ControlService::get_mode_async(std::function<void(bool, ControlMode)> on_co
                          control_source);
               }
 
+              // The reported setpoint belongs to whatever mode the pump is
+              // ACTUALLY in right now, so cache it into that mode's own slot
+              // regardless of whether we keep current_mode_ optimistic below. This
+              // keeps every mode's cache fresh and means bounded-retry recovery
+              // (sync_cache_async accepting the reported mode) never lands on an
+              // un-populated setpoint (issue #51/#91).
+              if (payload_len >= (size_t)(offset + 7)) {
+                cache_setpoint_for_mode(reported, protocol::decode_float_be(&payload[offset + 3]));
+              }
+
               // Issue #91: if a mode command is in flight and the pump is still
               // reporting the OLD mode, this read landed before the pump applied
               // our command (or is a stale in-flight read). Keep the commanded
-              // mode rather than letting the stale report overwrite it, and do not
-              // cache the reported (wrong-mode) setpoint. sync_cache_async() will
-              // retry, and once the pump reports the commanded mode the read below
-              // confirms it. This is what makes the #54 poll and the post-command
-              // reconciles safe against an in-flight mode change.
+              // mode rather than letting the stale report overwrite it.
+              // sync_cache_async() will retry, and once the pump reports the
+              // commanded mode the block below confirms it. This is what makes the
+              // #54 poll and the post-command reconciles safe against an in-flight
+              // mode change.
               if (mode_command_pending_ && reported != commanded_mode_) {
                 ESP_LOGD(TAG, "Ignoring readback mode %s while %s is pending confirmation",
                          get_mode_name(reported), get_mode_name(commanded_mode_));
@@ -341,23 +357,6 @@ bool ControlService::get_mode_async(std::function<void(bool, ControlMode)> on_co
               mode_confirm_attempts_ = 0;
               current_mode_ = reported;
               mode_valid_ = true;
-
-              // Extract and cache setpoint into the mode-specific field (issue #51).
-              // Per-mode storage eliminates cross-mode contamination.
-              if (payload_len >= (size_t)(offset + 7)) {
-                float raw_setpoint = protocol::decode_float_be(&payload[offset + 3]);
-
-                if (current_mode_ == ControlMode::CONSTANT_PRESSURE) {
-                  cached_pressure_setpoint_ = raw_setpoint / 9806.65f;
-                } else if (current_mode_ == ControlMode::PROPORTIONAL_PRESSURE) {
-                  cached_proportional_setpoint_ = raw_setpoint / 9806.65f;
-                } else if (current_mode_ == ControlMode::CONSTANT_FLOW) {
-                  cached_flow_setpoint_ = raw_setpoint * 3600.0f;
-                } else if (current_mode_ == ControlMode::CONSTANT_SPEED) {
-                  cached_speed_setpoint_ = raw_setpoint;
-                }
-                // Other modes don't use a scalar setpoint cache.
-              }
 
               ESP_LOGI(TAG, "Control mode updated to %d (%s), setpoint=%.2f",
                 control_mode_byte, get_mode_name(current_mode_), get_setpoint_for_mode(current_mode_));
