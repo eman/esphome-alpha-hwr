@@ -371,7 +371,11 @@ void AlphaHwrComponent::evaluate_link_status() {
 
 bool AlphaHwrComponent::is_state_synchronized() const {
   if (!session_.is_ready() || !initial_data_read_done_) return false;
-  return control_service_.is_cache_valid() && schedule_service_.is_overview_cache_valid();
+  
+  bool schedule_ready = schedule_service_.is_overview_cache_valid() || 
+                       (schedule_service_.is_schedule_state_cached() && !schedule_service_.is_schedule_enabled());
+                       
+  return control_service_.is_cache_valid() && schedule_ready;
 }
 
 void AlphaHwrComponent::trigger_initial_data_reads() {

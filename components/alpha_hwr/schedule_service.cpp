@@ -1011,7 +1011,7 @@ void ScheduleService::write_single_event_async(
         }
 
         if (on_complete)
-          on_complete(true);
+          on_complete(success);
       },
       3000, false, true);
 }

@@ -418,7 +418,8 @@ public:
    * @return True if cached state is valid, false if no state has been read yet
    */
   bool is_overview_cache_valid() const { return overview_cached_; }
-  
+  bool is_schedule_state_cached() const { return schedule_state_cached_; }
+  bool is_schedule_enabled() const { return schedule_enabled_; }
   /**
    * Invalidate all cached schedule data.
    */

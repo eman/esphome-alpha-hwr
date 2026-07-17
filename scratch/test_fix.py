@@ -11,28 +11,29 @@ HEADERS = {
     "Authorization": f"Bearer {TOKEN}",
     "Content-Type": "application/json"
 }
+VERIFY = os.environ.get("INSECURE", "0") != "1"
 
 def set_mode(mode):
     print(f"Setting mode to {mode}...")
     url = f"{HOST}/api/services/select/select_option"
-    res = requests.post(url, headers=HEADERS, json={"entity_id": "select.alpha_hwr_pump_control_mode", "option": mode}, verify=False)
+    res = requests.post(url, headers=HEADERS, json={"entity_id": "select.alpha_hwr_pump_control_mode", "option": mode}, verify=VERIFY)
     res.raise_for_status()
 
 def set_flow(value):
     print(f"Setting flow setpoint to {value}...")
     url = f"{HOST}/api/services/number/set_value"
-    res = requests.post(url, headers=HEADERS, json={"entity_id": "number.alpha_hwr_constant_flow_setpoint", "value": value}, verify=False)
+    res = requests.post(url, headers=HEADERS, json={"entity_id": "number.alpha_hwr_constant_flow_setpoint", "value": value}, verify=VERIFY)
     res.raise_for_status()
 
 def set_switch(entity_id, enabled):
     print(f"Setting {entity_id} to {enabled}...")
     url = f"{HOST}/api/services/switch/turn_{'on' if enabled else 'off'}"
-    res = requests.post(url, headers=HEADERS, json={"entity_id": entity_id}, verify=False)
+    res = requests.post(url, headers=HEADERS, json={"entity_id": entity_id}, verify=VERIFY)
     res.raise_for_status()
 
 def get_state(entity_id):
     url = f"{HOST}/api/states/{entity_id}"
-    res = requests.get(url, headers=HEADERS, verify=False)
+    res = requests.get(url, headers=HEADERS, verify=VERIFY)
     res.raise_for_status()
     return res.json().get("state")
 
