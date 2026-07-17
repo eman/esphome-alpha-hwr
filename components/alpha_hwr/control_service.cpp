@@ -209,23 +209,35 @@ void ControlService::sync_cache_async(std::function<void(bool)> callback) {
           cached_temp_min_ = protocol::decode_float_be(&payload[offset + 1]);
           cached_temp_max_ = protocol::decode_float_be(&payload[offset + 5]);
           
+          // Cycle-time config is optional for readiness (issue #94) and each byte
+          // is range-validated (1-60) so a 0xFF/0/out-of-range value maps to the
+          // -1 "unknown" sentinel instead of truncating into it. Reset to unknown
+          // first so a short payload that omits these bytes reports "unknown"
+          // rather than leaving stale values from a previous read.
+          cached_cycle_time_off_ = -1;
+          cached_cycle_time_on_ = -1;
           if (payload_len >= (size_t)(offset + 10)) {
-            cached_cycle_time_off_ = payload[offset + 9];
+            cached_cycle_time_off_ = parse_cycle_time_minutes(payload[offset + 9]);
             if (payload_len >= (size_t)(offset + 13)) {
-              cached_cycle_time_on_ = payload[offset + 12];
+              cached_cycle_time_on_ = parse_cycle_time_minutes(payload[offset + 12]);
             }
           }
         }
-        
+
         if (mode_change_callback_) {
           mode_change_callback_(current_mode_, cached_operation_mode_, get_setpoint_for_mode(current_mode_));
         }
-        
+
+        // Cycle times are not part of is_cache_valid() (issue #94), so log them
+        // separately as informational -- they may legitimately be -1 (unknown).
+        ESP_LOGD(TAG, "Config bounds synced (cycle_on=%d, cycle_off=%d)",
+                 cached_cycle_time_on_, cached_cycle_time_off_);
+
         if (callback) {
           bool valid = is_cache_valid();
           if (!valid) {
-            ESP_LOGW(TAG, "Cache sync completed but required fields are missing (autoadapt=%d, temp_min=%.1f, temp_max=%.1f, cycle_on=%d, cycle_off=%d)",
-                     cached_autoadapt_, cached_temp_min_, cached_temp_max_, cached_cycle_time_on_, cached_cycle_time_off_);
+            ESP_LOGW(TAG, "Cache sync completed but required fields are missing (autoadapt=%d, temp_min=%.1f, temp_max=%.1f)",
+                     cached_autoadapt_, cached_temp_min_, cached_temp_max_);
           }
           callback(valid);
         }

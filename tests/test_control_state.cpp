@@ -1051,6 +1051,57 @@ void test_mode_pending_cleared_on_disconnect() {
 }
 
 // ============================================================================
+// Issue #94: cycle-time config parsing and readiness independence.
+// ============================================================================
+
+// Mirrors ControlService::parse_cycle_time_minutes() (control_service.h): valid
+// range 1-60 -> value; anything else (0, 0xFF "unset", out of range) -> -1.
+static int8_t parse_cycle_time_minutes(uint8_t raw) {
+  return (raw >= 1 && raw <= 60) ? static_cast<int8_t>(raw) : -1;
+}
+
+// Mirrors the post-#94 ControlService::is_cache_valid(): cycle-time fields are
+// NOT part of the readiness gate.
+static bool is_cache_valid_model(bool mode_valid, bool pump_enabled_valid,
+                                 int8_t autoadapt, float temp_min, float temp_max) {
+  return mode_valid && pump_enabled_valid && autoadapt != -1 &&
+         !std::isnan(temp_min) && !std::isnan(temp_max);
+}
+
+void test_parse_cycle_time_minutes_range() {
+  std::cout << "\n=== Testing Cycle-Time Byte Range Validation (#94) ===" << std::endl;
+
+  // Valid values (1-60) are stored as-is.
+  TEST_ASSERT_EQ((int)parse_cycle_time_minutes(1), 1, "#94: byte 1 -> 1");
+  TEST_ASSERT_EQ((int)parse_cycle_time_minutes(5), 5, "#94: byte 5 -> 5 (real pump ON)");
+  TEST_ASSERT_EQ((int)parse_cycle_time_minutes(15), 15, "#94: byte 15 -> 15 (real pump OFF)");
+  TEST_ASSERT_EQ((int)parse_cycle_time_minutes(60), 60, "#94: byte 60 -> 60");
+
+  // Out-of-range bytes are explicitly treated as unknown (-1), not stored raw.
+  TEST_ASSERT_EQ((int)parse_cycle_time_minutes(0), -1, "#94: byte 0 (unconfigured) -> unknown, not a bogus valid value");
+  TEST_ASSERT_EQ((int)parse_cycle_time_minutes(61), -1, "#94: byte 61 (above max) -> unknown");
+  TEST_ASSERT_EQ((int)parse_cycle_time_minutes(128), -1, "#94: byte 128 -> unknown (raw store would have been a negative minute)");
+  TEST_ASSERT_EQ((int)parse_cycle_time_minutes(254), -1, "#94: byte 254 -> unknown (raw store would have been negative)");
+  TEST_ASSERT_EQ((int)parse_cycle_time_minutes(0xFF), -1, "#94: byte 0xFF -> explicitly unknown via range check (not by relying on signed truncation)");
+}
+
+void test_readiness_independent_of_cycle_time() {
+  std::cout << "\n=== Testing Readiness No Longer Requires Cycle-Time Config (#94) ===" << std::endl;
+
+  // The exact state that used to brick the component: everything the pump needs
+  // is synced, but the cycle-time fields are still -1 (e.g. a short Object 91
+  // payload). Readiness must now be TRUE.
+  TEST_ASSERT(is_cache_valid_model(/*mode*/true, /*enabled*/true, /*autoadapt*/1, 35.0f, 39.7f),
+              "#94: cache is valid with mode/enabled/autoadapt/temps set, regardless of cycle times");
+
+  // Still gated on the fields that ARE required (autoadapt here).
+  TEST_ASSERT(!is_cache_valid_model(true, true, /*autoadapt unknown*/-1, 35.0f, 39.7f),
+              "#94: cache is still invalid when a required field (autoadapt) is unknown");
+  TEST_ASSERT(!is_cache_valid_model(true, true, 1, NAN, 39.7f),
+              "#94: cache is still invalid when temp_min is unknown");
+}
+
+// ============================================================================
 // Test: start() reuses cached Constant Speed setpoint (fixes #43)
 // ============================================================================
 void test_start_reuses_cached_speed_setpoint() {
@@ -1342,6 +1393,9 @@ int main() {
   test_mode_out_of_band_readback_is_adopted();
   test_mode_stuck_command_recovers_after_max_retries();
   test_mode_pending_cleared_on_disconnect();
+  // Issue #94: cycle-time parsing + readiness independence
+  test_parse_cycle_time_minutes_range();
+  test_readiness_independent_of_cycle_time();
   test_start_schedules_readback();
   test_stop_schedules_readback();
 

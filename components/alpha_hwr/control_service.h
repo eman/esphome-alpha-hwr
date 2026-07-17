@@ -341,7 +341,20 @@ class ControlService {
    uint8_t get_cached_operation_mode() const { return cached_operation_mode_; }
    /** Get cached autoadapt enabled state (-1=unknown, 0=off, 1=on). */
    int8_t get_cached_autoadapt() const { return cached_autoadapt_; }
-   
+
+   /**
+    * Decode a cycle-time minutes byte read from the pump (Object 91). Valid range
+    * is 1-60 (matches set_cycle_time_control_async); any other byte is treated as
+    * explicitly "unknown" and returned as the -1 sentinel. This range check is
+    * what makes the raw uint8_t safe to store in the int8_t field: without it,
+    * assigning the byte directly let a 0 pass as a bogus valid value, mapped bytes
+    * 128-254 to negative minutes, and relied on signed truncation for the 0xFF
+    * "unset" case. See issue #94.
+    */
+   static int8_t parse_cycle_time_minutes(uint8_t raw) {
+     return (raw >= 1 && raw <= 60) ? static_cast<int8_t>(raw) : -1;
+   }
+
    /**
     * Synchronize all cached control data from the pump.
     * Queries Object 86 Sub 7 (Mode) and Object 91 Sub 430 (Temp range/cycle time).
@@ -353,13 +366,17 @@ class ControlService {
     * Check if all required control cache values are valid.
     */
    bool is_cache_valid() const {
+     // Cycle-time config (DHW_ON_OFF mode, Object 91) is intentionally NOT
+     // required here (issue #94): it is not displayed anywhere, and requiring it
+     // could permanently block every command (this gate feeds check_ready) if the
+     // pump ever returns a short/unusual Object 91 payload that leaves the
+     // cycle-time fields at their -1 "unknown" sentinel. Same rationale as
+     // excluding the mode-specific setpoints from readiness.
      return mode_valid_ &&
             pump_enabled_valid_ &&
             cached_autoadapt_ != -1 &&
             !std::isnan(cached_temp_min_) &&
-            !std::isnan(cached_temp_max_) &&
-            cached_cycle_time_on_ != -1 &&
-            cached_cycle_time_off_ != -1;
+            !std::isnan(cached_temp_max_);
    }
 
    /**
