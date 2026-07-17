@@ -10,6 +10,10 @@
   Fixed a major stall where attempting to sync the schedule (5 layers + 35 single events) while the schedule was disabled (e.g., in Constant Flow mode) would cause the pump to silently drop all 40 packets. This previously resulted in a compounding 3-second timeout per packet (up to 2 minutes of queue freeze).
   - The schedule sync now checks the cached state and instantly aborts if the schedule is disabled.
   - Reduced the timeout of the periodic `poll_state` command (`Obj 84 Sub 1`) to 1000ms and configured it to assume the schedule is disabled upon timeout, ensuring the rest of the schedule sync properly short-circuits.
+- **Command Rejection on Schedule Timeout** —
+  Fixed a bug where pump mode commands were rejected with `pump state is not yet fully synchronized` if the schedule `poll_state` timed out. The schedule service now correctly marks the overview cache as valid (even when disabled) upon a timeout so the control service can proceed.
+- **Transport Wildcard Mismatches & Parsing** —
+  Removed a flawed Object 84 payload workaround in the transport dispatcher and updated the FSM to ensure wildcard matchers (`0,0`) do not incorrectly intercept passive notifications when waiting for a command ACK.
 - **Double Callback Recursion Unwinding** —
   Fixed a subtle bug in `read_entries_async` where a synchronous abort of a disabled layer returned `false` after already invoking the success callback. This previously caused the sequential promise chain to unwind recursively, logging duplicated "Failed to queue read" warnings and triggering redundant Home Assistant UI updates.
 - **Compiler Warnings** —
