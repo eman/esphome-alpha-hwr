@@ -4,6 +4,21 @@
 
 ### Fixed
 
+- **Uncoordinated `current_mode_` writes during mode switches** —
+  A control-mode readback that landed after a mode command was issued but before
+  the pump had applied it (most easily via the 30 s out-of-band poll, but also the
+  post-command reconciles) reported the *old* mode and silently overwrote the
+  optimistic new mode, which then drove `sync_cache_async` into an unbounded 2 s
+  retry loop that NaN-ed the setpoint cache. `set_mode`/`start` now record the
+  commanded mode as *pending*, and every readback writer (`get_mode_async`, passive
+  notifications) keeps the commanded mode until a readback confirms it — so a
+  stale/in-flight read can no longer corrupt the mode or flicker the setpoint to
+  `unknown`. The sync retry is now bounded and, if the pump never applies a command,
+  falls back to accepting the pump's reported mode instead of forcing the commanded
+  one forever. Out-of-band change detection (issue #54) is preserved: with no
+  command pending, a readback still adopts the pump's mode. (Addresses the
+  coordination race in [#91](https://github.com/eman/esphome-alpha-hwr/issues/91);
+  the setpoint-clobber symptom itself was already removed by the #97/#83 fix.)
 - **Three of six control modes could not be entered, and mode changes clobbered
   the stored setpoint** —
   On v0.10.3, selecting Constant Pressure, Proportional Pressure, or Constant Flow

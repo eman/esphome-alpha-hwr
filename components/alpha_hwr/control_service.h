@@ -373,6 +373,10 @@ class ControlService {
      cached_temp_max_ = NAN;
      cached_cycle_time_on_ = -1;
      cached_cycle_time_off_ = -1;
+     // Drop any in-flight mode command (issue #91): a command issued on a prior
+     // connection must not be "confirmed" by a read on the next connection.
+     mode_command_pending_ = false;
+     mode_confirm_attempts_ = 0;
    }
 
    // ========== Setpoint Configuration Methods ==========
@@ -475,6 +479,23 @@ class ControlService {
     core::Session &session_;
     ControlMode current_mode_{ControlMode::NONE};
     bool mode_valid_{false};  // Track if we've received a real mode from the pump
+
+    // Mode-command coordination (issue #91). current_mode_ has several writers:
+    // the optimistic setters (set_mode/start) and the readback writers
+    // (get_mode_async, called directly by the #54 poll and post-command
+    // reconciles, plus update_mode_from_notification). Without coordination, a
+    // readback that lands after a mode command is issued but before the pump has
+    // applied it reports the OLD mode and silently overwrites the optimistic new
+    // mode. To prevent that, set_mode/start record the commanded mode as
+    // "pending", and every readback writer keeps the commanded mode until a
+    // readback confirms it (reports == commanded).
+    ControlMode commanded_mode_{ControlMode::NONE};  // last mode we told the pump to enter
+    bool mode_command_pending_{false};               // true until a readback confirms commanded_mode_
+    uint8_t mode_confirm_attempts_{0};               // bounds the sync_cache_async retry loop
+    // Max mismatch retries before we stop forcing the commanded mode and accept
+    // whatever the pump reports (recovers from a command the pump never applied).
+    static constexpr uint8_t MAX_MODE_CONFIRM_ATTEMPTS = 4;
+
     bool is_remote_mode_enabled_{false};  // Track remote mode state
     bool pump_enabled_{false};       // Pump enabled (AUTO/USER_DEFINED) vs stopped (STOP)
     bool pump_enabled_valid_{false}; // Whether pump_enabled_ has been determined
