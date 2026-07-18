@@ -10,6 +10,7 @@
 #ifdef USE_TIME
 #include "esphome/components/time/real_time_clock.h"
 #endif
+#include "api_bridge.h"
 #include "auth.h"
 #include "ble_connection_manager.h"
 #include "codec.h"
@@ -26,6 +27,7 @@
 #include "telemetry_service.h"
 #include "time_service.h"
 #include "transport.h"
+#include "write_operation_service.h"
 #include <esp_bt_defs.h>
 #include <esp_gap_ble_api.h>
 #include <esp_gattc_api.h>
@@ -92,7 +94,8 @@ public:
         schedule_service_(transport_, session_),
         device_info_service_(transport_, session_), time_service_(&transport_),
         event_log_service_(transport_, session_),
-        history_service_(transport_, session_) {
+        history_service_(transport_, session_),
+        write_op_service_(control_service_, schedule_service_, session_) {
     parent->register_ble_node(this);
     parent_ = parent;
     ESP_LOGI(TAG, "AlphaHwrComponent constructor");
@@ -304,6 +307,15 @@ private:
   // History service (reads trend data: flow, head, temp, power-on)
   services::HistoryService history_service_;
 
+  // Write-operation layer (issue #92): serializes every pump write, confirms
+  // it against the pump, and reports one terminal result per operation.
+  services::WriteOperationService write_op_service_;
+
+#ifdef ALPHA_HWR_HAS_API_BRIDGE
+  // Home Assistant services + write_settled event (issue #92).
+  AlphaHwrApiBridge api_bridge_;
+#endif
+
   // Sensor publisher (maps telemetry to ESPHome sensors)
   services::SensorPublisher sensor_publisher_;
 
@@ -388,18 +400,72 @@ public:
     return true;
   }
 
-  // Control service access methods (for ESPHome switches/buttons)
-  bool pump_start() { 
-    if (!check_ready("start")) return false;
-    return control_service_.start(); 
+  // ---- Programmatic write interface (issue #92). Submissions queue in the
+  // write-operation layer; each ends in exactly one terminal WriteResult
+  // delivered through the result callback (the api bridge turns that into the
+  // esphome.alpha_hwr_write_settled Home Assistant event).
+  void set_write_result_callback(std::function<void(const services::WriteResult &)> cb) {
+    write_op_service_.set_result_callback(std::move(cb));
   }
-  bool pump_stop() { 
+  void submit_set_enabled(bool enabled, const std::string &op_id) {
+    write_op_service_.submit_set_enabled(enabled, op_id);
+  }
+  void submit_set_mode(services::ControlMode mode, const std::string &op_id) {
+    write_op_service_.submit_set_mode(mode, op_id);
+  }
+  void submit_set_setpoint(services::ControlMode mode, float value, const std::string &op_id) {
+    write_op_service_.submit_set_setpoint(mode, value, op_id);
+  }
+  void submit_set_temperature_range(float min_c, float max_c, bool autoadapt,
+                                    const std::string &op_id) {
+    write_op_service_.submit_set_temperature_range(min_c, max_c, autoadapt, op_id);
+  }
+  void submit_set_cycle_times(uint8_t on_minutes, uint8_t off_minutes, const std::string &op_id) {
+    write_op_service_.submit_set_cycle_times(on_minutes, off_minutes, op_id);
+  }
+  void submit_set_schedule_entry(uint8_t layer, uint8_t day_index, uint8_t begin_hour,
+                                 uint8_t begin_minute, uint8_t end_hour, uint8_t end_minute,
+                                 const std::string &op_id) {
+    write_op_service_.submit_set_schedule_entry(layer, day_index, begin_hour, begin_minute,
+                                                end_hour, end_minute, op_id);
+  }
+  void submit_clear_schedule_entry(uint8_t layer, uint8_t day_index, const std::string &op_id) {
+    write_op_service_.submit_clear_schedule_entry(layer, day_index, op_id);
+  }
+  void submit_set_schedule_enabled(bool enabled, const std::string &op_id) {
+    write_op_service_.submit_set_schedule_enabled(enabled, op_id);
+  }
+  void submit_set_single_event(uint32_t begin_ts, uint32_t end_ts, const std::string &op_id) {
+    write_op_service_.submit_set_single_event(begin_ts, end_ts, op_id);
+  }
+  void submit_clear_single_event(uint8_t slot, const std::string &op_id) {
+    write_op_service_.submit_clear_single_event(slot, op_id);
+  }
+  void submit_refresh_schedule(const std::string &op_id) {
+    write_op_service_.submit_refresh_schedule(op_id);
+  }
+  void submit_refresh_single_events(const std::string &op_id) {
+    write_op_service_.submit_refresh_single_events(op_id);
+  }
+
+  // Control service access methods (for ESPHome switches/buttons).
+  // Entity writes route through the write-operation layer (issue #92) with an
+  // empty op_id: they get the same serialization, confirm readbacks, and
+  // terminal settle events as the programmatic services — one write path.
+  bool pump_start() {
+    if (!check_ready("start")) return false;
+    write_op_service_.submit_set_enabled(true, "");
+    return true;
+  }
+  bool pump_stop() {
     if (!check_ready("stop")) return false;
-    return control_service_.stop(); 
+    write_op_service_.submit_set_enabled(false, "");
+    return true;
   }
   bool set_control_mode(services::ControlMode mode) {
     if (!check_ready("set_control_mode")) return false;
-    return control_service_.set_mode(mode);
+    write_op_service_.submit_set_mode(mode, "");
+    return true;
   }
   bool enable_remote() { 
     if (!check_ready("enable_remote")) return false;
@@ -410,36 +476,40 @@ public:
     return control_service_.disable_remote_mode(); 
   }
 
-  // Setpoint configuration methods (for ESPHome number entities)
+  // Setpoint configuration methods (for ESPHome number entities). The bool
+  // callback fires with the operation's terminal result (true for
+  // accepted/clamped), no longer with the send/ACK of the first wire step.
   void set_constant_pressure(float value_m,
                              std::function<void(bool)> callback) {
     if (!check_ready("set_constant_pressure")) { if (callback) callback(false); return; }
-    control_service_.set_constant_pressure_async(value_m, callback);
+    write_op_service_.submit_set_setpoint(services::ControlMode::CONSTANT_PRESSURE, value_m, "",
+                                          callback);
   }
   void set_constant_speed(float value_rpm, std::function<void(bool)> callback) {
     if (!check_ready("set_constant_speed")) { if (callback) callback(false); return; }
-    control_service_.set_constant_speed_async(value_rpm, callback);
+    write_op_service_.submit_set_setpoint(services::ControlMode::CONSTANT_SPEED, value_rpm, "",
+                                          callback);
   }
   void set_constant_flow(float value_m3h, std::function<void(bool)> callback) {
     if (!check_ready("set_constant_flow")) { if (callback) callback(false); return; }
-    control_service_.set_constant_flow_async(value_m3h, callback);
+    write_op_service_.submit_set_setpoint(services::ControlMode::CONSTANT_FLOW, value_m3h, "",
+                                          callback);
   }
   void set_temperature_range(float min_temp, float max_temp, bool autoadapt,
                              std::function<void(bool)> callback) {
     if (!check_ready("set_temperature_range")) { if (callback) callback(false); return; }
-    control_service_.set_temperature_range_async(min_temp, max_temp, autoadapt,
-                                                 callback);
+    write_op_service_.submit_set_temperature_range(min_temp, max_temp, autoadapt, "", callback);
   }
   void set_proportional_pressure(float value_m,
                                  std::function<void(bool)> callback) {
     if (!check_ready("set_proportional_pressure")) { if (callback) callback(false); return; }
-    control_service_.set_proportional_pressure_async(value_m, callback);
+    write_op_service_.submit_set_setpoint(services::ControlMode::PROPORTIONAL_PRESSURE, value_m,
+                                          "", callback);
   }
   void set_cycle_time_control(uint8_t on_minutes, uint8_t off_minutes,
                               std::function<void(bool)> callback) {
     if (!check_ready("set_cycle_time_control")) { if (callback) callback(false); return; }
-    control_service_.set_cycle_time_control_async(on_minutes, off_minutes,
-                                                  callback);
+    write_op_service_.submit_set_cycle_times(on_minutes, off_minutes, "", callback);
   }
 
   // State tracking getters
@@ -483,20 +553,18 @@ public:
     return control_service_.get_cached_autoadapt();
   }
 
-  // Schedule service access methods (for ESPHome buttons/lambdas)
+  // Schedule service access methods (for ESPHome buttons/lambdas). Writes
+  // route through the write-operation layer (issue #92): verified against a
+  // pump readback, serialized with every other write, and reported via the
+  // terminal settle event. Display refreshes happen centrally in the
+  // write-result hook (see setup()).
   bool enable_schedule() {
-    bool success = schedule_service_.enable_schedule();
-    if (success) {
-      this->publish_schedule_json();
-    }
-    return success;
+    write_op_service_.submit_set_schedule_enabled(true, "");
+    return true;
   }
   bool disable_schedule() {
-    bool success = schedule_service_.disable_schedule();
-    if (success) {
-      this->publish_schedule_json();
-    }
-    return success;
+    write_op_service_.submit_set_schedule_enabled(false, "");
+    return true;
   }
   bool get_schedule_state(bool *result) {
     return schedule_service_.get_state(result);
@@ -524,7 +592,15 @@ public:
   void clear_schedule_entry(const std::string &day, uint8_t layer = 0,
                             std::function<void(bool)> on_complete = nullptr) {
     if (!check_ready("clear_schedule_entry")) { if (on_complete) on_complete(false); return; }
-    schedule_service_.clear_entry(day, layer, on_complete);
+    ScheduleEntry probe;
+    probe.set_day(day.c_str());
+    int day_index = probe.get_day_index();
+    if (day_index < 0) {
+      if (on_complete) on_complete(false);
+      return;
+    }
+    write_op_service_.submit_clear_schedule_entry(layer, static_cast<uint8_t>(day_index), "",
+                                                  on_complete);
   }
   bool get_schedule_display_string(const std::vector<ScheduleEntry> &entries,
                                    std::string *result) {
@@ -540,27 +616,14 @@ public:
                           const ScheduleEntry &entry,
                           std::function<void(bool)> on_complete) {
     if (!check_ready("set_schedule_entry")) { if (on_complete) on_complete(false); return; }
-    schedule_service_.set_entry_async(
-        layer, day_index, entry, [this, on_complete](bool success) {
-          if (success) {
-            // Refresh display after successful write
-            this->set_timeout(500, [this]() { this->publish_schedule_json(); });
-          }
-          if (on_complete)
-            on_complete(success);
-        });
+    write_op_service_.submit_set_schedule_entry(
+        layer, day_index, entry.get_begin_hour(), entry.get_begin_minute(),
+        entry.get_end_hour(), entry.get_end_minute(), "", on_complete);
   }
   void clear_schedule_entry_async(uint8_t layer, uint8_t day_index,
                                   std::function<void(bool)> on_complete) {
     if (!check_ready("clear_schedule_entry_async")) { if (on_complete) on_complete(false); return; }
-    schedule_service_.clear_entry_async(
-        layer, day_index, [this, on_complete](bool success) {
-          if (success) {
-            this->set_timeout(500, [this]() { this->publish_schedule_json(); });
-          }
-          if (on_complete)
-            on_complete(success);
-        });
+    write_op_service_.submit_clear_schedule_entry(layer, day_index, "", on_complete);
   }
   bool is_schedule_layer_cached(uint8_t layer) const {
     return schedule_service_.is_layer_cached(layer);
@@ -587,35 +650,12 @@ public:
   }
   void write_single_event(const services::SingleEvent &event,
                           std::function<void(bool)> on_complete) {
-    schedule_service_.write_single_event_async(
-        event, [this, on_complete](bool success) {
-          if (success) {
-#ifdef USE_TEXT_SENSOR
-            if (this->single_events_text_sensor_) {
-              this->single_events_text_sensor_->publish_state(
-                  schedule_service_.format_single_events_display());
-            }
-#endif
-          }
-          if (on_complete)
-            on_complete(success);
-        });
+    write_op_service_.submit_set_single_event(event.begin_timestamp, event.end_timestamp, "",
+                                              on_complete, event.index);
   }
   void clear_single_event(uint8_t index,
                           std::function<void(bool)> on_complete) {
-    schedule_service_.clear_single_event_async(
-        index, [this, on_complete](bool success) {
-          if (success) {
-#ifdef USE_TEXT_SENSOR
-            if (this->single_events_text_sensor_) {
-              this->single_events_text_sensor_->publish_state(
-                  schedule_service_.format_single_events_display());
-            }
-#endif
-          }
-          if (on_complete)
-            on_complete(success);
-        });
+    write_op_service_.submit_clear_single_event(index, "", on_complete);
   }
   int find_free_single_event_slot() const {
     return schedule_service_.find_free_single_event_slot();

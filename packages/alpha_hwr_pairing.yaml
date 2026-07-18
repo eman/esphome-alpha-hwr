@@ -86,6 +86,9 @@ text_sensor:
     update_interval: never  # constant value; published once at boot (see esphome.on_boot)
 
 api:
+  # Required by the alpha_hwr programmatic write services + write_settled event (issue #92)
+  custom_services: true
+  homeassistant_services: true
 
 time:
   - platform: homeassistant

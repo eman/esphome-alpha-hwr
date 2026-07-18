@@ -68,6 +68,9 @@ void AlphaHwrComponent::setup() {
     // Invalidate caches so old values don't falsely satisfy ready gating
     this->control_service_.invalidate_cache();
     this->schedule_service_.invalidate_cache();
+    // Terminal-event every pending write operation (issue #92): a client
+    // waiting on a settle event must never be left hanging across a BLE drop.
+    this->write_op_service_.on_disconnect();
     
     if (this->ready_sensor_) {
       this->ready_sensor_->publish_state(false);
@@ -231,6 +234,51 @@ void AlphaHwrComponent::setup() {
     }
 #endif
   });
+
+  // Initialize the write-operation layer (issue #92)
+  write_op_service_.set_schedule_callback(
+      [this](std::function<void()> callback, uint32_t delay_ms) {
+        this->set_timeout(delay_ms, std::move(callback));
+      });
+  write_op_service_.set_ready_check([this]() { return this->is_state_synchronized(); });
+
+  // Central write-result hook (issue #92): refresh the schedule displays when
+  // a schedule operation settles (the confirm readbacks have already updated
+  // the caches), then forward every result to the API bridge, which fires the
+  // esphome.alpha_hwr_write_settled event.
+  write_op_service_.set_result_callback([this](const services::WriteResult &result) {
+    using services::WriteCommand;
+    using services::WriteStatus;
+    bool applied = result.status == WriteStatus::ACCEPTED || result.status == WriteStatus::CLAMPED;
+    switch (result.command) {
+      case WriteCommand::SET_SCHEDULE_ENTRY:
+      case WriteCommand::CLEAR_SCHEDULE_ENTRY:
+      case WriteCommand::SET_SCHEDULE_ENABLED:
+      case WriteCommand::REFRESH_SCHEDULE:
+        if (applied) this->publish_schedule_json();
+        break;
+      case WriteCommand::SET_SINGLE_EVENT:
+      case WriteCommand::CLEAR_SINGLE_EVENT:
+      case WriteCommand::REFRESH_SINGLE_EVENTS:
+#ifdef USE_TEXT_SENSOR
+        if (applied && this->single_events_text_sensor_ != nullptr) {
+          this->single_events_text_sensor_->publish_state(
+              schedule_service_.format_single_events_display());
+        }
+#endif
+        break;
+      default:
+        break;
+    }
+#ifdef ALPHA_HWR_HAS_API_BRIDGE
+    api_bridge_.fire_write_settled(result);
+#endif
+  });
+
+#ifdef ALPHA_HWR_HAS_API_BRIDGE
+  // Register the programmatic services (issue #92).
+  api_bridge_.setup(this);
+#endif
 
   // Initialize schedule service callbacks
   schedule_service_.set_schedule_callback(

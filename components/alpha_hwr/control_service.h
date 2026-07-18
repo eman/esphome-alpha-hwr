@@ -143,74 +143,13 @@ class ControlService {
     */
    void set_mode_change_callback(std::function<void(ControlMode, uint8_t, float)> callback);
   
-  /**
-   * Start the pump.
-   * 
-   * Sends the start command using Class 10 DataObject method.
-   * Optionally switches to a different mode before starting.
-   * 
-   * @param mode Optional control mode (255 = use current mode)
-   * @return True if start command sent successfully
-   * 
-   * Protocol Notes:
-   * - Uses Class 10 Sub 0x5600, Obj 0x0601
-   * - Flag byte = 0x00 for start operation
-   * - Sends configuration commit after start
-   * - Requires authenticated session
-   * - When called with mode=255 (use current mode) and a setpoint has
-   *   already been cached for CONSTANT_PRESSURE, PROPORTIONAL_PRESSURE,
-   *   CONSTANT_SPEED, or CONSTANT_FLOW, that cached setpoint is resent
-   *   instead of the mode's hardcoded default suffix (fixes #43: enabling
-   *   the pump no longer forces it to a fixed ~3671 RPM). If no cached
-   *   setpoint is available yet, or an explicit mode override is passed,
-   *   the default suffix is used (unchanged behavior).
-   *
-   * Example:
-   *   control.start();  // Start with current mode
-   *   control.start(static_cast<uint8_t>(ControlMode::CONSTANT_PRESSURE));  // Start with specific mode
-   *
-   * Reference: control.py::start() lines 165-234
-   */
-  bool start(uint8_t mode = 255);
-  
-  /**
-   * Stop the pump.
-   * 
-   * Sends the stop command using Class 10 DataObject method.
-   * 
-   * @param mode Optional control mode (255 = use current mode)
-   * @return True if stop command sent successfully
-   * 
-   * Protocol Notes:
-   * - Uses Class 10 Sub 0x5600, Obj 0x0601
-   * - Flag byte = 0x01 for stop operation
-   * - Sends configuration commit after stop
-   * - Telemetry stream may pause when stopped
-   * 
-   * Example:
-   *   control.stop();
-   * 
-   * Reference: control.py::stop() lines 236-303
-   */
-  bool stop(uint8_t mode = 255);
-  
-  /**
-   * Set control mode.
-   * 
-   * Changes the pump's control mode without changing the setpoint.
-   * Tries Class 10 method first, falls back to Class 3 if needed.
-   * 
-   * @param mode Control mode to set
-   * @return True if mode set successfully
-   * 
-   * Example:
-   *   control.set_mode(ControlMode::CONSTANT_PRESSURE);
-   *   control.set_mode(ControlMode::AUTO_ADAPT_RADIATOR);
-   * 
-   * Reference: control.py::set_mode() lines 364-436
-   */
-  bool set_mode(ControlMode mode);
-  
+  // NOTE (issue #92): the high-level start/stop, set_mode and setpoint
+  // setters that used to live here moved into WriteOperationService, which
+  // sequences their wire steps (built from this service's primitives below)
+  // and reports a terminal settle result per write. This service keeps the
+  // pump-state cache, the readback/coordination guards, and the wire
+  // primitives.
+
   /**
    * Enable remote control mode.
    * 
@@ -254,11 +193,24 @@ class ControlService {
    
    /**
     * Get current control mode name as string.
-    * 
+    *
     * @param mode Control mode value
     * @return Human-readable mode name
     */
    static const char *get_mode_name(ControlMode mode);
+
+   /**
+    * Machine-readable mode identifier (snake_case), used by the programmatic
+    * service/event interface (issue #92). Distinct from get_mode_name(), which
+    * is the human-facing display string shown in entities.
+    */
+   static const char *mode_to_string(ControlMode mode);
+
+   /**
+    * Parse a machine-readable mode identifier (see mode_to_string()).
+    * @return True and sets out on a recognized identifier, false otherwise.
+    */
+   static bool mode_from_string(const char *str, ControlMode &out);
    
    /**
     * Get the current control mode.
@@ -396,102 +348,16 @@ class ControlService {
      mode_confirm_attempts_ = 0;
    }
 
-   // ========== Setpoint Configuration Methods ==========
-   
-   /**
-    * Set constant pressure mode with setpoint.
-    * 
-    * Switches to CONSTANT_PRESSURE mode (Mode 0) and sets the pressure setpoint.
-    * 
-    * @param value_m Pressure setpoint in meters of water column (0.5 - 10.0 m)
-    * @param callback Callback function(bool success)
-    * 
-    * Protocol Notes:
-    * - Sets mode first using set_mode()
-    * - Writes setpoint using Class 3 register 0x18
-    * - Value stored as 32-bit float big-endian
-    * - Sends configuration commit after write
-    * 
-    * Reference: control.py::set_constant_pressure() lines 591-629
-    */
-   void set_constant_pressure_async(float value_m, std::function<void(bool)> callback);
-   
-   /**
-    * Set constant speed mode with setpoint.
-    * 
-    * Switches to CONSTANT_SPEED mode (Mode 2) and sets the RPM setpoint.
-    * 
-    * @param value_rpm Speed setpoint in RPM (500 - 4500 RPM)
-    * @param callback Callback function(bool success)
-    * 
-    * Protocol Notes:
-    * - Sets mode first using set_mode()
-    * - Writes setpoint using Class 3 register 0x04
-    * - Value stored as 32-bit float big-endian
-    * - Sends configuration commit after write
-    * 
-    * Reference: control.py::set_constant_speed() lines 631-664
-    */
-   void set_constant_speed_async(float value_rpm, std::function<void(bool)> callback);
-   
-   /**
-    * Set constant flow mode with setpoint.
-    * 
-    * Switches to CONSTANT_FLOW mode (Mode 8) and sets the flow rate setpoint.
-    * 
-    * @param value_m3h Flow rate setpoint in cubic meters per hour
-    * @param callback Callback function(bool success)
-    * 
-    * Protocol Notes:
-    * - Sets mode first using set_mode()
-    * - Writes setpoint using Class 3 register 0x15
-    * - Value stored as 32-bit float big-endian
-    * - Sends configuration commit after write
-    * 
-    * Reference: control.py::set_constant_flow() lines 666-699
-    */
-   void set_constant_flow_async(float value_m3h, std::function<void(bool)> callback);
-   
-   /**
-    * Set temperature range control mode with min/max setpoints and AutoAdapt flag.
-    * 
-    * Switches to TEMPERATURE_RANGE mode (Mode 27) and configures temperature range.
-    * 
-    * @param min_temp Minimum temperature in Celsius
-    * @param max_temp Maximum temperature in Celsius
-    * @param autoadapt_enabled Enable AutoAdapt (DeltaTempEnabled flag)
-    * @param callback Callback function(bool success)
-    * 
-    * Protocol Notes:
-    * - Sets mode first using set_mode()
-    * - Writes config to Object 91, Sub-ID 430 (Type 1012)
-    * - Payload: [DeltaTempEnabled(1)][MinTemp(4BE)][MaxTemp(4BE)][TimeLimits(4)]
-    * - Total APDU: 19 bytes (OpSpec 0xB3 + 13-byte payload)
-    * - Sends configuration commit after write
-    * 
-    * Reference: control.py::set_temperature_range_control() lines 919-987
-    */
-   void set_temperature_range_async(float min_temp, float max_temp, bool autoadapt_enabled,
-                                     std::function<void(bool)> callback);
-   
-   /**
-    * Set proportional pressure mode with setpoint.
-    * Converts meters to Pascals (m × 9806.65) before sending.
-    * Two-step pattern: send_control_request + set_class10_setpoint(Sub 15).
-    * Reference: control.py::set_proportional_pressure() lines 635-668
-    */
-   void set_proportional_pressure_async(float value_m, std::function<void(bool)> callback);
-   
-   /**
-    * Set cycle time control mode (Mode 25 / DHW_ON_OFF_CONTROL).
-    * Configures pump to cycle on/off at specified intervals.
-    * Writes config to Object 91, Sub-ID 430.
-    * Reference: control.py::set_cycle_time_control() lines 982-1061
-    */
-   void set_cycle_time_control_async(uint8_t on_minutes, uint8_t off_minutes,
-                                      std::function<void(bool)> callback);
-   
    private:
+    // The write-operation layer (issue #92) sequences multi-step writes and
+    // terminal settle events on top of this service's wire primitives
+    // (send_control_request, send_set_mode_request, set_class10_setpoint,
+    // write_temp_range_config, write_cycle_config, read_obj91_config) and its
+    // command-coordination state (commanded_mode_/mode_command_pending_). It is
+    // deliberately a friend rather than widening the public API: the primitives
+    // are unsafe to call without the sequencing the op layer provides.
+    friend class WriteOperationService;
+
     core::Transport &transport_;
     core::Session &session_;
     ControlMode current_mode_{ControlMode::NONE};
@@ -636,6 +502,46 @@ class ControlService {
    * @return True if the command was queued
    */
   bool send_set_mode_request(ControlMode mode);
+
+  /**
+   * Record a just-sent mode command as "commanded but unconfirmed" (issue #91):
+   * sets commanded_mode_/mode_command_pending_, resets the confirm-attempt
+   * counter, optimistically adopts the mode, and notifies the mode-change
+   * callback. Shared by set_mode(), start(mode) and the write-operation layer.
+   */
+  void note_mode_commanded(ControlMode mode);
+
+  /**
+   * Record a just-sent start/stop command's optimistic enabled state.
+   * Shared by start()/stop() and the write-operation layer.
+   */
+  void note_enabled_commanded(bool enabled);
+
+  /**
+   * Write the temperature-range configuration struct (Object 91 Sub 430,
+   * OpSpec 0x97, matching the Grundfos GO app capture) and report the pump's
+   * ACK. Does NOT switch mode or commit; callers sequence that around it.
+   *
+   * @param on_ack Called with true on the pump's ACK, false on timeout.
+   */
+  void write_temp_range_config(float min_temp, float max_temp, bool autoadapt_enabled,
+                               std::function<void(bool)> on_ack);
+
+  /**
+   * Write the cycle-time configuration struct (Object 91 Sub 430, OpSpec 0x8F).
+   * Fire-and-forget on the wire (no ACK is matched); does NOT switch mode or
+   * commit. Callers sequence mode switch / commit / readback around it.
+   */
+  void write_cycle_config(uint8_t on_minutes, uint8_t off_minutes);
+
+  /**
+   * Read Object 91 Sub 430 (temperature range, AutoAdapt, cycle times) and
+   * refresh the corresponding caches. Extracted from sync_cache_async() so the
+   * write-operation layer can confirm config writes without re-reading the mode.
+   *
+   * @param callback Called with true when the read parsed and caches updated.
+   */
+  void read_obj91_config(std::function<void(bool)> callback);
 
   /**
    * Store a pump-native setpoint into the given mode's per-mode cache (issue #51),

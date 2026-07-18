@@ -222,7 +222,32 @@ public:
    *
    * @return True if read request was sent successfully, false otherwise
    */
-  bool poll_state();
+  bool poll_state() { return poll_state_async(nullptr); }
+
+  /**
+   * Poll schedule state with a completion callback (issue #92): the
+   * write-operation layer uses this both as the overview precondition before
+   * any schedule write (the configuration commit silently refuses without a
+   * cached overview) and as the verify readback for set_schedule_enabled.
+   *
+   * @param on_complete Called with true once the overview parsed and caches
+   *   updated, false on timeout/short payload.
+   */
+  bool poll_state_async(std::function<void(bool)> on_complete);
+
+  /**
+   * Write the schedule enabled flag with a completion callback (issue #92).
+   * Read-modify-write of the cached 10-byte ClockProgramOverview; unlike the
+   * legacy set_state() this REQUIRES the overview to be cached — the blind
+   * hardcoded-defaults RMW is exactly the clobber class issue #92 bans.
+   *
+   * @param on_sent Called with true once the write was ACKed or its response
+   *   window closed (the pump often commits despite the timeout — the
+   *   authoritative confirm is a poll_state_async() readback afterwards);
+   *   false when the write could not be attempted (no cached overview /
+   *   session not ready).
+   */
+  void set_state_async(bool enable, std::function<void(bool)> on_sent);
 
   /**
    * Enable the internal schedule.
@@ -394,6 +419,18 @@ public:
                                 std::function<void(bool)> on_complete);
 
   /**
+   * Read one single-event slot (issue #92). Factored out of the
+   * read_single_events_async() 35-slot loop so the write-operation layer can
+   * verify a just-written slot without re-reading every slot.
+   *
+   * @param index Slot to read (SubID = 900 + index)
+   * @param on_complete Called with (parsed_ok, event); event is only
+   *   meaningful when parsed_ok is true.
+   */
+  void read_single_event_async(uint8_t index,
+                               std::function<void(bool, const SingleEvent &)> on_complete);
+
+  /**
    * Find the first free (disabled) single event slot.
    * @return Index of free slot, or -1 if all slots are full
    */
@@ -405,6 +442,13 @@ public:
   const std::vector<SingleEvent> &get_cached_single_events() const {
     return cached_single_events_;
   }
+
+  /**
+   * Whether the single-event slots have been read since connect. While false,
+   * find_free_single_event_slot() blindly answers 0 — callers that would
+   * write to the returned slot must read first (issue #92).
+   */
+  bool is_single_events_cached() const { return single_events_cached_; }
 
   /**
    * Get max number of single events from ClockProgramOverview.

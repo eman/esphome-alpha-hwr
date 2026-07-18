@@ -230,10 +230,28 @@ external_components:
 
 That is the pattern used in `dhw-demand-example.yaml`.
 
+## Programmatic control (services + `write_settled` event)
+
+For automations, scripts, or any program driving the pump, the component
+registers write services (`pump_set_enabled`, `pump_set_mode`,
+`pump_set_setpoint`, `pump_set_temperature_range`, `pump_set_cycle_times`,
+plus the schedule services below). Every write — service- or
+entity-originated — is serialized, verified against a pump readback, and
+settles with exactly one `esphome.alpha_hwr_write_settled` event reporting
+whether it was `accepted`, `clamped`, `rejected`, `timeout`, or `superseded`,
+along with the value the pump actually stored. Pass an `op_id` of your choice
+to match results to your own calls — no fixed delays, no internal timing to
+know.
+
+Requires `custom_services: true` and `homeassistant_services: true` on the
+`api:` component (the shipped packages set both). Full contract and client
+examples: [`docs/programmatic-interface.md`](docs/programmatic-interface.md).
+
 ## Schedule services and entity names
 
-`alpha_hwr_schedule_editor.yaml` creates ESPHome services. Home Assistant sees
-them as:
+The schedule services are registered by the component itself
+(`alpha_hwr_schedule_editor.yaml` adds the optional Lovelace helper
+entities). Home Assistant sees them as:
 
 - `esphome.<node_name>_set_schedule_entry`
 - `esphome.<node_name>_clear_schedule_entry`

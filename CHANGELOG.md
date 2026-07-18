@@ -2,6 +2,55 @@
 
 ## [Unreleased]
 
+### Added
+
+- **Programmatic write-and-verify interface** (structural refactor,
+  [#92](https://github.com/eman/esphome-alpha-hwr/issues/92)) —
+  A new write-operation layer (`services::WriteOperationService`) owns every
+  pump write: writes queue and run strictly one at a time, each builds its wire
+  frames from the caller's arguments (never from a possibly-stale cache), each
+  is confirmed by reading the settled value back from the pump, and each ends
+  in exactly one terminal `esphome.alpha_hwr_write_settled` event
+  (`accepted` / `clamped` / `rejected` / `timeout` / `superseded`, with the
+  value the pump actually holds and a caller-supplied `op_id` for
+  correlation). Clients no longer insert fixed delays or guess at internal
+  readback timing.
+- **Home Assistant services for pump control** — `pump_set_enabled`,
+  `pump_set_mode` (unfused, via the object-86/sub-id-10 mode change from #98),
+  `pump_set_setpoint`, `pump_set_temperature_range`, `pump_set_cycle_times`,
+  registered in C++ (`api_bridge`). Requires `custom_services: true` and
+  `homeassistant_services: true` on `api:` (set in all shipped packages and
+  examples). Documented in `docs/programmatic-interface.md`.
+- **Cycle-time write verification** — `set_cycle_times` gains the Object 91
+  readback the legacy fire-and-forget setter never had (degrades gracefully to
+  accepted-with-detail on short-payload firmwares, #94).
+
+### Changed
+
+- **Entity writes route through the write-operation layer** — the dashboard
+  number/switch/select lambdas now get the same serialization and verify
+  readbacks as the services (their settle events carry `op_id: ""`). This
+  closes the issue-#92 collision class for UI users too (e.g. a setpoint write
+  followed immediately by off can no longer revert the setpoint), and entity
+  callbacks now report the write's *terminal* result rather than
+  fire-and-forget success.
+- **Schedule services migrated from YAML to C++** with unchanged names and
+  `data`-string formats plus a new optional `op_id` argument; the
+  `api: services:` block was removed from
+  `packages/alpha_hwr_schedule_editor.yaml`. **Behavior change:** schedule
+  writes are now verified with a post-commit readback and can report
+  `rejected`/`timeout` where they previously logged "OK" unconditionally;
+  malformed `data` strings now settle as `rejected` instead of failing
+  silently. `set_schedule_enabled` no longer falls back to a blind
+  hardcoded-defaults overview write, and schedule-entry writes always
+  fresh-read the layer first so out-of-band edits of other days can't be
+  clobbered. Single-event slot auto-selection reads the slots before choosing,
+  so it can no longer overwrite slot 0 on a cold cache.
+- `ControlService` no longer owns multi-step write sequencing (its high-level
+  start/stop/set-mode/setpoint setters moved into the operation layer); it
+  keeps the pump-state cache, the #91 coordination guards, and the wire
+  primitives.
+
 ## [0.11.0] - 2026-07-17
 
 ### Added

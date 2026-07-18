@@ -76,6 +76,9 @@ ble_client:
     id: hwr_pump_client
 
 api:
+  # Required by the alpha_hwr programmatic write services + write_settled event (issue #92)
+  custom_services: true
+  homeassistant_services: true
 
 time:
   - platform: homeassistant

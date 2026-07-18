@@ -2,10 +2,17 @@
 # ALPHA HWR Schedule Editor Package
 # ==============================================================================
 #
-# Provides ESPHome services plus internal helper entities for managing
-# individual schedule entries. The helper selects/numbers/buttons are
-# `internal: true` by default and are intended for dashboards or Lovelace cards,
-# while the primary integration surface is the service API defined below.
+# Provides internal helper entities for managing individual schedule entries.
+# The helper selects/numbers/buttons are `internal: true` by default and are
+# intended for dashboards or Lovelace cards.
+#
+# The schedule services (set_schedule_entry, clear_schedule_entry,
+# set_schedule_enabled, refresh_schedule, set_single_event, clear_single_event,
+# refresh_single_events) are registered by the component itself in C++ (see
+# components/alpha_hwr/api_bridge.cpp) with unchanged names and data-string
+# formats, plus a new optional op_id argument. Every call now settles with one
+# terminal esphome.alpha_hwr_write_settled event — see
+# docs/programmatic-interface.md.
 #
 # Usage:
 #   packages:
@@ -14,112 +21,10 @@
 # Requires: alpha_hwr_pairing.yaml (main component with id: pump)
 # ==============================================================================
 
-# ESPHome services for the Lovelace schedule card
-# Note: using string vars to work around ESP32-C3 RISC-V int32_t/long linker bug
 api:
-  services:
-    - service: set_schedule_entry
-      variables:
-        data: string
-      then:
-        - lambda: |-
-            // data format: "layer,day,start_hour,start_minute,end_hour,end_minute"
-            static const char* DAYS[] = {"Monday","Tuesday","Wednesday","Thursday","Friday","Saturday","Sunday"};
-            int vals[6];
-            int n = sscanf(data.c_str(), "%d,%d,%d,%d,%d,%d",
-                           &vals[0], &vals[1], &vals[2], &vals[3], &vals[4], &vals[5]);
-            if (n != 6 || vals[0] < 0 || vals[0] > 4 || vals[1] < 0 || vals[1] > 6) {
-              ESP_LOGW("sched_svc", "Invalid data: %s", data.c_str());
-              return;
-            }
-            esphome::alpha_hwr::ScheduleEntry entry(
-              DAYS[vals[1]], (uint8_t)vals[2], (uint8_t)vals[3],
-              (uint8_t)vals[4], (uint8_t)vals[5], 0x02, vals[0], true);
-            id(pump).set_schedule_entry(vals[0], vals[1], entry, [](bool ok) {
-              ESP_LOGI("sched_svc", "set_schedule_entry: %s", ok ? "OK" : "FAILED");
-            });
-
-    - service: clear_schedule_entry
-      variables:
-        data: string
-      then:
-        - lambda: |-
-            // data format: "layer,day"
-            int l, d;
-            if (sscanf(data.c_str(), "%d,%d", &l, &d) != 2 || l < 0 || l > 4 || d < 0 || d > 6) return;
-            id(pump).clear_schedule_entry_async(l, d, [](bool ok) {
-              ESP_LOGI("sched_svc", "clear_schedule_entry: %s", ok ? "OK" : "FAILED");
-            });
-
-    - service: set_schedule_enabled
-      variables:
-        data: string
-      then:
-        - lambda: |-
-            // data format: "0" or "1"
-            bool enable = (data == "1");
-            if (enable) {
-              id(pump).enable_schedule();
-            } else {
-              id(pump).disable_schedule();
-            }
-            // Refresh after a short delay so the JSON state updates
-            id(pump).update_schedule_display();
-
-    - service: refresh_schedule
-      then:
-        - lambda: |-
-            id(pump).update_schedule_display();
-
-    - service: set_single_event
-      variables:
-        data: string
-      then:
-        - lambda: |-
-            // data format: "begin_timestamp,end_timestamp"
-            // Timestamps are Unix epoch seconds
-            unsigned long begin_ts = 0, end_ts = 0;
-            if (sscanf(data.c_str(), "%lu,%lu", &begin_ts, &end_ts) != 2 || begin_ts >= end_ts) {
-              ESP_LOGW("sched_svc", "Invalid single event data: %s", data.c_str());
-              return;
-            }
-            int slot = id(pump).find_free_single_event_slot();
-            if (slot < 0) {
-              ESP_LOGW("sched_svc", "No free single event slots");
-              return;
-            }
-            esphome::alpha_hwr::services::SingleEvent event;
-            event.index = (uint8_t)slot;
-            event.enabled = true;
-            event.action = 0x02;  // RUN
-            event.begin_timestamp = (uint32_t)begin_ts;
-            event.end_timestamp = (uint32_t)end_ts;
-            ESP_LOGI("sched_svc", "Setting single event slot %d: %lu - %lu", slot, begin_ts, end_ts);
-            id(pump).write_single_event(event, [](bool ok) {
-              ESP_LOGI("sched_svc", "set_single_event: %s", ok ? "OK" : "FAILED");
-            });
-
-    - service: clear_single_event
-      variables:
-        data: string
-      then:
-        - lambda: |-
-            // data format: "slot_index"
-            int idx = 0;
-            if (sscanf(data.c_str(), "%d", &idx) != 1 || idx < 0 || idx > 99) {
-              ESP_LOGW("sched_svc", "Invalid slot: %s", data.c_str());
-              return;
-            }
-            id(pump).clear_single_event((uint8_t)idx, [](bool ok) {
-              ESP_LOGI("sched_svc", "clear_single_event: %s", ok ? "OK" : "FAILED");
-            });
-
-    - service: refresh_single_events
-      then:
-        - lambda: |-
-            id(pump).read_single_events([](bool ok, const std::vector<esphome::alpha_hwr::services::SingleEvent>& events) {
-              ESP_LOGI("sched_svc", "refresh_single_events: %s (%zu events)", ok ? "OK" : "FAILED", events.size());
-            });
+  # Required by the alpha_hwr programmatic write services + write_settled event (issue #92)
+  custom_services: true
+  homeassistant_services: true
 
 # Global variables to hold editor state
 globals:
