@@ -43,7 +43,7 @@ ESPHome prefixes each service with the node name: `esphome.<node_name>_<service>
 | --- | --- | --- |
 | `pump_set_enabled` | `enabled: bool`, `op_id: string` | Run state only, via the pump's unfused Class 3 START/STOP commands — carries no mode and no setpoint at all. A pump-rejected command settles `rejected`; the run state is always confirmed by readback (Class 3 produces no notification of its own). |
 | `pump_set_mode` | `mode: string`, `op_id: string` | Control mode only, via the pump's unfused mode-change object — touches neither the run state nor any mode's stored setpoint. |
-| `pump_set_setpoint` | `mode: string`, `value: float`, `op_id: string` | Switches to `mode` **and** sets its setpoint — exactly the pair the pump fuses in one write. Use `pump_set_mode` to switch modes without touching a setpoint. |
+| `pump_set_setpoint` | `mode: string`, `value: float`, `op_id: string` | **Switches the pump into `mode` AND sets that mode's setpoint** — `mode` is not merely selecting which stored setpoint to edit; after this call the pump is running (or armed) in that mode. This is exactly the pair the pump fuses in one write. Use `pump_set_mode` to switch modes without touching a setpoint. The pump stores an independent setpoint per mode, so setpoint writes to different modes never supersede each other. |
 | `pump_set_temperature_range` | `min_c: float`, `max_c: float`, `autoadapt: bool`, `op_id: string` | The temperature-range config object (its own fused write), after switching to temperature-range mode. |
 | `pump_set_cycle_times` | `on_minutes: float`, `off_minutes: float`, `op_id: string` | The cycle-time config object (1–60 minutes each), after switching to cycle-time mode. |
 
@@ -131,14 +131,18 @@ Every service call — and every entity write — ends in exactly one event:
 ```yaml
 event_type: esphome.alpha_hwr_write_settled
 data:
-  op_id: "restore-speed-1"   # the id you passed; "" for entity-originated writes
+  op_id: "restore-speed-1"   # the id you passed; may be empty
   command: "set_setpoint"    # which write this was
-  status: "clamped"          # accepted | clamped | rejected | timeout | superseded
+  status: "clamped"          # accepted | clamped | rejected | invalid | timeout | superseded
   detail: "pump stored 1650" # short reason when relevant
-  # plus the command's settled values, e.g.:
+  origin: "service"          # service (API call) | entity (dashboard write)
+  seq: "42"                  # submission-order sequence number (per boot)
+  # the command's settled values:
   mode: "constant_speed"
   value: "1650"
   enabled: "true"
+  # plus an echo of what was requested:
+  requested_value: "1500"
 ```
 
 > **All event values are strings** (`"1650"`, `"true"`) — the ESPHome
@@ -148,23 +152,40 @@ Statuses:
 
 - **`accepted`** — the pump confirmed the requested value.
 - **`clamped`** — the pump stored a *different* value (e.g. 1500 RPM clamped
-  to 1650). The event carries the stored value.
-- **`rejected`** — the pump kept its old value, or the request was invalid
-  (bad range, unknown mode, unparsable data) or unsafe to attempt
-  (pump not synchronized, required readback unavailable). `detail` says why.
-  Rejections for invalid arguments fire immediately, before any write.
+  to 1650). The event carries the stored value. Clamping can also come from
+  installer limits configured in the Grundfos GO app (pipe size, maximum
+  flow), so clamps at unexpected values usually reflect the pump's own
+  configuration rather than a protocol limit.
+- **`rejected`** — the pump or its state refused: it kept its old value,
+  nacked the command, or a precondition could not be read (pump not
+  synchronized, schedule overview unreadable). `detail` says why. A retry
+  may succeed once conditions change.
+- **`invalid`** — the request itself is malformed or out of range (bad
+  value, unknown mode, unparsable `data` string). Decided before any wire
+  write, deterministic, never worth a retry.
 - **`timeout`** — no pump confirmation within the operation's budget, or the
   BLE link dropped mid-operation (`detail: "disconnected"`).
 - **`superseded`** — a newer write to the same value replaced this one while
   it was still queued (last write wins). The superseding write still gets its
-  own terminal event.
+  own terminal event. Supersede is per-value: e.g. only a second setpoint
+  write to the *same mode* supersedes a queued one; setpoints for different
+  modes are independent values and both run.
 
 Settled-value fields per command: `mode`/`value`/`enabled` for the control
 commands; `temp_min`/`temp_max`/`autoadapt`; `on_minutes`/`off_minutes`;
 `layer`/`day`/`day_name`/`begin`/`end`/`enabled` for schedule entries;
 `slot`/`begin_ts`/`end_ts`/`enabled` for single events; `event_count` for the
 refreshes. For `accepted`/`clamped`/`rejected` these carry what the pump
-**actually holds** (from the readback), not what was requested.
+**actually holds** (from the readback), not what was requested. The original
+request is echoed alongside in `requested_*` fields (`requested_mode`,
+`requested_value`, `requested_temp_min`/`_max`,
+`requested_on_minutes`/`_off_minutes`, `requested_begin`/`_end`), so the
+event is self-contained for logging and retry decisions.
+
+Event ordering note: settle events for `superseded` operations fire at
+submission time, so they can arrive **before** the terminal events of
+operations submitted earlier. Use the `seq` field when reconstructing
+submission order from logs.
 
 ## Writing a client
 

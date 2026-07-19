@@ -37,6 +37,7 @@ const char *write_status_to_string(WriteStatus status) {
     case WriteStatus::CLAMPED:    return "clamped";
     case WriteStatus::REJECTED:   return "rejected";
     case WriteStatus::TIMEOUT:    return "timeout";
+    case WriteStatus::INVALID:    return "invalid";
     case WriteStatus::SUPERSEDED: return "superseded";
     case WriteStatus::PARTIAL:    return "partial";
   }
@@ -86,9 +87,13 @@ std::vector<std::string> WriteOperationService::resource_keys_(const Operation &
     case WriteCommand::SET_MODE:
       return {"mode"};
     case WriteCommand::SET_SETPOINT:
-      // A setpoint write also asserts its mode on the wire (the 0x0601 frame
-      // carries the mode byte), so it collides with queued mode changes too.
-      return {"mode", std::string("setpoint:") + ControlService::mode_to_string(op.mode)};
+      // Per-mode key ONLY: the pump stores an independent setpoint per mode,
+      // so queued setpoints for different modes must both run (review
+      // feedback on #92). The write still asserts its mode on the wire, but
+      // serialization alone yields the correct final mode, so no shared
+      // "mode" key is needed (or wanted: it would silently drop a write to
+      // an unrelated mode's stored value).
+      return {std::string("setpoint:") + ControlService::mode_to_string(op.mode)};
     case WriteCommand::SET_TEMPERATURE_RANGE:
       return {"temp_range"};
     case WriteCommand::SET_CYCLE_TIMES:
@@ -237,6 +242,24 @@ void WriteOperationService::finish_(uint32_t seq, WriteStatus status, const std:
   result.command = op.command;
   result.status = status;
   result.detail = detail;
+  result.origin = op.origin;
+  result.seq = op.seq;
+  // Echo the pristine request alongside the settled values (review feedback
+  // on #92): the event stays self-contained for logging and retry decisions.
+  result.requested_mode = op.req_mode;
+  result.requested_value = op.req_value;
+  result.requested_temp_min = op.req_temp_min;
+  result.requested_temp_max = op.req_temp_max;
+  if (op.command == WriteCommand::SET_CYCLE_TIMES) {
+    result.requested_on_minutes = op.req_on_minutes;
+    result.requested_off_minutes = op.req_off_minutes;
+  }
+  if (op.command == WriteCommand::SET_SCHEDULE_ENTRY) {
+    result.requested_begin_hhmm =
+        format_detail("%02u:%02u", op.req_begin_hour, op.req_begin_minute);
+    result.requested_end_hhmm =
+        format_detail("%02u:%02u", op.req_end_hour, op.req_end_minute);
+  }
   switch (op.command) {
     case WriteCommand::SET_PUMP_ENABLED:
       result.enabled = op.enabled ? 1 : 0;
@@ -334,58 +357,70 @@ void WriteOperationService::on_disconnect() {
 // ---------------------------------------------------------------------------
 
 void WriteOperationService::submit_set_enabled(bool enabled, const std::string &op_id,
-                                               std::function<void(bool)> done) {
+                                               std::function<void(bool)> done, WriteOrigin origin) {
   Operation op;
   op.command = WriteCommand::SET_PUMP_ENABLED;
   op.op_id = op_id;
+  op.origin = origin;
   op.enabled = enabled;
   op.done = std::move(done);
   submit_(std::move(op));
 }
 
 void WriteOperationService::submit_set_mode(ControlMode mode, const std::string &op_id,
-                                            std::function<void(bool)> done) {
+                                            std::function<void(bool)> done, WriteOrigin origin) {
   Operation op;
   op.command = WriteCommand::SET_MODE;
   op.op_id = op_id;
+  op.origin = origin;
   op.mode = mode;
+  op.req_mode = mode;
   op.done = std::move(done);
   submit_(std::move(op));
 }
 
 void WriteOperationService::submit_set_setpoint(ControlMode mode, float value,
                                                 const std::string &op_id,
-                                                std::function<void(bool)> done) {
+                                                std::function<void(bool)> done, WriteOrigin origin) {
   Operation op;
   op.command = WriteCommand::SET_SETPOINT;
   op.op_id = op_id;
+  op.origin = origin;
   op.mode = mode;
   op.value = value;
+  op.req_mode = mode;
+  op.req_value = value;
   op.done = std::move(done);
   submit_(std::move(op));
 }
 
 void WriteOperationService::submit_set_temperature_range(float min_c, float max_c, bool autoadapt,
                                                          const std::string &op_id,
-                                                         std::function<void(bool)> done) {
+                                                         std::function<void(bool)> done, WriteOrigin origin) {
   Operation op;
   op.command = WriteCommand::SET_TEMPERATURE_RANGE;
   op.op_id = op_id;
+  op.origin = origin;
   op.temp_min = min_c;
   op.temp_max = max_c;
   op.autoadapt = autoadapt;
+  op.req_temp_min = min_c;
+  op.req_temp_max = max_c;
   op.done = std::move(done);
   submit_(std::move(op));
 }
 
 void WriteOperationService::submit_set_cycle_times(uint8_t on_minutes, uint8_t off_minutes,
                                                    const std::string &op_id,
-                                                   std::function<void(bool)> done) {
+                                                   std::function<void(bool)> done, WriteOrigin origin) {
   Operation op;
   op.command = WriteCommand::SET_CYCLE_TIMES;
   op.op_id = op_id;
+  op.origin = origin;
   op.on_minutes = on_minutes;
   op.off_minutes = off_minutes;
+  op.req_on_minutes = on_minutes;
+  op.req_off_minutes = off_minutes;
   op.done = std::move(done);
   submit_(std::move(op));
 }
@@ -502,7 +537,7 @@ void WriteOperationService::run_set_mode_(uint32_t seq) {
 
   ControlService::ControlModeMapping mapping;
   if (!ControlService::get_class10_mapping(op->mode, mapping)) {
-    finish_(seq, WriteStatus::REJECTED,
+    finish_(seq, WriteStatus::INVALID,
             format_detail("unsupported mode %d", static_cast<int>(op->mode)));
     return;
   }
@@ -569,7 +604,7 @@ void WriteOperationService::run_set_setpoint_(uint32_t seq) {
   if (op == nullptr || op->phase == Phase::DONE) return;
 
   if (!is_scalar_mode_(op->mode)) {
-    finish_(seq, WriteStatus::REJECTED,
+    finish_(seq, WriteStatus::INVALID,
             format_detail("%s has no scalar setpoint", ControlService::mode_to_string(op->mode)));
     return;
   }
@@ -579,7 +614,7 @@ void WriteOperationService::run_set_setpoint_(uint32_t seq) {
   if (op->mode == ControlMode::CONSTANT_SPEED) { lo = 500.0f; hi = 4500.0f; unit = "RPM"; }
   if (op->mode == ControlMode::CONSTANT_FLOW) { lo = 0.1f; hi = 10.0f; unit = "m³/h"; }
   if (std::isnan(op->value) || op->value < lo || op->value > hi) {
-    finish_(seq, WriteStatus::REJECTED,
+    finish_(seq, WriteStatus::INVALID,
             format_detail("value out of range %.1f-%.1f %s", lo, hi, unit));
     return;
   }
@@ -668,11 +703,11 @@ void WriteOperationService::run_set_temperature_range_(uint32_t seq) {
 
   if (std::isnan(op->temp_min) || std::isnan(op->temp_max) ||
       op->temp_min < 20.0f || op->temp_min > 70.0f || op->temp_max < 20.0f || op->temp_max > 70.0f) {
-    finish_(seq, WriteStatus::REJECTED, "temperatures out of range 20-70 °C");
+    finish_(seq, WriteStatus::INVALID, "temperatures out of range 20-70 °C");
     return;
   }
   if (op->temp_min >= op->temp_max) {
-    finish_(seq, WriteStatus::REJECTED,
+    finish_(seq, WriteStatus::INVALID,
             format_detail("min %.1f must be below max %.1f", op->temp_min, op->temp_max));
     return;
   }
@@ -751,7 +786,7 @@ void WriteOperationService::run_set_cycle_times_(uint32_t seq) {
   if (op == nullptr || op->phase == Phase::DONE) return;
 
   if (op->on_minutes < 1 || op->on_minutes > 60 || op->off_minutes < 1 || op->off_minutes > 60) {
-    finish_(seq, WriteStatus::REJECTED, "cycle times must be 1-60 minutes");
+    finish_(seq, WriteStatus::INVALID, "cycle times must be 1-60 minutes");
     return;
   }
 
@@ -836,10 +871,15 @@ void WriteOperationService::submit_set_schedule_entry(uint8_t layer, uint8_t day
                                                       uint8_t begin_hour, uint8_t begin_minute,
                                                       uint8_t end_hour, uint8_t end_minute,
                                                       const std::string &op_id,
-                                                      std::function<void(bool)> done) {
+                                                      std::function<void(bool)> done, WriteOrigin origin) {
   Operation op;
   op.command = WriteCommand::SET_SCHEDULE_ENTRY;
   op.op_id = op_id;
+  op.origin = origin;
+  op.req_begin_hour = begin_hour;
+  op.req_begin_minute = begin_minute;
+  op.req_end_hour = end_hour;
+  op.req_end_minute = end_minute;
   op.layer = layer;
   op.day_index = day_index;
   op.begin_hour = begin_hour;
@@ -853,10 +893,11 @@ void WriteOperationService::submit_set_schedule_entry(uint8_t layer, uint8_t day
 
 void WriteOperationService::submit_clear_schedule_entry(uint8_t layer, uint8_t day_index,
                                                         const std::string &op_id,
-                                                        std::function<void(bool)> done) {
+                                                        std::function<void(bool)> done, WriteOrigin origin) {
   Operation op;
   op.command = WriteCommand::CLEAR_SCHEDULE_ENTRY;
   op.op_id = op_id;
+  op.origin = origin;
   op.layer = layer;
   op.day_index = day_index;
   op.enabled = false;
@@ -865,10 +906,11 @@ void WriteOperationService::submit_clear_schedule_entry(uint8_t layer, uint8_t d
 }
 
 void WriteOperationService::submit_set_schedule_enabled(bool enabled, const std::string &op_id,
-                                                        std::function<void(bool)> done) {
+                                                        std::function<void(bool)> done, WriteOrigin origin) {
   Operation op;
   op.command = WriteCommand::SET_SCHEDULE_ENABLED;
   op.op_id = op_id;
+  op.origin = origin;
   op.enabled = enabled;
   op.done = std::move(done);
   submit_(std::move(op));
@@ -876,10 +918,11 @@ void WriteOperationService::submit_set_schedule_enabled(bool enabled, const std:
 
 void WriteOperationService::submit_set_single_event(uint32_t begin_ts, uint32_t end_ts,
                                                     const std::string &op_id,
-                                                    std::function<void(bool)> done, int slot) {
+                                                    std::function<void(bool)> done, int slot, WriteOrigin origin) {
   Operation op;
   op.command = WriteCommand::SET_SINGLE_EVENT;
   op.op_id = op_id;
+  op.origin = origin;
   op.begin_ts = begin_ts;
   op.end_ts = end_ts;
   op.slot = static_cast<int16_t>(slot);
@@ -889,10 +932,11 @@ void WriteOperationService::submit_set_single_event(uint32_t begin_ts, uint32_t 
 }
 
 void WriteOperationService::submit_clear_single_event(uint8_t slot, const std::string &op_id,
-                                                      std::function<void(bool)> done) {
+                                                      std::function<void(bool)> done, WriteOrigin origin) {
   Operation op;
   op.command = WriteCommand::CLEAR_SINGLE_EVENT;
   op.op_id = op_id;
+  op.origin = origin;
   op.slot = slot;
   op.enabled = false;
   op.done = std::move(done);
@@ -900,19 +944,21 @@ void WriteOperationService::submit_clear_single_event(uint8_t slot, const std::s
 }
 
 void WriteOperationService::submit_refresh_schedule(const std::string &op_id,
-                                                    std::function<void(bool)> done) {
+                                                    std::function<void(bool)> done, WriteOrigin origin) {
   Operation op;
   op.command = WriteCommand::REFRESH_SCHEDULE;
   op.op_id = op_id;
+  op.origin = origin;
   op.done = std::move(done);
   submit_(std::move(op));
 }
 
 void WriteOperationService::submit_refresh_single_events(const std::string &op_id,
-                                                         std::function<void(bool)> done) {
+                                                         std::function<void(bool)> done, WriteOrigin origin) {
   Operation op;
   op.command = WriteCommand::REFRESH_SINGLE_EVENTS;
   op.op_id = op_id;
+  op.origin = origin;
   op.done = std::move(done);
   submit_(std::move(op));
 }
@@ -946,7 +992,7 @@ void WriteOperationService::run_schedule_entry_(uint32_t seq) {
   if (op == nullptr || op->phase == Phase::DONE) return;
 
   if (op->layer > 4 || op->day_index > 6) {
-    finish_(seq, WriteStatus::REJECTED, "layer must be 0-4 and day 0-6");
+    finish_(seq, WriteStatus::INVALID, "layer must be 0-4 and day 0-6");
     return;
   }
   if (op->command == WriteCommand::SET_SCHEDULE_ENTRY) {
@@ -955,7 +1001,7 @@ void WriteOperationService::run_schedule_entry_(uint32_t seq) {
     std::vector<std::string> errors;
     std::vector<ScheduleEntry> entries{entry};
     if (!ScheduleService::validate_entries(entries, &errors)) {
-      finish_(seq, WriteStatus::REJECTED,
+      finish_(seq, WriteStatus::INVALID,
               errors.empty() ? "invalid schedule entry" : errors.front());
       return;
     }
@@ -1112,7 +1158,7 @@ void WriteOperationService::run_single_event_(uint32_t seq) {
   if (op == nullptr || op->phase == Phase::DONE) return;
 
   if (op->command == WriteCommand::SET_SINGLE_EVENT && op->end_ts <= op->begin_ts) {
-    finish_(seq, WriteStatus::REJECTED, "end timestamp must be after begin timestamp");
+    finish_(seq, WriteStatus::INVALID, "end timestamp must be after begin timestamp");
     return;
   }
 
@@ -1266,10 +1312,12 @@ void WriteOperationService::run_refresh_single_events_(uint32_t seq) {
 
 void WriteOperationService::submit_upload_schedule(codec::UploadRequest request,
                                                    const std::string &op_id,
-                                                   std::function<void(bool)> done) {
+                                                   std::function<void(bool)> done,
+                                                   WriteOrigin origin) {
   Operation op;
   op.command = WriteCommand::UPLOAD_SCHEDULE;
   op.op_id = op_id;
+  op.origin = origin;
   op.done = std::move(done);
   op.upload = std::move(request);
   submit_(std::move(op));

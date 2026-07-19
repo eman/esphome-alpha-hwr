@@ -468,17 +468,17 @@ public:
   // terminal settle events as the programmatic services — one write path.
   bool pump_start() {
     if (!check_ready("start")) return false;
-    write_op_service_.submit_set_enabled(true, "");
+    write_op_service_.submit_set_enabled(true, "", nullptr, services::WriteOrigin::ENTITY);
     return true;
   }
   bool pump_stop() {
     if (!check_ready("stop")) return false;
-    write_op_service_.submit_set_enabled(false, "");
+    write_op_service_.submit_set_enabled(false, "", nullptr, services::WriteOrigin::ENTITY);
     return true;
   }
   bool set_control_mode(services::ControlMode mode) {
     if (!check_ready("set_control_mode")) return false;
-    write_op_service_.submit_set_mode(mode, "");
+    write_op_service_.submit_set_mode(mode, "", nullptr, services::WriteOrigin::ENTITY);
     return true;
   }
   bool enable_remote() { 
@@ -497,33 +497,35 @@ public:
                              std::function<void(bool)> callback) {
     if (!check_ready("set_constant_pressure")) { if (callback) callback(false); return; }
     write_op_service_.submit_set_setpoint(services::ControlMode::CONSTANT_PRESSURE, value_m, "",
-                                          callback);
+                                          callback, services::WriteOrigin::ENTITY);
   }
   void set_constant_speed(float value_rpm, std::function<void(bool)> callback) {
     if (!check_ready("set_constant_speed")) { if (callback) callback(false); return; }
     write_op_service_.submit_set_setpoint(services::ControlMode::CONSTANT_SPEED, value_rpm, "",
-                                          callback);
+                                          callback, services::WriteOrigin::ENTITY);
   }
   void set_constant_flow(float value_m3h, std::function<void(bool)> callback) {
     if (!check_ready("set_constant_flow")) { if (callback) callback(false); return; }
     write_op_service_.submit_set_setpoint(services::ControlMode::CONSTANT_FLOW, value_m3h, "",
-                                          callback);
+                                          callback, services::WriteOrigin::ENTITY);
   }
   void set_temperature_range(float min_temp, float max_temp, bool autoadapt,
                              std::function<void(bool)> callback) {
     if (!check_ready("set_temperature_range")) { if (callback) callback(false); return; }
-    write_op_service_.submit_set_temperature_range(min_temp, max_temp, autoadapt, "", callback);
+    write_op_service_.submit_set_temperature_range(min_temp, max_temp, autoadapt, "", callback,
+                                                   services::WriteOrigin::ENTITY);
   }
   void set_proportional_pressure(float value_m,
                                  std::function<void(bool)> callback) {
     if (!check_ready("set_proportional_pressure")) { if (callback) callback(false); return; }
     write_op_service_.submit_set_setpoint(services::ControlMode::PROPORTIONAL_PRESSURE, value_m,
-                                          "", callback);
+                                          "", callback, services::WriteOrigin::ENTITY);
   }
   void set_cycle_time_control(uint8_t on_minutes, uint8_t off_minutes,
                               std::function<void(bool)> callback) {
     if (!check_ready("set_cycle_time_control")) { if (callback) callback(false); return; }
-    write_op_service_.submit_set_cycle_times(on_minutes, off_minutes, "", callback);
+    write_op_service_.submit_set_cycle_times(on_minutes, off_minutes, "", callback,
+                                             services::WriteOrigin::ENTITY);
   }
 
   // State tracking getters
@@ -579,11 +581,11 @@ public:
   // terminal settle event. Display refreshes happen centrally in the
   // write-result hook (see setup()).
   bool enable_schedule() {
-    write_op_service_.submit_set_schedule_enabled(true, "");
+    write_op_service_.submit_set_schedule_enabled(true, "", nullptr, services::WriteOrigin::ENTITY);
     return true;
   }
   bool disable_schedule() {
-    write_op_service_.submit_set_schedule_enabled(false, "");
+    write_op_service_.submit_set_schedule_enabled(false, "", nullptr, services::WriteOrigin::ENTITY);
     return true;
   }
   bool get_schedule_state(bool *result) {
@@ -620,7 +622,7 @@ public:
       return;
     }
     write_op_service_.submit_clear_schedule_entry(layer, static_cast<uint8_t>(day_index), "",
-                                                  on_complete);
+                                                  on_complete, services::WriteOrigin::ENTITY);
   }
   bool get_schedule_display_string(const std::vector<ScheduleEntry> &entries,
                                    std::string *result) {
@@ -638,12 +640,14 @@ public:
     if (!check_ready("set_schedule_entry")) { if (on_complete) on_complete(false); return; }
     write_op_service_.submit_set_schedule_entry(
         layer, day_index, entry.get_begin_hour(), entry.get_begin_minute(),
-        entry.get_end_hour(), entry.get_end_minute(), "", on_complete);
+        entry.get_end_hour(), entry.get_end_minute(), "", on_complete,
+        services::WriteOrigin::ENTITY);
   }
   void clear_schedule_entry_async(uint8_t layer, uint8_t day_index,
                                   std::function<void(bool)> on_complete) {
     if (!check_ready("clear_schedule_entry_async")) { if (on_complete) on_complete(false); return; }
-    write_op_service_.submit_clear_schedule_entry(layer, day_index, "", on_complete);
+    write_op_service_.submit_clear_schedule_entry(layer, day_index, "", on_complete,
+                                                  services::WriteOrigin::ENTITY);
   }
   bool is_schedule_layer_cached(uint8_t layer) const {
     return schedule_service_.is_layer_cached(layer);
@@ -671,11 +675,13 @@ public:
   void write_single_event(const services::SingleEvent &event,
                           std::function<void(bool)> on_complete) {
     write_op_service_.submit_set_single_event(event.begin_timestamp, event.end_timestamp, "",
-                                              on_complete, event.index);
+                                              on_complete, event.index,
+                                              services::WriteOrigin::ENTITY);
   }
   void clear_single_event(uint8_t index,
                           std::function<void(bool)> on_complete) {
-    write_op_service_.submit_clear_single_event(index, "", on_complete);
+    write_op_service_.submit_clear_single_event(index, "", on_complete,
+                                                services::WriteOrigin::ENTITY);
   }
   int find_free_single_event_slot() const {
     return schedule_service_.find_free_single_event_slot();

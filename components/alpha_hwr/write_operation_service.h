@@ -41,10 +41,19 @@ enum class WriteCommand : uint8_t {
 enum class WriteStatus : uint8_t {
   ACCEPTED,    // pump confirmed the requested value
   CLAMPED,     // pump stored a different value (reported in the result)
-  REJECTED,    // pump kept its old value, or the request was invalid/unsafe
+  REJECTED,    // the pump or its state refused: kept its old value, nacked
+               // the command, or a required precondition was unreadable
+  INVALID,     // the request itself is malformed or out of range; decided
+               // before any wire write and deterministic (never worth a retry)
   TIMEOUT,     // no pump confirmation within the operation's budget
   SUPERSEDED,  // replaced by a newer queued write to the same resource
   PARTIAL,     // upload_schedule only: some layers confirmed, some failed
+};
+
+/** Where a write operation originated (reported in the settle event). */
+enum class WriteOrigin : uint8_t {
+  SERVICE,  // programmatic API call (op_id may still be empty)
+  ENTITY,   // dashboard entity / helper button
 };
 
 const char *write_command_to_string(WriteCommand cmd);
@@ -57,10 +66,16 @@ const char *write_status_to_string(WriteStatus status);
  * pump actually holds (from the confirm readback), not the request.
  */
 struct WriteResult {
-  std::string op_id;   // caller-supplied identifier ("" for entity-originated writes)
+  std::string op_id;   // caller-supplied identifier (may be empty)
   WriteCommand command{WriteCommand::SET_PUMP_ENABLED};
   WriteStatus status{WriteStatus::REJECTED};
   std::string detail;  // short reason when relevant ("pump stored 1650", ...)
+  WriteOrigin origin{WriteOrigin::SERVICE};  // service call vs entity write
+  // Submission-order sequence number (monotonic per boot). Settle events for
+  // superseded operations fire at submission time, i.e. before earlier
+  // in-flight operations settle, so event arrival order is NOT submission
+  // order; this field lets log analysis reconstruct it.
+  uint32_t seq{0};
 
   ControlMode mode{ControlMode::NONE};
   float value{NAN};             // setpoint, in display units
@@ -86,6 +101,18 @@ struct WriteResult {
   std::string layers_written;   // e.g. "0,2"
   std::string layers_skipped;   // e.g. "1,3,4" (already matching, no write)
   std::string schedule_hash;    // "" when rejected before any wire write
+
+  // The originally requested values, echoed so the event is self-contained
+  // for logging and retry decisions (review feedback on #92). Populated
+  // alongside their settled counterparts; for accepted results they match.
+  ControlMode requested_mode{ControlMode::NONE};
+  float requested_value{NAN};
+  float requested_temp_min{NAN};
+  float requested_temp_max{NAN};
+  int16_t requested_on_minutes{-1};
+  int16_t requested_off_minutes{-1};
+  std::string requested_begin_hhmm;
+  std::string requested_end_hhmm;
 };
 
 class ScheduleService;
@@ -141,39 +168,51 @@ class WriteOperationService {
   // accepted/clamped). Programmatic callers identify their result by op_id
   // through the result callback instead.
   void submit_set_enabled(bool enabled, const std::string &op_id,
-                          std::function<void(bool)> done = nullptr);
+                          std::function<void(bool)> done = nullptr,
+                          WriteOrigin origin = WriteOrigin::SERVICE);
   void submit_set_mode(ControlMode mode, const std::string &op_id,
-                       std::function<void(bool)> done = nullptr);
+                       std::function<void(bool)> done = nullptr,
+                       WriteOrigin origin = WriteOrigin::SERVICE);
   void submit_set_setpoint(ControlMode mode, float value, const std::string &op_id,
-                           std::function<void(bool)> done = nullptr);
+                           std::function<void(bool)> done = nullptr,
+                           WriteOrigin origin = WriteOrigin::SERVICE);
   void submit_set_temperature_range(float min_c, float max_c, bool autoadapt,
                                     const std::string &op_id,
-                                    std::function<void(bool)> done = nullptr);
+                                    std::function<void(bool)> done = nullptr,
+                                    WriteOrigin origin = WriteOrigin::SERVICE);
   void submit_set_cycle_times(uint8_t on_minutes, uint8_t off_minutes,
                               const std::string &op_id,
-                              std::function<void(bool)> done = nullptr);
+                              std::function<void(bool)> done = nullptr,
+                              WriteOrigin origin = WriteOrigin::SERVICE);
 
   // ---- Schedule writes (same contract; verify readbacks are new — no
   // schedule write had an honest success signal before this layer).
   void submit_set_schedule_entry(uint8_t layer, uint8_t day_index, uint8_t begin_hour,
                                  uint8_t begin_minute, uint8_t end_hour, uint8_t end_minute,
                                  const std::string &op_id,
-                                 std::function<void(bool)> done = nullptr);
+                                 std::function<void(bool)> done = nullptr,
+                                 WriteOrigin origin = WriteOrigin::SERVICE);
   void submit_clear_schedule_entry(uint8_t layer, uint8_t day_index, const std::string &op_id,
-                                   std::function<void(bool)> done = nullptr);
+                                   std::function<void(bool)> done = nullptr,
+                                   WriteOrigin origin = WriteOrigin::SERVICE);
   void submit_set_schedule_enabled(bool enabled, const std::string &op_id,
-                                   std::function<void(bool)> done = nullptr);
+                                   std::function<void(bool)> done = nullptr,
+                                   WriteOrigin origin = WriteOrigin::SERVICE);
   /** slot < 0 auto-resolves the first free slot; the chosen slot is echoed in the result. */
   void submit_set_single_event(uint32_t begin_ts, uint32_t end_ts, const std::string &op_id,
-                               std::function<void(bool)> done = nullptr, int slot = -1);
+                               std::function<void(bool)> done = nullptr, int slot = -1,
+                               WriteOrigin origin = WriteOrigin::SERVICE);
   void submit_clear_single_event(uint8_t slot, const std::string &op_id,
-                                 std::function<void(bool)> done = nullptr);
+                                 std::function<void(bool)> done = nullptr,
+                                 WriteOrigin origin = WriteOrigin::SERVICE);
   // Reads, but they contend for the same transport, so they run through the
   // same operation queue and get the same terminal-event guarantee.
   void submit_refresh_schedule(const std::string &op_id,
-                               std::function<void(bool)> done = nullptr);
+                               std::function<void(bool)> done = nullptr,
+                               WriteOrigin origin = WriteOrigin::SERVICE);
   void submit_refresh_single_events(const std::string &op_id,
-                                    std::function<void(bool)> done = nullptr);
+                                    std::function<void(bool)> done = nullptr,
+                                    WriteOrigin origin = WriteOrigin::SERVICE);
   /**
    * Bulk full-state schedule upload (RFC-005). The request expresses the
    * entire 7x5 grid; layers whose fresh readback already matches the
@@ -183,7 +222,8 @@ class WriteOperationService {
    */
   void submit_upload_schedule(codec::UploadRequest request,
                               const std::string &op_id,
-                              std::function<void(bool)> done = nullptr);
+                              std::function<void(bool)> done = nullptr,
+                              WriteOrigin origin = WriteOrigin::SERVICE);
 
   /**
    * Terminate every queued and in-flight operation with TIMEOUT
@@ -202,6 +242,7 @@ class WriteOperationService {
     uint32_t seq{0};
     WriteCommand command{WriteCommand::SET_PUMP_ENABLED};
     std::string op_id;
+    WriteOrigin origin{WriteOrigin::SERVICE};
     Phase phase{Phase::QUEUED};
     uint8_t attempts{0};
     std::function<void(bool)> done;
@@ -235,6 +276,15 @@ class WriteOperationService {
     uint8_t upload_written_mask{0};
     uint8_t upload_skipped_mask{0};
     uint8_t upload_failed_mask{0};
+
+    // Pristine copies of the request, captured at submit and never
+    // overwritten, so the settle event can echo what was asked for.
+    ControlMode req_mode{ControlMode::NONE};
+    float req_value{NAN};
+    float req_temp_min{NAN};
+    float req_temp_max{NAN};
+    uint8_t req_on_minutes{0}, req_off_minutes{0};
+    uint8_t req_begin_hour{0}, req_begin_minute{0}, req_end_hour{0}, req_end_minute{0};
   };
 
   // ---- Queue machinery
