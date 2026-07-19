@@ -834,10 +834,16 @@ static void test_single_event_auto_slot() {
   std::cout << "\n=== set_single_event: auto slot skips occupied slot 0 ===" << std::endl;
   Harness h;
   h.prime_cache();
-  // Slot 0 is occupied on the pump; the cache is cold, so the op must read
-  // the slots first instead of blindly picking slot 0.
+  // Slot 0 holds a LIVE event (ends after the new event begins); the cache
+  // is cold, so the op must read the slots first instead of blindly picking
+  // slot 0.
   h.sim.single_events[0][0] = 1;
   h.sim.single_events[0][1] = 0x02;
+  // end_ts = 3000000 (BE) — still in the future relative to begin 1000000
+  h.sim.single_events[0][6] = 0x00;
+  h.sim.single_events[0][7] = 0x2D;
+  h.sim.single_events[0][8] = 0xC6;
+  h.sim.single_events[0][9] = 0xC0;
 
   h.write_op.submit_set_single_event(1000000, 2000000, "ev1");
   h.advance(60000);
@@ -849,6 +855,32 @@ static void test_single_event_auto_slot() {
   TEST_ASSERT(r && r->begin_ts == 1000000 && r->end_ts == 2000000, "settled timestamps reported");
   TEST_ASSERT(h.sim.single_events[1][0] == 1, "pump slot 1 holds the enabled event");
   TEST_ASSERT(h.sim.single_events[0][0] == 1, "slot 0 was not overwritten");
+}
+
+
+static void test_single_event_reuses_expired_slot() {
+  std::cout << "\n=== set_single_event: expired slot is reused, pool never exhausts ===" << std::endl;
+  Harness h;
+  h.prime_cache();
+  // Slot 0 holds an ENABLED but EXPIRED event (ended at 500000, before the
+  // new event's begin 1000000). It must not count as occupied.
+  h.sim.single_events[0][0] = 1;
+  h.sim.single_events[0][1] = 0x02;
+  h.sim.single_events[0][6] = 0x00;
+  h.sim.single_events[0][7] = 0x07;
+  h.sim.single_events[0][8] = 0xA1;
+  h.sim.single_events[0][9] = 0x20;  // 500000 BE
+
+  h.write_op.submit_set_single_event(1000000, 2000000, "ev3");
+  h.advance(60000);
+
+  TEST_ASSERT(h.events_for("ev3") == 1, "exactly one terminal event");
+  const WriteResult *r = h.result_for("ev3");
+  TEST_ASSERT(r && r->status == WriteStatus::ACCEPTED, "status is accepted");
+  TEST_ASSERT(r && r->slot == 0, "expired slot 0 was reused");
+  TEST_ASSERT(h.sim.single_events[0][0] == 1 &&
+                  h.sim.single_events[0][9] == (2000000 & 0xFF),
+              "pump slot 0 now holds the new event");
 }
 
 static void test_clear_single_event() {
@@ -1109,6 +1141,7 @@ int main() {
   test_schedule_entry_no_overview();
   test_schedule_enabled_verified_rmw();
   test_single_event_auto_slot();
+  test_single_event_reuses_expired_slot();
   test_clear_single_event();
   test_schedule_supersede_keys();
   test_refresh_ops();

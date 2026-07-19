@@ -113,6 +113,17 @@ state are cached). External schedulers compare it against the hash of their
 desired schedule to decide whether reprogramming is needed — see RFC-005 in
 the dhw-sensor-apps repo for the algorithm and cross-language golden vectors.
 
+### Full-grid read-back (`schedule_layer_0..4` sensors)
+
+Five per-layer text sensors publish each layer's compact JSON (`[start_min,
+end_min]` per enabled day, `0` otherwise — always under HA's 255-char state
+cap, unlike the aggregate Weekly Schedule sensor).  Together with
+`schedule_hash` they give an external scheduler a race-free cold-start
+recovery path: reconstruct the grid from the five sensors, verify against
+the hash, then upload safely (dhw-sensor-apps issue #7).  Sensors report
+`unknown` until their layer is cached and are republished after every
+settled schedule operation.
+
 ## The `write_settled` event
 
 Every service call — and every entity write — ends in exactly one event:

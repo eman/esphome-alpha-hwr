@@ -79,6 +79,15 @@ std::string schedule_hash(const uint8_t images[UPLOAD_LAYERS][LAYER_IMAGE_BYTES]
                           bool schedule_enabled);
 
 /**
+ * Render a 42-byte layer image as compact JSON: an array of 7 cells,
+ * each `[start_min,end_min]` (enabled) or `0` (disabled) — the same cell
+ * format as the Weekly Schedule sensor, but per layer so it always fits
+ * HA's 255-char state cap (~86 chars worst case). Read-back path for
+ * external schedulers (dhw-sensor-apps issue #7).
+ */
+std::string layer_image_to_json(const uint8_t image[LAYER_IMAGE_BYTES]);
+
+/**
  * Canonicalize a raw layer image in place: any day whose enabled byte is
  * zero is zero-filled entirely, and enabled days get their action byte
  * normalized to 0x02, so stale times in disabled cells never perturb the

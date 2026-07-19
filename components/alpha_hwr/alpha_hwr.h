@@ -158,6 +158,10 @@ public:
   void set_schedule_hash_text_sensor(text_sensor::TextSensor *sensor) {
     schedule_hash_text_sensor_ = sensor;
   }
+  void set_schedule_layer_text_sensor(uint8_t layer,
+                                      text_sensor::TextSensor *sensor) {
+    if (layer < 5) schedule_layer_sensors_[layer] = sensor;
+  }
   void set_control_mode_text_sensor(text_sensor::TextSensor *sensor) {
     control_mode_sensor_ = sensor;
   }
@@ -329,6 +333,9 @@ private:
   // Schedule display sensor
   text_sensor::TextSensor *schedule_text_sensor_{nullptr};
   text_sensor::TextSensor *schedule_hash_text_sensor_{nullptr};
+  text_sensor::TextSensor *schedule_layer_sensors_[5] = {nullptr, nullptr,
+                                                         nullptr, nullptr,
+                                                         nullptr};
   // Control mode display sensor
   text_sensor::TextSensor *control_mode_sensor_{nullptr};
   // Device information text sensors
@@ -853,6 +860,15 @@ public:
    */
   void publish_schedule_hash() {
 #ifdef USE_TEXT_SENSOR
+    // Per-layer read-back sensors (dhw-sensor-apps issue #7): each layer's
+    // compact JSON always fits HA's 255-char cap, unlike the aggregate
+    // Weekly Schedule sensor.
+    for (uint8_t layer = 0; layer < 5; layer++) {
+      if (this->schedule_layer_sensors_[layer] != nullptr) {
+        this->schedule_layer_sensors_[layer]->publish_state(
+            schedule_service_.layer_json(layer));
+      }
+    }
     if (!this->schedule_hash_text_sensor_)
       return;
     std::string hash = schedule_service_.current_hash();

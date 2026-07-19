@@ -127,6 +127,27 @@ uint64_t fnv1a64(const uint8_t *data, size_t len) {
   return h;
 }
 
+std::string layer_image_to_json(const uint8_t image[LAYER_IMAGE_BYTES]) {
+  std::string json;
+  json.reserve(96);
+  json += "[";
+  char buf[24];
+  for (uint8_t day = 0; day < UPLOAD_DAYS; day++) {
+    if (day > 0) json += ",";
+    const uint8_t *cell = image + day * 6;
+    if (cell[0] != 0x00) {
+      int start = cell[2] * 60 + cell[3];
+      int end = cell[4] * 60 + cell[5];
+      snprintf(buf, sizeof(buf), "[%d,%d]", start, end);
+      json += buf;
+    } else {
+      json += "0";
+    }
+  }
+  json += "]";
+  return json;
+}
+
 void canonicalize_layer_image(uint8_t image[LAYER_IMAGE_BYTES]) {
   for (uint8_t day = 0; day < UPLOAD_DAYS; day++) {
     uint8_t *cell = image + day * 6;

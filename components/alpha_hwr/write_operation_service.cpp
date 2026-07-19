@@ -1114,7 +1114,9 @@ void WriteOperationService::run_single_event_(uint32_t seq) {
     auto resolve = [this, seq]() {
       Operation *op = find_(seq);
       if (op == nullptr || op->phase == Phase::DONE) return;
-      int slot = schedule_service_.find_free_single_event_slot();
+      // The new event's begin timestamp doubles as "now": any cached
+      // event that ended before it is expired and its slot reusable.
+      int slot = schedule_service_.find_free_single_event_slot(op->begin_ts);
       if (slot < 0) {
         finish_(seq, WriteStatus::REJECTED, "no free single event slots");
         return;

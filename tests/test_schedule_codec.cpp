@@ -145,6 +145,34 @@ static void test_canonicalize() {
               "action byte normalized to 0x02 on enabled cell");
 }
 
+static void test_layer_image_to_json() {
+  uint8_t image[LAYER_IMAGE_BYTES];
+  memset(image, 0, sizeof(image));
+  TEST_ASSERT(codec::layer_image_to_json(image) == "[0,0,0,0,0,0,0]",
+              "empty layer renders 7 zero cells");
+
+  UploadRequest req;
+  parse("v1,1;2,0,6,54,7,0;2,6,23,54,23,59", &req);
+  codec::build_layer_image(req, 2, image);
+  TEST_ASSERT(codec::layer_image_to_json(image) ==
+                  "[[414,420],0,0,0,0,0,[1434,1439]]",
+              "cells render as [start_min,end_min]");
+
+  // Worst case fits HA's 255-char state cap with plenty of room
+  UploadRequest full;
+  std::string payload = "v1,1";
+  for (int day = 0; day < 7; day++) {
+    payload += ";0," + std::to_string(day) + ",23,44,23,59";
+  }
+  parse(payload, &full);
+  codec::build_layer_image(full, 0, image);
+  std::string json = codec::layer_image_to_json(image);
+  TEST_ASSERT(json.size() <= 255, "worst-case layer JSON fits 255 chars");
+  TEST_ASSERT(json == "[[1424,1439],[1424,1439],[1424,1439],[1424,1439],"
+                      "[1424,1439],[1424,1439],[1424,1439]]",
+              "full layer renders all 7 cells");
+}
+
 static void test_golden_hash_vectors() {
   uint8_t images[UPLOAD_LAYERS][LAYER_IMAGE_BYTES];
   memset(images, 0, sizeof(images));
@@ -181,6 +209,7 @@ int main() {
   test_parse_rejects();
   test_layer_image();
   test_canonicalize();
+  test_layer_image_to_json();
   test_golden_hash_vectors();
   test_hash_ignores_stale_disabled_times();
   std::cout << std::endl

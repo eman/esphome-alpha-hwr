@@ -434,7 +434,13 @@ public:
    * Find the first free (disabled) single event slot.
    * @return Index of free slot, or -1 if all slots are full
    */
-  int find_free_single_event_slot() const;
+  /**
+   * Find a free single-event slot. A slot is free when it is absent from
+   * the cache, disabled, or — when reusable_before_ts > 0 — holds an event
+   * that ended before that timestamp (expired events do not exhaust the
+   * 35-slot pool; writing a new event over one both reuses and clears it).
+   */
+  int find_free_single_event_slot(uint32_t reusable_before_ts = 0) const;
 
   /**
    * Get cached single events.
@@ -607,6 +613,13 @@ public:
    * well under HA's 255-char state cap.
    */
   std::string current_hash() const;
+
+  /**
+   * Compact JSON of one cached layer (7 cells, [start_min,end_min] or 0).
+   * "unknown" while the layer is not cached. Read-back path for external
+   * schedulers (dhw-sensor-apps issue #7).
+   */
+  std::string layer_json(uint8_t layer) const;
 
   /**
    * Build the canonical 42-byte image of a cached layer (disabled days
