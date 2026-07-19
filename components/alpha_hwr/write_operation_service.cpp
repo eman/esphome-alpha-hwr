@@ -153,8 +153,10 @@ void WriteOperationService::submit_(Operation op) {
   }
   for (uint32_t seq : superseded) {
     finish_(seq, WriteStatus::SUPERSEDED,
-            op.op_id.empty() ? "superseded by entity write"
-                             : format_detail("superseded by %s", op.op_id.c_str()));
+            op.origin == WriteOrigin::ENTITY
+                ? "superseded by entity write"
+                : (op.op_id.empty() ? "superseded by service write"
+                                    : format_detail("superseded by %s", op.op_id.c_str())));
   }
 
   ESP_LOGD(TAG, "Queued %s (op_id='%s', seq=%u, queue depth=%zu)",
@@ -521,6 +523,11 @@ void WriteOperationService::confirm_enabled_(uint32_t seq) {
     if (!success) {
       finish_(seq, WriteStatus::TIMEOUT, "run-state readback failed");
     } else {
+      // Rejected results carry the settled state from the readback, same as
+      // the accepted path; the request survives in the requested_* echoes.
+      op->mode = control_.current_mode_;
+      op->value = control_.get_setpoint_for_mode(op->mode);
+      op->enabled = control_.pump_enabled_;
       finish_(seq, WriteStatus::REJECTED,
               format_detail("pump still reports %s", control_.pump_enabled_ ? "running" : "stopped"));
     }

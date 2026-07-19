@@ -192,9 +192,12 @@ void AlphaHwrApiBridge::on_set_temperature_range(float min_c, float max_c, bool 
 
 void AlphaHwrApiBridge::on_set_cycle_times(float on_minutes, float off_minutes, std::string op_id) {
   // Minutes arrive as float only because int-typed service variables hit the
-  // ESP32-C3 linker bug; the operation layer validates the 1-60 range.
-  if (on_minutes < 0 || on_minutes > 255 || off_minutes < 0 || off_minutes > 255) {
-    reject_(WriteCommand::SET_CYCLE_TIMES, op_id, "cycle times must be 1-60 minutes");
+  // ESP32-C3 linker bug; the pump takes whole minutes, so fractional values
+  // settle invalid here instead of being truncated. The operation layer
+  // validates the 1-60 range.
+  if (!(on_minutes >= 0) || on_minutes > 255 || !(off_minutes >= 0) || off_minutes > 255 ||
+      on_minutes != std::floor(on_minutes) || off_minutes != std::floor(off_minutes)) {
+    reject_(WriteCommand::SET_CYCLE_TIMES, op_id, "cycle times must be whole minutes, 1-60");
     return;
   }
   component_->submit_set_cycle_times(static_cast<uint8_t>(on_minutes),

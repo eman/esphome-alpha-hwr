@@ -45,7 +45,7 @@ ESPHome prefixes each service with the node name: `esphome.<node_name>_<service>
 | `pump_set_mode` | `mode: string`, `op_id: string` | Control mode only, via the pump's unfused mode-change object — touches neither the run state nor any mode's stored setpoint. |
 | `pump_set_setpoint` | `mode: string`, `value: float`, `op_id: string` | **Switches the pump into `mode` AND sets that mode's setpoint** — `mode` is not merely selecting which stored setpoint to edit; after this call the pump is running (or armed) in that mode. This is exactly the pair the pump fuses in one write. Use `pump_set_mode` to switch modes without touching a setpoint. The pump stores an independent setpoint per mode, so setpoint writes to different modes never supersede each other. |
 | `pump_set_temperature_range` | `min_c: float`, `max_c: float`, `autoadapt: bool`, `op_id: string` | The temperature-range config object (its own fused write), after switching to temperature-range mode. |
-| `pump_set_cycle_times` | `on_minutes: float`, `off_minutes: float`, `op_id: string` | The cycle-time config object (1–60 minutes each), after switching to cycle-time mode. |
+| `pump_set_cycle_times` | `on_minutes: float`, `off_minutes: float`, `op_id: string` | The cycle-time config object (whole minutes, 1–60 each — the arguments are float-typed for platform reasons, but fractional values settle `invalid`), after switching to cycle-time mode. |
 
 `mode` strings: `constant_pressure`, `proportional_pressure`, `constant_speed`,
 `constant_flow`, `auto_adapt_radiator`, `auto_adapt_underfloor`,
