@@ -34,6 +34,28 @@
   readback the legacy fire-and-forget setter never had (degrades gracefully to
   accepted-with-detail on short-payload firmwares, #94).
 
+### Fixed
+
+- **Cycle Time Control read/write targeted the wrong GENI object**
+  ([#106](https://github.com/eman/esphome-alpha-hwr/issues/106)) —
+  The component read and wrote cycle times through Object 91 Sub 430, which
+  the GENI profile identifies as `TemperatureRangeControlUserSettings`
+  (type 1012): its trailing bytes are min/max on/off-time LIMITS, invariant
+  to the live configuration — which is why the entities always showed 5/15
+  and writes never took. The live values are Object 91 **Sub 421**
+  (`dhw_on_off_control_configuration_obj`, type 985: flow setpoint + on/off
+  periods), confirmed byte-for-byte against GO-app captures. Cycle-time
+  reads and writes now use Sub 421 with the GO app's exact frame shape,
+  read-modify-write so the stored flow setpoint is echoed back verbatim,
+  and no configuration commit (capture-verified as unnecessary). The Cycle
+  Time ON/OFF entities are now wired to the pump's real cached values
+  instead of optimistic hardcoded defaults, and the config is read at every
+  cache sync.
+- **Temperature-range writes zeroed the pump's on/off-time limits** —
+  an adjacent consequence of the same misidentified struct: the Sub 430
+  write's tail bytes (sent as constants) are the pump's limit fields.
+  They are now echoed back from the last read instead of being overwritten.
+
 ### Changed
 
 - **Entity writes route through the write-operation layer** — the dashboard

@@ -192,20 +192,26 @@ void ControlService::sync_cache_async(std::function<void(bool)> callback) {
       // Fall through to read Obj 91 config bounds for the accepted mode.
     }
 
-    // Now read Obj 91 Sub 430 for Temp Range, AutoAdapt, and Cycle Time
+    // Now read Obj 91 Sub 430 for Temp Range and AutoAdapt (the live cycle
+    // times come from Sub 421 below -- issue #106)
     read_obj91_config([this, callback](bool ok) {
       if (!ok) {
         if (callback) callback(false);
         return;
       }
-      if (callback) {
-        bool valid = is_cache_valid();
-        if (!valid) {
-          ESP_LOGW(TAG, "Cache sync completed but required fields are missing (autoadapt=%d, temp_min=%.1f, temp_max=%.1f)",
-                   cached_autoadapt_, cached_temp_min_, cached_temp_max_);
+      // Chain the DHW on/off configuration read (Obj 91 Sub 421). Its result
+      // does not gate readiness (same rationale as issue #94: cycle times are
+      // not required fields), so the sync verdict ignores its success flag.
+      read_dhw_config([this, callback](bool /*dhw_ok*/) {
+        if (callback) {
+          bool valid = is_cache_valid();
+          if (!valid) {
+            ESP_LOGW(TAG, "Cache sync completed but required fields are missing (autoadapt=%d, temp_min=%.1f, temp_max=%.1f)",
+                     cached_autoadapt_, cached_temp_min_, cached_temp_max_);
+          }
+          callback(valid);
         }
-        callback(valid);
-      }
+      });
     });
   });
 }
@@ -227,18 +233,14 @@ void ControlService::read_obj91_config(std::function<void(bool)> callback) {
         cached_temp_min_ = protocol::decode_float_be(&payload[offset + 1]);
         cached_temp_max_ = protocol::decode_float_be(&payload[offset + 5]);
 
-        // Cycle-time config is optional for readiness (issue #94) and each byte
-        // is range-validated (1-60) so a 0xFF/0/out-of-range value maps to the
-        // -1 "unknown" sentinel instead of truncating into it. Reset to unknown
-        // first so a short payload that omits these bytes reports "unknown"
-        // rather than leaving stale values from a previous read.
-        cached_cycle_time_off_ = -1;
-        cached_cycle_time_on_ = -1;
-        if (payload_len >= (size_t)(offset + 10)) {
-          cached_cycle_time_off_ = parse_cycle_time_minutes(payload[offset + 9]);
-          if (payload_len >= (size_t)(offset + 13)) {
-            cached_cycle_time_on_ = parse_cycle_time_minutes(payload[offset + 12]);
-          }
+        // The trailing bytes of this struct are the pump's min/max on/off-time
+        // LIMITS (+ version tail), NOT the live cycle times the old parser
+        // read from here (issue #106; the live values are Obj 91 Sub 421, see
+        // read_dhw_config()). Keep them verbatim so write_temp_range_config()
+        // can echo them back instead of zeroing the pump's limits.
+        if (payload_len >= (size_t)(offset + 14)) {
+          memcpy(cached_temp_limits_tail_, &payload[offset + 9], 5);
+          temp_limits_tail_valid_ = true;
         }
       }
 
@@ -246,10 +248,39 @@ void ControlService::read_obj91_config(std::function<void(bool)> callback) {
         mode_change_callback_(current_mode_, cached_operation_mode_, get_setpoint_for_mode(current_mode_));
       }
 
-      // Cycle times are not part of is_cache_valid() (issue #94), so log them
-      // separately as informational -- they may legitimately be -1 (unknown).
-      ESP_LOGD(TAG, "Config bounds synced (cycle_on=%d, cycle_off=%d)",
-               cached_cycle_time_on_, cached_cycle_time_off_);
+      if (callback) callback(true);
+    }, 5000);
+}
+
+void ControlService::read_dhw_config(std::function<void(bool)> callback) {
+  // Obj 91 Sub 421 (dhw_on_off_control_configuration_obj, type 985):
+  // [setpoint f32 BE][on_period u8][off_period u8]. The pump replies with
+  // OpSpec 0x0D and a [00 00 06] size header before the struct
+  // (capture-verified; matched via the transport's Obj-91 workaround).
+  uint8_t apdu[5] = {0x0A, 0x03, 91, 0x01, 0xA5};
+  this->transport_.send_apdu_command(apdu, 5, 91, 421,
+    [this, callback](bool ok, const uint8_t* payload, size_t payload_len) {
+      if (!ok || payload_len < 9) {
+        ESP_LOGW(TAG, "Failed to read DHW config (success=%d, len=%zu)", ok, payload_len);
+        if (callback) callback(false);
+        return;
+      }
+
+      int offset = (payload_len >= 3 && payload[0] == 0x00 && payload[1] == 0x00) ? 3 : 0;
+      if (payload_len < (size_t)(offset + 6)) {
+        ESP_LOGW(TAG, "DHW config payload too short (len=%zu)", payload_len);
+        if (callback) callback(false);
+        return;
+      }
+
+      memcpy(cached_dhw_setpoint_raw_, &payload[offset], 4);
+      dhw_config_valid_ = true;
+      cached_cycle_time_on_ = parse_cycle_time_minutes(payload[offset + 4]);
+      cached_cycle_time_off_ = parse_cycle_time_minutes(payload[offset + 5]);
+
+      ESP_LOGD(TAG, "DHW config synced: on=%d min, off=%d min (setpoint %.3g native)",
+               cached_cycle_time_on_, cached_cycle_time_off_,
+               protocol::decode_float_be(cached_dhw_setpoint_raw_));
 
       if (callback) callback(true);
     }, 5000);
@@ -820,12 +851,11 @@ void ControlService::write_temp_range_config(float min_temp, float max_temp, boo
   protocol::encode_float_be(min_temp, &apdu[12]);
   protocol::encode_float_be(max_temp, &apdu[16]);
 
-  // Default time limits / constants
-  apdu[20] = 0x00;
-  apdu[21] = 0x00;
-  apdu[22] = 0x00;
-  apdu[23] = 0x16;
-  apdu[24] = 0x00;
+  // Trailing bytes: the pump's min/max on/off-time LIMITS + version tail
+  // (type 1012 TemperatureRangeControlUserSettings). Echo the values read
+  // from the pump so a temperature write doesn't zero its limits (issue
+  // #106); before the first read this falls back to the historical constants.
+  memcpy(&apdu[20], cached_temp_limits_tail_, 5);
 
   // Log the full APDU for debugging
   ESP_LOGI(TAG, "write_temp_range APDU: %s", format_hex_pretty(apdu, 25).c_str());
@@ -840,40 +870,47 @@ void ControlService::write_temp_range_config(float min_temp, float max_temp, boo
       3000, false, true); // 3000ms timeout, no register read, expect short ACK
 }
 
-void ControlService::write_cycle_config(uint8_t on_minutes, uint8_t off_minutes) {
-  // Payload: [00 00][OFF_min][01 42 02][ON_min][FB]  (8 bytes)
-  const uint8_t struct_payload[8] = {
-    0x00, 0x00,           // Header
-    off_minutes,          // Byte 2: OFF time
-    0x01, 0x42, 0x02,     // Fixed magic bytes
-    on_minutes,           // Byte 6: ON time
-    0xFB                  // Fixed suffix
-  };
+bool ControlService::write_dhw_config(uint8_t on_minutes, uint8_t off_minutes,
+                                      std::function<void(bool)> on_ack) {
+  // Read-modify-write: the struct carries the mode's stored flow setpoint,
+  // which must be echoed back verbatim. Refuse to write blind rather than
+  // invent a setpoint (the exact clobber class issue #92 bans).
+  if (!dhw_config_valid_) {
+    ESP_LOGW(TAG, "Cannot write DHW config: setpoint not read yet (call read_dhw_config first)");
+    return false;
+  }
 
-  // APDU: [Class][OpSpec][ObjID][SubH][SubL][Reserved][Type_H][Type_L][Size][Payload(8)]
-  // Object 91, Sub-ID 430 (0x01AE), Type 1012 (0x03F4)
-  // Using build_data_object_set equivalent format
-  uint8_t data[11];  // Type(2) + Size(1) + Payload(8)
-  data[0] = 0x03;    // Type high: 1012 = 0x03F4
-  data[1] = 0xF4;    // Type low
-  data[2] = 0x08;    // Size: 8 bytes
-  memcpy(&data[3], struct_payload, 8);
+  // Mirror the GO app's capture frame byte for byte (issue #106):
+  //   [0A][8F][5B][01 A5][03 D9][01][00 00 06][setpoint f32][on][off]
+  // Obj-first addressing with a 1-byte object id (like the Sub 430
+  // temperature write), type 985 DHWOnOffControlConfiguration version 1,
+  // 3-byte size = 6, then the struct. OpSpec 0x8F = SET + 15 bytes
+  // (1 obj + 2 sub + 2 type + 1 version + 3 size + 6 data).
+  uint8_t apdu[17];
+  apdu[0] = 0x0A;   // Class 10
+  apdu[1] = 0x8F;   // OpSpec: SET + 15 bytes
+  apdu[2] = 0x5B;   // Obj-ID (91, 1 byte in this packet shape)
+  apdu[3] = 0x01;   // Sub-ID high (421 = 0x01A5)
+  apdu[4] = 0xA5;   // Sub-ID low
+  apdu[5] = 0x03;   // Type high (985 = 0x03D9)
+  apdu[6] = 0xD9;   // Type low
+  apdu[7] = 0x01;   // Object version
+  apdu[8] = 0x00;   // Size high
+  apdu[9] = 0x00;   // Size mid
+  apdu[10] = 0x06;  // Size low (6 bytes)
+  memcpy(&apdu[11], cached_dhw_setpoint_raw_, 4);  // stored setpoint, verbatim
+  apdu[15] = on_minutes;
+  apdu[16] = off_minutes;
 
-  // Build full APDU matching build_data_object_set format:
-  // [0x0A][OpSpec][SubH][SubL][ObjH][ObjL][data...]
-  // sub_id=0x01AE (430), obj_id=91 (0x005B)
-  // standard_len = 1(svc) + 1(src) + 1(class) + 1(opspec) + 4(IDs) + len(data) = 8 + 11 = 19
-  // op_bits = 19 - 4 = 15 => OpSpec = 0x80 | 15 = 0x8F
-  uint8_t apdu[17];  // class(1) + opspec(1) + IDs(4) + data(11)
-  apdu[0] = 0x0A;    // Class 10
-  apdu[1] = 0x8F;    // OpSpec: SET + 15 bytes (4 IDs + 11 data)
-  apdu[2] = 0x01;    // Sub-ID high (0x01AE = 430)
-  apdu[3] = 0xAE;    // Sub-ID low
-  apdu[4] = 0x00;    // Obj-ID high (91 = 0x005B)
-  apdu[5] = 0x5B;    // Obj-ID low
-  memcpy(&apdu[6], data, 11);
-
-  this->transport_.send_apdu_command(apdu, 17);
+  // The pump replies with the generic short Class 10 ACK (OpSpec 0x01, no
+  // Obj/Sub fields), matched by the transport's short-ACK path.
+  this->transport_.send_apdu_command(
+      apdu, sizeof(apdu), 0, 0,
+      [on_ack](bool success, const uint8_t * /*data*/, size_t /*len*/) {
+        if (on_ack) on_ack(success);
+      },
+      3000, false, true);
+  return true;
 }
 
 }  // namespace services

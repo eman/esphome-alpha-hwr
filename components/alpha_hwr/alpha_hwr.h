@@ -552,6 +552,12 @@ public:
   int8_t get_cached_autoadapt() const {
     return control_service_.get_cached_autoadapt();
   }
+  int8_t get_cached_cycle_time_on() const {
+    return control_service_.get_cached_cycle_time_on();
+  }
+  int8_t get_cached_cycle_time_off() const {
+    return control_service_.get_cached_cycle_time_off();
+  }
 
   // Schedule service access methods (for ESPHome buttons/lambdas). Writes
   // route through the write-operation layer (issue #92): verified against a
