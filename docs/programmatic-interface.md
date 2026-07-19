@@ -41,7 +41,7 @@ ESPHome prefixes each service with the node name: `esphome.<node_name>_<service>
 
 | Service | Arguments | What it writes |
 | --- | --- | --- |
-| `pump_set_enabled` | `enabled: bool`, `op_id: string` | Run state only. Carries the mode's stored setpoint (or a "keep existing" sentinel), never a default. |
+| `pump_set_enabled` | `enabled: bool`, `op_id: string` | Run state only, via the pump's unfused Class 3 START/STOP commands — carries no mode and no setpoint at all. A pump-rejected command settles `rejected`; the run state is always confirmed by readback (Class 3 produces no notification of its own). |
 | `pump_set_mode` | `mode: string`, `op_id: string` | Control mode only, via the pump's unfused mode-change object — touches neither the run state nor any mode's stored setpoint. |
 | `pump_set_setpoint` | `mode: string`, `value: float`, `op_id: string` | Switches to `mode` **and** sets its setpoint — exactly the pair the pump fuses in one write. Use `pump_set_mode` to switch modes without touching a setpoint. |
 | `pump_set_temperature_range` | `min_c: float`, `max_c: float`, `autoadapt: bool`, `op_id: string` | The temperature-range config object (its own fused write), after switching to temperature-range mode. |

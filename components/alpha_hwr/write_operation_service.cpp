@@ -436,47 +436,31 @@ uint16_t WriteOperationService::setpoint_sub_id_(ControlMode mode) {
 void WriteOperationService::run_set_enabled_(uint32_t seq) {
   Operation *op = find_(seq);
   if (op == nullptr || op->phase == Phase::DONE) return;
-
-  // RESOLVING: the 0x0601 start/stop frame carries a mode byte, so the mode we
-  // assert must be pump-confirmed — never a still-unconfirmed optimistic value.
-  if (control_.mode_command_pending_ || !control_.mode_valid_) {
-    op->phase = Phase::RESOLVING;
-    control_.get_mode_async([this, seq](bool success, ControlMode /*mode*/) {
-      Operation *op = find_(seq);
-      if (op == nullptr || op->phase == Phase::DONE) return;
-      if (!success || !control_.mode_valid_) {
-        finish_(seq, WriteStatus::REJECTED, "could not read pump state before write");
-        return;
-      }
-      write_enabled_(seq);
-    });
-    return;
-  }
-  write_enabled_(seq);
-}
-
-void WriteOperationService::write_enabled_(uint32_t seq) {
-  Operation *op = find_(seq);
-  if (op == nullptr || op->phase == Phase::DONE) return;
   op->phase = Phase::WRITING;
 
-  // Reuse the mode's cached setpoint (converted to native units) exactly like
-  // the proven start()/stop() path; a cold cache sends the NaN "keep existing"
-  // sentinel (issue #83) inside send_control_request().
-  ControlMode mode = control_.current_mode_;
-  op->mode = mode;
-  float setpoint = control_.get_setpoint_for_mode(mode);
-  op->value = setpoint;  // display units (NaN when unknown)
-  float native = std::isnan(setpoint) ? NAN : to_native_units_(mode, setpoint);
+  // The unfused Class 3 START/STOP commands (ids bench-verified by jfriend00
+  // in issue #92) carry no mode and no setpoint, so this operation asserts
+  // nothing it would have to resolve first: no mode pre-read, no cached
+  // setpoint reuse, no NaN sentinel. The mode/value below are recorded for
+  // the settle event only.
+  op->mode = control_.current_mode_;
+  op->value = control_.get_setpoint_for_mode(op->mode);
 
-  if (!control_.send_control_request(mode, op->enabled, native)) {
-    finish_(seq, WriteStatus::REJECTED, "failed to queue control request");
-    return;
-  }
-  control_.note_enabled_commanded(op->enabled);
-
-  op->phase = Phase::CONFIRMING;
-  schedule_([this, seq]() { confirm_enabled_(seq); }, ENABLED_CONFIRM_DELAY_MS);
+  control_.send_run_command(op->enabled, [this, seq](bool acked, bool rejected) {
+    Operation *op = find_(seq);
+    if (op == nullptr || op->phase == Phase::DONE) return;
+    if (rejected) {
+      finish_(seq, WriteStatus::REJECTED,
+              format_detail("pump rejected %s command", op->enabled ? "START" : "STOP"));
+      return;
+    }
+    // Acked, or the ACK window closed without a match: either way the pump
+    // sends no unsolicited notification for Class 3 commands, so the run
+    // state must be read back — that readback is the authoritative verdict.
+    control_.note_enabled_commanded(op->enabled);
+    op->phase = Phase::CONFIRMING;
+    schedule_([this, seq]() { confirm_enabled_(seq); }, ENABLED_CONFIRM_DELAY_MS);
+  });
 }
 
 void WriteOperationService::confirm_enabled_(uint32_t seq) {

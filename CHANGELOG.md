@@ -28,6 +28,15 @@
   value the pump actually holds and a caller-supplied `op_id` for
   correlation). Clients no longer insert fixed delays or guess at internal
   readback timing.
+- **Unfused Class 3 START/STOP for on/off** — `pump_set_enabled` (and the
+  dashboard switch) now send the pump's dedicated Class 3 run-state commands
+  (START `0x06` / STOP `0x05` as SET, command ids and ACK shapes
+  bench-contributed by jfriend00 in
+  [#92](https://github.com/eman/esphome-alpha-hwr/issues/92)) instead of the
+  fused 0x0601 control object. On/off now carries no mode and no setpoint at
+  all — the last fused write leaves the on/off path — and a pump-rejected
+  command settles `rejected` from the `[03 01]` descriptor nack. The run
+  state is confirmed by readback as before.
 - **Home Assistant services for pump control** — `pump_set_enabled`,
   `pump_set_mode` (unfused, via the object-86/sub-id-10 mode change from #98),
   `pump_set_setpoint`, `pump_set_temperature_range`, `pump_set_cycle_times`,

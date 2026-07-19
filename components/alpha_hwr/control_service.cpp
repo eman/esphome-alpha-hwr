@@ -483,6 +483,26 @@ bool ControlService::enable_remote_mode() {
    return true;
  }
 
+void ControlService::send_run_command(bool start_pump,
+                                      std::function<void(bool acked, bool rejected)> on_result) {
+  // Class 3 SET: [0x03, 0x81, 0x06 START | 0x05 STOP]. See the header note;
+  // ids and ACK shapes from jfriend00's bench findings in issue #92.
+  const uint8_t apdu[3] = {0x03, 0x81, static_cast<uint8_t>(start_pump ? 0x06 : 0x05)};
+
+  ESP_LOGI(TAG, "Sending Class 3 %s command...", start_pump ? "START" : "STOP");
+  this->transport_.send_apdu_command(apdu, 3, 0, 0,
+    [on_result](bool got_response, const uint8_t *data, size_t len) {
+      if (!got_response || len < 6) {
+        // Window closed without a matchable ACK; the pump may still have
+        // applied the command — the caller's readback decides.
+        if (on_result) on_result(false, false);
+        return;
+      }
+      uint8_t ack_byte = data[5];
+      if (on_result) on_result(ack_byte == 0x00, ack_byte != 0x00);
+    });
+}
+
 void ControlService::with_resolved_enabled_state(std::function<void(bool resolved, bool enabled)> on_resolved) {
   if (pump_enabled_valid_) {
     on_resolved(true, pump_enabled_);

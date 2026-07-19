@@ -82,6 +82,8 @@ struct PumpSim {
   bool respond_overview_reads{true};
   bool honor_layer_writes{true};
   bool honor_overview_writes{true};
+  bool ack_class3{true};              // reply to Class 3 START/STOP at all
+  bool reject_class3{false};          // reply with the [03 01 xx] descriptor nack
   std::function<float(int sub, float native)> transform;  // clamping hook
 
   int sub_for_mode() const {
@@ -114,6 +116,7 @@ struct Harness {
   int frames_layer_write{0};  // whole-layer 42-byte schedule writes
   int frames_0a01{0};       // unfused mode changes
   int frames_register{0};   // 0x84 setpoint register writes
+  int frames_class3_run{0}; // Class 3 START/STOP commands
   std::vector<uint8_t> last_0601_setpoint_bytes;
 
   struct Task { uint64_t due; std::function<void()> fn; };
@@ -157,6 +160,22 @@ struct Harness {
     if (frame.size() < 6) return;
     const uint8_t *apdu = frame.data() + 4;
     size_t apdu_len = frame.size() - 6;
+
+    // Class 3 run-state commands: [0x03, 0x81, 0x06 START | 0x05 STOP].
+    if (apdu_len >= 3 && apdu[0] == 0x03 && apdu[1] == 0x81 &&
+        (apdu[2] == 0x05 || apdu[2] == 0x06)) {
+      frames_class3_run++;
+      if (sim.reject_class3) {
+        inject({0x24, 0x05, 0xF8, 0xE7, 0x03, 0x01, 0xAC, 0xAA, 0xBB});
+        return;
+      }
+      sim.enabled = (apdu[2] == 0x06);
+      if (sim.ack_class3) {
+        inject({0x24, 0x04, 0xF8, 0xE7, 0x03, 0x00, 0xAA, 0xBB});
+      }
+      return;
+    }
+
     if (apdu_len < 2 || apdu[0] != 0x0A) return;
 
     uint8_t opspec = apdu[1];
@@ -459,8 +478,11 @@ static void test_set_setpoint_resolve_abort() {
   TEST_ASSERT(h.frames_0601 == 0 && h.frames_register == 0, "no write frames were sent");
 }
 
-static void test_set_enabled_accepted_cold_cache() {
-  std::cout << "\n=== set_pump_enabled: accepted, cold cache sends NaN sentinel ===" << std::endl;
+static void test_set_enabled_unfused_class3() {
+  // Class 3 START/STOP (ids from jfriend00's #92 bench findings) carries no
+  // mode and no setpoint, so a cold setpoint cache is irrelevant by
+  // construction: no 0601 frame is sent at all.
+  std::cout << "\n=== set_pump_enabled: accepted via unfused Class 3 STOP ===" << std::endl;
   Harness h;
   h.sim.mode_byte = 0x02;
   h.sim.setpoints[13] = NAN;  // pump has a setpoint but never told us (cold cache)
@@ -473,11 +495,44 @@ static void test_set_enabled_accepted_cold_cache() {
   const WriteResult *r = h.result_for("e1");
   TEST_ASSERT(r && r->status == WriteStatus::ACCEPTED, "status is accepted");
   TEST_ASSERT(r && r->enabled == 0, "settled enabled state is off");
-  TEST_ASSERT(h.frames_0601 == 1, "one fused control write was sent");
-  const uint8_t nan_sentinel[4] = {0x7F, 0xFF, 0xFF, 0xFF};
-  TEST_ASSERT(h.last_0601_setpoint_bytes.size() == 4 &&
-              memcmp(h.last_0601_setpoint_bytes.data(), nan_sentinel, 4) == 0,
-              "cold-cache stop carried the NaN keep-existing setpoint (#83)");
+  TEST_ASSERT(h.frames_class3_run == 1, "one Class 3 STOP was sent");
+  TEST_ASSERT(h.frames_0601 == 0, "no fused 0x0601 write was sent (nothing to clobber)");
+  TEST_ASSERT(h.frames_register == 0, "no setpoint register write was sent");
+}
+
+static void test_set_enabled_class3_nack() {
+  std::cout << "\n=== set_pump_enabled: Class 3 descriptor nack -> rejected ===" << std::endl;
+  Harness h;
+  h.sim.mode_byte = 0x02;
+  h.prime_cache();
+  h.sim.reject_class3 = true;
+
+  h.write_op.submit_set_enabled(true, "e2");
+  h.advance(12000);
+
+  TEST_ASSERT(h.events_for("e2") == 1, "exactly one terminal event");
+  const WriteResult *r = h.result_for("e2");
+  TEST_ASSERT(r && r->status == WriteStatus::REJECTED, "status is rejected");
+  TEST_ASSERT(r && r->detail.find("rejected") != std::string::npos, "detail reports the nack");
+  TEST_ASSERT(!h.sim.enabled || h.frames_class3_run == 1, "command was sent once and not applied");
+}
+
+static void test_set_enabled_class3_ack_timeout() {
+  // No matchable ACK: the pump may still have applied the command, so the
+  // readback decides. The sim applies the state but never acks.
+  std::cout << "\n=== set_pump_enabled: ACK window closes -> readback decides ===" << std::endl;
+  Harness h;
+  h.sim.mode_byte = 0x02;
+  h.prime_cache();
+  h.sim.ack_class3 = false;
+
+  h.write_op.submit_set_enabled(false, "e3");
+  h.advance(15000);
+
+  TEST_ASSERT(h.events_for("e3") == 1, "exactly one terminal event");
+  const WriteResult *r = h.result_for("e3");
+  TEST_ASSERT(r && r->status == WriteStatus::ACCEPTED, "readback confirmed despite missing ACK");
+  TEST_ASSERT(!h.sim.enabled, "pump is off");
 }
 
 static void test_supersede_queued() {
@@ -1033,7 +1088,9 @@ int main() {
   test_set_setpoint_clamped();
   test_set_setpoint_rejected_kept_old();
   test_set_setpoint_resolve_abort();
-  test_set_enabled_accepted_cold_cache();
+  test_set_enabled_unfused_class3();
+  test_set_enabled_class3_nack();
+  test_set_enabled_class3_ack_timeout();
   test_supersede_queued();
   test_watchdog_timeout();
   test_disconnect_terminates();
