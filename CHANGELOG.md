@@ -33,6 +33,15 @@
 - **Cycle-time write verification** — `set_cycle_times` gains the Object 91
   readback the legacy fire-and-forget setter never had (degrades gracefully to
   accepted-with-detail on short-payload firmwares, #94).
+- **Settle-event refinements from the #92 contract review** — new `invalid`
+  terminal status for malformed/out-of-range requests (deterministic,
+  pre-wire; `rejected` now strictly means the pump or its state refused),
+  new `origin` (`service`/`entity`) and `seq` (submission-order) event
+  fields, and `requested_*` fields echoing the original request so the
+  event is self-contained for logging and retries. Supersede keys for
+  setpoint writes are now strictly per-mode: queued setpoints for different
+  modes both run, since the pump stores an independent setpoint per mode
+  (review catch).
 
 ### Fixed
 

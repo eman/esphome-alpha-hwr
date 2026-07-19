@@ -57,6 +57,33 @@ void AlphaHwrApiBridge::fire_write_settled(const WriteResult &result) {
   data["command"] = services::write_command_to_string(result.command);
   data["status"] = services::write_status_to_string(result.status);
   data["detail"] = result.detail;
+  data["origin"] = result.origin == services::WriteOrigin::ENTITY ? "entity" : "service";
+  data["seq"] = std::to_string(result.seq);
+  // Echo of the original request, so the event is self-contained for
+  // logging/retry (review feedback on #92). Only populated fields are sent.
+  if (result.requested_mode != ControlMode::NONE) {
+    data["requested_mode"] = ControlService::mode_to_string(result.requested_mode);
+  }
+  if (!std::isnan(result.requested_value)) {
+    char rbuf[32];
+    snprintf(rbuf, sizeof(rbuf), "%.4g", result.requested_value);
+    data["requested_value"] = rbuf;
+  }
+  if (!std::isnan(result.requested_temp_min)) {
+    char rbuf[32];
+    snprintf(rbuf, sizeof(rbuf), "%.1f", result.requested_temp_min);
+    data["requested_temp_min"] = rbuf;
+    snprintf(rbuf, sizeof(rbuf), "%.1f", result.requested_temp_max);
+    data["requested_temp_max"] = rbuf;
+  }
+  if (result.requested_on_minutes >= 0) {
+    data["requested_on_minutes"] = std::to_string(result.requested_on_minutes);
+    data["requested_off_minutes"] = std::to_string(result.requested_off_minutes);
+  }
+  if (!result.requested_begin_hhmm.empty()) {
+    data["requested_begin"] = result.requested_begin_hhmm;
+    data["requested_end"] = result.requested_end_hhmm;
+  }
 
   char buf[32];
   auto put_float = [&](const char *key, float value, const char *fmt) {
@@ -117,12 +144,14 @@ void AlphaHwrApiBridge::fire_write_settled(const WriteResult &result) {
 
 void AlphaHwrApiBridge::reject_(WriteCommand command, const std::string &op_id,
                                 const std::string &detail) {
-  ESP_LOGW(BRIDGE_TAG, "%s (op_id='%s') rejected at the bridge: %s",
+  // Bridge-level failures are malformed requests (unparsable data, unknown
+  // mode names): deterministic, so they settle `invalid`, never `rejected`.
+  ESP_LOGW(BRIDGE_TAG, "%s (op_id='%s') invalid at the bridge: %s",
            services::write_command_to_string(command), op_id.c_str(), detail.c_str());
   WriteResult result;
   result.op_id = op_id;
   result.command = command;
-  result.status = WriteStatus::REJECTED;
+  result.status = WriteStatus::INVALID;
   result.detail = detail;
   fire_write_settled(result);
 }

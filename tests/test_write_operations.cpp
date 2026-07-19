@@ -47,6 +47,7 @@ using esphome::alpha_hwr::services::ControlService;
 using esphome::alpha_hwr::services::ScheduleService;
 using esphome::alpha_hwr::services::WriteCommand;
 using esphome::alpha_hwr::services::WriteOperationService;
+using esphome::alpha_hwr::services::WriteOrigin;
 using esphome::alpha_hwr::services::WriteResult;
 using esphome::alpha_hwr::services::WriteStatus;
 namespace protocol = esphome::alpha_hwr::protocol;
@@ -640,8 +641,10 @@ static void test_not_ready_rejected() {
   TEST_ASSERT(h.frames_0a01 == 0 && h.frames_0601 == 0, "no wire writes were sent");
 }
 
-static void test_validation_rejected() {
-  std::cout << "\n=== validation: out-of-range value rejected before any wire write ===" << std::endl;
+static void test_validation_invalid() {
+  // Malformed requests settle `invalid`, distinct from pump-side `rejected`
+  // (review feedback on #92): deterministic, never worth a retry.
+  std::cout << "\n=== validation: malformed requests settle invalid, pre-wire ===" << std::endl;
   Harness h;
   h.prime_cache();
 
@@ -652,10 +655,65 @@ static void test_validation_rejected() {
   TEST_ASSERT(h.events_for("v1") == 1 && h.events_for("v2") == 1, "each got exactly one terminal event");
   const WriteResult *r1 = h.result_for("v1");
   const WriteResult *r2 = h.result_for("v2");
-  TEST_ASSERT(r1 && r1->status == WriteStatus::REJECTED, "out-of-range value rejected");
+  TEST_ASSERT(r1 && r1->status == WriteStatus::INVALID, "out-of-range value settles invalid");
   TEST_ASSERT(r1 && r1->detail.find("range") != std::string::npos, "detail states the valid range");
-  TEST_ASSERT(r2 && r2->status == WriteStatus::REJECTED, "non-scalar mode rejected");
+  TEST_ASSERT(r1 && std::fabs(r1->requested_value - 9999.0f) < 0.5f,
+              "event echoes the requested value");
+  TEST_ASSERT(r2 && r2->status == WriteStatus::INVALID, "non-scalar mode settles invalid");
   TEST_ASSERT(h.frames_0601 == 0 && h.frames_register == 0, "no write frames were sent");
+}
+
+static void test_setpoints_different_modes_both_run() {
+  // Review feedback on #92: the pump stores an independent setpoint per
+  // mode, so a queued constant_speed setpoint must NOT be superseded by a
+  // subsequent constant_flow setpoint. Both run; only same-mode pairs
+  // supersede.
+  std::cout << "\n=== supersede: different-mode setpoints both run ===" << std::endl;
+  Harness h;
+  h.sim.mode_byte = 0x02;
+  h.sim.setpoints[13] = 1700.0f;
+  h.sim.setpoints[39] = 1.0f / 3600.0f;
+  h.prime_cache();
+
+  h.write_op.submit_set_setpoint(ControlMode::CONSTANT_SPEED, 2000.0f, "ms");  // in flight
+  h.write_op.submit_set_setpoint(ControlMode::CONSTANT_SPEED, 2200.0f, "ms2"); // queued
+  h.write_op.submit_set_setpoint(ControlMode::CONSTANT_FLOW, 1.5f, "mf");      // different mode
+  TEST_ASSERT(h.events_for("ms2") == 0, "same-mode queued op not yet superseded by different mode");
+  h.write_op.submit_set_setpoint(ControlMode::CONSTANT_SPEED, 2400.0f, "ms3"); // supersedes ms2
+
+  TEST_ASSERT(h.events_for("ms2") == 1 && h.result_for("ms2")->status == WriteStatus::SUPERSEDED,
+              "same-mode queued setpoint superseded");
+  TEST_ASSERT(h.events_for("mf") == 0, "different-mode setpoint was NOT superseded");
+
+  h.advance(40000);
+  TEST_ASSERT(h.events_for("ms") == 1 && h.events_for("mf") == 1 && h.events_for("ms3") == 1,
+              "all surviving ops ran to terminal events");
+  TEST_ASSERT(h.result_for("mf")->status == WriteStatus::ACCEPTED, "flow setpoint accepted");
+  TEST_ASSERT(h.result_for("ms3")->status == WriteStatus::ACCEPTED, "final speed setpoint accepted");
+  TEST_ASSERT(std::fabs(h.sim.setpoints[13] - 2400.0f) < 0.5f, "speed slot holds the last speed write");
+  TEST_ASSERT(std::fabs(h.sim.setpoints[39] * 3600.0f - 1.5f) < 0.01f, "flow slot holds the flow write");
+}
+
+static void test_origin_and_seq_reported() {
+  std::cout << "\n=== event metadata: origin and submission seq ===" << std::endl;
+  Harness h;
+  h.sim.mode_byte = 0x02;
+  h.sim.setpoints[13] = 1700.0f;
+  h.prime_cache();
+
+  h.write_op.submit_set_setpoint(ControlMode::CONSTANT_SPEED, 2000.0f, "svc");
+  h.write_op.submit_set_setpoint(ControlMode::CONSTANT_SPEED, 2100.0f, "ent", nullptr,
+                                 WriteOrigin::ENTITY);
+  h.advance(20000);
+
+  const WriteResult *rs = h.result_for("svc");
+  const WriteResult *re = h.result_for("ent");
+  TEST_ASSERT(rs && rs->origin == WriteOrigin::SERVICE, "default origin is service");
+  TEST_ASSERT(re && re->origin == WriteOrigin::ENTITY, "entity origin reported");
+  TEST_ASSERT(rs && re && re->seq > rs->seq, "seq preserves submission order");
+  TEST_ASSERT(rs && std::fabs(rs->requested_value - 2000.0f) < 0.5f &&
+              std::fabs(rs->value - 2000.0f) < 0.5f,
+              "accepted result echoes matching requested and settled values");
 }
 
 static void test_temperature_range_accepted() {
@@ -705,7 +763,7 @@ static void test_temperature_range_invalid() {
 
   TEST_ASSERT(h.events_for("tr3") == 1, "exactly one terminal event");
   const WriteResult *r = h.result_for("tr3");
-  TEST_ASSERT(r && r->status == WriteStatus::REJECTED, "status is rejected");
+  TEST_ASSERT(r && r->status == WriteStatus::INVALID, "status is invalid (malformed request)");
 }
 
 static void test_cycle_times_accepted() {
@@ -1028,7 +1086,9 @@ int main() {
   test_watchdog_timeout();
   test_disconnect_terminates();
   test_not_ready_rejected();
-  test_validation_rejected();
+  test_validation_invalid();
+  test_setpoints_different_modes_both_run();
+  test_origin_and_seq_reported();
   test_temperature_range_accepted();
   test_temperature_range_no_ack();
   test_temperature_range_invalid();
