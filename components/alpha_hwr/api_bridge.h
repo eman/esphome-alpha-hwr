@@ -61,6 +61,7 @@ class AlphaHwrApiBridge : public api::CustomAPIDevice {
   // format is the ESP32-C3 int32 linker-bug workaround); op_id is a new,
   // optional second argument. Parse failures used to silently return in the
   // YAML lambdas — here they become an immediate terminal `rejected` event.
+  void on_upload_schedule(std::string data, std::string op_id);       // RFC-005 v1 bulk payload
   void on_set_schedule_entry(std::string data, std::string op_id);    // "layer,day,sh,sm,eh,em"
   void on_clear_schedule_entry(std::string data, std::string op_id);  // "layer,day"
   void on_set_schedule_enabled(std::string data, std::string op_id);  // "0" | "1"

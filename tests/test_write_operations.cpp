@@ -25,6 +25,7 @@
 #include "../components/alpha_hwr/session.h"
 #include "../components/alpha_hwr/transport.h"
 #include "../components/alpha_hwr/write_operation_service.h"
+#include "../components/alpha_hwr/schedule_codec.h"
 #include "../components/alpha_hwr/codec.h"
 
 uint32_t mock_millis = 0;
@@ -110,6 +111,7 @@ struct Harness {
 
   // Frame statistics for wire-shape assertions
   int frames_0601{0};       // fused control writes
+  int frames_layer_write{0};  // whole-layer 42-byte schedule writes
   int frames_0a01{0};       // unfused mode changes
   int frames_register{0};   // 0x84 setpoint register writes
   std::vector<uint8_t> last_0601_setpoint_bytes;
@@ -207,6 +209,7 @@ struct Harness {
         }
       } else if (opspec == 0xB3 && sub >= 1000 && sub <= 1004 && apdu_len >= 53) {
         // Whole-layer write (42 bytes at apdu+11)
+        frames_layer_write++;
         if (sim.honor_layer_writes) memcpy(sim.layers[sub - 1000], apdu + 11, 42);
         inject_layer_frame(static_cast<uint8_t>(sub - 1000));
       } else if (opspec == 0xB3 && sub >= 900 && sub < 935 && apdu_len >= 21) {
@@ -868,6 +871,157 @@ static void test_mode_strings() {
               "mode_to_string round trips");
 }
 
+// ---------------------------------------------------------------------------
+// upload_schedule (RFC-005 / dhw-sensor-apps issue #5)
+// ---------------------------------------------------------------------------
+
+namespace upcodec = esphome::alpha_hwr::codec;
+
+static upcodec::UploadRequest make_upload(std::initializer_list<upcodec::UploadEntry> entries,
+                                          int8_t enabled = 1) {
+  upcodec::UploadRequest req;
+  req.entries = entries;
+  req.enabled = enabled;
+  return req;
+}
+
+static void test_upload_accepted() {
+  std::cout << "\n=== upload_schedule: happy path ===" << std::endl;
+  Harness h;
+  h.prime_cache();
+
+  auto req = make_upload({{0, 0, 6, 54, 7, 0}, {0, 1, 7, 24, 7, 30}, {1, 0, 17, 54, 18, 0}});
+  h.write_op.submit_upload_schedule(req, "up1");
+  h.advance(60000);
+
+  TEST_ASSERT(h.events_for("up1") == 1, "exactly one terminal event");
+  const WriteResult *r = h.result_for("up1");
+  TEST_ASSERT(r && r->status == WriteStatus::ACCEPTED, "status is accepted");
+  TEST_ASSERT(r && r->layers_written == "0,1", "layers 0,1 written");
+  TEST_ASSERT(r && r->layers_skipped == "2,3,4", "untouched layers skipped");
+  const uint8_t *cell = h.sim.layers[0] + 0 * 6;
+  TEST_ASSERT(cell[0] == 1 && cell[2] == 6 && cell[3] == 54 && cell[4] == 7 && cell[5] == 0,
+              "pump layer 0 day 0 holds 06:54-07:00");
+  // Expected hash from the codec directly (cross-checked against the
+  // Python golden vector V3)
+  uint8_t images[5][42];
+  for (uint8_t layer = 0; layer < 5; layer++) upcodec::build_layer_image(req, layer, images[layer]);
+  TEST_ASSERT(r && r->schedule_hash == upcodec::schedule_hash(images, true),
+              "settled hash matches codec-computed hash");
+  TEST_ASSERT(r && r->schedule_hash == "v1:673dd2d1104de5b5",
+              "settled hash matches the RFC golden vector V3");
+}
+
+static void test_upload_skip_identical() {
+  std::cout << "\n=== upload_schedule: identical re-upload writes nothing ===" << std::endl;
+  Harness h;
+  h.prime_cache();
+
+  auto req = make_upload({{2, 3, 6, 30, 7, 15}});
+  h.write_op.submit_upload_schedule(req, "up2a");
+  h.advance(60000);
+  TEST_ASSERT(h.result_for("up2a") && h.result_for("up2a")->status == WriteStatus::ACCEPTED,
+              "first upload accepted");
+
+  int writes_before = h.frames_layer_write;
+  h.write_op.submit_upload_schedule(req, "up2b");
+  h.advance(60000);
+
+  TEST_ASSERT(h.events_for("up2b") == 1, "exactly one terminal event for re-upload");
+  const WriteResult *r = h.result_for("up2b");
+  TEST_ASSERT(r && r->status == WriteStatus::ACCEPTED, "re-upload accepted");
+  TEST_ASSERT(r && r->detail == "no-op", "re-upload reports no-op");
+  TEST_ASSERT(r && r->layers_skipped == "0,1,2,3,4", "all layers skipped");
+  TEST_ASSERT(h.frames_layer_write == writes_before,
+              "no layer write frames on identical re-upload");
+}
+
+static void test_upload_partial() {
+  std::cout << "\n=== upload_schedule: pump ignores writes -> partial ===" << std::endl;
+  Harness h;
+  h.prime_cache();
+  h.sim.honor_layer_writes = false;
+
+  auto req = make_upload({{0, 0, 6, 0, 7, 0}});
+  h.write_op.submit_upload_schedule(req, "up3");
+  h.advance(60000);
+
+  TEST_ASSERT(h.events_for("up3") == 1, "exactly one terminal event");
+  const WriteResult *r = h.result_for("up3");
+  TEST_ASSERT(r && r->status == WriteStatus::PARTIAL,
+              "status is partial (layer 0 failed, others matched)");
+  TEST_ASSERT(r && r->layers_written.empty(), "no layer confirmed written");
+  TEST_ASSERT(r && r->layers_skipped == "1,2,3,4", "matching layers still skipped");
+}
+
+static void test_upload_supersedes_queued() {
+  std::cout << "\n=== upload_schedule: newer upload supersedes queued one ===" << std::endl;
+  Harness h;
+  h.prime_cache();
+
+  h.write_op.submit_upload_schedule(make_upload({{0, 0, 6, 0, 7, 0}}), "up4a");
+  h.write_op.submit_upload_schedule(make_upload({{0, 0, 7, 0, 8, 0}}), "up4b");
+  h.write_op.submit_upload_schedule(make_upload({{0, 0, 8, 0, 9, 0}}), "up4c");
+  h.advance(120000);
+
+  TEST_ASSERT(h.events_for("up4a") == 1 && h.events_for("up4b") == 1 && h.events_for("up4c") == 1,
+              "every submission got exactly one terminal event");
+  TEST_ASSERT(h.result_for("up4b") && h.result_for("up4b")->status == WriteStatus::SUPERSEDED,
+              "queued middle upload superseded");
+  TEST_ASSERT(h.result_for("up4c") && h.result_for("up4c")->status == WriteStatus::ACCEPTED,
+              "latest upload accepted");
+  const uint8_t *cell = h.sim.layers[0];
+  TEST_ASSERT(cell[2] == 8 && cell[4] == 9, "pump holds the latest schedule");
+}
+
+static void test_upload_supersedes_entry_ops() {
+  std::cout << "\n=== upload_schedule: supersedes queued per-entry ops ===" << std::endl;
+  Harness h;
+  h.prime_cache();
+
+  h.write_op.submit_upload_schedule(make_upload({{0, 0, 6, 0, 7, 0}}), "up5a");  // in flight
+  h.write_op.submit_set_schedule_entry(1, 1, 9, 0, 10, 0, "se5");                // queued
+  h.write_op.submit_upload_schedule(make_upload({{0, 0, 6, 30, 7, 30}}), "up5b");
+  h.advance(120000);
+
+  TEST_ASSERT(h.result_for("se5") && h.result_for("se5")->status == WriteStatus::SUPERSEDED,
+              "queued per-entry op superseded by the upload");
+  TEST_ASSERT(h.result_for("up5b") && h.result_for("up5b")->status == WriteStatus::ACCEPTED,
+              "final upload accepted");
+}
+
+static void test_upload_disconnect_mid_op() {
+  std::cout << "\n=== upload_schedule: disconnect mid-op -> one timeout event ===" << std::endl;
+  Harness h;
+  h.prime_cache();
+
+  h.write_op.submit_upload_schedule(make_upload({{0, 0, 6, 0, 7, 0}}), "up6");
+  h.advance(200);  // op under way
+  h.write_op.on_disconnect();
+
+  TEST_ASSERT(h.events_for("up6") == 1, "exactly one terminal event");
+  const WriteResult *r = h.result_for("up6");
+  TEST_ASSERT(r && r->status == WriteStatus::TIMEOUT, "status is timeout");
+  TEST_ASSERT(r && r->detail == "disconnected", "detail reports disconnect");
+  h.advance(200000);
+  TEST_ASSERT(h.events_for("up6") == 1, "no second event after watchdog window");
+}
+
+static void test_upload_enabled_flag() {
+  std::cout << "\n=== upload_schedule: applies schedule-enabled flag ===" << std::endl;
+  Harness h;
+  h.prime_cache();
+  TEST_ASSERT(!h.sim.sched_enabled, "sim starts disabled");
+
+  h.write_op.submit_upload_schedule(make_upload({{0, 0, 6, 0, 7, 0}}, 1), "up7");
+  h.advance(60000);
+
+  const WriteResult *r = h.result_for("up7");
+  TEST_ASSERT(r && r->status == WriteStatus::ACCEPTED, "upload accepted");
+  TEST_ASSERT(h.sim.sched_enabled, "pump schedule enabled by the upload");
+}
+
+
 int main() {
   std::cout << "===========================================================" << std::endl;
   std::cout << "  Write Operation Service Test Suite (issue #92)" << std::endl;
@@ -892,6 +1046,7 @@ int main() {
   test_cycle_times_short_payload();
   test_interleaved_poll();
   test_issue92_collision();
+
   test_schedule_entry_accepted();
   test_schedule_entry_verify_mismatch();
   test_schedule_entry_no_overview();
@@ -901,6 +1056,13 @@ int main() {
   test_schedule_supersede_keys();
   test_refresh_ops();
   test_mode_strings();
+  test_upload_accepted();
+  test_upload_skip_identical();
+  test_upload_partial();
+  test_upload_supersedes_queued();
+  test_upload_supersedes_entry_ops();
+  test_upload_disconnect_mid_op();
+  test_upload_enabled_flag();
 
   std::cout << "\n===========================================================" << std::endl;
   std::cout << "  Test Results" << std::endl;

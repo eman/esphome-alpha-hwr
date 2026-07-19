@@ -157,6 +157,11 @@ alpha_hwr:
    # Schedule Display
    schedule:
       name: "Weekly Schedule"
+
+   # Canonical schedule hash (RFC-005) — sync-verification sensor for the
+   # dhw-sensor-apps recirculation scheduler ("unknown" until fully cached)
+   schedule_hash:
+      name: "Schedule Hash"
    
    # Single Events Display
    single_events:

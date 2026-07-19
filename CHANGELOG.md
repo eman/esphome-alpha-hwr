@@ -4,6 +4,19 @@
 
 ### Added
 
+- **Bulk schedule upload + sync hash** (RFC-005,
+  [dhw-sensor-apps#5](https://github.com/eman/dhw-sensor-apps/issues/5)) —
+  New `upload_schedule` service uploads the entire 7×5 weekly grid in one
+  call with full-state clear-and-set semantics; layers whose fresh readback
+  already matches the desired image are skipped (a no-change re-upload costs
+  zero BLE writes). New `partial` terminal status and `layers_written` /
+  `layers_skipped` / `schedule_hash` event fields. New `schedule_hash` text
+  sensor publishes a canonical FNV-1a-64 hash of the cached grid so external
+  schedulers can verify sync without a full read-back; the pure payload/hash
+  codec (`schedule_codec`) ships with host tests whose golden vectors are
+  shared with the dhw-sensor-apps scheduler suite. Bench client gains an
+  `upload` subcommand with local expected-hash computation.
+
 - **Programmatic write-and-verify interface** (structural refactor,
   [#92](https://github.com/eman/esphome-alpha-hwr/issues/92)) —
   A new write-operation layer (`services::WriteOperationService`) owns every

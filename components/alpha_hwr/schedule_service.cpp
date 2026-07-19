@@ -9,6 +9,7 @@
 
 #include "schedule_service.h"
 #include "codec.h"
+#include "schedule_codec.h"
 #include "esphome/core/hal.h"
 #include "esphome/core/log.h"
 #include "frame_builder.h"
@@ -924,6 +925,25 @@ void ScheduleService::set_entry_async(uint8_t layer, uint8_t day_index,
   }
 }
 
+void ScheduleService::write_layer_image_async(
+    uint8_t layer, const uint8_t image[42],
+    std::function<void(bool)> on_complete) {
+  if (layer > 4 || !layer_cached_[layer]) {
+    ESP_LOGE(TAG, "write_layer_image: layer %d not cached", layer);
+    if (on_complete)
+      on_complete(false);
+    return;
+  }
+  if (!this->session_.is_ready()) {
+    ESP_LOGE(TAG, "write_layer_image: session not ready");
+    if (on_complete)
+      on_complete(false);
+    return;
+  }
+  memcpy(cached_layer_data_[layer], image, 42);
+  write_cached_layer_async(layer, on_complete);
+}
+
 void ScheduleService::clear_entry_async(uint8_t layer, uint8_t day_index,
                                         std::function<void(bool)> on_complete) {
   // Create a disabled entry
@@ -1224,6 +1244,39 @@ bool ScheduleService::get_schedule_display_string(
 
   *result = output;
   return true;
+}
+
+bool ScheduleService::build_cached_layer_image(uint8_t layer,
+                                               uint8_t out[42]) const {
+  if (layer > 4 || !this->layer_cached_[layer])
+    return false;
+  memset(out, 0, 42);
+  for (uint8_t day = 0; day < 7; day++) {
+    ScheduleEntry entry;
+    if (!this->get_cached_entry(layer, day, &entry))
+      return false;
+    uint8_t *cell = out + day * 6;
+    if (entry.is_enabled()) {
+      cell[0] = 0x01;
+      cell[1] = 0x02;
+      cell[2] = entry.get_begin_hour();
+      cell[3] = entry.get_begin_minute();
+      cell[4] = entry.get_end_hour();
+      cell[5] = entry.get_end_minute();
+    }
+  }
+  return true;
+}
+
+std::string ScheduleService::current_hash() const {
+  if (!this->schedule_state_cached_)
+    return "unknown";
+  uint8_t images[codec::UPLOAD_LAYERS][codec::LAYER_IMAGE_BYTES];
+  for (uint8_t layer = 0; layer < codec::UPLOAD_LAYERS; layer++) {
+    if (!this->build_cached_layer_image(layer, images[layer]))
+      return "unknown";
+  }
+  return codec::schedule_hash(images, this->schedule_enabled_);
 }
 
 std::string ScheduleService::generate_json() const {

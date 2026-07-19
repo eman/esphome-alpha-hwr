@@ -69,10 +69,49 @@ working); `op_id` is a new optional argument.
 | `set_single_event` | `begin_ts,end_ts` (epoch seconds) | One-time run; a free slot is chosen and echoed in the event |
 | `clear_single_event` | `slot` | Clear one single-event slot |
 | `refresh_single_events` | *(no data)* | Re-read all single-event slots |
+| `upload_schedule` | RFC-005 v1 payload (below) | **Bulk full-state upload** of the entire 7×5 grid in one call |
 
 Schedule writes are **verified**: after the write and commit, the component
 reads the schedule back from the pump and compares before reporting. (They
 previously reported success unconditionally.)
+
+### Bulk upload (`upload_schedule`)
+
+One service call replaces the 35-clear + N-set sequence. The `data` payload
+expresses the **entire desired grid** — any `(layer, day)` cell absent from
+the payload is cleared — making the operation idempotent and safe to retry:
+
+```
+data     := "v1," enabled ( ";" entry )*
+enabled  := "0" | "1" | "-"          ("-" = leave schedule-enabled untouched)
+entry    := layer "," day "," sh "," sm "," eh "," em
+```
+
+Example — three entries, schedule enabled:
+
+```yaml
+service: esphome.hwr_pump_upload_schedule
+data:
+  data: "v1,1;0,0,6,54,7,0;0,1,7,24,7,30;1,0,17,54,18,0"
+  op_id: "sched-2026-07-20"
+```
+
+Per layer the component performs a mandatory fresh read, **skips layers whose
+image already matches** (zero BLE writes on a no-change re-upload), writes
+changed layers as one 42-byte whole-layer frame each, commits, settles, and
+readback-verifies. Terminal statuses: `accepted` (all confirmed; detail
+`no-op` when everything was skipped), `partial` (mixed — the event carries
+`layers_written` / `layers_skipped`), `rejected`, `timeout`, `superseded`.
+Watchdog budget: 150 s.
+
+### Schedule hash (sync verification)
+
+The `schedule_hash` text sensor publishes a canonical FNV-1a-64 hash
+(`v1:<16hex>`) of the full cached grid + enabled flag, recomputed after every
+settled schedule operation ("unknown" until all five layers and the schedule
+state are cached). External schedulers compare it against the hash of their
+desired schedule to decide whether reprogramming is needed — see RFC-005 in
+the dhw-sensor-apps repo for the algorithm and cross-language golden vectors.
 
 ## The `write_settled` event
 

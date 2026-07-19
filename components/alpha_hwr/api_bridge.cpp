@@ -31,6 +31,8 @@ void AlphaHwrApiBridge::setup(AlphaHwrComponent *component) {
   register_service(&AlphaHwrApiBridge::on_set_cycle_times, "pump_set_cycle_times",
                    {"on_minutes", "off_minutes", "op_id"});
 
+  register_service(&AlphaHwrApiBridge::on_upload_schedule, "upload_schedule",
+                   {"data", "op_id"});
   register_service(&AlphaHwrApiBridge::on_set_schedule_entry, "set_schedule_entry",
                    {"data", "op_id"});
   register_service(&AlphaHwrApiBridge::on_clear_schedule_entry, "clear_schedule_entry",
@@ -108,6 +110,11 @@ void AlphaHwrApiBridge::fire_write_settled(const WriteResult &result) {
       if (result.end_ts > 0) data["end_ts"] = std::to_string(result.end_ts);
       put_bool("enabled", result.sched_enabled);
       if (result.event_count >= 0) data["event_count"] = std::to_string(result.event_count);
+      if (result.command == WriteCommand::UPLOAD_SCHEDULE) {
+        data["layers_written"] = result.layers_written;
+        data["layers_skipped"] = result.layers_skipped;
+        data["schedule_hash"] = result.schedule_hash;
+      }
       break;
     }
   }
@@ -168,6 +175,16 @@ void AlphaHwrApiBridge::on_set_cycle_times(float on_minutes, float off_minutes, 
 // ---------------------------------------------------------------------------
 // Schedule services (data-string formats preserved from the YAML originals)
 // ---------------------------------------------------------------------------
+
+void AlphaHwrApiBridge::on_upload_schedule(std::string data, std::string op_id) {
+  codec::UploadRequest request;
+  std::string err;
+  if (!codec::parse_upload_payload(data, &request, &err)) {
+    reject_(WriteCommand::UPLOAD_SCHEDULE, op_id, err);
+    return;
+  }
+  component_->submit_upload_schedule(std::move(request), op_id);
+}
 
 void AlphaHwrApiBridge::on_set_schedule_entry(std::string data, std::string op_id) {
   int vals[6];

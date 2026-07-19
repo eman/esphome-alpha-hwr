@@ -13,6 +13,7 @@ Usage:
   write_bench.py states
   write_bench.py call <service> [k=v ...] [--timeout N] [--linger N]
   write_bench.py burst <service> <common k=v ...> --each k=v[,k=v] [--each ...]
+  write_bench.py upload <enabled 0|1|-> [layer,day,sh,sm,eh,em ...]
 
 `call` auto-generates an op_id if none is passed. `burst` fires one call per
 --each group (merged over the common args) back to back on a single
@@ -29,6 +30,7 @@ Run with a Python that has aioesphomeapi available; the esphome venv works:
 Examples:
   write_bench.py call pump_set_setpoint mode=constant_speed value=2000
   write_bench.py call set_schedule_entry data=3,1,6,0,8,0
+  write_bench.py upload 1 0,0,6,54,7,0 0,1,7,24,7,30 1,0,17,54,18,0
   write_bench.py burst pump_set_setpoint mode=constant_speed \\
       --each value=1800 --each value=1900 --each value=2100
 """
@@ -264,6 +266,49 @@ async def cmd_burst(host: str, key: str, service_name: str, common: list[str],
     return 1 if bad else 0
 
 
+
+# ---------------------------------------------------------------------------
+# upload subcommand (RFC-005 bulk schedule upload)
+# ---------------------------------------------------------------------------
+
+def _canonical_hash(entries: list[tuple[int, ...]], enabled: bool) -> str:
+    """Python mirror of schedule_codec's canonical hash (RFC-005 §5.2)."""
+    grid = {}
+    for layer, day, sh, sm, eh, em in entries:
+        grid[(layer, day)] = (sh, sm, eh, em)
+    buf = bytearray()
+    for layer in range(5):
+        for day in range(7):
+            cell = grid.get((layer, day))
+            if cell is None:
+                buf += bytes(6)
+            else:
+                buf += bytes([0x01, 0x02, *cell])
+    buf.append(0x01 if enabled else 0x00)
+    h = 0xCBF29CE484222325
+    for b in buf:
+        h = ((h ^ b) * 0x100000001B3) & 0xFFFFFFFFFFFFFFFF
+    return f"v1:{h:016x}"
+
+
+def build_upload(enabled: str, entry_args: list[str]) -> tuple[str, str]:
+    """Build the v1 payload + expected hash from CLI entry specs.
+
+    Each entry spec is "layer,day,sh,sm,eh,em" (same fields as the wire
+    grammar). Returns (payload, expected_hash); expected hash is only
+    meaningful when enabled is "0"/"1" (not "-").
+    """
+    entries = []
+    for spec in entry_args:
+        fields = [int(x) for x in spec.split(",")]
+        if len(fields) != 6:
+            die(f"entry needs 6 comma-separated fields: {spec!r}")
+        entries.append(tuple(fields))
+    payload = ";".join([f"v1,{enabled}"] + [",".join(str(f) for f in e) for e in entries])
+    expected = _canonical_hash(entries, enabled == "1") if enabled in ("0", "1") else "(n/a)"
+    return payload, expected
+
+
 def main() -> int:
     host, key, args = resolve_connection(sys.argv[1:])
     if not args:
@@ -293,6 +338,15 @@ def main() -> int:
         if not rest:
             die("call requires a service name")
         return asyncio.run(cmd_call(host, key, rest[0], rest[1:], timeout, linger))
+    if cmd == "upload":
+        # upload <enabled 0|1|-> [layer,day,sh,sm,eh,em ...]
+        if not rest:
+            die("upload requires the enabled flag (0|1|-) first")
+        payload, expected = build_upload(rest[0], rest[1:])
+        print(f"payload:       {payload}")
+        print(f"expected hash: {expected}")
+        return asyncio.run(cmd_call(host, key, "upload_schedule",
+                                    [f"data={payload}"], max(timeout, 160.0), linger))
     if cmd == "burst":
         if not rest or not groups:
             die("burst requires a service name and at least one --each group")
