@@ -224,7 +224,6 @@ class WriteOperationService {
 
   // ---- Per-command state machines
   void run_set_enabled_(uint32_t seq);
-  void write_enabled_(uint32_t seq);
   void confirm_enabled_(uint32_t seq);
   void run_set_mode_(uint32_t seq);
   void confirm_mode_(uint32_t seq);

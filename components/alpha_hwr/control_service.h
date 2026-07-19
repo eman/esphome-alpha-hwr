@@ -434,6 +434,24 @@ class ControlService {
   void handle_remote_mode_ack(bool enabling, bool got_response, const uint8_t* data, size_t len);
 
   /**
+   * Send the pump's unfused Class 3 run-state command: START (0x06) or STOP
+   * (0x05) as a SET (`[0x03, 0x81, <id>]`). Command ids and ACK behavior
+   * bench-verified by jfriend00 on a real pump (issue #92, 2026-07-19):
+   * success is the clean `[03 00]` ACK (empty data), a rejection is the
+   * `[03 01 xx]` descriptor reply (the same shapes as the remote-mode
+   * commands, #46). Unlike the 0x0601 control object, this carries no mode
+   * and no setpoint, so it cannot clobber either — but it also produces no
+   * unsolicited notification, so callers must read the run state back to
+   * confirm it actually changed.
+   *
+   * @param start_pump True for START, false for STOP
+   * @param on_result Called once: (acked, rejected). (false, false) = the
+   *   ACK window closed without a match (the command may still have applied;
+   *   decide via readback).
+   */
+  void send_run_command(bool start_pump, std::function<void(bool acked, bool rejected)> on_result);
+
+  /**
    * Resolve the pump's current enabled (on/off) state before sending a
    * setpoint or mode-change control request, so those writes never
    * implicitly force-enable or force-disable the pump (fixes #45).
