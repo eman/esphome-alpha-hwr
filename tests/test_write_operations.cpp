@@ -101,7 +101,7 @@ struct Harness {
   Session session;
   ControlService control{transport, session};
   ScheduleService schedule{transport, session};
-  WriteOperationService write_op{control, schedule, session};
+  WriteOperationService write_op{control, schedule};
   PumpSim sim;
 
   bool ready{true};

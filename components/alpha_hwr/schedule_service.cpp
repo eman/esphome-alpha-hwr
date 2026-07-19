@@ -412,8 +412,8 @@ bool ScheduleService::read_entries(std::vector<ScheduleEntry> *entries,
 
   this->transport_.send_apdu_command(
       apdu, 5, 0xDE01, 0,
-      [this, entries, layer](bool success, const uint8_t *payload,
-                             size_t payload_len) {
+      [entries, layer](bool success, const uint8_t *payload,
+                       size_t payload_len) {
         if (!success) {
           ESP_LOGW(TAG,
                    "Failed to read schedule entries for layer %d (timeout)",
@@ -668,7 +668,7 @@ bool ScheduleService::write_entries_async(
 
   this->transport_.send_apdu_command(
       apdu, sizeof(apdu), 0xDE01, 0,
-      [on_complete, layer](bool success, const uint8_t *data, size_t len) {
+      [on_complete, layer](bool success, const uint8_t * /*data*/, size_t /*len*/) {
         if (success) {
           ESP_LOGI(TAG, "Async write completed with ACK for layer %d", layer);
         } else {
@@ -987,8 +987,8 @@ void ScheduleService::write_cached_layer_async(
 
   this->transport_.send_apdu_command(
       apdu, sizeof(apdu), 0xDE01, 0,
-      [this, on_complete, layer](bool success, const uint8_t *data,
-                                 size_t len) {
+      [this, on_complete, layer](bool /*success*/, const uint8_t * /*data*/,
+                                 size_t /*len*/) {
         // Send configuration commit after write
         this->send_configuration_commit();
         ESP_LOGI(TAG, "Layer %d write + config commit sent", layer);
@@ -1040,7 +1040,7 @@ void ScheduleService::read_single_events_async(
 
     this->transport_.send_apdu_command(
       apdu, 5, 0xDC01, 0,
-        [this, idx, events, on_complete, max_events,
+        [idx, events, on_complete,
          read_next](bool success, const uint8_t *payload, size_t payload_len) {
           if (success && payload_len >= 13) {
             SingleEvent ev = SingleEvent::from_bytes(payload + 3, idx);
@@ -1089,8 +1089,8 @@ void ScheduleService::write_single_event_async(
 
   this->transport_.send_apdu_command(
       apdu, sizeof(apdu), 0xDC01, 0,
-      [this, on_complete, event](bool success, const uint8_t *data,
-                                 size_t len) {
+      [this, on_complete, event](bool /*success*/, const uint8_t * /*data*/,
+                                 size_t /*len*/) {
         this->send_configuration_commit();
         ESP_LOGI(TAG, "Single event slot %d write + commit sent", event.index);
 

@@ -95,7 +95,7 @@ public:
         device_info_service_(transport_, session_), time_service_(&transport_),
         event_log_service_(transport_, session_),
         history_service_(transport_, session_),
-        write_op_service_(control_service_, schedule_service_, session_) {
+        write_op_service_(control_service_, schedule_service_) {
     parent->register_ble_node(this);
     parent_ = parent;
     ESP_LOGI(TAG, "AlphaHwrComponent constructor");

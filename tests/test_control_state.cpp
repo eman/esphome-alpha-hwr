@@ -347,8 +347,8 @@ struct RemoteModeState {
  * ControlService::update_mode_from_notification() / get_mode_async() after
  * the #88 fix: CONSTANT_FLOW natively uses m³/s, so we must multiply by 3600.
  */
-float resolve_cached_setpoint_from_pump_read(ControlMode mode, ControlMode previous_mode,
-                                              float previous_cached, float raw_from_pump) {
+float resolve_cached_setpoint_from_pump_read(ControlMode mode, ControlMode /*previous_mode*/,
+                                              float /*previous_cached*/, float raw_from_pump) {
   if (mode == ControlMode::CONSTANT_PRESSURE || mode == ControlMode::PROPORTIONAL_PRESSURE) {
     return raw_from_pump / 9806.65f;
   } else if (mode == ControlMode::CONSTANT_FLOW) {

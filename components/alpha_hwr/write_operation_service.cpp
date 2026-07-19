@@ -55,9 +55,8 @@ static std::string format_detail(const char *fmt, ...) {
   return std::string(buf);
 }
 
-WriteOperationService::WriteOperationService(ControlService &control, ScheduleService &schedule,
-                                             core::Session &session)
-    : control_(control), schedule_service_(schedule), session_(session) {}
+WriteOperationService::WriteOperationService(ControlService &control, ScheduleService &schedule)
+    : control_(control), schedule_service_(schedule) {}
 
 // ---------------------------------------------------------------------------
 // Queue machinery

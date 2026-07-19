@@ -117,7 +117,7 @@ class ScheduleService;
  */
 class WriteOperationService {
  public:
-  WriteOperationService(ControlService &control, ScheduleService &schedule, core::Session &session);
+  WriteOperationService(ControlService &control, ScheduleService &schedule);
 
   /** Delegate for scheduling delayed steps (the component's set_timeout). */
   void set_schedule_callback(std::function<void(std::function<void()>, uint32_t)> callback) {
@@ -288,7 +288,6 @@ class WriteOperationService {
 
   ControlService &control_;
   ScheduleService &schedule_service_;
-  core::Session &session_;
 
   std::deque<Operation> queue_;
   uint32_t next_seq_{1};
