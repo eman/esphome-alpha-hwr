@@ -433,6 +433,8 @@ number:
           });
 
   # Cycle Time ON Duration (Mode 25 - DHW Cycle Time Control)
+  # Reflects the pump's live stored value (Obj 91 Sub 421, issue #106); shows
+  # unknown until the config has been read from the pump.
   - platform: template
     name: "Cycle Time ON"
     id: cycle_time_on
@@ -443,13 +445,19 @@ number:
     max_value: 60
     step: 1
     mode: slider
-    optimistic: true
-    initial_value: 5
+    optimistic: false
+    update_interval: 5s
     disabled_by_default: false
+    lambda: |-
+      int8_t val = id(pump).get_cached_cycle_time_on();
+      if (val > 0) return (float) val;
+      return NAN;
     set_action:
       - lambda: |-
+          int8_t off_cached = id(pump).get_cached_cycle_time_off();
           float off_val = id(cycle_time_off).state;
-          uint8_t off_min = std::isnan(off_val) ? 15 : (uint8_t)off_val;
+          uint8_t off_min = !std::isnan(off_val) ? (uint8_t)off_val
+                            : (off_cached > 0 ? (uint8_t)off_cached : 15);
           ESP_LOGI("number", "Setting cycle time: %.0f min ON, %d min OFF", x, off_min);
           id(pump).set_cycle_time_control((uint8_t)x, off_min, [](bool success) {
             if (success) {
@@ -470,13 +478,19 @@ number:
     max_value: 60
     step: 1
     mode: slider
-    optimistic: true
-    initial_value: 15
+    optimistic: false
+    update_interval: 5s
     disabled_by_default: false
+    lambda: |-
+      int8_t val = id(pump).get_cached_cycle_time_off();
+      if (val > 0) return (float) val;
+      return NAN;
     set_action:
       - lambda: |-
+          int8_t on_cached = id(pump).get_cached_cycle_time_on();
           float on_val = id(cycle_time_on).state;
-          uint8_t on_min = std::isnan(on_val) ? 5 : (uint8_t)on_val;
+          uint8_t on_min = !std::isnan(on_val) ? (uint8_t)on_val
+                           : (on_cached > 0 ? (uint8_t)on_cached : 5);
           ESP_LOGI("number", "Setting cycle time: %d min ON, %.0f min OFF", on_min, x);
           id(pump).set_cycle_time_control(on_min, (uint8_t)x, [](bool success) {
             if (success) {

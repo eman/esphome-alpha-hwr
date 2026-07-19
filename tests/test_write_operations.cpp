@@ -63,6 +63,11 @@ struct PumpSim {
   std::map<int, float> setpoints{{13, NAN}, {15, NAN}, {39, NAN}};
   float temp_min{25.0f}, temp_max{55.0f};
   bool autoadapt{false};
+  // Trailing limit bytes of the Sub 430 struct (min/max on/off-time limits +
+  // version tail; issue #106). Distinctive values so preservation is provable.
+  uint8_t temp_limits_tail[5] = {0x05, 0x3C, 0x02, 0x3C, 0x01};
+  // DHW on/off config (Obj 91 Sub 421): stored flow setpoint + live periods.
+  uint8_t dhw_setpoint_raw[4] = {0x38, 0x84, 0x4F, 0x30};  // 1.0 gal/min native
   int cycle_on{5}, cycle_off{15};
 
   // Schedule state (Object 84)
@@ -78,7 +83,10 @@ struct PumpSim {
   bool ack_temp_write{true};
   bool honor_mode_change{true};       // apply 0x0A01 mode changes
   bool honor_setpoint_writes{true};   // apply setpoint values from 0601/register writes
-  bool obj91_includes_cycles{true};   // firmware echoes cycle bytes (issue #94)
+  bool obj91_includes_limits{true};   // firmware echoes the 5 limit tail bytes
+  bool respond_dhw_reads{true};       // reply to Obj 91 Sub 421 reads
+  bool honor_dhw_writes{true};        // apply Sub 421 writes
+  int dhw_min_off{0};                 // >0: pump clamps off_period to this floor
   bool respond_overview_reads{true};
   bool honor_layer_writes{true};
   bool honor_overview_writes{true};
@@ -117,7 +125,11 @@ struct Harness {
   int frames_0a01{0};       // unfused mode changes
   int frames_register{0};   // 0x84 setpoint register writes
   int frames_class3_run{0}; // Class 3 START/STOP commands
+  int frames_dhw_read{0};   // Obj 91 Sub 421 reads
+  int frames_dhw_write{0};  // Obj 91 Sub 421 writes
   std::vector<uint8_t> last_0601_setpoint_bytes;
+  std::vector<uint8_t> last_dhw_write_setpoint;
+  std::vector<uint8_t> last_temp_write_tail;
 
   struct Task { uint64_t due; std::function<void()> fn; };
   std::vector<Task> tasks;
@@ -202,19 +214,31 @@ struct Harness {
     } else if (opspec == 0x03 && apdu_len >= 5 && apdu[2] == 91 && apdu[3] == 0x01 && apdu[4] == 0xAE) {
       // Obj 91 Sub 430 config read
       if (sim.respond_obj91) inject_obj91_response();
-    } else if (opspec == 0x97 && apdu_len >= 20) {
-      // Temperature-range config write
+    } else if (opspec == 0x03 && apdu_len >= 5 && apdu[2] == 91 && apdu[3] == 0x01 && apdu[4] == 0xA5) {
+      // Obj 91 Sub 421 DHW config read (issue #106)
+      frames_dhw_read++;
+      if (sim.respond_dhw_reads) inject_dhw_response();
+    } else if (opspec == 0x97 && apdu_len >= 25) {
+      // Temperature-range config write; capture the limits tail for the
+      // preservation assertion (issue #106).
       bool aa = apdu[11] != 0;
       float mn = protocol::decode_float_be(apdu + 12);
       float mx = protocol::decode_float_be(apdu + 16);
       sim.autoadapt = aa;
       sim.temp_min = mn;
       sim.temp_max = mx;
+      last_temp_write_tail.assign(apdu + 20, apdu + 25);
       if (sim.ack_temp_write) inject_short_ack();
-    } else if (opspec == 0x8F && apdu_len >= 17) {
-      // Cycle-time config write: payload [00 00][off][01 42 02][on][FB] at apdu+9
-      sim.cycle_off = apdu[11];
-      sim.cycle_on = apdu[15];
+    } else if (opspec == 0x8F && apdu_len >= 17 && apdu[2] == 0x5B && apdu[3] == 0x01 && apdu[4] == 0xA5) {
+      // DHW config write (Obj 91 Sub 421, type 985, GO-app frame shape)
+      frames_dhw_write++;
+      last_dhw_write_setpoint.assign(apdu + 11, apdu + 15);
+      if (sim.honor_dhw_writes) {
+        sim.cycle_on = apdu[15];
+        sim.cycle_off = apdu[16];
+        if (sim.dhw_min_off > 0 && sim.cycle_off < sim.dhw_min_off) sim.cycle_off = sim.dhw_min_off;
+      }
+      inject_short_ack();
     } else if (apdu[2] == 84 && apdu_len >= 5) {
       uint16_t sub = (apdu[3] << 8) | apdu[4];
       if (opspec == 0x03) {
@@ -264,22 +288,32 @@ struct Harness {
 
   void inject_obj91_response() {
     // OpSpec 0x15 workaround path: payload at byte 10.
-    // payload [00 00 0D][autoadapt][min f32be][max f32be]([off][00 00][on])
-    std::vector<uint8_t> payload = {0x00, 0x00, 0x0D, static_cast<uint8_t>(sim.autoadapt ? 1 : 0),
+    // payload [00 00 0E][autoadapt][min f32be][max f32be][limits tail x5]
+    std::vector<uint8_t> payload = {0x00, 0x00, 0x0E, static_cast<uint8_t>(sim.autoadapt ? 1 : 0),
                                     0, 0, 0, 0, 0, 0, 0, 0};
     protocol::encode_float_be(sim.temp_min, payload.data() + 4);
     protocol::encode_float_be(sim.temp_max, payload.data() + 8);
-    if (sim.obj91_includes_cycles) {
-      payload.push_back(static_cast<uint8_t>(sim.cycle_off));
-      payload.push_back(0x00);
-      payload.push_back(0x00);
-      payload.push_back(static_cast<uint8_t>(sim.cycle_on));
+    if (sim.obj91_includes_limits) {
+      payload.insert(payload.end(), sim.temp_limits_tail, sim.temp_limits_tail + 5);
     }
     std::vector<uint8_t> f = {0x24, 0, 0xF8, 0xE7, 0x0A, 0x15, 0x00, 0x5B, 0x01, 0xAE};
     f.insert(f.end(), payload.begin(), payload.end());
     f.push_back(0xAA);
     f.push_back(0xBB);
     f[1] = static_cast<uint8_t>(f.size() - 4);
+    inject(std::move(f));
+  }
+
+  void inject_dhw_response() {
+    // Capture-verified Sub 421 reply: OpSpec 0x0D, [00][type 03D9][ver 01]
+    // [size 00 00 06][setpoint f32][on][off].
+    std::vector<uint8_t> f = {0x24, 0x11, 0xF8, 0xE7, 0x0A, 0x0D, 0x00, 0x03, 0xD9, 0x01,
+                              0x00, 0x00, 0x06,
+                              sim.dhw_setpoint_raw[0], sim.dhw_setpoint_raw[1],
+                              sim.dhw_setpoint_raw[2], sim.dhw_setpoint_raw[3],
+                              static_cast<uint8_t>(sim.cycle_on),
+                              static_cast<uint8_t>(sim.cycle_off),
+                              0xAA, 0xBB};
     inject(std::move(f));
   }
 
@@ -678,10 +712,15 @@ static void test_temperature_range_invalid() {
 }
 
 static void test_cycle_times_accepted() {
-  std::cout << "\n=== set_cycle_times: accepted with verify readback ===" << std::endl;
+  // Issue #106: reads and writes go to Obj 91 Sub 421 (the live DHW config),
+  // never Sub 430, and the stored flow setpoint is echoed back verbatim.
+  std::cout << "\n=== set_cycle_times: verified via Sub 421, setpoint preserved ===" << std::endl;
   Harness h;
   h.sim.mode_byte = 0x02;
+  h.sim.cycle_on = 5;
+  h.sim.cycle_off = 15;
   h.prime_cache();
+  int commits_before = h.commit_count;
 
   h.write_op.submit_set_cycle_times(10, 20, "ct1");
   h.advance(15000);
@@ -690,23 +729,71 @@ static void test_cycle_times_accepted() {
   const WriteResult *r = h.result_for("ct1");
   TEST_ASSERT(r && r->status == WriteStatus::ACCEPTED, "status is accepted");
   TEST_ASSERT(r && r->on_minutes == 10 && r->off_minutes == 20, "settled cycle times reported");
+  TEST_ASSERT(h.sim.cycle_on == 10 && h.sim.cycle_off == 20, "pump holds the new periods");
+  TEST_ASSERT(h.frames_dhw_write == 1, "one Sub 421 write was sent");
+  TEST_ASSERT(h.frames_dhw_read >= 2, "fresh pre-read plus verify readback of Sub 421");
+  TEST_ASSERT(h.last_dhw_write_setpoint.size() == 4 &&
+              memcmp(h.last_dhw_write_setpoint.data(), h.sim.dhw_setpoint_raw, 4) == 0,
+              "stored DHW flow setpoint echoed back verbatim");
+  TEST_ASSERT(h.commit_count == commits_before, "no configuration commit (capture-verified)");
+  TEST_ASSERT(h.control.get_cached_cycle_time_on() == 10 &&
+              h.control.get_cached_cycle_time_off() == 20,
+              "entity-facing cache reflects the pump values");
 }
 
-static void test_cycle_times_short_payload() {
-  std::cout << "\n=== set_cycle_times: short obj91 payload -> accepted with detail (#94) ===" << std::endl;
+static void test_cycle_times_pump_clamps() {
+  std::cout << "\n=== set_cycle_times: pump clamps OFF floor -> clamped ===" << std::endl;
   Harness h;
   h.sim.mode_byte = 0x02;
+  h.sim.dhw_min_off = 5;  // the GO-app-observed minimum-off behavior
   h.prime_cache();
-  h.sim.obj91_includes_cycles = false;
 
-  h.write_op.submit_set_cycle_times(10, 20, "ct2");
+  h.write_op.submit_set_cycle_times(1, 3, "ct2");
   h.advance(15000);
 
   TEST_ASSERT(h.events_for("ct2") == 1, "exactly one terminal event");
   const WriteResult *r = h.result_for("ct2");
-  TEST_ASSERT(r && r->status == WriteStatus::ACCEPTED, "short payload never causes a false reject");
-  TEST_ASSERT(r && r->detail.find("readback unavailable") != std::string::npos,
-              "detail flags the unavailable readback");
+  TEST_ASSERT(r && r->status == WriteStatus::CLAMPED, "status is clamped");
+  TEST_ASSERT(r && r->on_minutes == 1 && r->off_minutes == 5, "settled values report the clamp");
+  TEST_ASSERT(r && r->detail.find("off=5") != std::string::npos, "detail reports the stored value");
+}
+
+static void test_cycle_times_read_unavailable() {
+  std::cout << "\n=== set_cycle_times: Sub 421 unreadable -> rejected before any write ===" << std::endl;
+  Harness h;
+  h.sim.mode_byte = 0x02;
+  h.prime_cache();
+  h.sim.respond_dhw_reads = false;
+
+  h.write_op.submit_set_cycle_times(10, 20, "ct3");
+  h.advance(20000);
+
+  TEST_ASSERT(h.events_for("ct3") == 1, "exactly one terminal event");
+  const WriteResult *r = h.result_for("ct3");
+  TEST_ASSERT(r && r->status == WriteStatus::REJECTED, "status is rejected");
+  TEST_ASSERT(r && r->detail.find("not attempted") != std::string::npos,
+              "detail says the write was never attempted");
+  TEST_ASSERT(h.frames_dhw_write == 0, "no blind Sub 421 write was sent");
+}
+
+static void test_temp_range_preserves_limits() {
+  // Issue #106 (adjacent bug): the Sub 430 struct's tail bytes are the pump's
+  // on/off-time limits; a temperature write must echo them, not zero them.
+  std::cout << "\n=== set_temperature_range: limit tail bytes preserved ===" << std::endl;
+  Harness h;
+  h.sim.mode_byte = 0x02;
+  h.prime_cache();
+  h.control.sync_cache_async(nullptr);  // populates the cached limits tail
+  h.advance(2000);
+
+  h.write_op.submit_set_temperature_range(30.0f, 50.0f, true, "tl1");
+  h.advance(15000);
+
+  const WriteResult *r = h.result_for("tl1");
+  TEST_ASSERT(r && r->status == WriteStatus::ACCEPTED, "temperature write accepted");
+  TEST_ASSERT(h.last_temp_write_tail.size() == 5 &&
+              memcmp(h.last_temp_write_tail.data(), h.sim.temp_limits_tail, 5) == 0,
+              "pump's limit tail bytes echoed back verbatim (not zeroed)");
 }
 
 static void test_interleaved_poll() {
@@ -1132,7 +1219,9 @@ int main() {
   test_temperature_range_no_ack();
   test_temperature_range_invalid();
   test_cycle_times_accepted();
-  test_cycle_times_short_payload();
+  test_cycle_times_pump_clamps();
+  test_cycle_times_read_unavailable();
+  test_temp_range_preserves_limits();
   test_interleaved_poll();
   test_issue92_collision();
 

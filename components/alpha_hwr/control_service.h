@@ -294,6 +294,10 @@ class ControlService {
    uint8_t get_cached_operation_mode() const { return cached_operation_mode_; }
    /** Get cached autoadapt enabled state (-1=unknown, 0=off, 1=on). */
    int8_t get_cached_autoadapt() const { return cached_autoadapt_; }
+   /** Get cached cycle time ON minutes (-1 = not yet read; Obj 91 Sub 421, issue #106). */
+   int8_t get_cached_cycle_time_on() const { return cached_cycle_time_on_; }
+   /** Get cached cycle time OFF minutes (-1 = not yet read). */
+   int8_t get_cached_cycle_time_off() const { return cached_cycle_time_off_; }
 
    /**
     * Decode a cycle-time minutes byte read from the pump (Object 91). Valid range
@@ -343,6 +347,8 @@ class ControlService {
      cached_temp_max_ = NAN;
      cached_cycle_time_on_ = -1;
      cached_cycle_time_off_ = -1;
+     dhw_config_valid_ = false;
+     temp_limits_tail_valid_ = false;
      // Drop any in-flight mode command (issue #91): a command issued on a prior
      // connection must not be "confirmed" by a read on the next connection.
      mode_command_pending_ = false;
@@ -407,8 +413,21 @@ class ControlService {
     float cached_temp_max_{NAN};           // Temperature range max (Object 91 Sub 430)
     uint8_t cached_operation_mode_{0xFF};  // Operation mode from notification
     int8_t cached_autoadapt_{-1};           // AutoAdapt state (-1=unknown, 0=off, 1=on)
-    int8_t cached_cycle_time_on_{-1};       // Cycle time ON minutes
-    int8_t cached_cycle_time_off_{-1};      // Cycle time OFF minutes  
+    int8_t cached_cycle_time_on_{-1};       // Cycle time ON minutes (Obj 91 Sub 421, issue #106)
+    int8_t cached_cycle_time_off_{-1};      // Cycle time OFF minutes (Obj 91 Sub 421)
+    // DHW config (Obj 91 Sub 421, type 985 DHWOnOffControlConfiguration): the
+    // stored per-mode flow setpoint, kept as the raw wire bytes so a cycle-time
+    // write can echo it back verbatim (read-modify-write) without a float
+    // round trip. Valid only after a successful read_dhw_config().
+    uint8_t cached_dhw_setpoint_raw_[4]{0, 0, 0, 0};
+    bool dhw_config_valid_{false};
+    // Trailing bytes of the Sub 430 TemperatureRangeControlUserSettings struct
+    // (the pump's min/max on/off-time LIMITS + version tail, issue #106): kept
+    // verbatim from the last read so write_temp_range_config() preserves them
+    // instead of zeroing the pump's limits. Defaults to the byte pattern the
+    // component historically sent, used only before the first read.
+    uint8_t cached_temp_limits_tail_[5]{0x00, 0x00, 0x00, 0x16, 0x00};
+    bool temp_limits_tail_valid_{false};
   // Sub-ID constants for setpoint registers (Reference: control.py lines 137-141)
   static constexpr uint16_t SUB_SPEED_SETPOINT = 13;
   static constexpr uint16_t SUB_PRESSURE_SETPOINT = 15;
@@ -547,11 +566,30 @@ class ControlService {
                                std::function<void(bool)> on_ack);
 
   /**
-   * Write the cycle-time configuration struct (Object 91 Sub 430, OpSpec 0x8F).
-   * Fire-and-forget on the wire (no ACK is matched); does NOT switch mode or
-   * commit. Callers sequence mode switch / commit / readback around it.
+   * Read the DHW on/off configuration (Object 91 Sub 421, type 985
+   * DHWOnOffControlConfiguration: [setpoint f32][on u8][off u8]) and refresh
+   * cached_cycle_time_on_/off_ plus the raw setpoint bytes. This is the
+   * object that actually holds the live cycle times; the Sub 430 block the
+   * component previously read is the temperature-range user settings, whose
+   * trailing bytes are on/off-time LIMITS and invariant to the cycle
+   * configuration (issue #106, GENI profile 52/7 + GO-app captures).
+   *
+   * @param callback Called with true when the read parsed and caches updated.
    */
-  void write_cycle_config(uint8_t on_minutes, uint8_t off_minutes);
+  void read_dhw_config(std::function<void(bool)> callback);
+
+  /**
+   * Write the DHW on/off configuration (Object 91 Sub 421, OpSpec 0x8F,
+   * obj-first addressing, mirroring the GO app's capture frame byte for
+   * byte). Read-modify-write: the stored flow setpoint is echoed back from
+   * the last read_dhw_config(), so callers MUST read first — returns false
+   * without sending when no setpoint is cached. No configuration commit is
+   * needed (capture-verified: the GO app sends none and the value persists).
+   *
+   * @param on_ack Called with the pump's short ACK result.
+   */
+  bool write_dhw_config(uint8_t on_minutes, uint8_t off_minutes,
+                        std::function<void(bool)> on_ack);
 
   /**
    * Read Object 91 Sub 430 (temperature range, AutoAdapt, cycle times) and

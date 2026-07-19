@@ -755,49 +755,65 @@ void WriteOperationService::run_set_cycle_times_(uint32_t seq) {
     return;
   }
 
-  op->phase = Phase::WRITING;
-  if (!control_.send_set_mode_request(ControlMode::DHW_ON_OFF)) {
-    finish_(seq, WriteStatus::REJECTED, "failed to queue mode command");
-    return;
-  }
-  control_.note_mode_commanded(ControlMode::DHW_ON_OFF);
-
-  schedule_([this, seq]() {
+  // RESOLVING: the DHW config struct (Obj 91 Sub 421, issue #106) fuses the
+  // mode's stored flow setpoint with the on/off periods, so a mandatory fresh
+  // read supplies the setpoint bytes the write echoes back verbatim.
+  op->phase = Phase::RESOLVING;
+  control_.read_dhw_config([this, seq](bool ok) {
     Operation *op = find_(seq);
     if (op == nullptr || op->phase == Phase::DONE) return;
-    control_.write_cycle_config(op->on_minutes, op->off_minutes);
-    control_.send_configuration_commit();
-    op->phase = Phase::CONFIRMING;
-    // This readback is new relative to the legacy fire-and-forget setter: it is
-    // what turns the cycle-time write into a verified operation.
-    schedule_([this, seq]() { confirm_cycle_times_(seq); }, CONFIG_CONFIRM_DELAY_MS);
-  }, CONFIG_STEP2_DELAY_MS);
+    if (!ok) {
+      finish_(seq, WriteStatus::REJECTED, "could not read DHW config; write not attempted");
+      return;
+    }
+
+    op->phase = Phase::WRITING;
+    if (!control_.send_set_mode_request(ControlMode::DHW_ON_OFF)) {
+      finish_(seq, WriteStatus::REJECTED, "failed to queue mode command");
+      return;
+    }
+    control_.note_mode_commanded(ControlMode::DHW_ON_OFF);
+
+    schedule_([this, seq]() {
+      Operation *op = find_(seq);
+      if (op == nullptr || op->phase == Phase::DONE) return;
+      // Capture-verified: the GO app sends this write with no configuration
+      // commit and the value persists, so none is sent here either.
+      bool queued = control_.write_dhw_config(op->on_minutes, op->off_minutes,
+        [this, seq](bool acked) {
+          Operation *op = find_(seq);
+          if (op == nullptr || op->phase == Phase::DONE) return;
+          if (!acked) {
+            finish_(seq, WriteStatus::REJECTED, "config write not acknowledged");
+            return;
+          }
+          op->phase = Phase::CONFIRMING;
+          schedule_([this, seq]() { confirm_cycle_times_(seq); }, CONFIG_CONFIRM_DELAY_MS);
+        });
+      if (!queued) {
+        finish_(seq, WriteStatus::REJECTED, "DHW setpoint unavailable; write not attempted");
+      }
+    }, CONFIG_STEP2_DELAY_MS);
+  });
 }
 
 void WriteOperationService::confirm_cycle_times_(uint32_t seq) {
   Operation *op = find_(seq);
   if (op == nullptr || op->phase == Phase::DONE) return;
 
-  control_.read_obj91_config([this, seq](bool ok) {
+  control_.read_dhw_config([this, seq](bool ok) {
     Operation *op = find_(seq);
     if (op == nullptr || op->phase == Phase::DONE) return;
 
-    if (!ok) {
+    int8_t stored_on = control_.cached_cycle_time_on_;
+    int8_t stored_off = control_.cached_cycle_time_off_;
+    if (!ok || stored_on == -1 || stored_off == -1) {
       if (op->attempts < CONFIG_MAX_ATTEMPTS) {
         op->attempts++;
         schedule_([this, seq]() { confirm_cycle_times_(seq); }, CONFIG_RETRY_DELAY_MS);
         return;
       }
-      finish_(seq, WriteStatus::TIMEOUT, "config readback failed");
-      return;
-    }
-
-    int8_t stored_on = control_.cached_cycle_time_on_;
-    int8_t stored_off = control_.cached_cycle_time_off_;
-    if (stored_on == -1 || stored_off == -1) {
-      // Short-payload firmware (issue #94): the write was ACKed and committed
-      // but this firmware doesn't echo the cycle bytes — never a false reject.
-      finish_(seq, WriteStatus::ACCEPTED, "config ACKed; readback unavailable");
+      finish_(seq, WriteStatus::TIMEOUT, "DHW config readback failed");
       return;
     }
     bool match = stored_on == static_cast<int8_t>(op->on_minutes) &&

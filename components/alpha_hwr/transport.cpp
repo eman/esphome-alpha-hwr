@@ -374,9 +374,11 @@ bool Transport::try_dispatch_response(const uint8_t* data, size_t len) {
     if (queued_class == 0x0A && len >= 6 && data[4] == 0x0A && (data[5] == 0x01 || data[5] == 0x81) &&
         cmd.expect_obj_id == 0x0000 && cmd.expect_sub_id == 0x0000 &&
         cmd.packet.size() > 9 &&
-        (cmd.packet[5] == 0x97 || cmd.packet[5] == 0x96 || cmd.packet[5] == 0xB3 || 
-         cmd.packet[5] == 0x95 || cmd.packet[5] == 0x91 || cmd.packet[5] == 0x90) &&  // queued OpSpec
+        (cmd.packet[5] == 0x97 || cmd.packet[5] == 0x96 || cmd.packet[5] == 0xB3 ||
+         cmd.packet[5] == 0x95 || cmd.packet[5] == 0x91 || cmd.packet[5] == 0x90 ||
+         cmd.packet[5] == 0x8F) &&  // queued OpSpec (0x8F: DHW config write, #106)
         ((cmd.packet[6] == 91 && cmd.packet[7] == 0x01 && cmd.packet[8] == 0xAE) || // old format
+         (cmd.packet[6] == 91 && cmd.packet[7] == 0x01 && cmd.packet[8] == 0xA5) || // Obj 91 Sub 421 DHW config (#106)
          (cmd.packet[6] == 0x01 && cmd.packet[7] == 0xAE && cmd.packet[8] == 0x00 && cmd.packet[9] == 91) || // new format SubID 430 Obj 91
          (cmd.packet[6] == 0x56 && cmd.packet[7] == 0x00 && cmd.packet[8] == 0x06 && cmd.packet[9] == 0x01))) {  // Sub 5600 Obj 0601 (mode write)
       uint8_t err_code = (len >= 7) ? data[6] : 0xFF;
@@ -500,16 +502,22 @@ bool Transport::try_dispatch_response(const uint8_t* data, size_t len) {
       }
     }
     
-    // SPECIAL CASE WORKAROUND: Object 91 Sub 430 (Cache Sync)
-    // The pump responds to this read request with OpSpec 0x15, which does NOT carry 
-    // the standard Obj/Sub IDs in the payload header. Python reference simply accepted it 
-    // via a wildcard match and sliced at byte 10. We explicitly handle this case here to 
-    // avoid wildcard matching other packets.
-    if (!matched && cmd.expect_obj_id == 91 && cmd.expect_sub_id == 430 && opspec == 0x15 && len >= 12) {
+    // SPECIAL CASE WORKAROUND: Object 91 config reads (Cache Sync / DHW config)
+    // The pump responds to these read requests with a size-specific OpSpec
+    // (0x15 for the 14-byte Sub 430 temperature-range settings, 0x0D for the
+    // 6-byte Sub 421 DHW on/off configuration -- bench/capture-verified, see
+    // issue #106) which does NOT carry the standard Obj/Sub IDs in the payload
+    // header. Python reference simply accepted these via a wildcard match and
+    // sliced at byte 10. We explicitly handle the known cases here to avoid
+    // wildcard matching other packets.
+    if (!matched && cmd.expect_obj_id == 91 && len >= 12 &&
+        ((cmd.expect_sub_id == 430 && opspec == 0x15) ||
+         (cmd.expect_sub_id == 421 && opspec == 0x0D))) {
       matched = true;
       payload = data + 10;
       payload_len = len - 12; // len - 10(header) - 2(CRC)
-      ESP_LOGV(TAG, "Matched Object 91 Sub 430 using OpSpec 0x15 workaround");
+      ESP_LOGV(TAG, "Matched Object 91 Sub %d using OpSpec 0x%02X workaround",
+               cmd.expect_sub_id, opspec);
     }
 
     if (matched) {
