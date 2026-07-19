@@ -15,7 +15,11 @@
   schedulers can verify sync without a full read-back; the pure payload/hash
   codec (`schedule_codec`) ships with host tests whose golden vectors are
   shared with the dhw-sensor-apps scheduler suite. Bench client gains an
-  `upload` subcommand with local expected-hash computation.
+  `upload` subcommand with local expected-hash computation. Five
+  `schedule_layer_0..4` text sensors publish each layer's compact JSON for
+  full-grid cold-start recovery (dhw-sensor-apps#7), and auto-slot
+  resolution reuses expired single-event slots so the 35-slot pool cannot
+  exhaust.
 
 - **Programmatic write-and-verify interface** (structural refactor,
   [#92](https://github.com/eman/esphome-alpha-hwr/issues/92)) —

@@ -162,6 +162,19 @@ alpha_hwr:
    # dhw-sensor-apps recirculation scheduler ("unknown" until fully cached)
    schedule_hash:
       name: "Schedule Hash"
+
+   # Per-layer schedule read-back (issue #7) — each layer's compact JSON
+   # always fits HA's 255-char state cap, enabling full-grid recovery
+   schedule_layer_0:
+      name: "Schedule Layer 0"
+   schedule_layer_1:
+      name: "Schedule Layer 1"
+   schedule_layer_2:
+      name: "Schedule Layer 2"
+   schedule_layer_3:
+      name: "Schedule Layer 3"
+   schedule_layer_4:
+      name: "Schedule Layer 4"
    
    # Single Events Display
    single_events:

@@ -615,6 +615,13 @@ public:
   std::string current_hash() const;
 
   /**
+   * Compact JSON of one cached layer (7 cells, [start_min,end_min] or 0).
+   * "unknown" while the layer is not cached. Read-back path for external
+   * schedulers (dhw-sensor-apps issue #7).
+   */
+  std::string layer_json(uint8_t layer) const;
+
+  /**
    * Build the canonical 42-byte image of a cached layer (disabled days
    * zero-filled). Returns false when the layer is not cached.
    */

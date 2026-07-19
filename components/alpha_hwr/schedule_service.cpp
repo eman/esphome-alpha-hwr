@@ -1273,6 +1273,13 @@ bool ScheduleService::build_cached_layer_image(uint8_t layer,
   return true;
 }
 
+std::string ScheduleService::layer_json(uint8_t layer) const {
+  uint8_t image[42];
+  if (!this->build_cached_layer_image(layer, image))
+    return "unknown";
+  return codec::layer_image_to_json(image);
+}
+
 std::string ScheduleService::current_hash() const {
   if (!this->schedule_state_cached_)
     return "unknown";
