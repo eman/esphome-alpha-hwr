@@ -434,7 +434,13 @@ public:
    * Find the first free (disabled) single event slot.
    * @return Index of free slot, or -1 if all slots are full
    */
-  int find_free_single_event_slot() const;
+  /**
+   * Find a free single-event slot. A slot is free when it is absent from
+   * the cache, disabled, or — when reusable_before_ts > 0 — holds an event
+   * that ended before that timestamp (expired events do not exhaust the
+   * 35-slot pool; writing a new event over one both reuses and clears it).
+   */
+  int find_free_single_event_slot(uint32_t reusable_before_ts = 0) const;
 
   /**
    * Get cached single events.

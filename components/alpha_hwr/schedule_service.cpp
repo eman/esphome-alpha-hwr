@@ -1124,13 +1124,18 @@ void ScheduleService::clear_single_event_async(
   write_single_event_async(disabled, on_complete);
 }
 
-int ScheduleService::find_free_single_event_slot() const {
+int ScheduleService::find_free_single_event_slot(
+    uint32_t reusable_before_ts) const {
   uint8_t max_events = overview_cached_ ? overview_structure_[1] : 35;
   if (!single_events_cached_)
     return 0;
 
   std::set<uint8_t> used;
   for (const auto &ev : cached_single_events_) {
+    if (reusable_before_ts > 0 &&
+        (!ev.enabled || ev.end_timestamp < reusable_before_ts)) {
+      continue;  // disabled or expired — reusable
+    }
     used.insert(ev.index);
   }
   for (uint8_t i = 0; i < max_events; i++) {
