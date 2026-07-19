@@ -92,6 +92,7 @@ struct PumpSim {
   bool honor_overview_writes{true};
   bool ack_class3{true};              // reply to Class 3 START/STOP at all
   bool reject_class3{false};          // reply with the [03 01 xx] descriptor nack
+  bool apply_class3{true};            // actually change run state on START/STOP
   std::function<float(int sub, float native)> transform;  // clamping hook
 
   int sub_for_mode() const {
@@ -180,7 +181,7 @@ struct Harness {
         inject({0x24, 0x05, 0xF8, 0xE7, 0x03, 0x01, 0xAC, 0xAA, 0xBB});
         return;
       }
-      sim.enabled = (apdu[2] == 0x06);
+      if (sim.apply_class3) sim.enabled = (apdu[2] == 0x06);
       if (sim.ack_class3) {
         inject({0x24, 0x04, 0xF8, 0xE7, 0x03, 0x00, 0xAA, 0xBB});
       }
@@ -565,6 +566,55 @@ static void test_set_enabled_class3_ack_timeout() {
   const WriteResult *r = h.result_for("e3");
   TEST_ASSERT(r && r->status == WriteStatus::ACCEPTED, "readback confirmed despite missing ACK");
   TEST_ASSERT(!h.sim.enabled, "pump is off");
+}
+
+static void test_set_enabled_rejected_reports_readback() {
+  // Copilot review on #105: a rejected run-state write must carry the pump's
+  // actual state from the readback, not the requested value (the request
+  // survives in the requested_* echoes).
+  std::cout << "\n=== set_pump_enabled: rejected result carries readback state ===" << std::endl;
+  Harness h;
+  h.sim.mode_byte = 0x02;
+  h.prime_cache();
+  h.sim.apply_class3 = false;  // pump acks the STOP but stays running
+
+  h.write_op.submit_set_enabled(false, "e4");
+  h.advance(30000);
+
+  TEST_ASSERT(h.events_for("e4") == 1, "exactly one terminal event");
+  const WriteResult *r = h.result_for("e4");
+  TEST_ASSERT(r && r->status == WriteStatus::REJECTED, "status is rejected");
+  TEST_ASSERT(r && r->detail.find("running") != std::string::npos, "detail reports the pump's state");
+  TEST_ASSERT(r && r->enabled == 1, "settled enabled reflects the readback, not the request");
+}
+
+static void test_supersede_detail_uses_origin() {
+  // Copilot review on #105: the supersede detail labeled any empty-op_id
+  // superseder an "entity write", mislabeling service calls that omit op_id.
+  // The label must come from the operation's origin.
+  std::cout << "\n=== supersede: detail labels superseder by origin ===" << std::endl;
+  Harness h;
+  h.sim.mode_byte = 0x02;
+  h.sim.setpoints[13] = 1700.0f;
+  h.prime_cache();
+
+  h.write_op.submit_set_setpoint(ControlMode::CONSTANT_SPEED, 2000.0f, "a5");  // in flight
+  h.write_op.submit_set_setpoint(ControlMode::CONSTANT_SPEED, 2200.0f, "b5");  // queued
+  h.write_op.submit_set_setpoint(ControlMode::CONSTANT_SPEED, 2400.0f, "");    // service, no op_id
+  h.write_op.submit_set_setpoint(ControlMode::CONSTANT_SPEED, 2600.0f, "c5", nullptr,
+                                 WriteOrigin::ENTITY);
+  h.advance(20000);
+
+  const WriteResult *b = h.result_for("b5");
+  TEST_ASSERT(b && b->status == WriteStatus::SUPERSEDED, "queued op b5 superseded");
+  TEST_ASSERT(b && b->detail == "superseded by service write",
+              "empty-op_id service superseder labeled as service write");
+  const WriteResult *anon = h.result_for("");
+  TEST_ASSERT(anon && anon->status == WriteStatus::SUPERSEDED, "queued anonymous op superseded");
+  TEST_ASSERT(anon && anon->detail == "superseded by entity write",
+              "entity-origin superseder labeled as entity write");
+  const WriteResult *c = h.result_for("c5");
+  TEST_ASSERT(c && c->status == WriteStatus::ACCEPTED, "last write ran to acceptance");
 }
 
 static void test_supersede_queued() {
@@ -1082,6 +1132,8 @@ int main() {
   test_set_enabled_unfused_class3();
   test_set_enabled_class3_nack();
   test_set_enabled_class3_ack_timeout();
+  test_set_enabled_rejected_reports_readback();
+  test_supersede_detail_uses_origin();
   test_supersede_queued();
   test_watchdog_timeout();
   test_disconnect_terminates();

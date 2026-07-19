@@ -31,8 +31,9 @@
   `homeassistant_services: true` on `api:` (set in all shipped packages and
   examples). Documented in `docs/programmatic-interface.md`.
 - **Cycle-time write verification** — `set_cycle_times` gains the Object 91
-  readback the legacy fire-and-forget setter never had (degrades gracefully to
-  accepted-with-detail on short-payload firmwares, #94).
+  readback the legacy fire-and-forget setter never had: an unreadable DHW
+  config before the write settles `rejected` with no write attempted, and a
+  readback that keeps failing after the write settles `timeout`.
 - **Settle-event refinements from the #92 contract review** — new `invalid`
   terminal status for malformed/out-of-range requests (deterministic,
   pre-wire; `rejected` now strictly means the pump or its state refused),
