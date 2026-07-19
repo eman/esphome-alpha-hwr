@@ -446,7 +446,7 @@ void WriteOperationService::run_set_enabled_(uint32_t seq) {
   op->mode = control_.current_mode_;
   op->value = control_.get_setpoint_for_mode(op->mode);
 
-  control_.send_run_command(op->enabled, [this, seq](bool acked, bool rejected) {
+  control_.send_run_command(op->enabled, [this, seq](bool /*acked*/, bool rejected) {
     Operation *op = find_(seq);
     if (op == nullptr || op->phase == Phase::DONE) return;
     if (rejected) {
