@@ -11,6 +11,7 @@
 #include "transport.h"
 #include "session.h"
 
+#include <cinttypes>
 #include <cstring>
 #include <memory>
 
@@ -115,7 +116,7 @@ void EventLogService::read_entries_async(
           // Event log entries use OpSpec 0x14 (register-read format) — no 3-byte sub-header
           if (payload_len >= 16) {
             EventLogEntry entry = EventLogEntry::from_bytes(payload);
-            ESP_LOGD(TAG, "Entry %d: %s cycle=%d ts=%u",
+            ESP_LOGD(TAG, "Entry %d: %s cycle=%d ts=%" PRIu32,
                      idx, entry.event_type_str(), entry.cycle_counter, entry.timestamp);
             if (entry.timestamp > 0) {
               entries->push_back(entry);

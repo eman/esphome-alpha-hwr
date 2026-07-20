@@ -16,6 +16,7 @@
 #include "session.h"
 #include "transport.h"
 #include <algorithm>
+#include <cinttypes>
 #include <cstring>
 #include <memory>
 #include <set>
@@ -1046,7 +1047,7 @@ void ScheduleService::read_single_events_async(
             SingleEvent ev = SingleEvent::from_bytes(payload + 3, idx);
             if (ev.enabled) {
               events->push_back(ev);
-              ESP_LOGD(TAG, "Single event slot %d: active (%u - %u)", idx,
+              ESP_LOGD(TAG, "Single event slot %d: active (%" PRIu32 " - %" PRIu32 ")", idx,
                        ev.begin_timestamp, ev.end_timestamp);
             }
           }
@@ -1069,7 +1070,7 @@ void ScheduleService::write_single_event_async(
   }
 
   uint16_t sub_id = 900 + event.index;
-  ESP_LOGI(TAG, "Writing single event to slot %d (SubID %d): %s %u-%u",
+  ESP_LOGI(TAG, "Writing single event to slot %d (SubID %d): %s %" PRIu32 "-%" PRIu32,
            event.index, sub_id, event.enabled ? "enabled" : "disabled",
            event.begin_timestamp, event.end_timestamp);
 

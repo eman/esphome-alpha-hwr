@@ -1,6 +1,7 @@
 #include "ble_connection_manager.h"
 #include "esphome/core/log.h"
 #include <algorithm>
+#include <cinttypes>
 #include <cstdio>
 #include <vector>
 
@@ -333,7 +334,7 @@ void BLEConnectionManager::handle_service_discovery_complete(esp_gatt_if_t gattc
       
       if (discovery_retry_count_ < MAX_DISCOVERY_RETRIES) {
         discovery_retry_count_++;
-        ESP_LOGW(TAG, "Retrying service discovery in %dms (attempt %d/%d)...", 
+        ESP_LOGW(TAG, "Retrying service discovery in %" PRIu32 "ms (attempt %d/%d)...",
                  DISCOVERY_RETRY_DELAY_MS, discovery_retry_count_ + 1, MAX_DISCOVERY_RETRIES);
         
         // Schedule a retry
@@ -573,7 +574,7 @@ void BLEConnectionManager::handle_gap_event(esp_gap_ble_cb_event_t event, esp_bl
               param->ble_security.key_notif.bd_addr[0], param->ble_security.key_notif.bd_addr[1],
               param->ble_security.key_notif.bd_addr[2], param->ble_security.key_notif.bd_addr[3],
               param->ble_security.key_notif.bd_addr[4], param->ble_security.key_notif.bd_addr[5]);
-      ESP_LOGI(TAG, "BLE passkey notification from %s: %06d", addr_str, param->ble_security.key_notif.passkey);
+      ESP_LOGI(TAG, "BLE passkey notification from %s: %06" PRIu32, addr_str, param->ble_security.key_notif.passkey);
       ESP_LOGI(TAG, "  Note: Using 'Just Works' pairing - passkey is for display only");
       break;
     }

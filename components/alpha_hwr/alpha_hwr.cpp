@@ -1,6 +1,7 @@
 #include "alpha_hwr.h"
 #include "frame_parser.h"
 #include "telemetry_decoder.h"
+#include <cinttypes>
 
 namespace esphome {
 namespace alpha_hwr {
@@ -110,7 +111,7 @@ void AlphaHwrComponent::setup() {
     // single-pump node it means "the pump is bonded."
     if (this->reconnect_settle_ms_ > 0 && this->parent_ != nullptr &&
         esp_ble_get_bond_device_num() > 0) {
-      ESP_LOGI(TAG, "Disconnected; holding reconnect until pump reappears + %u ms",
+      ESP_LOGI(TAG, "Disconnected; holding reconnect until pump reappears + %" PRIu32 " ms",
                this->reconnect_settle_ms_);
       this->parent_->set_auto_connect(false);
       this->reconnect_settling_ = true;
@@ -320,7 +321,7 @@ bool AlphaHwrComponent::parse_device(
   }
   // Pump is advertising again after the disconnect — start the settle timer once.
   this->reconnect_timer_armed_ = true;
-  ESP_LOGI(TAG, "Pump reappeared; holding reconnect %u ms to let it settle",
+  ESP_LOGI(TAG, "Pump reappeared; holding reconnect %" PRIu32 " ms to let it settle",
            this->reconnect_settle_ms_);
   this->set_timeout("reconnect_settle", this->reconnect_settle_ms_, [this]() {
     ESP_LOGI(TAG, "Reconnect settle window elapsed; allowing reconnect");
@@ -758,7 +759,7 @@ void AlphaHwrComponent::read_statistics() {
   device_info_service_.read_statistics_async(
       [this](bool success, uint32_t start_count, float operating_hours) {
         if (success) {
-          ESP_LOGI(TAG, "Statistics read successful: %u starts, %.1f hours",
+          ESP_LOGI(TAG, "Statistics read successful: %" PRIu32 " starts, %.1f hours",
                    start_count, operating_hours);
           if (this->start_count_sensor_) {
             this->start_count_sensor_->publish_state(start_count);

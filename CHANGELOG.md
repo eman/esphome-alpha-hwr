@@ -74,6 +74,19 @@
 
 ### Fixed
 
+- **All compiler warnings in the ESP-IDF build** — the component emitted 21
+  warnings, all of them format mismatches. On ESP32, `uint32_t` is
+  `long unsigned int`, so the `%u`/`%d` used for millisecond timers,
+  timestamps, start counts and the BLE passkey did not match their arguments
+  (`-Wformat=`); these are now `PRIu32` from `<cinttypes>`.
+  `ESPTime::timestamp` is printed via a `long long` cast since `time_t` width
+  varies by platform. The `"HH:MM"` helpers in `schedule_entry.h` tripped
+  `-Wformat-truncation=` because the compiler could not prove a `uint8_t`
+  hour/minute renders in two digits; the fields are now bounded so the 6-byte
+  buffer can never truncate. No behavioural change — verified with a full
+  ESP-IDF build (0 warnings) and the host test suite (`-Wall -Wextra`, 494
+  assertions passing).
+
 - **Cycle Time Control read/write targeted the wrong GENI object**
   ([#106](https://github.com/eman/esphome-alpha-hwr/issues/106)) —
   The component read and wrote cycle times through Object 91 Sub 430, which
