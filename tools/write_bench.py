@@ -297,12 +297,37 @@ def build_upload(enabled: str, entry_args: list[str]) -> tuple[str, str]:
     Each entry spec is "layer,day,sh,sm,eh,em" (same fields as the wire
     grammar). Returns (payload, expected_hash); expected hash is only
     meaningful when enabled is "0"/"1" (not "-").
+
+    Validation mirrors schedule_codec's parse rules, so a spec the firmware
+    would reject dies here instead of printing a misleading expected hash.
     """
+    if enabled not in ("0", "1", "-"):
+        die(f"enabled flag must be 0, 1 or -: {enabled!r}")
+    if len(entry_args) > 35:
+        die("more than 35 entries")
     entries = []
+    seen: set[tuple[int, int]] = set()
     for spec in entry_args:
-        fields = [int(x) for x in spec.split(",")]
+        try:
+            fields = [int(x) for x in spec.split(",")]
+        except ValueError:
+            die(f"non-numeric field in entry: {spec!r}")
         if len(fields) != 6:
             die(f"entry needs 6 comma-separated fields: {spec!r}")
+        layer, day, sh, sm, eh, em = fields
+        if not 0 <= layer <= 4:
+            die(f"layer must be 0-4: {spec!r}")
+        if not 0 <= day <= 6:
+            die(f"day must be 0-6: {spec!r}")
+        if not (0 <= sh <= 23 and 0 <= eh <= 23):
+            die(f"hour must be 0-23: {spec!r}")
+        if not (0 <= sm <= 59 and 0 <= em <= 59):
+            die(f"minute must be 0-59: {spec!r}")
+        if sh * 60 + sm >= eh * 60 + em:
+            die(f"start must precede end (same-day interval): {spec!r}")
+        if (layer, day) in seen:
+            die(f"duplicate (layer, day) cell: {spec!r}")
+        seen.add((layer, day))
         entries.append(tuple(fields))
     payload = ";".join([f"v1,{enabled}"] + [",".join(str(f) for f in e) for e in entries])
     expected = _canonical_hash(entries, enabled == "1") if enabled in ("0", "1") else "(n/a)"
