@@ -109,6 +109,15 @@
 
 ### Changed
 
+- **Constant Speed Setpoint slider steps by 25 RPM instead of 100**
+  ([#108](https://github.com/eman/esphome-alpha-hwr/issues/108)) —
+  The pump resolves 25 RPM increments (each one yields a distinct,
+  progressively higher flow), whereas a single 100 RPM click moved flow by
+  roughly 20-25%. The finer step also divides the 500 RPM floor evenly, so
+  hardware minimums such as 1650 RPM can be selected directly rather than
+  reached by undershooting and waiting for the pump to clamp. Range
+  (500-4500 RPM) is unchanged.
+
 - **`pump_set_cycle_times` surface changes for #107** — the service now
   declares a `flow` field; Home Assistant requires every declared field, so
   existing callers must add `flow: 0` (the bench tool defaults it
