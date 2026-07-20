@@ -434,7 +434,13 @@ public:
    * Find the first free (disabled) single event slot.
    * @return Index of free slot, or -1 if all slots are full
    */
-  int find_free_single_event_slot() const;
+  /**
+   * Find a free single-event slot. A slot is free when it is absent from
+   * the cache, disabled, or — when reusable_before_ts > 0 — holds an event
+   * that ended before that timestamp (expired events do not exhaust the
+   * 35-slot pool; writing a new event over one both reuses and clears it).
+   */
+  int find_free_single_event_slot(uint32_t reusable_before_ts = 0) const;
 
   /**
    * Get cached single events.
@@ -566,6 +572,15 @@ public:
                        std::function<void(bool)> on_complete);
 
   /**
+   * Write a full 42-byte layer image (7 days x 6 bytes) in one whole-layer
+   * write + configuration commit (RFC-005 bulk upload). Requires the layer
+   * to be cached (call read_entries_async first); patches the cache and
+   * reuses the same write path as set_entry_async.
+   */
+  void write_layer_image_async(uint8_t layer, const uint8_t image[42],
+                               std::function<void(bool)> on_complete);
+
+  /**
    * Clear (disable) a single day's schedule entry on a layer.
    * Writes a disabled entry for the specified day.
    *
@@ -589,6 +604,28 @@ public:
    * Truncated to 255 chars to fit HA's text sensor state length limit.
    */
   std::string generate_json() const;
+
+  /**
+   * Canonical schedule hash over the cached 7x5 grid + enabled flag
+   * (RFC-005 §5.2; algorithm in schedule_codec.h). Returns "unknown"
+   * until all 5 layers and the schedule state are cached, so the HA
+   * sensor never reports a hash computed from partial data. 19 chars —
+   * well under HA's 255-char state cap.
+   */
+  std::string current_hash() const;
+
+  /**
+   * Compact JSON of one cached layer (7 cells, [start_min,end_min] or 0).
+   * "unknown" while the layer is not cached. Read-back path for external
+   * schedulers (dhw-sensor-apps issue #7).
+   */
+  std::string layer_json(uint8_t layer) const;
+
+  /**
+   * Build the canonical 42-byte image of a cached layer (disabled days
+   * zero-filled). Returns false when the layer is not cached.
+   */
+  bool build_cached_layer_image(uint8_t layer, uint8_t out[42]) const;
 
   /**
    * Send configuration commit to persist schedule changes.

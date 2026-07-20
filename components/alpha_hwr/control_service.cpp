@@ -339,7 +339,7 @@ bool ControlService::get_mode_async(std::function<void(bool, ControlMode)> on_co
             offset = 3;
           }
 
-          if (payload_len >= offset + 7) {
+          if (payload_len >= (size_t)(offset + 7)) {
             uint8_t control_source = payload[offset];
             uint8_t operation_mode = payload[offset + 1];
             uint8_t control_mode_byte = payload[offset + 2];

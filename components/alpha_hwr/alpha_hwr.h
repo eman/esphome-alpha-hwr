@@ -95,7 +95,7 @@ public:
         device_info_service_(transport_, session_), time_service_(&transport_),
         event_log_service_(transport_, session_),
         history_service_(transport_, session_),
-        write_op_service_(control_service_, schedule_service_, session_) {
+        write_op_service_(control_service_, schedule_service_) {
     parent->register_ble_node(this);
     parent_ = parent;
     ESP_LOGI(TAG, "AlphaHwrComponent constructor");
@@ -154,6 +154,13 @@ public:
   }
   void set_schedule_text_sensor(text_sensor::TextSensor *sensor) {
     schedule_text_sensor_ = sensor;
+  }
+  void set_schedule_hash_text_sensor(text_sensor::TextSensor *sensor) {
+    schedule_hash_text_sensor_ = sensor;
+  }
+  void set_schedule_layer_text_sensor(uint8_t layer,
+                                      text_sensor::TextSensor *sensor) {
+    if (layer < 5) schedule_layer_sensors_[layer] = sensor;
   }
   void set_control_mode_text_sensor(text_sensor::TextSensor *sensor) {
     control_mode_sensor_ = sensor;
@@ -325,6 +332,10 @@ private:
 #ifdef USE_TEXT_SENSOR
   // Schedule display sensor
   text_sensor::TextSensor *schedule_text_sensor_{nullptr};
+  text_sensor::TextSensor *schedule_hash_text_sensor_{nullptr};
+  text_sensor::TextSensor *schedule_layer_sensors_[5] = {nullptr, nullptr,
+                                                         nullptr, nullptr,
+                                                         nullptr};
   // Control mode display sensor
   text_sensor::TextSensor *control_mode_sensor_{nullptr};
   // Device information text sensors
@@ -446,6 +457,9 @@ public:
   }
   void submit_refresh_single_events(const std::string &op_id) {
     write_op_service_.submit_refresh_single_events(op_id);
+  }
+  void submit_upload_schedule(codec::UploadRequest request, const std::string &op_id) {
+    write_op_service_.submit_upload_schedule(std::move(request), op_id);
   }
 
   // Control service access methods (for ESPHome switches/buttons).
@@ -841,6 +855,7 @@ public:
    *   - Entry: [start_minutes, end_minutes] or 0 (disabled/empty)
    */
   void publish_schedule_json() {
+    this->publish_schedule_hash();
 #ifdef USE_TEXT_SENSOR
     if (!this->schedule_text_sensor_)
       return;
@@ -848,6 +863,29 @@ public:
     std::string json = schedule_service_.generate_json();
     this->schedule_text_sensor_->publish_state(json);
     ESP_LOGD(TAG, "Published schedule JSON (%zu chars)", json.size());
+#endif
+  }
+
+  /**
+   * Publish the canonical schedule hash (RFC-005 §5.2) — the scheduler's
+   * sync-verification sensor. "unknown" until the full grid is cached.
+   */
+  void publish_schedule_hash() {
+#ifdef USE_TEXT_SENSOR
+    // Per-layer read-back sensors (dhw-sensor-apps issue #7): each layer's
+    // compact JSON always fits HA's 255-char cap, unlike the aggregate
+    // Weekly Schedule sensor.
+    for (uint8_t layer = 0; layer < 5; layer++) {
+      if (this->schedule_layer_sensors_[layer] != nullptr) {
+        this->schedule_layer_sensors_[layer]->publish_state(
+            schedule_service_.layer_json(layer));
+      }
+    }
+    if (!this->schedule_hash_text_sensor_)
+      return;
+    std::string hash = schedule_service_.current_hash();
+    this->schedule_hash_text_sensor_->publish_state(hash);
+    ESP_LOGD(TAG, "Published schedule hash %s", hash.c_str());
 #endif
   }
 

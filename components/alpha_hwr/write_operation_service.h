@@ -7,6 +7,7 @@
 #include <string>
 #include <vector>
 #include "control_service.h"
+#include "schedule_codec.h"
 
 namespace esphome {
 namespace alpha_hwr {
@@ -30,6 +31,7 @@ enum class WriteCommand : uint8_t {
   CLEAR_SINGLE_EVENT,
   REFRESH_SCHEDULE,
   REFRESH_SINGLE_EVENTS,
+  UPLOAD_SCHEDULE,  // bulk full-state grid upload (RFC-005 / issue #5)
 };
 
 /**
@@ -45,6 +47,7 @@ enum class WriteStatus : uint8_t {
                // before any wire write and deterministic (never worth a retry)
   TIMEOUT,     // no pump confirmation within the operation's budget
   SUPERSEDED,  // replaced by a newer queued write to the same resource
+  PARTIAL,     // upload_schedule only: some layers confirmed, some failed
 };
 
 /** Where a write operation originated (reported in the settle event). */
@@ -94,6 +97,11 @@ struct WriteResult {
   int8_t sched_enabled{-1};
   int16_t event_count{-1};
 
+  // UPLOAD_SCHEDULE: per-layer outcome summary + post-op canonical hash
+  std::string layers_written;   // e.g. "0,2"
+  std::string layers_skipped;   // e.g. "1,3,4" (already matching, no write)
+  std::string schedule_hash;    // "" when rejected before any wire write
+
   // The originally requested values, echoed so the event is self-contained
   // for logging and retry decisions (review feedback on #92). Populated
   // alongside their settled counterparts; for accepted results they match.
@@ -136,7 +144,7 @@ class ScheduleService;
  */
 class WriteOperationService {
  public:
-  WriteOperationService(ControlService &control, ScheduleService &schedule, core::Session &session);
+  WriteOperationService(ControlService &control, ScheduleService &schedule);
 
   /** Delegate for scheduling delayed steps (the component's set_timeout). */
   void set_schedule_callback(std::function<void(std::function<void()>, uint32_t)> callback) {
@@ -205,6 +213,17 @@ class WriteOperationService {
   void submit_refresh_single_events(const std::string &op_id,
                                     std::function<void(bool)> done = nullptr,
                                     WriteOrigin origin = WriteOrigin::SERVICE);
+  /**
+   * Bulk full-state schedule upload (RFC-005). The request expresses the
+   * entire 7x5 grid; layers whose fresh readback already matches the
+   * desired image are skipped (no BLE write). Terminates ACCEPTED (all
+   * layers confirmed, possibly all skipped), PARTIAL (mixed), REJECTED,
+   * TIMEOUT or SUPERSEDED — always exactly one terminal event.
+   */
+  void submit_upload_schedule(codec::UploadRequest request,
+                              const std::string &op_id,
+                              std::function<void(bool)> done = nullptr,
+                              WriteOrigin origin = WriteOrigin::SERVICE);
 
   /**
    * Terminate every queued and in-flight operation with TIMEOUT
@@ -251,6 +270,13 @@ class WriteOperationService {
     uint32_t begin_ts{0}, end_ts{0};
     int16_t event_count{-1};
 
+    // UPLOAD_SCHEDULE fields
+    codec::UploadRequest upload;
+    uint8_t upload_layer{0};        // cursor for the layer loop / confirms
+    uint8_t upload_written_mask{0};
+    uint8_t upload_skipped_mask{0};
+    uint8_t upload_failed_mask{0};
+
     // Pristine copies of the request, captured at submit and never
     // overwritten, so the settle event can echo what was asked for.
     ControlMode req_mode{ControlMode::NONE};
@@ -291,6 +317,11 @@ class WriteOperationService {
   void confirm_single_event_(uint32_t seq);
   void run_refresh_schedule_(uint32_t seq);
   void run_refresh_single_events_(uint32_t seq);
+  void run_upload_schedule_(uint32_t seq);
+  void upload_next_layer_(uint32_t seq);
+  void upload_apply_enabled_(uint32_t seq);
+  void confirm_upload_(uint32_t seq);
+  void finish_upload_(uint32_t seq);
   /**
    * Overview precondition shared by every schedule write: the configuration
    * commit silently refuses without a cached ClockProgramOverview, so poll it
@@ -306,7 +337,6 @@ class WriteOperationService {
 
   ControlService &control_;
   ScheduleService &schedule_service_;
-  core::Session &session_;
 
   std::deque<Operation> queue_;
   uint32_t next_seq_{1};
@@ -343,6 +373,9 @@ class WriteOperationService {
   static constexpr uint32_t WATCHDOG_SINGLE_EVENT_MS = 60000;
   static constexpr uint32_t WATCHDOG_REFRESH_SCHEDULE_MS = 30000;
   static constexpr uint32_t WATCHDOG_REFRESH_EVENTS_MS = 120000;
+  // Upload: overview + up to 5 x (read + write + commit) + settle +
+  // readbacks + margin (RFC-005 §3.4).
+  static constexpr uint32_t WATCHDOG_UPLOAD_MS = 150000;
 };
 
 }  // namespace services

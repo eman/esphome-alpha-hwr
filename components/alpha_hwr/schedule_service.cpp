@@ -9,6 +9,7 @@
 
 #include "schedule_service.h"
 #include "codec.h"
+#include "schedule_codec.h"
 #include "esphome/core/hal.h"
 #include "esphome/core/log.h"
 #include "frame_builder.h"
@@ -411,8 +412,8 @@ bool ScheduleService::read_entries(std::vector<ScheduleEntry> *entries,
 
   this->transport_.send_apdu_command(
       apdu, 5, 0xDE01, 0,
-      [this, entries, layer](bool success, const uint8_t *payload,
-                             size_t payload_len) {
+      [entries, layer](bool success, const uint8_t *payload,
+                       size_t payload_len) {
         if (!success) {
           ESP_LOGW(TAG,
                    "Failed to read schedule entries for layer %d (timeout)",
@@ -667,7 +668,7 @@ bool ScheduleService::write_entries_async(
 
   this->transport_.send_apdu_command(
       apdu, sizeof(apdu), 0xDE01, 0,
-      [on_complete, layer](bool success, const uint8_t *data, size_t len) {
+      [on_complete, layer](bool success, const uint8_t * /*data*/, size_t /*len*/) {
         if (success) {
           ESP_LOGI(TAG, "Async write completed with ACK for layer %d", layer);
         } else {
@@ -924,6 +925,25 @@ void ScheduleService::set_entry_async(uint8_t layer, uint8_t day_index,
   }
 }
 
+void ScheduleService::write_layer_image_async(
+    uint8_t layer, const uint8_t image[42],
+    std::function<void(bool)> on_complete) {
+  if (layer > 4 || !layer_cached_[layer]) {
+    ESP_LOGE(TAG, "write_layer_image: layer %d not cached", layer);
+    if (on_complete)
+      on_complete(false);
+    return;
+  }
+  if (!this->session_.is_ready()) {
+    ESP_LOGE(TAG, "write_layer_image: session not ready");
+    if (on_complete)
+      on_complete(false);
+    return;
+  }
+  memcpy(cached_layer_data_[layer], image, 42);
+  write_cached_layer_async(layer, on_complete);
+}
+
 void ScheduleService::clear_entry_async(uint8_t layer, uint8_t day_index,
                                         std::function<void(bool)> on_complete) {
   // Create a disabled entry
@@ -967,8 +987,8 @@ void ScheduleService::write_cached_layer_async(
 
   this->transport_.send_apdu_command(
       apdu, sizeof(apdu), 0xDE01, 0,
-      [this, on_complete, layer](bool success, const uint8_t *data,
-                                 size_t len) {
+      [this, on_complete, layer](bool /*success*/, const uint8_t * /*data*/,
+                                 size_t /*len*/) {
         // Send configuration commit after write
         this->send_configuration_commit();
         ESP_LOGI(TAG, "Layer %d write + config commit sent", layer);
@@ -1020,7 +1040,7 @@ void ScheduleService::read_single_events_async(
 
     this->transport_.send_apdu_command(
       apdu, 5, 0xDC01, 0,
-        [this, idx, events, on_complete, max_events,
+        [idx, events, on_complete,
          read_next](bool success, const uint8_t *payload, size_t payload_len) {
           if (success && payload_len >= 13) {
             SingleEvent ev = SingleEvent::from_bytes(payload + 3, idx);
@@ -1069,8 +1089,8 @@ void ScheduleService::write_single_event_async(
 
   this->transport_.send_apdu_command(
       apdu, sizeof(apdu), 0xDC01, 0,
-      [this, on_complete, event](bool success, const uint8_t *data,
-                                 size_t len) {
+      [this, on_complete, event](bool /*success*/, const uint8_t * /*data*/,
+                                 size_t /*len*/) {
         this->send_configuration_commit();
         ESP_LOGI(TAG, "Single event slot %d write + commit sent", event.index);
 
@@ -1104,13 +1124,18 @@ void ScheduleService::clear_single_event_async(
   write_single_event_async(disabled, on_complete);
 }
 
-int ScheduleService::find_free_single_event_slot() const {
+int ScheduleService::find_free_single_event_slot(
+    uint32_t reusable_before_ts) const {
   uint8_t max_events = overview_cached_ ? overview_structure_[1] : 35;
   if (!single_events_cached_)
     return 0;
 
   std::set<uint8_t> used;
   for (const auto &ev : cached_single_events_) {
+    if (reusable_before_ts > 0 &&
+        (!ev.enabled || ev.end_timestamp < reusable_before_ts)) {
+      continue;  // disabled or expired — reusable
+    }
     used.insert(ev.index);
   }
   for (uint8_t i = 0; i < max_events; i++) {
@@ -1224,6 +1249,46 @@ bool ScheduleService::get_schedule_display_string(
 
   *result = output;
   return true;
+}
+
+bool ScheduleService::build_cached_layer_image(uint8_t layer,
+                                               uint8_t out[42]) const {
+  if (layer > 4 || !this->layer_cached_[layer])
+    return false;
+  memset(out, 0, 42);
+  for (uint8_t day = 0; day < 7; day++) {
+    ScheduleEntry entry;
+    if (!this->get_cached_entry(layer, day, &entry))
+      return false;
+    uint8_t *cell = out + day * 6;
+    if (entry.is_enabled()) {
+      cell[0] = 0x01;
+      cell[1] = 0x02;
+      cell[2] = entry.get_begin_hour();
+      cell[3] = entry.get_begin_minute();
+      cell[4] = entry.get_end_hour();
+      cell[5] = entry.get_end_minute();
+    }
+  }
+  return true;
+}
+
+std::string ScheduleService::layer_json(uint8_t layer) const {
+  uint8_t image[42];
+  if (!this->build_cached_layer_image(layer, image))
+    return "unknown";
+  return codec::layer_image_to_json(image);
+}
+
+std::string ScheduleService::current_hash() const {
+  if (!this->schedule_state_cached_)
+    return "unknown";
+  uint8_t images[codec::UPLOAD_LAYERS][codec::LAYER_IMAGE_BYTES];
+  for (uint8_t layer = 0; layer < codec::UPLOAD_LAYERS; layer++) {
+    if (!this->build_cached_layer_image(layer, images[layer]))
+      return "unknown";
+  }
+  return codec::schedule_hash(images, this->schedule_enabled_);
 }
 
 std::string ScheduleService::generate_json() const {

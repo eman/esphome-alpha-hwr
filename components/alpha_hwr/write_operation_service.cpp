@@ -4,6 +4,7 @@
 #include <algorithm>
 #include <cstdarg>
 #include <cstdio>
+#include <cstring>
 
 namespace esphome {
 namespace alpha_hwr {
@@ -25,6 +26,7 @@ const char *write_command_to_string(WriteCommand cmd) {
     case WriteCommand::CLEAR_SINGLE_EVENT:    return "clear_single_event";
     case WriteCommand::REFRESH_SCHEDULE:      return "refresh_schedule";
     case WriteCommand::REFRESH_SINGLE_EVENTS: return "refresh_single_events";
+    case WriteCommand::UPLOAD_SCHEDULE:       return "upload_schedule";
   }
   return "unknown";
 }
@@ -37,6 +39,7 @@ const char *write_status_to_string(WriteStatus status) {
     case WriteStatus::TIMEOUT:    return "timeout";
     case WriteStatus::INVALID:    return "invalid";
     case WriteStatus::SUPERSEDED: return "superseded";
+    case WriteStatus::PARTIAL:    return "partial";
   }
   return "unknown";
 }
@@ -53,9 +56,8 @@ static std::string format_detail(const char *fmt, ...) {
   return std::string(buf);
 }
 
-WriteOperationService::WriteOperationService(ControlService &control, ScheduleService &schedule,
-                                             core::Session &session)
-    : control_(control), schedule_service_(schedule), session_(session) {}
+WriteOperationService::WriteOperationService(ControlService &control, ScheduleService &schedule)
+    : control_(control), schedule_service_(schedule) {}
 
 // ---------------------------------------------------------------------------
 // Queue machinery
@@ -108,6 +110,19 @@ std::vector<std::string> WriteOperationService::resource_keys_(const Operation &
       // per-slot keys can't be computed at submit time. Last write wins
       // across the single-event domain.
       return {"single_event"};
+    case WriteCommand::UPLOAD_SCHEDULE: {
+      // Full-grid write: collides with every queued per-entry op, the
+      // schedule-enabled op, and other uploads (last write wins).
+      std::vector<std::string> keys;
+      keys.reserve(36);
+      for (uint8_t layer = 0; layer < 5; layer++) {
+        for (uint8_t day = 0; day < 7; day++) {
+          keys.push_back(format_detail("sched_entry:%u:%u", layer, day));
+        }
+      }
+      keys.push_back("sched_enabled");
+      return keys;
+    }
     case WriteCommand::REFRESH_SCHEDULE:
       return {"refresh_schedule"};
     case WriteCommand::REFRESH_SINGLE_EVENTS:
@@ -173,6 +188,7 @@ void WriteOperationService::start_front_() {
     case WriteCommand::CLEAR_SINGLE_EVENT:    budget = WATCHDOG_SINGLE_EVENT_MS; break;
     case WriteCommand::REFRESH_SCHEDULE:      budget = WATCHDOG_REFRESH_SCHEDULE_MS; break;
     case WriteCommand::REFRESH_SINGLE_EVENTS: budget = WATCHDOG_REFRESH_EVENTS_MS; break;
+    case WriteCommand::UPLOAD_SCHEDULE:       budget = WATCHDOG_UPLOAD_MS; break;
     default: break;
   }
   arm_watchdog_(seq, budget);
@@ -190,6 +206,7 @@ void WriteOperationService::start_front_() {
     case WriteCommand::CLEAR_SINGLE_EVENT:    run_single_event_(seq); break;
     case WriteCommand::REFRESH_SCHEDULE:      run_refresh_schedule_(seq); break;
     case WriteCommand::REFRESH_SINGLE_EVENTS: run_refresh_single_events_(seq); break;
+    case WriteCommand::UPLOAD_SCHEDULE:       run_upload_schedule_(seq); break;
   }
 }
 
@@ -290,6 +307,26 @@ void WriteOperationService::finish_(uint32_t seq, WriteStatus status, const std:
     case WriteCommand::REFRESH_SINGLE_EVENTS:
       result.event_count = op.event_count;
       break;
+    case WriteCommand::UPLOAD_SCHEDULE: {
+      auto mask_to_list = [](uint8_t mask) {
+        std::string out;
+        for (uint8_t layer = 0; layer < 5; layer++) {
+          if ((mask & (1 << layer)) == 0) continue;
+          if (!out.empty()) out += ",";
+          out += std::to_string(layer);
+        }
+        return out;
+      };
+      result.layers_written = mask_to_list(op.upload_written_mask);
+      result.layers_skipped = mask_to_list(op.upload_skipped_mask);
+      // Post-op hash: only meaningful once wire work happened; empty on
+      // rejection before the first write.
+      if (op.upload_written_mask != 0 || op.upload_skipped_mask != 0) {
+        result.schedule_hash = schedule_service_.current_hash();
+      }
+      result.sched_enabled = op.upload.enabled;
+      break;
+    }
   }
 
   ESP_LOGI(TAG, "%s (op_id='%s') settled: %s%s%s",
@@ -446,7 +483,7 @@ void WriteOperationService::run_set_enabled_(uint32_t seq) {
   op->mode = control_.current_mode_;
   op->value = control_.get_setpoint_for_mode(op->mode);
 
-  control_.send_run_command(op->enabled, [this, seq](bool acked, bool rejected) {
+  control_.send_run_command(op->enabled, [this, seq](bool /*acked*/, bool rejected) {
     Operation *op = find_(seq);
     if (op == nullptr || op->phase == Phase::DONE) return;
     if (rejected) {
@@ -1146,7 +1183,9 @@ void WriteOperationService::run_single_event_(uint32_t seq) {
     auto resolve = [this, seq]() {
       Operation *op = find_(seq);
       if (op == nullptr || op->phase == Phase::DONE) return;
-      int slot = schedule_service_.find_free_single_event_slot();
+      // The new event's begin timestamp doubles as "now": any cached
+      // event that ended before it is expired and its slot reusable.
+      int slot = schedule_service_.find_free_single_event_slot(op->begin_ts);
       if (slot < 0) {
         finish_(seq, WriteStatus::REJECTED, "no free single event slots");
         return;
@@ -1265,6 +1304,169 @@ void WriteOperationService::run_refresh_single_events_(uint32_t seq) {
       op->event_count = static_cast<int16_t>(events.size());
       finish_(seq, WriteStatus::ACCEPTED, "");
     });
+}
+
+// ---------------------------------------------------------------------------
+// UPLOAD_SCHEDULE (RFC-005 / dhw-sensor-apps issue #5)
+//
+// Full-state bulk upload: overview precondition, then per layer 0..4 a
+// mandatory fresh read, a memcmp against the desired 42-byte image (layers
+// already matching are SKIPPED — no BLE write), a whole-layer write + commit
+// for the rest, the shared settle delay, and a readback confirm of every
+// written layer. Exactly one terminal event; PARTIAL when some layers
+// confirmed and some failed.
+// ---------------------------------------------------------------------------
+
+void WriteOperationService::submit_upload_schedule(codec::UploadRequest request,
+                                                   const std::string &op_id,
+                                                   std::function<void(bool)> done,
+                                                   WriteOrigin origin) {
+  Operation op;
+  op.command = WriteCommand::UPLOAD_SCHEDULE;
+  op.op_id = op_id;
+  op.origin = origin;
+  op.done = std::move(done);
+  op.upload = std::move(request);
+  submit_(std::move(op));
+}
+
+void WriteOperationService::run_upload_schedule_(uint32_t seq) {
+  Operation *op = find_(seq);
+  if (op == nullptr || op->phase == Phase::DONE) return;
+
+  op->phase = Phase::RESOLVING;
+  ensure_overview_(seq, [this, seq]() {
+    Operation *op = find_(seq);
+    if (op == nullptr || op->phase == Phase::DONE) return;
+    op->phase = Phase::WRITING;
+    op->upload_layer = 0;
+    upload_next_layer_(seq);
+  });
+}
+
+void WriteOperationService::upload_next_layer_(uint32_t seq) {
+  Operation *op = find_(seq);
+  if (op == nullptr || op->phase == Phase::DONE) return;
+
+  if (op->upload_layer >= codec::UPLOAD_LAYERS) {
+    upload_apply_enabled_(seq);
+    return;
+  }
+  uint8_t layer = op->upload_layer;
+
+  // Mandatory fresh read — never trust a stale cache before deciding to
+  // skip or write (same rule as the per-entry op).
+  schedule_service_.read_entries_async(layer,
+    [this, seq, layer](bool ok, const std::vector<ScheduleEntry> &) {
+      Operation *op = find_(seq);
+      if (op == nullptr || op->phase == Phase::DONE) return;
+
+      if (!ok) {
+        ESP_LOGW(TAG, "upload: layer %u read failed; layer not written", layer);
+        op->upload_failed_mask |= (1 << layer);
+        op->upload_layer++;
+        upload_next_layer_(seq);
+        return;
+      }
+
+      uint8_t desired[codec::LAYER_IMAGE_BYTES];
+      codec::build_layer_image(op->upload, layer, desired);
+      uint8_t actual[codec::LAYER_IMAGE_BYTES];
+      if (schedule_service_.build_cached_layer_image(layer, actual) &&
+          memcmp(desired, actual, codec::LAYER_IMAGE_BYTES) == 0) {
+        ESP_LOGD(TAG, "upload: layer %u already matches — skipped", layer);
+        op->upload_skipped_mask |= (1 << layer);
+        op->upload_layer++;
+        upload_next_layer_(seq);
+        return;
+      }
+
+      // Whole-layer write of the desired image (one 42-byte GENI frame +
+      // configuration commit), via the same proven path as set_entry_async.
+      schedule_service_.write_layer_image_async(layer, desired,
+        [this, seq, layer](bool /*always_true*/) {
+          Operation *op = find_(seq);
+          if (op == nullptr || op->phase == Phase::DONE) return;
+          op->upload_written_mask |= (1 << layer);
+          op->upload_layer++;
+          upload_next_layer_(seq);
+        });
+    });
+}
+
+void WriteOperationService::upload_apply_enabled_(uint32_t seq) {
+  Operation *op = find_(seq);
+  if (op == nullptr || op->phase == Phase::DONE) return;
+
+  bool current = false;
+  bool have_state = schedule_service_.get_state(&current);
+  if (op->upload.enabled < 0 ||
+      (have_state && current == (op->upload.enabled == 1))) {
+    op->phase = Phase::CONFIRMING;
+    op->upload_layer = 0;  // reuse as the confirm cursor
+    schedule_([this, seq]() { confirm_upload_(seq); }, SCHED_SETTLE_DELAY_MS);
+    return;
+  }
+  schedule_service_.set_state_async(op->upload.enabled == 1,
+    [this, seq](bool /*sent*/) {
+      Operation *op = find_(seq);
+      if (op == nullptr || op->phase == Phase::DONE) return;
+      op->phase = Phase::CONFIRMING;
+      op->upload_layer = 0;  // reuse as the confirm cursor
+      schedule_([this, seq]() { confirm_upload_(seq); }, SCHED_SETTLE_DELAY_MS);
+    });
+}
+
+void WriteOperationService::confirm_upload_(uint32_t seq) {
+  Operation *op = find_(seq);
+  if (op == nullptr || op->phase == Phase::DONE) return;
+
+  // Readback-confirm each WRITTEN layer; upload_layer was reset to 0 on
+  // the transition into CONFIRMING and now serves as the confirm cursor.
+  while (op->upload_layer < codec::UPLOAD_LAYERS &&
+         (op->upload_written_mask & (1 << op->upload_layer)) == 0) {
+    op->upload_layer++;
+  }
+  if (op->upload_layer >= codec::UPLOAD_LAYERS) {
+    finish_upload_(seq);
+    return;
+  }
+  uint8_t layer = op->upload_layer;
+  schedule_service_.read_entries_async(layer,
+    [this, seq, layer](bool ok, const std::vector<ScheduleEntry> &) {
+      Operation *op = find_(seq);
+      if (op == nullptr || op->phase == Phase::DONE) return;
+
+      uint8_t desired[codec::LAYER_IMAGE_BYTES];
+      codec::build_layer_image(op->upload, layer, desired);
+      uint8_t actual[codec::LAYER_IMAGE_BYTES];
+      bool match = ok &&
+                   schedule_service_.build_cached_layer_image(layer, actual) &&
+                   memcmp(desired, actual, codec::LAYER_IMAGE_BYTES) == 0;
+      if (!match) {
+        ESP_LOGW(TAG, "upload: layer %u readback does not match", layer);
+        op->upload_written_mask &= ~(1 << layer);
+        op->upload_failed_mask |= (1 << layer);
+      }
+      op->upload_layer++;
+      confirm_upload_(seq);
+    });
+}
+
+void WriteOperationService::finish_upload_(uint32_t seq) {
+  Operation *op = find_(seq);
+  if (op == nullptr || op->phase == Phase::DONE) return;
+
+  uint8_t confirmed = op->upload_written_mask | op->upload_skipped_mask;
+  if (op->upload_failed_mask == 0) {
+    finish_(seq, WriteStatus::ACCEPTED,
+            op->upload_written_mask == 0 ? "no-op" : "");
+  } else if (confirmed != 0) {
+    finish_(seq, WriteStatus::PARTIAL,
+            format_detail("failed layers mask 0x%02x", op->upload_failed_mask));
+  } else {
+    finish_(seq, WriteStatus::REJECTED, "no layer could be written");
+  }
 }
 
 }  // namespace services

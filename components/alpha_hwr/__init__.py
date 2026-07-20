@@ -50,6 +50,8 @@ CONF_CONTROL_STATE_POLL_INTERVAL = "control_state_poll_interval"
 CONF_ALARMS = "alarms"
 CONF_WARNINGS = "warnings"
 CONF_SCHEDULE = "schedule"
+CONF_SCHEDULE_HASH = "schedule_hash"
+CONF_SCHEDULE_LAYERS = [f"schedule_layer_{n}" for n in range(5)]
 CONF_CONTROL_MODE = "control_mode"
 CONF_SERIAL_NUMBER = "serial_number"
 CONF_SOFTWARE_VERSION = "software_version"
@@ -172,6 +174,17 @@ CONFIG_SCHEMA = cv.Schema(
         cv.Optional(CONF_SCHEDULE): text_sensor.text_sensor_schema(
             icon="mdi:calendar-clock",
         ),
+        cv.Optional(CONF_SCHEDULE_HASH): text_sensor.text_sensor_schema(
+            icon="mdi:pound",
+            entity_category=ENTITY_CATEGORY_DIAGNOSTIC,
+        ),
+        **{
+            cv.Optional(key): text_sensor.text_sensor_schema(
+                icon="mdi:calendar-export",
+                entity_category=ENTITY_CATEGORY_DIAGNOSTIC,
+            )
+            for key in CONF_SCHEDULE_LAYERS
+        },
         cv.Optional(CONF_CONTROL_MODE): text_sensor.text_sensor_schema(
             icon="mdi:cog",
         ),
@@ -336,6 +349,15 @@ async def to_code(config):
     if CONF_SCHEDULE in config:
         sens = await text_sensor.new_text_sensor(config[CONF_SCHEDULE])
         cg.add(var.set_schedule_text_sensor(sens))
+
+    if CONF_SCHEDULE_HASH in config:
+        sens = await text_sensor.new_text_sensor(config[CONF_SCHEDULE_HASH])
+        cg.add(var.set_schedule_hash_text_sensor(sens))
+
+    for layer, key in enumerate(CONF_SCHEDULE_LAYERS):
+        if key in config:
+            sens = await text_sensor.new_text_sensor(config[key])
+            cg.add(var.set_schedule_layer_text_sensor(layer, sens))
 
     if CONF_CONTROL_MODE in config:
         sens = await text_sensor.new_text_sensor(config[CONF_CONTROL_MODE])

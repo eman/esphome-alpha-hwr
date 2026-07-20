@@ -2,9 +2,15 @@ name: Unit Tests
 
 on:
   push:
-    branches: [ "main" ]
   pull_request:
     branches: [ "main" ]
+  workflow_dispatch:
+
+# A push to a branch with an open PR fires both events; cancel superseded
+# runs per ref so the queue stays short.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event_name }}-${{ github.ref }}
+  cancel-in-progress: true
 
 jobs:
   test:
