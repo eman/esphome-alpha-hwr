@@ -266,7 +266,12 @@ number:
     unit_of_measurement: "RPM"
     min_value: 500
     max_value: 4500
-    step: 100
+    # 25 RPM: the pump resolves steps this fine (each one yields a distinct,
+    # progressively higher flow), and a 100 RPM step was coarse enough that one
+    # click moved flow by ~20-25%. 25 also divides the 500 RPM floor evenly, so
+    # hardware minimums like 1650 are directly selectable rather than having to
+    # be reached by undershooting and waiting for the pump to clamp (#108).
+    step: 25
     mode: slider
     optimistic: false
     update_interval: 5s
