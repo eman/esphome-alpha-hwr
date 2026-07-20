@@ -1,5 +1,25 @@
 # Configuration
 
+## `api:` requirements
+
+The component's programmatic write services and the
+`esphome.alpha_hwr_write_settled` event (see
+[programmatic-interface.md](programmatic-interface.md)) require two flags on
+the ESPHome `api:` component:
+
+```yaml
+api:
+  custom_services: true
+  homeassistant_services: true
+```
+
+All shipped packages and examples set these. Without them the component still
+compiles and the entities work, but no services are registered and no settle
+events fire.
+
+> Naming note: the existing `reconnect_settle_time` option below is unrelated
+> to the `write_settled` event — it is a BLE reconnect hold-off.
+
 ## alpha_hwr Component
 
 | Option | Type | Default | Description |

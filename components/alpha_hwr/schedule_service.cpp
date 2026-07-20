@@ -121,9 +121,11 @@ bool ScheduleService::get_state(bool *result) {
   return true;
 }
 
-bool ScheduleService::poll_state() {
+bool ScheduleService::poll_state_async(std::function<void(bool)> on_complete) {
   if (!this->session_.is_ready()) {
     ESP_LOGV(TAG, "Cannot poll schedule state: session not ready");
+    if (on_complete)
+      on_complete(false);
     return false;
   }
 
@@ -140,9 +142,11 @@ bool ScheduleService::poll_state() {
   // IMPORTANT: Pump responds with SubID 0, not SubID 1 that we requested!
   this->transport_.send_apdu_command(
       apdu, 5, 0xDA01, 0,
-      [this](bool success, const uint8_t *payload, size_t payload_len) {
+      [this, on_complete](bool success, const uint8_t *payload, size_t payload_len) {
         if (!success) {
           ESP_LOGW(TAG, "Failed to poll schedule state (timeout)");
+          if (on_complete)
+            on_complete(false);
           return;
         }
 
@@ -158,9 +162,13 @@ bool ScheduleService::poll_state() {
           if (this->state_change_callback_) {
             this->state_change_callback_(this->schedule_enabled_);
           }
+          if (on_complete)
+            on_complete(true);
         } else {
           ESP_LOGW(TAG, "Schedule state response too short (%zu bytes)",
                    payload_len);
+          if (on_complete)
+            on_complete(false);
         }
       });
 
@@ -233,6 +241,97 @@ bool ScheduleService::set_state(bool enable) {
   this->schedule_state_cached_ = true;
 
   return true;
+}
+
+void ScheduleService::set_state_async(bool enable, std::function<void(bool)> on_sent) {
+  if (!this->session_.is_ready()) {
+    ESP_LOGE(TAG, "Cannot set schedule state: session not ready");
+    if (on_sent)
+      on_sent(false);
+    return;
+  }
+
+  // Unlike the legacy set_state(), require the real overview: blind RMW of the
+  // 10-byte ClockProgramOverview from hardcoded defaults could overwrite pump
+  // settings we never read (the issue-#92 clobber class). The operation layer
+  // polls the overview first, so this is only a safety net.
+  if (!this->overview_cached_) {
+    ESP_LOGE(TAG, "Cannot set schedule state: ClockProgramOverview not cached");
+    if (on_sent)
+      on_sent(false);
+    return;
+  }
+
+  ESP_LOGI(TAG, "%s schedule (verified path)...", enable ? "Enabling" : "Disabling");
+
+  uint8_t structure_bytes[10];
+  memcpy(structure_bytes, this->overview_structure_, 10);
+  structure_bytes[4] = enable ? 0x01 : 0x00;
+
+  // Same APDU as set_state(): Class 10 OpSpec 0x93, Object 84, SubID 1,
+  // Type 218 (ClockProgramOverview) — but sent expecting a response window so
+  // the caller gets a completion signal instead of fire-and-forget.
+  uint8_t apdu[21];
+  apdu[0] = 0x0A;
+  apdu[1] = 0x93;
+  apdu[2] = 84;
+  apdu[3] = 0x00;
+  apdu[4] = 0x01;
+  apdu[5] = 0x00;
+  apdu[6] = 0xDA;
+  apdu[7] = 0x01;
+  apdu[8] = 0x00;
+  apdu[9] = 0x00;
+  apdu[10] = 0x0A;
+  memcpy(apdu + 11, structure_bytes, 10);
+
+  this->transport_.send_apdu_command(
+      apdu, sizeof(apdu), 0xDA01, 0,
+      [this, enable, on_sent](bool acked, const uint8_t * /*data*/, size_t /*len*/) {
+        // The pump's two-phase commit often closes the window without a
+        // matchable ACK even on success; the authoritative confirm is the
+        // caller's poll_state_async() readback. Report "sent" either way.
+        ESP_LOGD(TAG, "Schedule %s write %s", enable ? "enable" : "disable",
+                 acked ? "ACKed" : "window closed (verify via readback)");
+        // Update cached copy so a subsequent commit doesn't revert the flag.
+        this->overview_structure_[4] = enable ? 0x01 : 0x00;
+        this->schedule_enabled_ = enable;
+        this->schedule_state_cached_ = true;
+        if (on_sent)
+          on_sent(true);
+      },
+      3000);
+}
+
+void ScheduleService::read_single_event_async(
+    uint8_t index, std::function<void(bool, const SingleEvent &)> on_complete) {
+  if (!this->session_.is_ready()) {
+    ESP_LOGE(TAG, "Cannot read single event: session not ready");
+    if (on_complete)
+      on_complete(false, SingleEvent{});
+    return;
+  }
+
+  uint16_t sub_id = 900 + index;
+  uint8_t apdu[5];
+  apdu[0] = 0x0A;
+  apdu[1] = 0x03;
+  apdu[2] = 84;
+  apdu[3] = (sub_id >> 8) & 0xFF;
+  apdu[4] = sub_id & 0xFF;
+
+  this->transport_.send_apdu_command(
+      apdu, 5, 0xDC01, 0,
+      [index, on_complete](bool success, const uint8_t *payload, size_t payload_len) {
+        if (!success || payload_len < 13) {
+          if (on_complete)
+            on_complete(false, SingleEvent{});
+          return;
+        }
+        if (on_complete)
+          on_complete(true, SingleEvent::from_bytes(payload + 3, index));
+      },
+      3000);
 }
 
 bool ScheduleService::send_configuration_commit() {

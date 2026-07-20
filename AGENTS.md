@@ -59,7 +59,12 @@ Logic that does not depend on ESP hardware **MUST** be testable on the host mach
 * **Frame Encoders/Decoders**: Verify that `build_packet` produces the exact byte sequence expected by the pump.
 * **Parsing Logic**: Verify `decode_packet` correctly extracts float values from raw hex strings.
 
-*Action*: Create simple C++ test files (e.g., `tests/test_protocol.cpp`) that can be compiled with `g++` or `clang` on the developer's machine to verify this logic without flashing a device.
+*Action*: Create simple C++ test files (e.g., `tests/test_protocol.cpp`) that can be compiled with `g++` or `clang` on the developer's machine to verify this logic without flashing a device. Run the whole suite with `cd tests && make test`.
+
+Two established styles in `tests/`:
+
+* **Logic replicas** (`test_control_state.cpp`) — re-declare minimal copies of production enums/logic in the test file; no component sources compiled.
+* **Real sources with mocks** (`test_schedule_service.cpp`, `test_write_operations.cpp`) — compile the actual component `.cpp` files against the mock ESPHome SDK in `tests/mocks/`, capture outgoing frames via `transport.set_write_callback`, drive time with the `mock_millis` global, and inject synthetic response frames via `transport.on_notification`. `test_write_operations.cpp` adds a small pump simulator that answers reads and applies/ignores/clamps writes, which is the template for testing write-operation behavior end-to-end.
 
 ### Hardware Verification
 
@@ -82,16 +87,17 @@ Note: `hwr-pump-example.yaml` is for documentation and compilation testing only 
 
 ## 6. Architecture: Layered Service-Based Design
 
-The ESPHome component follows the same layered, service-based architecture as the [Python Reference Implementation](reference/alpha-hwr/src/alpha_hwr). This architecture separates concerns, improves testability, and makes the codebase maintainable.
+The ESPHome component follows a layered, service-based architecture. This architecture separates concerns, improves testability, and makes the codebase maintainable.
 
 
 **Key Architectural Principles:**
 
 1. **Separation of Concerns**: Each layer has a single, well-defined responsibility.
-2. **Client as Facade**: The `AlphaHWRClient` is a thin orchestration layer that delegates all work to services.
+2. **Client as Facade**: The `AlphaHwrComponent` is a thin orchestration layer that delegates all work to services.
 3. **Services Own Business Logic**: Each service encapsulates all operations for its domain (e.g., `TelemetryService` handles all telemetry operations).
 4. **Protocol Layer is Stateless**: Frame builders and parsers are pure functions with no side effects.
 5. **Core Layer Manages State**: Transport handles BLE I/O, Session tracks connection state, Authentication handles handshake.
+6. **One Write Path**: Every pump write — entity-originated or service-originated — goes through the write-operation layer (`services::WriteOperationService`, issue #92), which serializes write sequences, confirms each write against a pump readback, and reports exactly one terminal settle result per operation.
 
 ### ESPHome Component Implementation (COMPLETED)
 
@@ -102,6 +108,7 @@ The ESPHome component follows the same layered, service-based architecture as th
 ```
 components/alpha_hwr/
 ├── alpha_hwr.h/cpp                  # Main component (thin facade, orchestration)
+├── api_bridge.h/cpp                 # HA services + write_settled event (issue #92)
 ├── core::                           # Foundation layer (namespace)
 │   ├── transport.h/cpp              # BLE I/O, command queue, FSM transaction manager
 │   ├── session.h/cpp                # Connection state machine
@@ -113,9 +120,14 @@ components/alpha_hwr/
 │   ├── frame_parser.h/cpp           # Parse GENI responses, validate CRC
 │   └── telemetry_decoder.h/cpp      # Decode Class 10 DataObjects to telemetry
 └── services::                       # Business logic layer (namespace)
+    ├── write_operation_service.h/cpp # Write lifecycle: serialize, confirm, settle events
     ├── telemetry_service.h/cpp      # Sensor readings and polling
-    ├── control_service.h/cpp        # Start/stop, modes, setpoints
+    ├── control_service.h/cpp        # Pump-state cache + control wire primitives
     ├── schedule_service.h/cpp       # Weekly schedule management
+    ├── device_info_service.h/cpp    # Device ID strings + operating statistics
+    ├── time_service.h/cpp           # Pump RTC synchronization
+    ├── event_log_service.h/cpp      # Start/stop event history
+    ├── history_service.h/cpp        # Trend data + cycle timestamps
     └── sensor_publisher.h/cpp       # Map telemetry to ESPHome sensors
 ```
 
@@ -125,7 +137,7 @@ components/alpha_hwr/
 * **Thin Facade**: `AlphaHwrComponent` delegates all operations to services (no direct protocol manipulation)
 * **Non-Blocking Transport**: Command queue + FSM state machine (`IDLE`, `SENDING_CHUNKS`, `AWAITING_RESPONSE`)
 * **Transaction Safety**: 50ms pacing between commands, response matching by Object/Sub-ID
-* **Reference Alignment**: File structure and APIs mirror Python implementation 1:1
+* **Write-and-Verify**: One write path through the operation layer; every write is confirmed against a pump readback and reported with a terminal settle event (see §8.4 and `docs/programmatic-interface.md`)
 
 ### Benefits of This Architecture
 
@@ -134,15 +146,14 @@ components/alpha_hwr/
 3. **Extensibility**: New features (e.g., `HistoryService`, `TimeService`) can be added without touching existing code.
 4. **Debuggability**: Smaller files and clear boundaries make bugs easier to isolate.
 5. **ESPHome Compatibility**: Flat file structure with namespace-based organization meets ESPHome requirements.
-6. **Reference Alignment**: Matches Python implementation 1:1, making it easier to verify correctness.
 
 ### Rules for Future Development
 
 1. **Maintain Layering**: New features should be added to the appropriate layer/namespace.
-2. **Follow Reference Implementation**: When implementing new features, mirror the Python code structure.
-3. **Document Protocol References**: Every packet builder/parser must cite the protocol doc section.
-4. **Test After Changes**: Verify `hwr-pump-example.yaml` compiles and `hwr-pump.yaml` works on hardware.
-5. **Keep Services Focused**: Each service should own a single domain (telemetry, control, schedules, etc.).
+2. **Document Protocol References**: Every packet builder/parser must cite the protocol doc section.
+3. **Test After Changes**: Verify `hwr-pump-example.yaml` compiles and `hwr-pump.yaml` works on hardware.
+4. **Keep Services Focused**: Each service should own a single domain (telemetry, control, schedules, etc.).
+5. **No New Standalone Write Paths**: Anything that writes to the pump must be a `WriteCommand` in the operation layer (see §9), so it inherits serialization, confirm readbacks, and the one-terminal-event contract.
 
 ## 7. Current Status & Implementation Progress
 
@@ -170,8 +181,22 @@ components/alpha_hwr/
 * [x] Schedule display in Home Assistant
 * [x] Schedule packet building (53-byte APDU format)
 * [x] Schedule validation logic
-* [x] Write packet construction matches Python reference
 * [x] **Schedule write persistence** (RESOLVED via Non-Blocking Transaction Manager)
+
+Additional services beyond the original phases: `device_info_service` (device
+ID strings + statistics), `time_service` (RTC sync), `event_log_service`,
+`history_service`.
+
+#### Phase 5: Programmatic Write-and-Verify Interface (COMPLETE — issue #92)
+
+* [x] `WriteOperationService`: one serialized write path with confirm readbacks and terminal statuses (accepted/clamped/rejected/timeout/superseded)
+* [x] Entity writes routed through the operation layer (anti-clobber for the dashboard too)
+* [x] HA services (`pump_set_enabled`, `pump_set_mode`, `pump_set_setpoint`, `pump_set_temperature_range`, `pump_set_cycle_times`) registered in C++ (`api_bridge`)
+* [x] Schedule services migrated from YAML to `api_bridge` with verify readbacks (previously they reported success unconditionally)
+* [x] `esphome.alpha_hwr_write_settled` event: exactly one terminal event per write, self-identifying via caller-supplied `op_id`
+* [x] Host test suite `tests/test_write_operations.cpp` (pump simulator driving every terminal status)
+
+See `docs/programmatic-interface.md` for the public contract.
 
 ## 8. The Solution: Non-Blocking BLE Transaction Manager
 
@@ -202,23 +227,49 @@ The implementation includes specific logic for pump-specific behaviors:
 * **SubID 0 Quirk**: The pump often responds with `SubID 0` even when a specific Sub-ID (like `1000`) was requested. The matching logic now treats `SubID 0` as a wildcard match for the requested Object ID.
 * **OpSpec 0x01**: Some writes trigger an immediate `OpSpec 0x01` response. The matching logic has been tuned to be flexible while ensuring the transaction window remains open long enough for the commit to finish.
 
+### 8.4 The Write-Operation Layer (issue #92)
+
+The transport FSM serializes individual *commands*; `services::WriteOperationService` serializes *write sequences* on top of it. A pump write is usually several wire steps (a mode change, a register write, a configuration commit, a confirm readback) — on the legacy paths those steps from different writes could interleave, folding stale cached values into fused frames (the root cause behind #43/#45/#52/#83/#91/#97).
+
+The operation layer's rules:
+
+1. **One operation in flight** — later submissions queue; a newly submitted write SUPERSEDES a still-queued write to the same resource (last write wins), but never aborts an operation mid-wire.
+2. **Explicit arguments, not cache reconstruction** — each operation builds its frames from the values passed in. The only cache reads are deliberate (e.g. reusing a mode's stored setpoint for start/stop, with the NaN "keep existing" sentinel when cold).
+3. **Confirm readbacks decide the verdict** — a write settles as `accepted`/`clamped`/`rejected` based on what the pump reports actually holding, not on the ACK (the two-phase-commit window of §8.1 often closes without a matchable ACK even on success).
+4. **Exactly one terminal event per operation** — validation failures reject before any wire write, a per-operation watchdog converts stuck operations into `timeout`, and a BLE disconnect terminal-events everything pending. A client waiting on `esphome.alpha_hwr_write_settled` can never hang.
+
+`ControlService` retains the pump-state cache, the issue-#91 commanded-but-unconfirmed guards, and the wire primitives; `ScheduleService` likewise. The operation layer composes those primitives (it is a `friend` of `ControlService`) and owns all sequencing.
+
 ## 9. Workflows
 
 ### Creating New Features
 
 The layered architecture is now in place. When adding new features:
 
-1. **Check Reference**: Look at how the Python implementation does it (check `reference/alpha-hwr/src/alpha_hwr`).
+1. **Check Protocol Doc**: Consult the [GENI protocol documentation](https://eman.github.io/alpha-hwr/reimplementation/) for the packet formats involved.
 2. **Identify Layer**: Determine which namespace/layer owns this feature:
    * `protocol::` for packet encoding/decoding (stateless)
    * `core::` for BLE transport, session state, authentication
    * `services::` for business logic (telemetry, control, schedules, etc.)
 3. **Plan**: Define the packet structure and state flow.
 4. **Implement Protocol**: Add packet builder/parser functions in the `protocol` namespace (codec, frame_builder, frame_parser, telemetry_decoder).
-5. **Unit Test**: Verify the packet builder produces the correct hex (compare with Python reference).
+5. **Unit Test**: Verify the packet builder produces the correct hex against captured byte sequences.
 6. **Implement Service**: Add business logic to the appropriate service in the `services` namespace or create a new service.
 7. **Integration**: Hook the service into the main `AlphaHwrComponent` class (add accessors as needed).
 8. **Verify**: Compile `hwr-pump-example.yaml`, flash `hwr-pump.yaml`, and test on hardware.
+
+### Adding a New Write Operation (issue #92 contract)
+
+Any feature that WRITES to the pump must be a `WriteCommand` in
+`services::WriteOperationService` — never a standalone write path:
+
+1. **Define the command**: add it to `WriteCommand`, the `Operation` fields, and `write_command_to_string()`.
+2. **Wire steps**: implement `run_<command>_()` composing wire primitives from `ControlService`/`ScheduleService` (add a primitive there if the write needs a new APDU; keep it side-effect-free beyond the wire write).
+3. **Confirm comparator**: implement `confirm_<command>_()` — read the value back from the pump and decide accepted/clamped/rejected; overwrite the operation's fields with the SETTLED values before finishing so the event reports what the pump holds.
+4. **Resource key + budget**: add a supersede key in `resource_keys_()` and a watchdog budget in `start_front_()`.
+5. **Surface it**: add a `submit_*` method, a facade passthrough in `alpha_hwr.h`, a service registration + event fields in `api_bridge.cpp`, and (if entity-driven) route the entity lambda through the facade.
+6. **Host test**: add cases to `tests/test_write_operations.cpp` covering at minimum: accepted, one failure status, and the one-terminal-event invariant.
+7. **Document**: add the service + event fields to `docs/programmatic-interface.md`.
 
 
 ---

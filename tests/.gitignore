@@ -7,6 +7,7 @@ test_dhw_demand_logic
 test_transport_matching
 test_transport_fsm
 test_schedule_service
+test_write_operations
 
 # Object files
 *.o
@@ -17,3 +18,4 @@ test_schedule_service
 
 # OS files
 .DS_Store
+test_schedule_codec

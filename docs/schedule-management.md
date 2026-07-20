@@ -1,7 +1,9 @@
 # Schedule Management via Home Assistant
 
-This document covers the Home Assistant services exposed by
-`packages/alpha_hwr_schedule_editor.yaml`.
+This document covers the pump's schedule services. The services are registered
+by the component itself (`components/alpha_hwr/api_bridge.cpp`); the
+`packages/alpha_hwr_schedule_editor.yaml` package adds the optional Lovelace
+helper entities.
 
 ## Service name format
 
@@ -16,6 +18,14 @@ If your node is named `hwr-pump`, the service
 
 ## Available services
 
+Every service takes its original `data` string plus an optional `op_id`
+string. Each call is **verified against the pump** (written, committed, then
+read back and compared) and ends in exactly one
+`esphome.alpha_hwr_write_settled` event carrying your `op_id` and the settled
+values — see [programmatic-interface.md](programmatic-interface.md) for the
+event schema and waiting patterns. Calls that used to fail silently (bad data
+strings, unreadable schedule state) now settle as `rejected` with a reason.
+
 ### Weekly schedule
 
 | Service | Data format | Description |
@@ -23,7 +33,7 @@ If your node is named `hwr-pump`, the service
 | `esphome.<node_name>_set_schedule_entry` | `layer,day,start_h,start_m,end_h,end_m` | Set a recurring entry |
 | `esphome.<node_name>_clear_schedule_entry` | `layer,day` | Clear a recurring entry |
 | `esphome.<node_name>_set_schedule_enabled` | `0` or `1` | Enable or disable the weekly schedule |
-| `esphome.<node_name>_refresh_schedule` | *(none)* | Refresh the weekly schedule text sensor |
+| `esphome.<node_name>_refresh_schedule` | *(none)* | Re-read the schedule and refresh the text sensor |
 
 - `day`: `0=Monday` … `6=Sunday`
 - `layer`: `0` … `4`
@@ -35,10 +45,22 @@ If your node is named `hwr-pump`, the service
 | --- | --- | --- |
 | `esphome.<node_name>_set_single_event` | `begin_timestamp,end_timestamp` | Schedule a one-time run |
 | `esphome.<node_name>_clear_single_event` | `slot_index` | Clear one slot |
-| `esphome.<node_name>_refresh_single_events` | *(none)* | Refresh the single-events text sensor |
+| `esphome.<node_name>_refresh_single_events` | *(none)* | Re-read the slots and refresh the text sensor |
 
 - timestamps are Unix epoch seconds
-- slot indexes are assigned from the pump's available single-event slots
+- `set_single_event` picks the first free slot and echoes it in the settle
+  event (`slot` field); `rejected` with `"no free single event slots"` when
+  full
+
+## Behavior change (v0.11)
+
+Schedule writes previously reported "OK" in the logs unconditionally — even
+when the pump discarded the write. They are now verified with a readback, so
+a write that doesn't stick settles as `rejected` (and a schedule that can't be
+read settles the write as `rejected` *before* anything is sent, rather than
+risking a blind read-modify-write). If an automation of yours starts reporting
+failures that used to look like successes, the failures were already
+happening — they're just visible now.
 
 ## Example automations
 

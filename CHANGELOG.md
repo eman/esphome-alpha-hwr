@@ -2,6 +2,96 @@
 
 ## [Unreleased]
 
+### Added
+
+- **Programmatic write-and-verify interface** (structural refactor,
+  [#92](https://github.com/eman/esphome-alpha-hwr/issues/92)) —
+  A new write-operation layer (`services::WriteOperationService`) owns every
+  pump write: writes queue and run strictly one at a time, each builds its wire
+  frames from the caller's arguments (never from a possibly-stale cache), each
+  is confirmed by reading the settled value back from the pump, and each ends
+  in exactly one terminal `esphome.alpha_hwr_write_settled` event
+  (`accepted` / `clamped` / `rejected` / `timeout` / `superseded`, with the
+  value the pump actually holds and a caller-supplied `op_id` for
+  correlation). Clients no longer insert fixed delays or guess at internal
+  readback timing.
+- **Unfused Class 3 START/STOP for on/off** — `pump_set_enabled` (and the
+  dashboard switch) now send the pump's dedicated Class 3 run-state commands
+  (START `0x06` / STOP `0x05` as SET, command ids and ACK shapes
+  bench-contributed by jfriend00 in
+  [#92](https://github.com/eman/esphome-alpha-hwr/issues/92)) instead of the
+  fused 0x0601 control object. On/off now carries no mode and no setpoint at
+  all — the last fused write leaves the on/off path — and a pump-rejected
+  command settles `rejected` from the `[03 01]` descriptor nack. The run
+  state is confirmed by readback as before.
+- **Home Assistant services for pump control** — `pump_set_enabled`,
+  `pump_set_mode` (unfused, via the object-86/sub-id-10 mode change from #98),
+  `pump_set_setpoint`, `pump_set_temperature_range`, `pump_set_cycle_times`,
+  registered in C++ (`api_bridge`). Requires `custom_services: true` and
+  `homeassistant_services: true` on `api:` (set in all shipped packages and
+  examples). Documented in `docs/programmatic-interface.md`.
+- **Cycle-time write verification** — `set_cycle_times` gains the Object 91
+  readback the legacy fire-and-forget setter never had: an unreadable DHW
+  config before the write settles `rejected` with no write attempted, and a
+  readback that keeps failing after the write settles `timeout`.
+- **Settle-event refinements from the #92 contract review** — new `invalid`
+  terminal status for malformed/out-of-range requests (deterministic,
+  pre-wire; `rejected` now strictly means the pump or its state refused),
+  new `origin` (`service`/`entity`) and `seq` (submission-order) event
+  fields, and `requested_*` fields echoing the original request so the
+  event is self-contained for logging and retries. Supersede keys for
+  setpoint writes are now strictly per-mode: queued setpoints for different
+  modes both run, since the pump stores an independent setpoint per mode
+  (review catch).
+
+### Fixed
+
+- **Cycle Time Control read/write targeted the wrong GENI object**
+  ([#106](https://github.com/eman/esphome-alpha-hwr/issues/106)) —
+  The component read and wrote cycle times through Object 91 Sub 430, which
+  the GENI profile identifies as `TemperatureRangeControlUserSettings`
+  (type 1012): its trailing bytes are min/max on/off-time LIMITS, invariant
+  to the live configuration — which is why the entities always showed 5/15
+  and writes never took. The live values are Object 91 **Sub 421**
+  (`dhw_on_off_control_configuration_obj`, type 985: flow setpoint + on/off
+  periods), confirmed byte-for-byte against GO-app captures. Cycle-time
+  reads and writes now use Sub 421 with the GO app's exact frame shape,
+  read-modify-write so the stored flow setpoint is echoed back verbatim,
+  and no configuration commit (capture-verified as unnecessary). The Cycle
+  Time ON/OFF entities are now wired to the pump's real cached values
+  instead of optimistic hardcoded defaults, and the config is read at every
+  cache sync.
+- **Temperature-range writes zeroed the pump's on/off-time limits** —
+  an adjacent consequence of the same misidentified struct: the Sub 430
+  write's tail bytes (sent as constants) are the pump's limit fields.
+  They are now echoed back from the last read instead of being overwritten.
+
+### Changed
+
+- **Entity writes route through the write-operation layer** — the dashboard
+  number/switch/select lambdas now get the same serialization and verify
+  readbacks as the services (their settle events carry `op_id: ""`). This
+  closes the issue-#92 collision class for UI users too (e.g. a setpoint write
+  followed immediately by off can no longer revert the setpoint), and entity
+  callbacks now report the write's *terminal* result rather than
+  fire-and-forget success.
+- **Schedule services migrated from YAML to C++** with unchanged names and
+  `data`-string formats plus a new optional `op_id` argument; the
+  `api: services:` block was removed from
+  `packages/alpha_hwr_schedule_editor.yaml`. **Behavior change:** schedule
+  writes are now verified with a post-commit readback and can report
+  `rejected`/`timeout` where they previously logged "OK" unconditionally;
+  malformed `data` strings now settle as `rejected` instead of failing
+  silently. `set_schedule_enabled` no longer falls back to a blind
+  hardcoded-defaults overview write, and schedule-entry writes always
+  fresh-read the layer first so out-of-band edits of other days can't be
+  clobbered. Single-event slot auto-selection reads the slots before choosing,
+  so it can no longer overwrite slot 0 on a cold cache.
+- `ControlService` no longer owns multi-step write sequencing (its high-level
+  start/stop/set-mode/setpoint setters moved into the operation layer); it
+  keeps the pump-state cache, the #91 coordination guards, and the wire
+  primitives.
+
 ## [0.11.0] - 2026-07-17
 
 ### Added
