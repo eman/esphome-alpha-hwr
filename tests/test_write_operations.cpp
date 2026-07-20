@@ -922,7 +922,7 @@ static void test_cycle_flow_only_accepted() {
   TEST_ASSERT(r && std::fabs(r->flow - 0.5f) < 0.005f, "settled flow reported");
   TEST_ASSERT(r && std::fabs(r->requested_flow - 0.5f) < 0.0001f, "requested flow echoed");
   float stored = protocol::decode_float_be(h.sim.dhw_setpoint_raw) * 3600.0f;
-  TEST_ASSERT(std::fabs(stored - 0.5f) < 0.005f, "pump stores the encoded flow (m³/s wire units)");
+  TEST_ASSERT(std::fabs(stored - 0.5f) < 0.005f, "pump stores the encoded flow (m³/h)");
   TEST_ASSERT(h.frames_dhw_write == 1 && h.frames_dhw_read >= 2,
               "one write between the fresh read and the verify readback");
   TEST_ASSERT(h.commit_count == commits_before, "no configuration commit");
