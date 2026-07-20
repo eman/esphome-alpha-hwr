@@ -9,6 +9,7 @@
 #include "esphome/core/hal.h"
 #include "frame_builder.h"
 #include <algorithm>
+#include <cinttypes>
 
 namespace esphome {
 namespace alpha_hwr {
@@ -109,10 +110,10 @@ void Transport::loop() {
         // here means either the feature is absent or the window closed; either
         // way it is expected behaviour — log at DEBUG to avoid noise.
         if (cmd.expect_obj_id == 0 && cmd.expect_sub_id == 0) {
-          ESP_LOGD(TAG, "Command timeout (wildcard match) — pump did not respond (now=%u, timestamp=%u, timeout=%u)", 
+          ESP_LOGD(TAG, "Command timeout (wildcard match) — pump did not respond (now=%" PRIu32 ", timestamp=%" PRIu32 ", timeout=%" PRIu32 ")",
                    now, cmd.timestamp_ms, cmd.timeout_ms);
         } else {
-          ESP_LOGW(TAG, "Command timeout waiting for Obj %d Sub %d (now=%u, timestamp=%u, timeout=%u)",
+          ESP_LOGW(TAG, "Command timeout waiting for Obj %d Sub %d (now=%" PRIu32 ", timestamp=%" PRIu32 ", timeout=%" PRIu32 ")",
                    cmd.expect_obj_id, cmd.expect_sub_id, now, cmd.timestamp_ms, cmd.timeout_ms);
         }
         if (cmd.callback) {
@@ -305,7 +306,7 @@ void Transport::check_timeouts(uint32_t timeout_ms) {
       [now, timeout_ms](const PendingHandler& handler) {
         uint32_t age = now - handler.timestamp_ms;
         if (age > timeout_ms) {
-          ESP_LOGW(TAG, "Response handler timeout for Object %d SubID %d (%d ms)",
+          ESP_LOGW(TAG, "Response handler timeout for Object %d SubID %d (%" PRIu32 " ms)",
                    handler.object_id, handler.sub_id, age);
           return true;  // Remove this handler
         }

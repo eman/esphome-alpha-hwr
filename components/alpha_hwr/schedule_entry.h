@@ -155,7 +155,10 @@ class ScheduleEntry {
    */
   std::string get_begin_time() const {
     char buf[6];
-    snprintf(buf, sizeof(buf), "%02d:%02d", this->begin_hour_, this->begin_minute_);
+    // Bound each field to two digits so the "HH:MM" buffer can never truncate,
+    // even if the pump ever reports an out-of-range hour/minute byte.
+    snprintf(buf, sizeof(buf), "%02u:%02u", this->begin_hour_ % 100u,
+             this->begin_minute_ % 100u);
     return std::string(buf);
   }
 
@@ -164,7 +167,10 @@ class ScheduleEntry {
    */
   std::string get_end_time() const {
     char buf[6];
-    snprintf(buf, sizeof(buf), "%02d:%02d", this->end_hour_, this->end_minute_);
+    // Bound each field to two digits so the "HH:MM" buffer can never truncate,
+    // even if the pump ever reports an out-of-range hour/minute byte.
+    snprintf(buf, sizeof(buf), "%02u:%02u", this->end_hour_ % 100u,
+             this->end_minute_ % 100u);
     return std::string(buf);
   }
 

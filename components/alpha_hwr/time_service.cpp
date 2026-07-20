@@ -210,8 +210,10 @@ ESPTime TimeService::parse_clock_response(const uint8_t *data, size_t len) {
   base.recalc_timestamp_local();
   pump_time.timestamp = base.timestamp;
   
-  ESP_LOGD(TAG, "ESPTime created: timestamp=%ld, is_valid=%d", 
-           pump_time.timestamp, pump_time.is_valid());
+  // time_t width varies by platform (long long on ESP-IDF, long on many hosts):
+  // widen to long long so one format string is correct everywhere.
+  ESP_LOGD(TAG, "ESPTime created: timestamp=%lld, is_valid=%d",
+           static_cast<long long>(pump_time.timestamp), pump_time.is_valid());
   
   return pump_time;
 }

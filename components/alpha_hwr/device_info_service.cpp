@@ -11,6 +11,7 @@
 #include "session.h"
 #include "frame_builder.h"
 #include "esphome/core/log.h"
+#include <cinttypes>
 #include <cstring>
 
 namespace esphome {
@@ -234,7 +235,7 @@ void DeviceInfoService::read_statistics_async(std::function<void(bool, uint32_t,
                              (uint32_t(stats[10]) << 8) | uint32_t(stats[11]);
       float operating_hours = op_time_sec / 3600.0f;
 
-      ESP_LOGI(TAG, "Statistics: starts=%u, hours=%.1f", start_count, operating_hours);
+      ESP_LOGI(TAG, "Statistics: starts=%" PRIu32 ", hours=%.1f", start_count, operating_hours);
       if (on_complete) on_complete(true, start_count, operating_hours);
     },
     5000  // 5 second timeout
