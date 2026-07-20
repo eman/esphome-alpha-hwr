@@ -253,8 +253,11 @@ void WriteOperationService::finish_(uint32_t seq, WriteStatus status, const std:
   result.requested_temp_min = op.req_temp_min;
   result.requested_temp_max = op.req_temp_max;
   if (op.command == WriteCommand::SET_CYCLE_TIMES) {
-    result.requested_on_minutes = op.req_on_minutes;
-    result.requested_off_minutes = op.req_off_minutes;
+    // Kept (0-sentinel) fields are omitted from the requested echo: -1/NAN
+    // suppress the event keys, so the echo shows exactly what was asked for.
+    result.requested_on_minutes = op.req_on_minutes > 0 ? op.req_on_minutes : -1;
+    result.requested_off_minutes = op.req_off_minutes > 0 ? op.req_off_minutes : -1;
+    result.requested_flow = op.req_flow;
   }
   if (op.command == WriteCommand::SET_SCHEDULE_ENTRY) {
     result.requested_begin_hhmm =
@@ -282,8 +285,12 @@ void WriteOperationService::finish_(uint32_t seq, WriteStatus status, const std:
       result.autoadapt = op.autoadapt ? 1 : 0;
       break;
     case WriteCommand::SET_CYCLE_TIMES:
-      result.on_minutes = op.on_minutes;
-      result.off_minutes = op.off_minutes;
+      // A resolved operation always has minutes >= 1; 0 only survives to a
+      // pre-wire terminal (invalid/rejected before the fresh read) where the
+      // kept-sentinel is not a value worth reporting.
+      result.on_minutes = op.on_minutes > 0 ? op.on_minutes : -1;
+      result.off_minutes = op.off_minutes > 0 ? op.off_minutes : -1;
+      result.flow = op.flow;  // settled from the confirm readback when it ran
       break;
     case WriteCommand::SET_SCHEDULE_ENTRY:
     case WriteCommand::CLEAR_SCHEDULE_ENTRY:
@@ -413,7 +420,7 @@ void WriteOperationService::submit_set_temperature_range(float min_c, float max_
 }
 
 void WriteOperationService::submit_set_cycle_times(uint8_t on_minutes, uint8_t off_minutes,
-                                                   const std::string &op_id,
+                                                   float flow, const std::string &op_id,
                                                    std::function<void(bool)> done, WriteOrigin origin) {
   Operation op;
   op.command = WriteCommand::SET_CYCLE_TIMES;
@@ -421,8 +428,11 @@ void WriteOperationService::submit_set_cycle_times(uint8_t on_minutes, uint8_t o
   op.origin = origin;
   op.on_minutes = on_minutes;
   op.off_minutes = off_minutes;
+  if (!std::isnan(flow) && flow == 0.0f) flow = NAN;  // 0 sentinel -> keep existing
+  op.flow = flow;
   op.req_on_minutes = on_minutes;
   op.req_off_minutes = off_minutes;
+  op.req_flow = flow;
   op.done = std::move(done);
   submit_(std::move(op));
 }
@@ -792,14 +802,29 @@ void WriteOperationService::run_set_cycle_times_(uint32_t seq) {
   Operation *op = find_(seq);
   if (op == nullptr || op->phase == Phase::DONE) return;
 
-  if (op->on_minutes < 1 || op->on_minutes > 60 || op->off_minutes < 1 || op->off_minutes > 60) {
-    finish_(seq, WriteStatus::INVALID, "cycle times must be 1-60 minutes");
+  // Keep-existing sentinels (issue #107): 0 for either minute field, NAN for
+  // flow (the API's 0 was normalized to NAN at submit). Asserted fields are
+  // range-checked; kept fields are resolved from the mandatory fresh read.
+  const bool on_asserted = op->on_minutes != 0;
+  const bool off_asserted = op->off_minutes != 0;
+  const bool flow_asserted = !std::isnan(op->flow);
+  if ((on_asserted && (op->on_minutes < 1 || op->on_minutes > 60)) ||
+      (off_asserted && (op->off_minutes < 1 || op->off_minutes > 60))) {
+    finish_(seq, WriteStatus::INVALID, "cycle times must be 1-60 minutes (0 = keep)");
+    return;
+  }
+  if (flow_asserted && (op->flow < 0.1f || op->flow > 10.0f)) {
+    finish_(seq, WriteStatus::INVALID, "flow out of range 0.1-10.0 m3/h (0 = keep)");
+    return;
+  }
+  if (!on_asserted && !off_asserted && !flow_asserted) {
+    finish_(seq, WriteStatus::INVALID, "nothing to write: all fields are keep-existing");
     return;
   }
 
   // RESOLVING: the DHW config struct (Obj 91 Sub 421, issue #106) fuses the
   // mode's stored flow setpoint with the on/off periods, so a mandatory fresh
-  // read supplies the setpoint bytes the write echoes back verbatim.
+  // read supplies the kept fields (kept flow is echoed back byte-verbatim).
   op->phase = Phase::RESOLVING;
   control_.read_dhw_config([this, seq](bool ok) {
     Operation *op = find_(seq);
@@ -808,6 +833,17 @@ void WriteOperationService::run_set_cycle_times_(uint32_t seq) {
       finish_(seq, WriteStatus::REJECTED, "could not read DHW config; write not attempted");
       return;
     }
+
+    op->pre_on_minutes = control_.cached_cycle_time_on_;
+    op->pre_off_minutes = control_.cached_cycle_time_off_;
+    op->pre_flow = control_.get_cached_cycle_flow();
+    if ((op->on_minutes == 0 && op->pre_on_minutes == -1) ||
+        (op->off_minutes == 0 && op->pre_off_minutes == -1)) {
+      finish_(seq, WriteStatus::REJECTED, "stored cycle periods unreadable; write not attempted");
+      return;
+    }
+    if (op->on_minutes == 0) op->on_minutes = static_cast<uint8_t>(op->pre_on_minutes);
+    if (op->off_minutes == 0) op->off_minutes = static_cast<uint8_t>(op->pre_off_minutes);
 
     op->phase = Phase::WRITING;
     if (!control_.send_set_mode_request(ControlMode::DHW_ON_OFF)) {
@@ -821,6 +857,13 @@ void WriteOperationService::run_set_cycle_times_(uint32_t seq) {
       if (op == nullptr || op->phase == Phase::DONE) return;
       // Capture-verified: the GO app sends this write with no configuration
       // commit and the value persists, so none is sent here either.
+      uint8_t setpoint_be4[4];
+      const uint8_t *sp = nullptr;
+      if (!std::isnan(op->req_flow)) {
+        protocol::encode_float_be(to_native_units_(ControlMode::CONSTANT_FLOW, op->req_flow),
+                                  setpoint_be4);
+        sp = setpoint_be4;
+      }
       bool queued = control_.write_dhw_config(op->on_minutes, op->off_minutes,
         [this, seq](bool acked) {
           Operation *op = find_(seq);
@@ -831,7 +874,7 @@ void WriteOperationService::run_set_cycle_times_(uint32_t seq) {
           }
           op->phase = Phase::CONFIRMING;
           schedule_([this, seq]() { confirm_cycle_times_(seq); }, CONFIG_CONFIRM_DELAY_MS);
-        });
+        }, sp);
       if (!queued) {
         finish_(seq, WriteStatus::REJECTED, "DHW setpoint unavailable; write not attempted");
       }
@@ -858,15 +901,35 @@ void WriteOperationService::confirm_cycle_times_(uint32_t seq) {
       finish_(seq, WriteStatus::TIMEOUT, "DHW config readback failed");
       return;
     }
-    bool match = stored_on == static_cast<int8_t>(op->on_minutes) &&
-                 stored_off == static_cast<int8_t>(op->off_minutes);
-    std::string detail;
-    if (!match) {
-      detail = format_detail("pump stored on=%d off=%d", stored_on, stored_off);
-    }
+    // Per-asserted-field comparison (issue #107): kept fields were resolved
+    // FROM the pump, so they are excluded from the accept decision (a
+    // concurrent GO-app edit on a kept field is last-writer-wins). REJECTED
+    // requires every asserted field to still sit at its pre-read value,
+    // mirroring the setpoint confirm's kept-vs-clamped distinction.
+    float stored_flow = control_.get_cached_cycle_flow();
+    const bool flow_asserted = !std::isnan(op->req_flow);
+    const float flow_eps = setpoint_epsilon_(ControlMode::CONSTANT_FLOW);
+    bool on_ok = op->req_on_minutes == 0 || stored_on == static_cast<int8_t>(op->on_minutes);
+    bool off_ok = op->req_off_minutes == 0 || stored_off == static_cast<int8_t>(op->off_minutes);
+    bool flow_ok = !flow_asserted ||
+                   (!std::isnan(stored_flow) && std::fabs(stored_flow - op->req_flow) <= flow_eps);
+    bool all_kept_old =
+        (op->req_on_minutes == 0 || stored_on == op->pre_on_minutes) &&
+        (op->req_off_minutes == 0 || stored_off == op->pre_off_minutes) &&
+        (!flow_asserted || (!std::isnan(op->pre_flow) &&
+                            std::fabs(stored_flow - op->pre_flow) <= flow_eps));
     op->on_minutes = static_cast<uint8_t>(stored_on);
     op->off_minutes = static_cast<uint8_t>(stored_off);
-    finish_(seq, match ? WriteStatus::ACCEPTED : WriteStatus::CLAMPED, detail);
+    op->flow = stored_flow;
+    if (on_ok && off_ok && flow_ok) {
+      finish_(seq, WriteStatus::ACCEPTED, "");
+    } else if (all_kept_old) {
+      finish_(seq, WriteStatus::REJECTED,
+              format_detail("pump kept on=%d off=%d flow=%.3f", stored_on, stored_off, stored_flow));
+    } else {
+      finish_(seq, WriteStatus::CLAMPED,
+              format_detail("pump stored on=%d off=%d flow=%.3f", stored_on, stored_off, stored_flow));
+    }
   });
 }
 

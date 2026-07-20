@@ -29,7 +29,7 @@ void AlphaHwrApiBridge::setup(AlphaHwrComponent *component) {
   register_service(&AlphaHwrApiBridge::on_set_temperature_range, "pump_set_temperature_range",
                    {"min_c", "max_c", "autoadapt", "op_id"});
   register_service(&AlphaHwrApiBridge::on_set_cycle_times, "pump_set_cycle_times",
-                   {"on_minutes", "off_minutes", "op_id"});
+                   {"on_minutes", "off_minutes", "flow", "op_id"});
 
   register_service(&AlphaHwrApiBridge::on_upload_schedule, "upload_schedule",
                    {"data", "op_id"});
@@ -78,9 +78,18 @@ void AlphaHwrApiBridge::fire_write_settled(const WriteResult &result) {
     snprintf(rbuf, sizeof(rbuf), "%.1f", result.requested_temp_max);
     data["requested_temp_max"] = rbuf;
   }
+  // Emitted independently: with the keep-existing sentinels (issue #107) a
+  // cycle write may assert any subset of its three fields.
   if (result.requested_on_minutes >= 0) {
     data["requested_on_minutes"] = std::to_string(result.requested_on_minutes);
+  }
+  if (result.requested_off_minutes >= 0) {
     data["requested_off_minutes"] = std::to_string(result.requested_off_minutes);
+  }
+  if (!std::isnan(result.requested_flow)) {
+    char fbuf[32];
+    snprintf(fbuf, sizeof(fbuf), "%.3f", result.requested_flow);
+    data["requested_flow"] = fbuf;
   }
   if (!result.requested_begin_hhmm.empty()) {
     data["requested_begin"] = result.requested_begin_hhmm;
@@ -120,6 +129,7 @@ void AlphaHwrApiBridge::fire_write_settled(const WriteResult &result) {
     case WriteCommand::SET_CYCLE_TIMES:
       if (result.on_minutes >= 0) data["on_minutes"] = std::to_string(result.on_minutes);
       if (result.off_minutes >= 0) data["off_minutes"] = std::to_string(result.off_minutes);
+      put_float("flow", result.flow, "%.3f");
       break;
     default: {
       // Schedule commands. Settled values come from the verify readbacks.
@@ -190,18 +200,20 @@ void AlphaHwrApiBridge::on_set_temperature_range(float min_c, float max_c, bool 
   component_->submit_set_temperature_range(min_c, max_c, autoadapt, op_id);
 }
 
-void AlphaHwrApiBridge::on_set_cycle_times(float on_minutes, float off_minutes, std::string op_id) {
+void AlphaHwrApiBridge::on_set_cycle_times(float on_minutes, float off_minutes, float flow,
+                                           std::string op_id) {
   // Minutes arrive as float only because int-typed service variables hit the
   // ESP32-C3 linker bug; the pump takes whole minutes, so fractional values
-  // settle invalid here instead of being truncated. The operation layer
-  // validates the 1-60 range.
+  // settle invalid here instead of being truncated. 0 means keep-existing
+  // (issue #107) for all three fields; the operation layer validates the
+  // 1-60 minute and 0.1-10.0 m3/h flow ranges.
   if (!(on_minutes >= 0) || on_minutes > 255 || !(off_minutes >= 0) || off_minutes > 255 ||
       on_minutes != std::floor(on_minutes) || off_minutes != std::floor(off_minutes)) {
-    reject_(WriteCommand::SET_CYCLE_TIMES, op_id, "cycle times must be whole minutes, 1-60");
+    reject_(WriteCommand::SET_CYCLE_TIMES, op_id, "cycle times must be whole minutes 1-60, or 0 to keep");
     return;
   }
   component_->submit_set_cycle_times(static_cast<uint8_t>(on_minutes),
-                                     static_cast<uint8_t>(off_minutes), op_id);
+                                     static_cast<uint8_t>(off_minutes), flow, op_id);
 }
 
 // ---------------------------------------------------------------------------

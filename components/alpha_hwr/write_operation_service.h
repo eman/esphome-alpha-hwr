@@ -85,6 +85,7 @@ struct WriteResult {
   int8_t autoadapt{-1};         // -1 unknown, 0 off, 1 on
   int16_t on_minutes{-1};
   int16_t off_minutes{-1};
+  float flow{NAN};              // cycle-mode stored flow, m³/h (issue #107)
 
   // Schedule commands
   int16_t layer{-1};
@@ -111,6 +112,7 @@ struct WriteResult {
   float requested_temp_max{NAN};
   int16_t requested_on_minutes{-1};
   int16_t requested_off_minutes{-1};
+  float requested_flow{NAN};    // NAN when the request kept the stored flow
   std::string requested_begin_hhmm;
   std::string requested_end_hhmm;
 };
@@ -180,7 +182,10 @@ class WriteOperationService {
                                     const std::string &op_id,
                                     std::function<void(bool)> done = nullptr,
                                     WriteOrigin origin = WriteOrigin::SERVICE);
-  void submit_set_cycle_times(uint8_t on_minutes, uint8_t off_minutes,
+  // Each field has a keep-existing sentinel resolved from the mandatory
+  // fresh Sub 421 read: 0 for the minute fields, 0/NAN for flow (m³/h,
+  // 0.1-10.0 when asserted; issue #107). All three kept settles `invalid`.
+  void submit_set_cycle_times(uint8_t on_minutes, uint8_t off_minutes, float flow,
                               const std::string &op_id,
                               std::function<void(bool)> done = nullptr,
                               WriteOrigin origin = WriteOrigin::SERVICE);
@@ -257,10 +262,16 @@ class WriteOperationService {
     bool autoadapt{false};
     uint8_t on_minutes{0};
     uint8_t off_minutes{0};
+    float flow{NAN};  // cycle flow, m³/h; NAN = keep existing (issue #107)
     // Setpoint value before the write (display units): distinguishes
     // "pump kept its old value" (REJECTED) from "pump stored a different
     // value" (CLAMPED) in the confirm comparison.
     float pre_value{NAN};
+    // Cycle-config values from the mandatory pre-write read: resolve the
+    // kept (0-sentinel) fields and drive the same REJECTED-vs-CLAMPED
+    // distinction for SET_CYCLE_TIMES.
+    int8_t pre_on_minutes{-1}, pre_off_minutes{-1};
+    float pre_flow{NAN};
 
     // Schedule fields
     uint8_t layer{0};
@@ -284,6 +295,7 @@ class WriteOperationService {
     float req_temp_min{NAN};
     float req_temp_max{NAN};
     uint8_t req_on_minutes{0}, req_off_minutes{0};
+    float req_flow{NAN};  // NAN = request kept the stored flow
     uint8_t req_begin_hour{0}, req_begin_minute{0}, req_end_hour{0}, req_end_minute{0};
   };
 

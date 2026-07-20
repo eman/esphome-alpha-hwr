@@ -298,6 +298,13 @@ class ControlService {
    int8_t get_cached_cycle_time_on() const { return cached_cycle_time_on_; }
    /** Get cached cycle time OFF minutes (-1 = not yet read). */
    int8_t get_cached_cycle_time_off() const { return cached_cycle_time_off_; }
+   /**
+    * Get the cycle-mode stored flow setpoint in m³/h (Obj 91 Sub 421; NAN until
+    * the DHW config has been read). The wire float is SI m³/s (issue #107).
+    */
+   float get_cached_cycle_flow() const {
+     return dhw_config_valid_ ? protocol::decode_float_be(cached_dhw_setpoint_raw_) * 3600.0f : NAN;
+   }
 
    /**
     * Decode a cycle-time minutes byte read from the pump (Object 91). Valid range
@@ -581,15 +588,18 @@ class ControlService {
   /**
    * Write the DHW on/off configuration (Object 91 Sub 421, OpSpec 0x8F,
    * obj-first addressing, mirroring the GO app's capture frame byte for
-   * byte). Read-modify-write: the stored flow setpoint is echoed back from
-   * the last read_dhw_config(), so callers MUST read first — returns false
-   * without sending when no setpoint is cached. No configuration commit is
+   * byte). Read-modify-write: callers MUST read first — returns false
+   * without sending when no config is cached. No configuration commit is
    * needed (capture-verified: the GO app sends none and the value persists).
    *
    * @param on_ack Called with the pump's short ACK result.
+   * @param setpoint_be4 Optional new flow setpoint as 4 wire bytes (f32 BE,
+   *   m³/s; issue #107). nullptr echoes the stored setpoint bytes verbatim
+   *   from the last read_dhw_config().
    */
   bool write_dhw_config(uint8_t on_minutes, uint8_t off_minutes,
-                        std::function<void(bool)> on_ack);
+                        std::function<void(bool)> on_ack,
+                        const uint8_t *setpoint_be4 = nullptr);
 
   /**
    * Read Object 91 Sub 430 (temperature range, AutoAdapt, cycle times) and

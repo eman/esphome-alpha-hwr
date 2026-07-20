@@ -88,6 +88,8 @@ struct PumpSim {
   bool respond_dhw_reads{true};       // reply to Obj 91 Sub 421 reads
   bool honor_dhw_writes{true};        // apply Sub 421 writes
   int dhw_min_off{0};                 // >0: pump clamps off_period to this floor
+  bool honor_dhw_flow_writes{true};   // apply asserted setpoint bytes (issue #107)
+  float dhw_flow_clamp_native{0};     // >0: pump caps the stored flow (m³/s)
   bool respond_overview_reads{true};
   bool honor_layer_writes{true};
   bool honor_overview_writes{true};
@@ -239,6 +241,14 @@ struct Harness {
         sim.cycle_on = apdu[15];
         sim.cycle_off = apdu[16];
         if (sim.dhw_min_off > 0 && sim.cycle_off < sim.dhw_min_off) sim.cycle_off = sim.dhw_min_off;
+        if (sim.honor_dhw_flow_writes) {
+          float native = protocol::decode_float_be(apdu + 11);
+          if (sim.dhw_flow_clamp_native > 0 && native > sim.dhw_flow_clamp_native) {
+            native = sim.dhw_flow_clamp_native;
+          }
+          // Re-encode after the cap so the sim's stored bytes stay exact.
+          protocol::encode_float_be(native, sim.dhw_setpoint_raw);
+        }
       }
       inject_short_ack();
     } else if (apdu[2] == 84 && apdu_len >= 5) {
@@ -830,13 +840,16 @@ static void test_cycle_times_accepted() {
   h.prime_cache();
   int commits_before = h.commit_count;
 
-  h.write_op.submit_set_cycle_times(10, 20, "ct1");
+  h.write_op.submit_set_cycle_times(10, 20, NAN, "ct1");
   h.advance(15000);
 
   TEST_ASSERT(h.events_for("ct1") == 1, "exactly one terminal event");
   const WriteResult *r = h.result_for("ct1");
   TEST_ASSERT(r && r->status == WriteStatus::ACCEPTED, "status is accepted");
   TEST_ASSERT(r && r->on_minutes == 10 && r->off_minutes == 20, "settled cycle times reported");
+  TEST_ASSERT(r && std::fabs(r->flow - 0.2271f) < 0.005f,
+              "settled flow reported even on a kept-flow write");
+  TEST_ASSERT(r && std::isnan(r->requested_flow), "kept flow omitted from the requested echo");
   TEST_ASSERT(h.sim.cycle_on == 10 && h.sim.cycle_off == 20, "pump holds the new periods");
   TEST_ASSERT(h.frames_dhw_write == 1, "one Sub 421 write was sent");
   TEST_ASSERT(h.frames_dhw_read >= 2, "fresh pre-read plus verify readback of Sub 421");
@@ -856,7 +869,7 @@ static void test_cycle_times_pump_clamps() {
   h.sim.dhw_min_off = 5;  // the GO-app-observed minimum-off behavior
   h.prime_cache();
 
-  h.write_op.submit_set_cycle_times(1, 3, "ct2");
+  h.write_op.submit_set_cycle_times(1, 3, NAN, "ct2");
   h.advance(15000);
 
   TEST_ASSERT(h.events_for("ct2") == 1, "exactly one terminal event");
@@ -873,7 +886,7 @@ static void test_cycle_times_read_unavailable() {
   h.prime_cache();
   h.sim.respond_dhw_reads = false;
 
-  h.write_op.submit_set_cycle_times(10, 20, "ct3");
+  h.write_op.submit_set_cycle_times(10, 20, NAN, "ct3");
   h.advance(20000);
 
   TEST_ASSERT(h.events_for("ct3") == 1, "exactly one terminal event");
@@ -882,6 +895,169 @@ static void test_cycle_times_read_unavailable() {
   TEST_ASSERT(r && r->detail.find("not attempted") != std::string::npos,
               "detail says the write was never attempted");
   TEST_ASSERT(h.frames_dhw_write == 0, "no blind Sub 421 write was sent");
+}
+
+// --- Cycle flow setpoint (issue #107) ------------------------------------
+
+static void test_cycle_flow_only_accepted() {
+  std::cout << "\n=== cycle flow: flow-only write, periods preserved ===" << std::endl;
+  Harness h;
+  h.sim.mode_byte = 0x02;
+  h.sim.cycle_on = 5;
+  h.sim.cycle_off = 15;
+  h.prime_cache();
+  int commits_before = h.commit_count;
+
+  h.write_op.submit_set_cycle_times(0, 0, 0.5f, "cf1");
+  h.advance(15000);
+
+  TEST_ASSERT(h.events_for("cf1") == 1, "exactly one terminal event");
+  const WriteResult *r = h.result_for("cf1");
+  TEST_ASSERT(r && r->status == WriteStatus::ACCEPTED, "status is accepted");
+  TEST_ASSERT(h.sim.cycle_on == 5 && h.sim.cycle_off == 15, "kept periods untouched on the pump");
+  TEST_ASSERT(r && r->on_minutes == 5 && r->off_minutes == 15,
+              "settled periods report the pump's (kept) values");
+  TEST_ASSERT(r && r->requested_on_minutes == -1 && r->requested_off_minutes == -1,
+              "kept periods omitted from the requested echo");
+  TEST_ASSERT(r && std::fabs(r->flow - 0.5f) < 0.005f, "settled flow reported");
+  TEST_ASSERT(r && std::fabs(r->requested_flow - 0.5f) < 0.0001f, "requested flow echoed");
+  float stored = protocol::decode_float_be(h.sim.dhw_setpoint_raw) * 3600.0f;
+  TEST_ASSERT(std::fabs(stored - 0.5f) < 0.005f, "pump stores the encoded flow (m³/s wire units)");
+  TEST_ASSERT(h.frames_dhw_write == 1 && h.frames_dhw_read >= 2,
+              "one write between the fresh read and the verify readback");
+  TEST_ASSERT(h.commit_count == commits_before, "no configuration commit");
+}
+
+static void test_cycle_combined_write() {
+  std::cout << "\n=== cycle flow: combined periods + flow write ===" << std::endl;
+  Harness h;
+  h.sim.mode_byte = 0x02;
+  h.prime_cache();
+
+  h.write_op.submit_set_cycle_times(10, 20, 0.5f, "cf2");
+  h.advance(15000);
+
+  const WriteResult *r = h.result_for("cf2");
+  TEST_ASSERT(r && r->status == WriteStatus::ACCEPTED, "status is accepted");
+  TEST_ASSERT(h.sim.cycle_on == 10 && h.sim.cycle_off == 20, "periods applied");
+  float stored = protocol::decode_float_be(h.sim.dhw_setpoint_raw) * 3600.0f;
+  TEST_ASSERT(std::fabs(stored - 0.5f) < 0.005f, "flow applied");
+  TEST_ASSERT(r && r->requested_on_minutes == 10 && r->requested_off_minutes == 20 &&
+              std::fabs(r->requested_flow - 0.5f) < 0.0001f,
+              "all three asserted fields echoed as requested");
+}
+
+static void test_cycle_flow_clamped() {
+  std::cout << "\n=== cycle flow: pump caps the flow -> clamped ===" << std::endl;
+  Harness h;
+  h.sim.mode_byte = 0x02;
+  h.sim.dhw_flow_clamp_native = 0.3f / 3600.0f;  // installer limit at 0.3 m³/h
+  h.prime_cache();
+
+  h.write_op.submit_set_cycle_times(0, 0, 0.5f, "cf3");
+  h.advance(15000);
+
+  TEST_ASSERT(h.events_for("cf3") == 1, "exactly one terminal event");
+  const WriteResult *r = h.result_for("cf3");
+  TEST_ASSERT(r && r->status == WriteStatus::CLAMPED, "status is clamped");
+  TEST_ASSERT(r && std::fabs(r->flow - 0.3f) < 0.005f, "settled flow reports the cap");
+  TEST_ASSERT(r && r->detail.find("flow=0.300") != std::string::npos,
+              "detail reports the stored flow");
+  TEST_ASSERT(h.sim.cycle_on == 5 && h.sim.cycle_off == 15, "kept periods untouched");
+}
+
+static void test_cycle_flow_rejected_kept() {
+  std::cout << "\n=== cycle flow: pump keeps its old flow -> rejected ===" << std::endl;
+  Harness h;
+  h.sim.mode_byte = 0x02;
+  h.sim.honor_dhw_flow_writes = false;  // pump ignores the asserted setpoint bytes
+  h.prime_cache();
+
+  h.write_op.submit_set_cycle_times(0, 0, 0.5f, "cf4");
+  h.advance(15000);
+
+  const WriteResult *r = h.result_for("cf4");
+  TEST_ASSERT(r && r->status == WriteStatus::REJECTED, "status is rejected (pump kept old value)");
+  TEST_ASSERT(r && r->detail.find("pump kept") != std::string::npos, "detail says kept");
+  TEST_ASSERT(r && std::fabs(r->flow - 0.2271f) < 0.005f, "settled flow is the pump's old value");
+}
+
+static void test_cycle_flow_invalid_ranges() {
+  std::cout << "\n=== cycle flow: out-of-range fields -> invalid, no wire traffic ===" << std::endl;
+  Harness h;
+  h.sim.mode_byte = 0x02;
+  h.prime_cache();
+  int reads_before = h.frames_dhw_read;
+
+  h.write_op.submit_set_cycle_times(0, 0, 0.05f, "iv1");   // below the 0.1 floor
+  h.write_op.submit_set_cycle_times(0, 0, -1.0f, "iv2");   // negative
+  h.write_op.submit_set_cycle_times(0, 0, 11.0f, "iv3");   // above the 10.0 cap
+  h.write_op.submit_set_cycle_times(61, 0, NAN, "iv4");    // minutes out of range
+  h.advance(5000);
+
+  for (const char *id : {"iv1", "iv2", "iv3", "iv4"}) {
+    const WriteResult *r = h.result_for(id);
+    TEST_ASSERT(r && r->status == WriteStatus::INVALID, "out-of-range field settles invalid");
+  }
+  TEST_ASSERT(h.frames_dhw_write == 0 && h.frames_dhw_read == reads_before,
+              "no wire traffic for invalid requests");
+}
+
+static void test_cycle_all_kept_invalid() {
+  std::cout << "\n=== cycle flow: all fields keep-existing -> invalid ===" << std::endl;
+  Harness h;
+  h.sim.mode_byte = 0x02;
+  h.prime_cache();
+  int reads_before = h.frames_dhw_read;
+
+  h.write_op.submit_set_cycle_times(0, 0, NAN, "ak1");
+  h.write_op.submit_set_cycle_times(0, 0, 0.0f, "ak2");  // API 0 sentinel
+  h.advance(5000);
+
+  for (const char *id : {"ak1", "ak2"}) {
+    const WriteResult *r = h.result_for(id);
+    TEST_ASSERT(r && r->status == WriteStatus::INVALID, "nothing-to-write settles invalid");
+    TEST_ASSERT(r && r->detail.find("nothing to write") != std::string::npos, "detail explains");
+  }
+  TEST_ASSERT(h.frames_dhw_write == 0 && h.frames_dhw_read == reads_before, "zero wire traffic");
+}
+
+static void test_cycle_kept_minutes_unreadable() {
+  std::cout << "\n=== cycle flow: kept periods unreadable -> rejected, no write ===" << std::endl;
+  Harness h;
+  h.sim.mode_byte = 0x02;
+  h.sim.cycle_on = 0;  // parses to the -1 "unknown" sentinel
+  h.prime_cache();
+
+  h.write_op.submit_set_cycle_times(0, 0, 0.5f, "ku1");
+  h.advance(15000);
+
+  const WriteResult *r = h.result_for("ku1");
+  TEST_ASSERT(r && r->status == WriteStatus::REJECTED, "status is rejected");
+  TEST_ASSERT(r && r->detail.find("not attempted") != std::string::npos,
+              "detail says the write was never attempted");
+  TEST_ASSERT(h.frames_dhw_write == 0, "no Sub 421 write was sent");
+}
+
+static void test_cycle_flow_entity_origin() {
+  std::cout << "\n=== cycle flow: entity-origin flow-only submit ===" << std::endl;
+  Harness h;
+  h.sim.mode_byte = 0x02;
+  h.prime_cache();
+
+  bool done_result = false, done_fired = false;
+  h.write_op.submit_set_cycle_times(0, 0, 0.4f, "",
+                                    [&](bool ok) { done_fired = true; done_result = ok; },
+                                    WriteOrigin::ENTITY);
+  h.advance(15000);
+
+  TEST_ASSERT(h.events_for("") == 1, "exactly one terminal event");
+  const WriteResult *r = h.result_for("");
+  TEST_ASSERT(r && r->status == WriteStatus::ACCEPTED, "status is accepted");
+  TEST_ASSERT(r && r->origin == WriteOrigin::ENTITY, "origin is entity");
+  TEST_ASSERT(done_fired && done_result, "entity callback fired with success");
+  float stored = protocol::decode_float_be(h.sim.dhw_setpoint_raw) * 3600.0f;
+  TEST_ASSERT(std::fabs(stored - 0.4f) < 0.005f, "flow applied");
 }
 
 static void test_temp_range_preserves_limits() {
@@ -1333,6 +1509,14 @@ int main() {
   test_cycle_times_accepted();
   test_cycle_times_pump_clamps();
   test_cycle_times_read_unavailable();
+  test_cycle_flow_only_accepted();
+  test_cycle_combined_write();
+  test_cycle_flow_clamped();
+  test_cycle_flow_rejected_kept();
+  test_cycle_flow_invalid_ranges();
+  test_cycle_all_kept_invalid();
+  test_cycle_kept_minutes_unreadable();
+  test_cycle_flow_entity_origin();
   test_temp_range_preserves_limits();
   test_interleaved_poll();
   test_issue92_collision();

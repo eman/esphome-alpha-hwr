@@ -431,8 +431,9 @@ public:
                                     const std::string &op_id) {
     write_op_service_.submit_set_temperature_range(min_c, max_c, autoadapt, op_id);
   }
-  void submit_set_cycle_times(uint8_t on_minutes, uint8_t off_minutes, const std::string &op_id) {
-    write_op_service_.submit_set_cycle_times(on_minutes, off_minutes, op_id);
+  void submit_set_cycle_times(uint8_t on_minutes, uint8_t off_minutes, float flow,
+                              const std::string &op_id) {
+    write_op_service_.submit_set_cycle_times(on_minutes, off_minutes, flow, op_id);
   }
   void submit_set_schedule_entry(uint8_t layer, uint8_t day_index, uint8_t begin_hour,
                                  uint8_t begin_minute, uint8_t end_hour, uint8_t end_minute,
@@ -524,7 +525,14 @@ public:
   void set_cycle_time_control(uint8_t on_minutes, uint8_t off_minutes,
                               std::function<void(bool)> callback) {
     if (!check_ready("set_cycle_time_control")) { if (callback) callback(false); return; }
-    write_op_service_.submit_set_cycle_times(on_minutes, off_minutes, "", callback,
+    write_op_service_.submit_set_cycle_times(on_minutes, off_minutes, NAN, "", callback,
+                                             services::WriteOrigin::ENTITY);
+  }
+  // Cycle-mode flow setpoint, m³/h (issue #107). Flow-only write: the op
+  // layer resolves the on/off periods from its mandatory fresh read.
+  void set_cycle_flow(float value_m3h, std::function<void(bool)> callback) {
+    if (!check_ready("set_cycle_flow")) { if (callback) callback(false); return; }
+    write_op_service_.submit_set_cycle_times(0, 0, value_m3h, "", callback,
                                              services::WriteOrigin::ENTITY);
   }
 
@@ -573,6 +581,9 @@ public:
   }
   int8_t get_cached_cycle_time_off() const {
     return control_service_.get_cached_cycle_time_off();
+  }
+  float get_cached_cycle_flow() const {
+    return control_service_.get_cached_cycle_flow();
   }
 
   // Schedule service access methods (for ESPHome buttons/lambdas). Writes
