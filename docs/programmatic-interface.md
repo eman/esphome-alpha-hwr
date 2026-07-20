@@ -45,7 +45,7 @@ ESPHome prefixes each service with the node name: `esphome.<node_name>_<service>
 | `pump_set_mode` | `mode: string`, `op_id: string` | Control mode only, via the pump's unfused mode-change object — touches neither the run state nor any mode's stored setpoint. |
 | `pump_set_setpoint` | `mode: string`, `value: float`, `op_id: string` | **Switches the pump into `mode` AND sets that mode's setpoint** — `mode` is not merely selecting which stored setpoint to edit; after this call the pump is running (or armed) in that mode. This is exactly the pair the pump fuses in one write. Use `pump_set_mode` to switch modes without touching a setpoint. The pump stores an independent setpoint per mode, so setpoint writes to different modes never supersede each other. |
 | `pump_set_temperature_range` | `min_c: float`, `max_c: float`, `autoadapt: bool`, `op_id: string` | The temperature-range config object (its own fused write), after switching to temperature-range mode. |
-| `pump_set_cycle_times` | `on_minutes: float`, `off_minutes: float`, `op_id: string` | The cycle-time config object (whole minutes, 1–60 each — the arguments are float-typed for platform reasons, but fractional values settle `invalid`), after switching to cycle-time mode. |
+| `pump_set_cycle_times` | `on_minutes: float`, `off_minutes: float`, `flow: float`, `op_id: string` | The cycle-time config object, after switching to cycle-time mode. Minutes are whole, 1–60 (float-typed for platform reasons; fractional values settle `invalid`). `flow` is the flow the pump targets during ON periods, in m³/h (0.1–10.0). **Each field accepts `0` = keep existing**: kept fields are resolved from a fresh read of the pump's stored config (a kept flow is echoed back byte-for-byte, no float round trip), so flow-only or single-period writes are safe. All three at `0` settles `invalid`. |
 
 `mode` strings: `constant_pressure`, `proportional_pressure`, `constant_speed`,
 `constant_flow`, `auto_adapt_radiator`, `auto_adapt_underfloor`,
@@ -172,15 +172,19 @@ Statuses:
   modes are independent values and both run.
 
 Settled-value fields per command: `mode`/`value`/`enabled` for the control
-commands; `temp_min`/`temp_max`/`autoadapt`; `on_minutes`/`off_minutes`;
-`layer`/`day`/`day_name`/`begin`/`end`/`enabled` for schedule entries;
-`slot`/`begin_ts`/`end_ts`/`enabled` for single events; `event_count` for the
-refreshes. For `accepted`/`clamped`/`rejected` these carry what the pump
-**actually holds** (from the readback), not what was requested. The original
-request is echoed alongside in `requested_*` fields (`requested_mode`,
-`requested_value`, `requested_temp_min`/`_max`,
-`requested_on_minutes`/`_off_minutes`, `requested_begin`/`_end`), so the
-event is self-contained for logging and retry decisions.
+commands; `temp_min`/`temp_max`/`autoadapt`; `on_minutes`/`off_minutes`/`flow`
+(all three are always reported from the readback on confirmed cycle settles,
+including fields the request kept — a keep-everything-but-one write doubles
+as a read of the others); `layer`/`day`/`day_name`/`begin`/`end`/`enabled`
+for schedule entries; `slot`/`begin_ts`/`end_ts`/`enabled` for single events;
+`event_count` for the refreshes. For `accepted`/`clamped`/`rejected` these
+carry what the pump **actually holds** (from the readback), not what was
+requested. The original request is echoed alongside in `requested_*` fields
+(`requested_mode`, `requested_value`, `requested_temp_min`/`_max`,
+`requested_on_minutes`/`_off_minutes`, `requested_flow`,
+`requested_begin`/`_end`), so the event is self-contained for logging and
+retry decisions. Kept (`0`-sentinel) cycle fields are omitted from the
+`requested_*` echo.
 
 Event ordering note: settle events for `superseded` operations fire at
 submission time, so they can arrive **before** the terminal events of

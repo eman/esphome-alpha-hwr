@@ -871,10 +871,12 @@ void ControlService::write_temp_range_config(float min_temp, float max_temp, boo
 }
 
 bool ControlService::write_dhw_config(uint8_t on_minutes, uint8_t off_minutes,
-                                      std::function<void(bool)> on_ack) {
+                                      std::function<void(bool)> on_ack,
+                                      const uint8_t *setpoint_be4) {
   // Read-modify-write: the struct carries the mode's stored flow setpoint,
-  // which must be echoed back verbatim. Refuse to write blind rather than
-  // invent a setpoint (the exact clobber class issue #92 bans).
+  // echoed back verbatim unless the caller asserts new setpoint bytes
+  // (issue #107). The freshness guard applies either way: refuse to write
+  // blind rather than clobber unread state (the class issue #92 bans).
   if (!dhw_config_valid_) {
     ESP_LOGW(TAG, "Cannot write DHW config: setpoint not read yet (call read_dhw_config first)");
     return false;
@@ -898,7 +900,7 @@ bool ControlService::write_dhw_config(uint8_t on_minutes, uint8_t off_minutes,
   apdu[8] = 0x00;   // Size high
   apdu[9] = 0x00;   // Size mid
   apdu[10] = 0x06;  // Size low (6 bytes)
-  memcpy(&apdu[11], cached_dhw_setpoint_raw_, 4);  // stored setpoint, verbatim
+  memcpy(&apdu[11], setpoint_be4 != nullptr ? setpoint_be4 : cached_dhw_setpoint_raw_, 4);
   apdu[15] = on_minutes;
   apdu[16] = off_minutes;
 

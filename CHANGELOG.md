@@ -4,6 +4,17 @@
 
 ### Added
 
+- **Cycle Time flow setpoint**
+  ([#107](https://github.com/eman/esphome-alpha-hwr/issues/107)) —
+  The flow the pump targets during cycle-mode ON periods (the Obj 91 Sub 421
+  stored setpoint, previously settable only from the GO app) is now exposed:
+  a `flow` argument on `pump_set_cycle_times` (m³/h, 0.1–10.0) and a new
+  "Cycle Flow" number entity. All three cycle fields accept `0` =
+  keep-existing, resolved from a mandatory fresh read of the pump's stored
+  config, so flow-only and single-period writes are safe; a kept flow is
+  still echoed to the pump byte-for-byte. The settle event gains `flow` and
+  `requested_flow` fields.
+
 - **Bulk schedule upload + sync hash** (RFC-005,
   [dhw-sensor-apps#5](https://github.com/eman/dhw-sensor-apps/issues/5)) —
   New `upload_schedule` service uploads the entire 7×5 weekly grid in one
@@ -85,6 +96,16 @@
 
 ### Changed
 
+- **`pump_set_cycle_times` surface changes for #107** — the service now
+  declares a `flow` field; Home Assistant requires every declared field, so
+  existing callers must add `flow: 0` (the bench tool defaults it
+  automatically). Minute arguments of `0` now mean keep-existing (previously
+  settled `invalid`). A cycle write the pump wholly ignores now settles
+  `rejected` instead of `clamped`, matching setpoint semantics. The
+  `requested_on_minutes`/`requested_off_minutes` event fields are emitted
+  independently and omitted for kept fields. The Cycle Time ON/OFF entities
+  now write only their own period (the other is keep-existing) instead of
+  reconstructing it from cache with hard-coded fallbacks.
 - **Entity writes route through the write-operation layer** — the dashboard
   number/switch/select lambdas now get the same serialization and verify
   readbacks as the services (their settle events carry `op_id: ""`). This

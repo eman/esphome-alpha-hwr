@@ -454,12 +454,11 @@ number:
       return NAN;
     set_action:
       - lambda: |-
-          int8_t off_cached = id(pump).get_cached_cycle_time_off();
-          float off_val = id(cycle_time_off).state;
-          uint8_t off_min = !std::isnan(off_val) ? (uint8_t)off_val
-                            : (off_cached > 0 ? (uint8_t)off_cached : 15);
-          ESP_LOGI("number", "Setting cycle time: %.0f min ON, %d min OFF", x, off_min);
-          id(pump).set_cycle_time_control((uint8_t)x, off_min, [](bool success) {
+          // OFF period 0 = keep existing: the write layer resolves it from a
+          // mandatory fresh read of the pump's stored config (issue #107),
+          // never from a possibly-stale cache or entity state.
+          ESP_LOGI("number", "Setting cycle time ON to %.0f min", x);
+          id(pump).set_cycle_time_control((uint8_t)x, 0, [](bool success) {
             if (success) {
               ESP_LOGI("number", "Cycle time updated successfully");
             } else {
@@ -487,16 +486,47 @@ number:
       return NAN;
     set_action:
       - lambda: |-
-          int8_t on_cached = id(pump).get_cached_cycle_time_on();
-          float on_val = id(cycle_time_on).state;
-          uint8_t on_min = !std::isnan(on_val) ? (uint8_t)on_val
-                           : (on_cached > 0 ? (uint8_t)on_cached : 5);
-          ESP_LOGI("number", "Setting cycle time: %d min ON, %.0f min OFF", on_min, x);
-          id(pump).set_cycle_time_control(on_min, (uint8_t)x, [](bool success) {
+          // ON period 0 = keep existing (see Cycle Time ON above).
+          ESP_LOGI("number", "Setting cycle time OFF to %.0f min", x);
+          id(pump).set_cycle_time_control(0, (uint8_t)x, [](bool success) {
             if (success) {
               ESP_LOGI("number", "Cycle time updated successfully");
             } else {
               ESP_LOGW("number", "Failed to update cycle time");
+            }
+          });
+
+  # Cycle Flow (Mode 25 - DHW Cycle Time Control): the flow the pump targets
+  # during ON periods in cycle mode (Obj 91 Sub 421 stored setpoint, issue
+  # #107). Shows unknown until the DHW config has been read from the pump.
+  # Box input rather than slider: 0.01 m³/h precision over 0.1-10.0 (the
+  # factory value 0.23 m³/h = 1.0 gal/min needs finer steps than a slider
+  # can usefully offer).
+  - platform: template
+    name: "Cycle Flow"
+    id: cycle_flow
+    icon: "mdi:water-pump"
+    device_class: volume_flow_rate
+    unit_of_measurement: "m³/h"
+    min_value: 0.1
+    max_value: 10.0
+    step: 0.01
+    mode: box
+    optimistic: false
+    update_interval: 5s
+    disabled_by_default: false
+    lambda: |-
+      float v = id(pump).get_cached_cycle_flow();
+      if (!std::isnan(v)) return v;
+      return NAN;
+    set_action:
+      - lambda: |-
+          ESP_LOGI("number", "Setting cycle flow to %.3f m³/h", x);
+          id(pump).set_cycle_flow(x, [](bool success) {
+            if (success) {
+              ESP_LOGI("number", "Cycle flow updated successfully");
+            } else {
+              ESP_LOGW("number", "Failed to update cycle flow");
             }
           });
 
