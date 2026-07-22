@@ -5,6 +5,7 @@
 #include <cstdio>
 #include <map>
 #include "alpha_hwr.h"
+#include "esphome/core/application.h"
 #include "esphome/core/log.h"
 
 namespace esphome {
@@ -60,6 +61,10 @@ void AlphaHwrApiBridge::fire_write_settled(const WriteResult &result) {
   data["status"] = services::write_status_to_string(result.status);
   data["detail"] = result.detail;
   data["origin"] = result.origin == services::WriteOrigin::ENTITY ? "entity" : "service";
+  // Node name (App.get_name()) makes the event self-identifying across a
+  // multi-controller install, unlike HA's opaque, re-add-unstable device_id
+  // (issue #113). Present on every event, including empty-op_id entity writes.
+  data["node"] = App.get_name();
   data["seq"] = std::to_string(result.seq);
   // Echo of the original request, so the event is self-contained for
   // logging/retry (review feedback on #92). Only populated fields are sent.

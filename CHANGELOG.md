@@ -2,6 +2,17 @@
 
 ## [Unreleased]
 
+### Added
+
+- **Node name in the settle event**
+  ([#113](https://github.com/eman/esphome-alpha-hwr/issues/113)) —
+  `write_settled` events now carry a `node` field (the controller's ESPHome
+  node name, from `App.get_name()`), so deployments with more than one
+  controller can attribute each event to its source. Unlike Home Assistant's
+  `device_id` — opaque, and regenerated if the device is removed and re-added
+  — the node name is stable, human-readable, and matches the service-call
+  prefix. Present on every event, including empty-`op_id` entity writes.
+
 ## [0.12.0] - 2026-07-19
 
 ### Added
