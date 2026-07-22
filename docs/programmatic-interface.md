@@ -136,7 +136,8 @@ data:
   status: "clamped"          # accepted | clamped | rejected | invalid | timeout | superseded
   detail: "pump stored 1650" # short reason when relevant
   origin: "service"          # service (API call) | entity (dashboard write)
-  seq: "42"                  # submission-order sequence number (per boot)
+  node: "recirc-controller"  # this controller's ESPHome node name
+  seq: "42"                  # submission-order sequence number (per boot and per controller)
   # the command's settled values:
   mode: "constant_speed"
   value: "1650"
@@ -147,6 +148,20 @@ data:
 
 > **All event values are strings** (`"1650"`, `"true"`) — the ESPHome
 > event API sends string maps. Convert in your client if you need numbers.
+
+`node` is this controller's ESPHome node name — `App.get_name()`, normally the
+`name:` from its YAML (with the MAC-address suffix appended when
+`name_add_mac_suffix` is enabled). It is closely related to the token that
+prefixes its service calls, `esphome.<node_name>_...`, but not always
+byte-identical: Home Assistant slugifies the name for service registration, so
+a hyphenated node like `recirc-controller` appears here verbatim yet becomes
+`recirc_controller` in `esphome.recirc_controller_pump_set_enabled`. Use `node`
+to attribute an event to a controller when several report to the same event
+bus: it's stable and human-readable, unlike Home Assistant's `device_id`,
+which is opaque and regenerated if the device is removed and re-added. Because
+`seq` is per boot **and per controller**, `node` + `seq` uniquely *identifies*
+an event within a multi-controller install (each controller keeps its own seq
+counter, so seq values from different nodes are not comparable across them).
 
 Statuses:
 
