@@ -51,7 +51,7 @@ void DhwDemandComponent::dump_config() {
                 motor_current_spike_threshold_);
   ESP_LOGCONFIG(TAG, "    pump_power_spike: %.1f W/s",
                 pump_power_spike_threshold_);
-  ESP_LOGCONFIG(TAG, "    pump_head_rate: %.1f kPa/s",
+  ESP_LOGCONFIG(TAG, "    pump_head_rate: %.3f m/s",
                 pump_head_rate_threshold_);
   ESP_LOGCONFIG(TAG, "    flow_latch: %d s", flow_latch_seconds_);
   ESP_LOGCONFIG(TAG, "    session_gap_tolerance: %d s",
@@ -299,8 +299,9 @@ void DhwDemandComponent::publish_result_(bool demand, float confidence,
   if (demand_sensor_ != nullptr)
     demand_sensor_->publish_state(demand);
 
+  // Confidence is tracked internally as a 0.0–1.0 weight; publish as a percent.
   if (confidence_sensor_ != nullptr)
-    confidence_sensor_->publish_state(confidence);
+    confidence_sensor_->publish_state(confidence * 100.0f);
 
   if (detection_method_sensor_ != nullptr)
     detection_method_sensor_->publish_state(method);

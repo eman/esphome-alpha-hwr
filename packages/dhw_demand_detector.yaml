@@ -124,6 +124,6 @@ dhw_demand:
   pump_flow_collapse_threshold: 0.2     # GPM   (only used when pump sensors present)
   motor_current_spike_threshold: 0.001  # A/s   (only used when pump sensors present)
   pump_power_spike_threshold: 5.0       # W/s   (only used when pump sensors present)
-  pump_head_rate_threshold: 3.0         # kPa/s (corroborating vote; only fires when pump is on)
+  pump_head_rate_threshold: 0.31        # m/s (corroborating vote; only fires when pump is on)
   flow_latch_seconds: 30
   session_gap_tolerance_seconds: 60
