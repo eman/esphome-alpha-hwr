@@ -207,7 +207,7 @@ bool ScheduleService::set_state(bool enable) {
     structure_bytes[2] = 0x05; // max_nof_alternative_events_per_day = 5
     structure_bytes[3] = 0x05; // max_nof_events_per_day = 5
     structure_bytes[4] = 0x00; // clock_program_enabled (will be set below)
-    structure_bytes[5] = 0x01; // default_action = START
+    structure_bytes[5] = 0x01; // default_action = Stop (set explicitly below)
     structure_bytes[6] = 0x00; // base_set_point (float32 = 0.0)
     structure_bytes[7] = 0x00;
     structure_bytes[8] = 0x00;
@@ -216,6 +216,12 @@ bool ScheduleService::set_state(bool enable) {
 
   // Modify only the enable flag (byte 4)
   structure_bytes[4] = enable ? 0x01 : 0x00;
+  // Force default_action = Stop (SchedulingActionType 0x01), matching the
+  // Grundfos app, instead of preserving whatever is on the pump. The pump
+  // idles between windows and runs during the Auto windows we write. A stale
+  // default_action of Auto (0x02) makes the app render the whole schedule as
+  // "pump will be idle" (bench-confirmed 2026-07-22).
+  structure_bytes[5] = 0x01;
 
   // Build APDU: Class 10 SET command for Object 84, SubID 1
   // OpSpec 0x93 = OpSpec 4 (SET), Length 19
@@ -269,6 +275,7 @@ void ScheduleService::set_state_async(bool enable, std::function<void(bool)> on_
   uint8_t structure_bytes[10];
   memcpy(structure_bytes, this->overview_structure_, 10);
   structure_bytes[4] = enable ? 0x01 : 0x00;
+  structure_bytes[5] = 0x01;  // default_action = Stop (see set_state() note)
 
   // Same APDU as set_state(): Class 10 OpSpec 0x93, Object 84, SubID 1,
   // Type 218 (ClockProgramOverview) — but sent expecting a response window so
@@ -354,6 +361,7 @@ bool ScheduleService::send_configuration_commit() {
 
   if (this->overview_cached_) {
     memcpy(structure_bytes, this->overview_structure_, 10);
+    structure_bytes[5] = 0x01;  // default_action = Stop (see set_state() note)
     ESP_LOGD(TAG, "Using cached ClockProgramOverview structure for commit");
   } else {
     ESP_LOGW(TAG, "Cannot commit configuration: ClockProgramOverview not yet cached. Ignoring commit to prevent corruption.");
