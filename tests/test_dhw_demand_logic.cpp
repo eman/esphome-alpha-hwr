@@ -1,13 +1,18 @@
 /**
  * Unit tests for DHW demand pump-on hydraulic voting.
  *
- * These tests mirror the production vote logic to verify that recirculation
- * pump startup transients do not falsely declare DHW demand while genuine
- * open-loop signals remain detectable.
+ * These tests call the production vote logic directly (dhw_demand_votes.h)
+ * to verify that recirculation pump startup transients do not falsely
+ * declare DHW demand while genuine open-loop signals remain detectable.
  */
 
+#include "../components/dhw_demand/dhw_demand_votes.h"
 #include <cmath>
 #include <iostream>
+
+using esphome::dhw_demand::apply_dhw_in_use_boost;
+using esphome::dhw_demand::compute_pump_on_confidence;
+using esphome::dhw_demand::kDefaultPumpOnVoteThresholds;
 
 int tests_passed = 0;
 int tests_failed = 0;
@@ -36,46 +41,11 @@ static float deterministic_pump_on_conf(float inlet_deriv, float inlet_psi,
                                         float pump_flow, float current_deriv,
                                         float power_deriv, float head_rate_peak,
                                         bool suppress_transient_votes) {
-  constexpr float inlet_pressure_transient_threshold = 0.07f;
-  constexpr float inlet_pressure_demand_floor = 5.0f;
-  constexpr float pump_flow_collapse_threshold = 0.2f;
-  constexpr float motor_current_spike_threshold = 0.001f;
-  constexpr float pump_power_spike_threshold = 5.0f;
-  constexpr float pump_head_rate_threshold = 3.0f;
-
-  int votes = 0;
-
-  if (!suppress_transient_votes) {
-    if (!std::isnan(inlet_deriv) &&
-        std::fabs(inlet_deriv) > inlet_pressure_transient_threshold)
-      votes++;
-  }
-
-  if (!std::isnan(inlet_psi) && inlet_psi < inlet_pressure_demand_floor)
-    votes++;
-
-  if (!std::isnan(pump_flow) && pump_flow < pump_flow_collapse_threshold)
-    votes++;
-
-  if (!suppress_transient_votes) {
-    if (!std::isnan(current_deriv) &&
-        std::fabs(current_deriv) > motor_current_spike_threshold)
-      votes++;
-
-    if (!std::isnan(power_deriv) &&
-        power_deriv > pump_power_spike_threshold)
-      votes++;
-
-    if (votes >= 1 && head_rate_peak > pump_head_rate_threshold)
-      votes++;
-  }
-
-  if (votes == 0)
-    return 0.0f;
-
-  static const float conf_map[7] = {0.0f, 0.50f, 0.65f, 0.80f,
-                                    0.90f, 0.95f, 0.95f};
-  return (votes < 7) ? conf_map[votes] : 0.95f;
+  const char *method = nullptr;
+  return compute_pump_on_confidence(inlet_deriv, inlet_psi, pump_flow,
+                                    current_deriv, power_deriv, head_rate_peak,
+                                    suppress_transient_votes,
+                                    kDefaultPumpOnVoteThresholds, &method);
 }
 
 static bool pump_off_flow_onset_is_confirmed(bool flow_present,
@@ -110,7 +80,9 @@ void test_startup_transients_still_trigger_without_guard() {
   float confidence = deterministic_pump_on_conf(1.32f, 13.2f, 9.56f, 0.015f,
                                                 1.4f, 2.94f, false);
 
-  TEST_ASSERT_NEAR(confidence, 0.65f, 0.0001f,
+  // Three votes without the guard: inlet-pressure transient, current spike,
+  // and the head-rate vote that rides along once something else has voted.
+  TEST_ASSERT_NEAR(confidence, 0.80f, 0.0001f,
                    "Pressure + current startup spikes would have caused a false positive");
 }
 
@@ -157,6 +129,26 @@ void test_flow_only_onset_requires_one_full_off_tick() {
               "Charge-drop corroboration confirms a first-tick flow onset");
 }
 
+void test_dhw_in_use_boost_is_gated_to_pump_off() {
+  std::cout << "\n=== Testing DHW In-Use Boost Gating ===" << std::endl;
+
+  float pump_off_boosted = apply_dhw_in_use_boost(0.80f, true, false, 1.0f);
+  float pump_on_boosted = apply_dhw_in_use_boost(0.80f, true, true, 1.0f);
+  float no_demand_boosted = apply_dhw_in_use_boost(0.80f, false, false, 1.0f);
+  float nan_flag_boosted = apply_dhw_in_use_boost(0.80f, true, false, NAN);
+  float clamped = apply_dhw_in_use_boost(0.99f, true, false, 1.0f);
+
+  TEST_ASSERT_NEAR(pump_off_boosted, 0.85f, 0.0001f,
+                   "Pump-off demand with dhw_in_use high receives the boost");
+  TEST_ASSERT_NEAR(pump_on_boosted, 0.80f, 0.0001f,
+                   "Pump-on demand does not receive the boost (60 s phantom flag)");
+  TEST_ASSERT_NEAR(no_demand_boosted, 0.80f, 0.0001f,
+                   "No boost is applied when there is no demand");
+  TEST_ASSERT_NEAR(nan_flag_boosted, 0.80f, 0.0001f,
+                   "A NaN dhw_in_use reading does not boost");
+  TEST_ASSERT_NEAR(clamped, 1.0f, 0.0001f, "Boosted confidence is clamped to 1.0");
+}
+
 void test_ambiguous_flow_onset_does_not_prime_continuation() {
   std::cout << "\n=== Testing Ambiguous Onset Does Not Prime Continuation ==="
             << std::endl;
@@ -181,6 +173,7 @@ int main() {
   test_startup_transients_still_trigger_without_guard();
   test_startup_guard_keeps_open_loop_signals();
   test_flow_only_onset_requires_one_full_off_tick();
+  test_dhw_in_use_boost_is_gated_to_pump_off();
   test_ambiguous_flow_onset_does_not_prime_continuation();
 
   std::cout << "\n==========================================================="

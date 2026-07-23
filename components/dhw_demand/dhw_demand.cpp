@@ -240,55 +240,14 @@ float DhwDemandComponent::detect_pump_on_deterministic_(
     float current_deriv, float power_deriv, float head_rate_peak,
     bool suppress_transient_votes,
     const char **method_out) {
-  int votes = 0;
-
-  if (!suppress_transient_votes) {
-    // Pressure/current/power/head-rate spikes also occur when the recirculation
-    // pump itself starts, so ignore them for a short post-start window. During
-    // that window, continuation detection still works and steady-state
-    // open-loop signals below remain active.
-
-    // Signal 1: Pressure transient (valve-open shock)
-    if (!std::isnan(inlet_deriv) &&
-        std::abs(inlet_deriv) > inlet_pressure_transient_threshold_)
-      votes++;
-  }
-
-  // Signal 2: Absolute inlet pressure below demand floor (open circuit)
-  if (!std::isnan(inlet_psi) && inlet_psi < inlet_pressure_demand_floor_)
-    votes++;
-
-  // Signal 3: Pump-side flow collapse (flow diverted to house)
-  if (!std::isnan(pump_flow) && pump_flow < pump_flow_collapse_threshold_)
-    votes++;
-
-  if (!suppress_transient_votes) {
-    // Signal 4: Current spike (load change at valve opening)
-    if (!std::isnan(current_deriv) &&
-        std::abs(current_deriv) > motor_current_spike_threshold_)
-      votes++;
-
-    // Signal 5: Power spike (corroborates current spike)
-    if (!std::isnan(power_deriv) && power_deriv > pump_power_spike_threshold_)
-      votes++;
-
-    // Signal 6: Head-pressure rate spike — corroborating only.
-    // Captured at ~1–2 Hz via callback so valve-open transients aren't missed.
-    // Only counts when at least one other signal has voted to avoid false triggers.
-    if (votes >= 1 && head_rate_peak > pump_head_rate_threshold_)
-      votes++;
-  }
-
-  if (votes == 0)
-    return 0.0f;
-
-  // Confidence scales with vote count; cap at 0.95 (votes not independent).
-  // Index 0 unused; indices 1–6 map 1–5+ votes.
-  static const float conf_map[7] = {0.0f, 0.50f, 0.65f, 0.80f, 0.90f, 0.95f, 0.95f};
-  float confidence = (votes < 7) ? conf_map[votes] : 0.95f;
-
-  *method_out = "deterministic_pump_on";
-  return confidence;
+  PumpOnVoteThresholds thresholds{
+      inlet_pressure_transient_threshold_, inlet_pressure_demand_floor_,
+      pump_flow_collapse_threshold_,       motor_current_spike_threshold_,
+      pump_power_spike_threshold_,         pump_head_rate_threshold_};
+  return compute_pump_on_confidence(inlet_deriv, inlet_psi, pump_flow,
+                                    current_deriv, power_deriv, head_rate_peak,
+                                    suppress_transient_votes, thresholds,
+                                    method_out);
 }
 
 // ── Publish & session helpers ─────────────────────────────────────────────────
@@ -497,9 +456,7 @@ void DhwDemandComponent::update() {
   }
 
   // ── 6. DHW in-use confidence boost ────────────────────────────────────────
-  if (demand && !std::isnan(dhw_in_use) && dhw_in_use >= 0.5f) {
-    confidence = std::min(1.0f, confidence + 0.05f);
-  }
+  confidence = apply_dhw_in_use_boost(confidence, demand, pump_on, dhw_in_use);
 
   prev_flow_ = flow;
   prev_pump_on_ = pump_on;

@@ -1,5 +1,6 @@
 #pragma once
 
+#include "dhw_demand_votes.h"
 #include "esphome/components/binary_sensor/binary_sensor.h"
 #include "esphome/components/sensor/sensor.h"
 #include "esphome/components/text_sensor/text_sensor.h"
@@ -125,12 +126,20 @@ class DhwDemandComponent : public PollingComponent {
   float flow_threshold_{0.3f};         // GPM
   float thermal_collapse_rate_{0.05f};         // °F/s
   float dhw_charge_drop_rate_{0.005f};         // %/s
-  float inlet_pressure_transient_threshold_{0.07f};  // PSI/s
-  float inlet_pressure_demand_floor_{5.0f};    // PSI
-  float pump_flow_collapse_threshold_{0.2f};   // GPM
-  float motor_current_spike_threshold_{0.001f};  // A/s
-  float pump_power_spike_threshold_{5.0f};     // W/s
-  float pump_head_rate_threshold_{0.31f};      // m/s
+  // Pump-on vote thresholds default from kDefaultPumpOnVoteThresholds — the
+  // single source of truth also used by the host test (dhw_demand_votes.h).
+  float inlet_pressure_transient_threshold_{
+      kDefaultPumpOnVoteThresholds.inlet_pressure_transient};  // PSI/s
+  float inlet_pressure_demand_floor_{
+      kDefaultPumpOnVoteThresholds.inlet_pressure_demand_floor};  // PSI
+  float pump_flow_collapse_threshold_{
+      kDefaultPumpOnVoteThresholds.pump_flow_collapse};  // GPM
+  float motor_current_spike_threshold_{
+      kDefaultPumpOnVoteThresholds.motor_current_spike};  // A/s
+  float pump_power_spike_threshold_{
+      kDefaultPumpOnVoteThresholds.pump_power_spike};  // W/s
+  float pump_head_rate_threshold_{
+      kDefaultPumpOnVoteThresholds.pump_head_rate};  // m/s
   int flow_latch_seconds_{30};                 // s
   int session_gap_tolerance_seconds_{60};      // s
 

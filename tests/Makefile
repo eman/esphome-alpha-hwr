@@ -18,7 +18,7 @@ test_protocol: test_protocol.cpp protocol.h
 test_control_state: test_control_state.cpp
 	$(CXX) $(CXXFLAGS) test_control_state.cpp -o test_control_state $(LDFLAGS)
 
-test_dhw_demand_logic: test_dhw_demand_logic.cpp
+test_dhw_demand_logic: test_dhw_demand_logic.cpp ../components/dhw_demand/dhw_demand_votes.h
 	$(CXX) $(CXXFLAGS) test_dhw_demand_logic.cpp -o test_dhw_demand_logic $(LDFLAGS)
 
 test_transport_matching: test_transport_matching.cpp
