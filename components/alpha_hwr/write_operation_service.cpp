@@ -988,7 +988,8 @@ void WriteOperationService::submit_set_schedule_enabled(bool enabled, const std:
 
 void WriteOperationService::submit_set_single_event(uint32_t begin_ts, uint32_t end_ts,
                                                     const std::string &op_id,
-                                                    std::function<void(bool)> done, int slot, WriteOrigin origin) {
+                                                    std::function<void(bool)> done, int slot,
+                                                    WriteOrigin origin, uint8_t action) {
   Operation op;
   op.command = WriteCommand::SET_SINGLE_EVENT;
   op.op_id = op_id;
@@ -997,6 +998,27 @@ void WriteOperationService::submit_set_single_event(uint32_t begin_ts, uint32_t 
   op.end_ts = end_ts;
   op.slot = static_cast<int16_t>(slot);
   op.enabled = true;
+  op.single_event_action = action;
+  op.done = std::move(done);
+  submit_(std::move(op));
+}
+
+void WriteOperationService::submit_set_vacation(uint32_t begin_ts, uint32_t end_ts,
+                                                const std::string &op_id,
+                                                std::function<void(bool)> done, WriteOrigin origin) {
+  // A vacation is just a Stop (0x01) single-event over a date range.
+  submit_set_single_event(begin_ts, end_ts, op_id, std::move(done), -1, origin, 0x01);
+}
+
+void WriteOperationService::submit_clear_vacation(const std::string &op_id,
+                                                  std::function<void(bool)> done, WriteOrigin origin) {
+  Operation op;
+  op.command = WriteCommand::CLEAR_SINGLE_EVENT;
+  op.op_id = op_id;
+  op.origin = origin;
+  op.slot = -1;                 // auto-resolve to the active vacation slot
+  op.clear_by_vacation = true;
+  op.enabled = false;
   op.done = std::move(done);
   submit_(std::move(op));
 }
@@ -1246,6 +1268,17 @@ void WriteOperationService::run_single_event_(uint32_t seq) {
     auto resolve = [this, seq]() {
       Operation *op = find_(seq);
       if (op == nullptr || op->phase == Phase::DONE) return;
+      if (op->clear_by_vacation) {
+        // clear_vacation: target the active Stop (vacation) single-event.
+        int slot = schedule_service_.find_vacation_slot();
+        if (slot < 0) {
+          finish_(seq, WriteStatus::ACCEPTED, "no active vacation");
+          return;
+        }
+        op->slot = static_cast<int16_t>(slot);
+        write_single_event_(seq);
+        return;
+      }
       // The new event's begin timestamp doubles as "now": any cached
       // event that ended before it is expired and its slot reusable.
       int slot = schedule_service_.find_free_single_event_slot(op->begin_ts);
@@ -1281,7 +1314,7 @@ void WriteOperationService::write_single_event_(uint32_t seq) {
   SingleEvent event;
   event.index = static_cast<uint8_t>(op->slot);
   event.enabled = op->command == WriteCommand::SET_SINGLE_EVENT;
-  event.action = 0x02;
+  event.action = op->single_event_action;
   event.begin_timestamp = op->begin_ts;
   event.end_timestamp = op->end_ts;
 

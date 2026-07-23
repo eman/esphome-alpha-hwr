@@ -266,6 +266,10 @@ void AlphaHwrComponent::setup() {
           this->single_events_text_sensor_->publish_state(
               schedule_service_.format_single_events_display());
         }
+        if (applied && this->vacation_text_sensor_ != nullptr) {
+          this->vacation_text_sensor_->publish_state(
+              schedule_service_.format_vacation_display());
+        }
 #endif
         break;
       default:
