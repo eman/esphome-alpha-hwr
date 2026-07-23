@@ -220,8 +220,11 @@ bool ScheduleService::set_state(bool enable) {
   // Grundfos app, instead of preserving whatever is on the pump. The pump
   // idles between windows and runs during the Auto windows we write. A stale
   // default_action of Auto (0x02) makes the app render the whole schedule as
-  // "pump will be idle" (bench-confirmed 2026-07-22).
+  // "pump will be idle" (bench-confirmed 2026-07-22). Keep the cache in sync
+  // with what we write so later cache reuses stay consistent.
   structure_bytes[5] = 0x01;
+  if (this->overview_cached_)
+    this->overview_structure_[5] = 0x01;
 
   // Build APDU: Class 10 SET command for Object 84, SubID 1
   // OpSpec 0x93 = OpSpec 4 (SET), Length 19
@@ -276,6 +279,7 @@ void ScheduleService::set_state_async(bool enable, std::function<void(bool)> on_
   memcpy(structure_bytes, this->overview_structure_, 10);
   structure_bytes[4] = enable ? 0x01 : 0x00;
   structure_bytes[5] = 0x01;  // default_action = Stop (see set_state() note)
+  this->overview_structure_[5] = 0x01;  // keep cache consistent
 
   // Same APDU as set_state(): Class 10 OpSpec 0x93, Object 84, SubID 1,
   // Type 218 (ClockProgramOverview) — but sent expecting a response window so
@@ -362,6 +366,7 @@ bool ScheduleService::send_configuration_commit() {
   if (this->overview_cached_) {
     memcpy(structure_bytes, this->overview_structure_, 10);
     structure_bytes[5] = 0x01;  // default_action = Stop (see set_state() note)
+    this->overview_structure_[5] = 0x01;  // keep cache consistent
     ESP_LOGD(TAG, "Using cached ClockProgramOverview structure for commit");
   } else {
     ESP_LOGW(TAG, "Cannot commit configuration: ClockProgramOverview not yet cached. Ignoring commit to prevent corruption.");
