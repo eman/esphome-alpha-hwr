@@ -154,10 +154,6 @@ alpha_hwr:
    warnings:
      name: "Active Warnings"
    
-   # Schedule Display
-   schedule:
-      name: "Weekly Schedule"
-
    # Canonical schedule hash (RFC-005) — sync-verification sensor for the
    # dhw-sensor-apps recirculation scheduler ("unknown" until fully cached)
    schedule_hash:

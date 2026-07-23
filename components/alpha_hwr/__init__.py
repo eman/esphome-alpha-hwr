@@ -49,7 +49,6 @@ CONF_RECONNECT_SETTLE_TIME = "reconnect_settle_time"
 CONF_CONTROL_STATE_POLL_INTERVAL = "control_state_poll_interval"
 CONF_ALARMS = "alarms"
 CONF_WARNINGS = "warnings"
-CONF_SCHEDULE = "schedule"
 CONF_SCHEDULE_HASH = "schedule_hash"
 CONF_SCHEDULE_LAYERS = [f"schedule_layer_{n}" for n in range(5)]
 CONF_CONTROL_MODE = "control_mode"
@@ -173,9 +172,6 @@ CONFIG_SCHEMA = cv.Schema(
         ),
         cv.Optional(CONF_WARNINGS): text_sensor.text_sensor_schema(
             icon="mdi:alert",
-        ),
-        cv.Optional(CONF_SCHEDULE): text_sensor.text_sensor_schema(
-            icon="mdi:calendar-clock",
         ),
         cv.Optional(CONF_SCHEDULE_HASH): text_sensor.text_sensor_schema(
             icon="mdi:pound",
@@ -351,10 +347,6 @@ async def to_code(config):
     if CONF_WARNINGS in config:
         sens = await text_sensor.new_text_sensor(config[CONF_WARNINGS])
         cg.add(var.set_warnings_text_sensor(sens))
-
-    if CONF_SCHEDULE in config:
-        sens = await text_sensor.new_text_sensor(config[CONF_SCHEDULE])
-        cg.add(var.set_schedule_text_sensor(sens))
 
     if CONF_SCHEDULE_HASH in config:
         sens = await text_sensor.new_text_sensor(config[CONF_SCHEDULE_HASH])

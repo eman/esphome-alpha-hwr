@@ -1339,63 +1339,6 @@ std::string ScheduleService::current_hash() const {
   return codec::schedule_hash(images, this->schedule_enabled_);
 }
 
-std::string ScheduleService::generate_json() const {
-  bool enabled = this->schedule_enabled_;
-
-  std::string json;
-  json.reserve(256);
-  json += "{\"e\":";
-  json += enabled ? "1" : "0";
-  json += ",\"s\":{";
-
-  char buf[32];
-  bool first_layer = true;
-  for (int layer = 0; layer < 5; layer++) {
-    if (!is_layer_cached(layer))
-      continue;
-
-    bool has_entries = false;
-    std::string layer_json;
-    layer_json.reserve(100);
-    layer_json += "[";
-    for (int day = 0; day < 7; day++) {
-      if (day > 0)
-        layer_json += ",";
-      ScheduleEntry entry;
-      if (get_cached_entry(layer, day, &entry) && entry.is_enabled()) {
-        int start = entry.get_begin_hour() * 60 + entry.get_begin_minute();
-        int end = entry.get_end_hour() * 60 + entry.get_end_minute();
-        snprintf(buf, sizeof(buf), "[%d,%d]", start, end);
-        layer_json += buf;
-        has_entries = true;
-      } else {
-        layer_json += "0";
-      }
-    }
-    layer_json += "]";
-
-    if (has_entries) {
-      if (!first_layer)
-        json += ",";
-      snprintf(buf, sizeof(buf), "\"%d\":", layer);
-      json += buf;
-      json += layer_json;
-      first_layer = false;
-    }
-  }
-
-  json += "}}";
-
-  // Safety: HA limits entity state to 255 characters
-  if (json.size() > 255) {
-    json.resize(252);
-    json += "...";
-    ESP_LOGW(TAG, "Schedule JSON truncated to 255 chars");
-  }
-
-  return json;
-}
-
 } // namespace services
 } // namespace alpha_hwr
 } // namespace esphome

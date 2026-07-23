@@ -152,9 +152,6 @@ public:
   void set_warnings_text_sensor(text_sensor::TextSensor *sensor) {
     sensor_publisher_.set_warnings_text_sensor(sensor);
   }
-  void set_schedule_text_sensor(text_sensor::TextSensor *sensor) {
-    schedule_text_sensor_ = sensor;
-  }
   void set_schedule_hash_text_sensor(text_sensor::TextSensor *sensor) {
     schedule_hash_text_sensor_ = sensor;
   }
@@ -333,8 +330,7 @@ private:
   binary_sensor::BinarySensor *pairing_status_sensor_{nullptr};
   binary_sensor::BinarySensor *ready_sensor_{nullptr};
 #ifdef USE_TEXT_SENSOR
-  // Schedule display sensor
-  text_sensor::TextSensor *schedule_text_sensor_{nullptr};
+  // Schedule display sensors
   text_sensor::TextSensor *schedule_hash_text_sensor_{nullptr};
   text_sensor::TextSensor *schedule_layer_sensors_[5] = {nullptr, nullptr,
                                                          nullptr, nullptr,
@@ -856,50 +852,14 @@ public:
   void perform_clock_sync();
 
   /**
-   * Asynchronously read the pump schedule and update the text sensor display.
-   *
-   * This is a convenience method for displaying the current schedule in Home
-   * Assistant. It reads all schedule layers from the pump and formats them into
-   * a readable string, then publishes to the schedule_text_sensor if one is
-   * configured.
-   *
-   * Usage in YAML button lambda:
-   *   on_press:
-   *     - lambda: id(pump).update_schedule_display();
-   */
-  /**
-   * Publish schedule data as JSON to the text sensor for the Lovelace card.
-   * Reads from the schedule cache (no BLE traffic). Call after reads/writes
-   * complete.
-   *
-   * JSON format (compact, fits HA 255-char state limit for typical usage):
-   *   {"e":1,"s":{"0":[[360,480],[360,480],0,0,0,0,0]}}
-   *   - "e": schedule enabled (1/0)
-   *   - "s": layers keyed by number, only non-empty layers included
-   *   - Each layer: array of 7 entries (Mon=0..Sun=6)
-   *   - Entry: [start_minutes, end_minutes] or 0 (disabled/empty)
-   */
-  void publish_schedule_json() {
-    this->publish_schedule_hash();
-#ifdef USE_TEXT_SENSOR
-    if (!this->schedule_text_sensor_)
-      return;
-
-    std::string json = schedule_service_.generate_json();
-    this->schedule_text_sensor_->publish_state(json);
-    ESP_LOGD(TAG, "Published schedule JSON (%zu chars)", json.size());
-#endif
-  }
-
-  /**
    * Publish the canonical schedule hash (RFC-005 §5.2) — the scheduler's
-   * sync-verification sensor. "unknown" until the full grid is cached.
+   * sync-verification sensor — plus the per-layer read-back sensors.
+   * "unknown" until the full grid is cached.
    */
   void publish_schedule_hash() {
 #ifdef USE_TEXT_SENSOR
     // Per-layer read-back sensors (dhw-sensor-apps issue #7): each layer's
-    // compact JSON always fits HA's 255-char cap, unlike the aggregate
-    // Weekly Schedule sensor.
+    // compact JSON always fits HA's 255-char state cap.
     for (uint8_t layer = 0; layer < 5; layer++) {
       if (this->schedule_layer_sensors_[layer] != nullptr) {
         this->schedule_layer_sensors_[layer]->publish_state(
@@ -926,7 +886,7 @@ public:
             ESP_LOGW(TAG, "Failed to read schedule for display update");
             return;
           }
-          this->publish_schedule_json();
+          this->publish_schedule_hash();
         });
   }
 };
