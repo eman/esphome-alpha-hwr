@@ -2,6 +2,23 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- **Schedules showed as "pump will be idle" in the Grundfos app** — the
+  component preserved the pump's existing `ClockProgramOverview.default_action`
+  on every schedule write instead of setting it, unlike the Grundfos app, which
+  always writes `default_action = Stop`. When the pump's `default_action` was
+  `Auto` (0x02), the app rendered the whole schedule as *"pump will be idle"*
+  even though the interval windows themselves were correct (`action = Auto`,
+  i.e. run) — the source of the long-standing "inverted schedule" confusion.
+  Schedule writes now explicitly set `default_action = Stop` (0x01) at all three
+  overview-write paths (`set_state`, `set_state_async`,
+  `send_configuration_commit`), matching the app. Bench-confirmed on hardware:
+  forcing `Auto` reproduces the "idle" label, forcing `Stop` restores
+  *"pump will run"*. No change to the interval action, the upload payload, or
+  the canonical hash, so the external scheduler/RFC need no changes. The
+  mislabeled `default_action = START` comment (0x01 is Stop) is corrected.
+
 ### Changed
 
 - **Units audit — Head unified to meters, Confidence to percent.** A full
