@@ -19,6 +19,45 @@
   the canonical hash, so the external scheduler/RFC need no changes. The
   mislabeled `default_action = START` comment (0x01 is Stop) is corrected.
 
+### Changed
+
+- **Units audit — Head unified to meters, Confidence to percent.** A full
+  audit cross-checked every entity's unit interpretation against the GENI
+  reverse-engineering resources (reference decoders, `unit_index_mapping.csv` /
+  `unit_factor_mapping.csv`, the device profile, and captured traffic). **No
+  decode/scaling bugs were found** — live telemetry (flow m³/h, head m, temp °C,
+  RPM, W, V, A, bar) and every setpoint/trend/statistic factor match ground
+  truth. Two presentation inconsistencies were resolved:
+  - The **Head** sensor now reports **meters of head** (the pump's native unit,
+    matching the pressure setpoints) instead of kPa; **Head Rate** is now
+    **m/s**. The Head sensor loses its `pressure` device_class (`m` is not a
+    valid Home Assistant pressure unit). The DHW `pump_head_rate_threshold`
+    default is rescaled `3.0` kPa/s → `0.31` m/s.
+  - **DHW Detection Confidence** now reports a **percentage (0–100 %)** instead
+    of a blank-unit 0–1 ratio.
+
+    Home Assistant history for these three sensors steps at the upgrade (values
+    differ from prior points by the constant conversion factor). No setpoint
+    (the values users write) changed.
+
+### Added
+
+- **Units audit reference + regression test.** A new
+  [`docs/units-audit.md`](docs/units-audit.md) catalogues every entity's
+  unit, factor, decode site, and the resource that confirms it, with a
+  re-verification procedure. A new host test `tests/test_telemetry_units.cpp`
+  pins the physical-unit interpretation of every telemetry field (no
+  GENI-scaling, no ×3600 on telemetry flow, no temperature offset) so a
+  future reintroduction of the #88 class of bug fails the suite.
+- **Node name in the settle event**
+  ([#113](https://github.com/eman/esphome-alpha-hwr/issues/113)) —
+  `write_settled` events now carry a `node` field (the controller's ESPHome
+  node name, from `App.get_name()`), so deployments with more than one
+  controller can attribute each event to its source. Unlike Home Assistant's
+  `device_id` — opaque, and regenerated if the device is removed and re-added
+  — the node name is stable, human-readable, and matches the service-call
+  prefix. Present on every event, including empty-`op_id` entity writes.
+
 ## [0.12.0] - 2026-07-19
 
 ### Added

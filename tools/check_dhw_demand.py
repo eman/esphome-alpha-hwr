@@ -38,7 +38,7 @@ THRESHOLDS = {
     "pump_flow_collapse_threshold": 0.2,  # GPM
     "motor_current_spike_threshold": 0.001,  # A/s
     "pump_power_spike_threshold": 5.0,  # W/s
-    "pump_head_rate_threshold": 3.0,  # kPa/s
+    "pump_head_rate_threshold": 0.31,  # m/s
     "flow_latch_seconds": 30,  # s
     "session_gap_tolerance_seconds": 60,  # s
 }
@@ -50,7 +50,7 @@ ENTITY_IDS = {
     "inlet_pressure_psi": "sensor.alpha_hwr_inlet_pressure",  # PSI (converted)
     "pump_flow_gpm": "sensor.alpha_hwr_flow_rate",  # GPM (converted)
     "pump_power": "sensor.alpha_hwr_power",  # W
-    "pump_head_rate": "sensor.alpha_hwr_head_rate",  # kPa/s
+    "pump_head_rate": "sensor.alpha_hwr_head_rate",  # m/s
     "flow": "sensor.droplet_f5bc_flow_rate",  # GPM (Droplet)
     "tank_lower_temp": "sensor.nwp500_tank_lower_temperature",  # °F
     "dhw_charge": "sensor.nwp500_dhw_charge",  # %

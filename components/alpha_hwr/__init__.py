@@ -93,10 +93,12 @@ CONFIG_SCHEMA = cv.Schema(
             device_class="volume_flow_rate",
             state_class=STATE_CLASS_MEASUREMENT,
         ),
+        # Head is published in meters of head (the pump's native unit and the
+        # same unit as the pressure setpoints). "m" is not a valid Home
+        # Assistant `pressure` device_class unit, so no device_class is set.
         cv.Optional(CONF_HEAD): sensor.sensor_schema(
-            unit_of_measurement="kPa",
+            unit_of_measurement="m",
             accuracy_decimals=2,
-            device_class="pressure",
             state_class=STATE_CLASS_MEASUREMENT,
         ),
         cv.Optional(CONF_POWER): sensor.sensor_schema(
@@ -153,8 +155,8 @@ CONFIG_SCHEMA = cv.Schema(
             state_class=STATE_CLASS_MEASUREMENT,
         ),
         cv.Optional(CONF_HEAD_RATE): sensor.sensor_schema(
-            unit_of_measurement="kPa/s",
-            accuracy_decimals=3,
+            unit_of_measurement="m/s",
+            accuracy_decimals=4,
             state_class=STATE_CLASS_MEASUREMENT,
             entity_category=ENTITY_CATEGORY_DIAGNOSTIC,
             icon="mdi:gauge",

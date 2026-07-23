@@ -162,8 +162,8 @@ class SensorPublisher {
   sensor::Sensor *inlet_pressure_sensor_{nullptr};
   sensor::Sensor *head_rate_sensor_{nullptr};
 
-  // State for head-pressure derivative (callback-based, captures `this`)
-  float prev_head_kpa_{NAN};
+  // State for head derivative (callback-based, captures `this`)
+  float prev_head_m_{NAN};
   uint32_t prev_head_time_ms_{0};
 
 #ifdef USE_TEXT_SENSOR
