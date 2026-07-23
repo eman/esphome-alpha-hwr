@@ -31,6 +31,7 @@
 #include <esp_bt_defs.h>
 #include <esp_gap_ble_api.h>
 #include <esp_gattc_api.h>
+#include <ctime>
 
 namespace esphome {
 namespace alpha_hwr {
@@ -706,6 +707,97 @@ public:
   }
   int find_free_single_event_slot() const {
     return schedule_service_.find_free_single_event_slot();
+  }
+
+  /**
+   * Build a begin/end Unix-timestamp pair from wall-clock month/day/hour/minute
+   * fields, anchored to the current local year. Shared by the "Add Single Event"
+   * and "Set Vacation" editor buttons (alpha_hwr_schedule_editor.yaml).
+   *
+   *  - Requires synced system time; refuses to build the pre-2020 timestamps an
+   *    unsynced (epoch-1970) clock would otherwise produce.
+   *  - Validates that both dates are real calendar dates (day-of-month, incl.
+   *    leap years).
+   *  - If the end falls strictly before the begin, rolls the end into the next
+   *    year so ranges spanning New Year (e.g. Dec 28 -> Jan 3) work. A same-day
+   *    range is fine as long as end > begin (e.g. 00:00 -> 23:59).
+   *
+   * @return true with *begin_ts/*end_ts set on success; false (with a reason
+   *         logged under `tag`) otherwise — callers should abort the write.
+   */
+  bool build_event_window(const char *tag,
+                          uint16_t begin_month, uint16_t begin_day,
+                          uint16_t begin_hour, uint16_t begin_minute,
+                          uint16_t end_month, uint16_t end_day,
+                          uint16_t end_hour, uint16_t end_minute,
+                          uint32_t *begin_ts, uint32_t *end_ts) const {
+    auto valid_ymd = [](uint16_t month, uint16_t day, int tm_year) -> bool {
+      if (month < 1 || month > 12 || day < 1)
+        return false;
+      static const uint8_t days_in_month[12] = {31, 28, 31, 30, 31, 30,
+                                                31, 31, 30, 31, 30, 31};
+      uint8_t max_day = days_in_month[month - 1];
+      if (month == 2) {
+        int full_year = tm_year + 1900;
+        bool leap = (full_year % 4 == 0 && full_year % 100 != 0) ||
+                    (full_year % 400 == 0);
+        if (leap)
+          max_day = 29;
+      }
+      return day <= max_day;
+    };
+    auto make_ts = [](int tm_year, uint16_t month, uint16_t day, uint16_t hour,
+                      uint16_t minute) -> time_t {
+      struct tm t = {};
+      t.tm_year = tm_year;
+      t.tm_mon = month - 1;
+      t.tm_mday = day;
+      t.tm_hour = hour;
+      t.tm_min = minute;
+      t.tm_sec = 0;
+      t.tm_isdst = -1;  // let mktime resolve DST for the local zone
+      return mktime(&t);
+    };
+
+    time_t now = ::time(nullptr);
+    struct tm *lt = ::localtime(&now);
+    if (lt == nullptr || lt->tm_year < 120 /* 2020 */) {
+      ESP_LOGW(tag, "System time not synced yet — cannot set a dated event");
+      return false;
+    }
+    int year = lt->tm_year;  // years since 1900
+
+    if (!valid_ymd(begin_month, begin_day, year)) {
+      ESP_LOGW(tag, "Invalid start date %02d/%02d", begin_month, begin_day);
+      return false;
+    }
+    if (!valid_ymd(end_month, end_day, year)) {
+      ESP_LOGW(tag, "Invalid end date %02d/%02d", end_month, end_day);
+      return false;
+    }
+
+    time_t begin = make_ts(year, begin_month, begin_day, begin_hour, begin_minute);
+    time_t end = make_ts(year, end_month, end_day, end_hour, end_minute);
+
+    // End strictly before begin means the range wraps the New Year: re-anchor
+    // the end to next year (re-validating day-of-month against the new year, in
+    // case Feb 29 leap status differs).
+    if (end < begin) {
+      if (!valid_ymd(end_month, end_day, year + 1)) {
+        ESP_LOGW(tag, "Invalid end date %02d/%02d", end_month, end_day);
+        return false;
+      }
+      end = make_ts(year + 1, end_month, end_day, end_hour, end_minute);
+    }
+
+    if (end <= begin) {
+      ESP_LOGW(tag, "Start must be before end");
+      return false;
+    }
+
+    *begin_ts = (uint32_t) begin;
+    *end_ts = (uint32_t) end;
+    return true;
   }
 
   // Event log methods

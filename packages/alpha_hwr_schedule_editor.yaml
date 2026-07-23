@@ -366,36 +366,17 @@ button:
           uint16_t end_hour = (uint16_t)id(single_event_end_hour).state;
           uint16_t end_minute = (uint16_t)id(single_event_end_min).state;
           
-          // Build Unix timestamps using current year
-          time_t now = ::time(nullptr);
-          struct tm *t = localtime(&now);
-          int year = t->tm_year;  // years since 1900
-          
-          struct tm start_tm = {};
-          start_tm.tm_year = year;
-          start_tm.tm_mon = start_month - 1;
-          start_tm.tm_mday = start_day_val;
-          start_tm.tm_hour = start_hour;
-          start_tm.tm_min = start_minute;
-          start_tm.tm_sec = 0;
-          start_tm.tm_isdst = -1;
-          time_t begin_ts = mktime(&start_tm);
-          
-          struct tm end_tm = {};
-          end_tm.tm_year = year;
-          end_tm.tm_mon = end_month - 1;
-          end_tm.tm_mday = end_day_val;
-          end_tm.tm_hour = end_hour;
-          end_tm.tm_min = end_minute;
-          end_tm.tm_sec = 0;
-          end_tm.tm_isdst = -1;
-          time_t end_ts = mktime(&end_tm);
-          
-          if (begin_ts >= end_ts) {
-            ESP_LOGW("single_event", "Start must be before end");
+          // Build Unix timestamps anchored to the current year. build_event_window
+          // validates the dates, rolls ranges that wrap New Year into next year,
+          // and refuses to run before system time is synced.
+          uint32_t begin_ts, end_ts;
+          if (!id(pump).build_event_window("single_event",
+                  start_month, start_day_val, start_hour, start_minute,
+                  end_month, end_day_val, end_hour, end_minute,
+                  &begin_ts, &end_ts)) {
             return;
           }
-          
+
           // Find a free slot
           int slot = id(pump).find_free_single_event_slot();
           if (slot < 0) {
@@ -465,41 +446,22 @@ button:
           uint16_t end_month = (uint16_t)id(vacation_end_month).state;
           uint16_t end_day_val = (uint16_t)id(vacation_end_day).state;
 
-          // Build Unix timestamps using the current year. A vacation spans
-          // whole days: 00:00 of the start day through 23:59 of the end day.
-          time_t now = ::time(nullptr);
-          struct tm *t = localtime(&now);
-          int year = t->tm_year;  // years since 1900
-
-          struct tm start_tm = {};
-          start_tm.tm_year = year;
-          start_tm.tm_mon = start_month - 1;
-          start_tm.tm_mday = start_day_val;
-          start_tm.tm_hour = 0;
-          start_tm.tm_min = 0;
-          start_tm.tm_sec = 0;
-          start_tm.tm_isdst = -1;
-          time_t begin_ts = mktime(&start_tm);
-
-          struct tm end_tm = {};
-          end_tm.tm_year = year;
-          end_tm.tm_mon = end_month - 1;
-          end_tm.tm_mday = end_day_val;
-          end_tm.tm_hour = 23;
-          end_tm.tm_min = 59;
-          end_tm.tm_sec = 0;
-          end_tm.tm_isdst = -1;
-          time_t end_ts = mktime(&end_tm);
-
-          if (begin_ts >= end_ts) {
-            ESP_LOGW("vacation", "Start must be before end");
+          // A vacation spans whole days: 00:00 of the start day through 23:59 of
+          // the end day, anchored to the current year (build_event_window rolls
+          // the end into next year for ranges that wrap New Year, validates the
+          // dates, and refuses to run before system time is synced).
+          uint32_t begin_ts, end_ts;
+          if (!id(pump).build_event_window("vacation",
+                  start_month, start_day_val, 0, 0,
+                  end_month, end_day_val, 23, 59,
+                  &begin_ts, &end_ts)) {
             return;
           }
 
           ESP_LOGI("vacation", "Setting vacation: %02d/%02d 00:00 - %02d/%02d 23:59",
                    start_month, start_day_val, end_month, end_day_val);
 
-          id(pump).submit_set_vacation((uint32_t)begin_ts, (uint32_t)end_ts, "");
+          id(pump).submit_set_vacation(begin_ts, end_ts, "");
 
   - platform: template
     name: "Clear Vacation"
