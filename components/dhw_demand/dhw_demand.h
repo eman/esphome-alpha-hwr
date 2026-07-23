@@ -130,12 +130,12 @@ class DhwDemandComponent : public PollingComponent {
   float pump_flow_collapse_threshold_{0.2f};   // GPM
   float motor_current_spike_threshold_{0.001f};  // A/s
   float pump_power_spike_threshold_{5.0f};     // W/s
-  float pump_head_rate_threshold_{3.0f};       // kPa/s
+  float pump_head_rate_threshold_{0.31f};      // m/s
   int flow_latch_seconds_{30};                 // s
   int session_gap_tolerance_seconds_{60};      // s
 
   // ── Head-rate peak tracker (updated by callback at ~1–2 Hz; reset per tick) ─
-  float head_rate_peak_{0.0f};  // Maximum |kPa/s| seen since last update()
+  float head_rate_peak_{0.0f};  // Maximum |m/s| seen since last update()
 
   // ── Circular buffer — Droplet flow (30 samples × 10 s = 5 min) ───────────
   float flow_buf_[DROPLET_BUF_SIZE];

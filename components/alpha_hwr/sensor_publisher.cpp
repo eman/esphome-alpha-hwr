@@ -29,20 +29,20 @@ void SensorPublisher::setup_head_rate_callback() {
   if (head_sensor_ == nullptr || head_rate_sensor_ == nullptr) {
     return;
   }
-  head_sensor_->add_on_state_callback([this](float head_kpa) {
+  head_sensor_->add_on_state_callback([this](float head_m) {
     uint32_t now_ms = millis();
-    if (!std::isnan(prev_head_kpa_) && prev_head_time_ms_ != 0) {
+    if (!std::isnan(prev_head_m_) && prev_head_time_ms_ != 0) {
       float dt_s = static_cast<float>(now_ms - prev_head_time_ms_) / 1000.0f;
       if (dt_s > 30.0f) {
         // BLE reconnect gap: stale baseline — reset silently.
         ESP_LOGD(TAG, "Head rate: reset after %.1f s gap", dt_s);
       } else if (dt_s >= 0.1f) {
-        float rate_kpa_s = (head_kpa - prev_head_kpa_) / dt_s;
-        ESP_LOGD(TAG, "Head rate: %.3f kPa/s (dt=%.2f s)", rate_kpa_s, dt_s);
-        head_rate_sensor_->publish_state(rate_kpa_s);
+        float rate_m_s = (head_m - prev_head_m_) / dt_s;
+        ESP_LOGD(TAG, "Head rate: %.4f m/s (dt=%.2f s)", rate_m_s, dt_s);
+        head_rate_sensor_->publish_state(rate_m_s);
       }
     }
-    prev_head_kpa_ = head_kpa;
+    prev_head_m_ = head_m;
     prev_head_time_ms_ = now_ms;
   });
 }
@@ -95,22 +95,23 @@ void SensorPublisher::publish_flow_pressure(const protocol::FlowPressureTelemetr
   }
   
   // Log summary
-  ESP_LOGD(TAG, "Flow/Head: %.3f m³/h, %.2f m (%.2f kPa), P_in=%.2f bar",
-           flow.flow_m3h, flow.head_m, flow.head_m * 9.80665f,
+  ESP_LOGD(TAG, "Flow/Head: %.3f m³/h, %.2f m, P_in=%.2f bar",
+           flow.flow_m3h, flow.head_m,
            flow.has_inlet_pressure ? flow.inlet_pressure_bar : NAN);
-  
+
   // Publish flow rate
   if (flow.has_flow && flow_sensor_ != nullptr) {
     flow_sensor_->publish_state(flow.flow_m3h);
   }
-  
-  // Publish head pressure (convert meters of head to kPa for HA auto-conversion)
+
+  // Publish head in meters of head — the pump's native unit and the same unit
+  // as the pressure setpoints (Grundfos GO app / datasheet convention).
   if (flow.has_head && head_sensor_ != nullptr) {
-    head_sensor_->publish_state(flow.head_m * 9.80665f);
+    head_sensor_->publish_state(flow.head_m);
   }
 
-  // Compute and publish head pressure rate of change (kPa/s) at notification rate.
-  // Rate computation is handled via head_sensor_ callback registered in setup_head_rate_callback().
+  // Head rate of change (m/s) is computed at notification rate via the
+  // head_sensor_ callback registered in setup_head_rate_callback().
 
   // Publish inlet pressure (often NaN on HWR models)
   if (flow.has_inlet_pressure && inlet_pressure_sensor_ != nullptr) {

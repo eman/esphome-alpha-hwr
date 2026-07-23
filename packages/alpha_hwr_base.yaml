@@ -7,7 +7,7 @@
 #
 # Telemetry Included:
 # - Flow Rate (m³/h)
-# - Head Pressure (kPa)
+# - Head (m)
 # - Water Temperature (°C)
 # - Motor Speed (RPM)
 # - Power Consumption (W)

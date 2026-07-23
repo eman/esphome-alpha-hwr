@@ -58,9 +58,10 @@ CONFIG_SCHEMA = (
 
             # ── Outputs ──────────────────────────────────────────────────────
             cv.Optional(CONF_DEMAND): binary_sensor.binary_sensor_schema(),
+            # Detection confidence, published as a percentage (0–100 %).
             cv.Optional(CONF_CONFIDENCE): sensor.sensor_schema(
-                unit_of_measurement="",
-                accuracy_decimals=2,
+                unit_of_measurement="%",
+                accuracy_decimals=0,
                 state_class=STATE_CLASS_MEASUREMENT,
                 entity_category=ENTITY_CATEGORY_DIAGNOSTIC,
             ),
@@ -106,7 +107,9 @@ CONFIG_SCHEMA = (
                 cv.positive_float,
             cv.Optional(CONF_PUMP_POWER_SPIKE_THRESHOLD, default=5.0):
                 cv.positive_float,
-            cv.Optional(CONF_PUMP_HEAD_RATE_THRESHOLD, default=3.0):
+            # m/s. Head telemetry is meters of head; 0.31 m/s ≈ the former
+            # 3.0 kPa/s threshold (÷9.80665).
+            cv.Optional(CONF_PUMP_HEAD_RATE_THRESHOLD, default=0.31):
                 cv.positive_float,
             cv.Optional(CONF_FLOW_LATCH_SECONDS, default=30):
                 cv.positive_int,

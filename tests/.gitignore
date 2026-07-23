@@ -19,3 +19,4 @@ test_write_operations
 # OS files
 .DS_Store
 test_schedule_codec
+test_telemetry_units
