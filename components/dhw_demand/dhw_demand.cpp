@@ -497,7 +497,10 @@ void DhwDemandComponent::update() {
   }
 
   // ── 6. DHW in-use confidence boost ────────────────────────────────────────
-  if (demand && !std::isnan(dhw_in_use) && dhw_in_use >= 0.5f) {
+  // Only trustworthy while the pump is off. With the pump running the flag
+  // routinely latches high for a fixed ~60 s with no real draw behind it, so
+  // boosting a pump-on detection with it just adds confidence to a phantom.
+  if (demand && !pump_on && !std::isnan(dhw_in_use) && dhw_in_use >= 0.5f) {
     confidence = std::min(1.0f, confidence + 0.05f);
   }
 

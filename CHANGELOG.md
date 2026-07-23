@@ -2,6 +2,21 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- **`dhw_demand`: the `dhw_in_use` confidence boost was applied regardless of
+  pump state.** The upstream flag is only trustworthy while the recirculation
+  pump is off — with the pump running it routinely latches high for a fixed
+  ~60 s with no real draw behind it, so boosting a pump-on detection with it
+  just added confidence to a phantom. The boost is now gated to pump-off,
+  matching the corrected Python detector in `dhw-sensor-apps`.
+- **`tests/test_dhw_demand_logic.cpp` had drifted from the component.** Its
+  hand-mirrored `pump_head_rate_threshold` was still the pre-units-audit
+  `3.0f` (kPa/s) while `dhw_demand.h` now uses `0.31f` (m/s), so the head-rate
+  vote never fired in the test and the unguarded-startup case silently checked
+  two votes instead of three. Synced the constant and corrected the
+  expectation (0.65 → 0.80); added coverage for the boost gating above.
+
 ## [0.13.0] - 2026-07-23
 
 ### Added
