@@ -51,6 +51,24 @@ strings, unreadable schedule state) now settle as `rejected` with a reason.
 - `set_single_event` picks the first free slot and echoes it in the settle
   event (`slot` field); `rejected` with `"no free single event slots"` when
   full
+- a one-time event runs the pump (`Auto` action); it and the weekly windows are
+  what "run" means. A vacation is the same object with a `Stop` action — see below
+
+### Vacation
+
+| Service | Data format | Description |
+| --- | --- | --- |
+| `esphome.<node_name>_set_vacation` | `begin_timestamp,end_timestamp` | Hold the pump **off** for a multi-day period |
+| `esphome.<node_name>_clear_vacation` | *(none)* | End the active vacation |
+
+A vacation is a **`Stop`-action single-event** (the same object as one-time
+events, sharing the slot pool) that **overrides the weekly schedule** for its
+range: while active the pump is held idle regardless of what the weekly grid
+says. This matches the Grundfos **Home** app's vacation feature (the GO app does
+not expose it). `set_vacation` picks a free slot; `clear_vacation` auto-resolves
+whichever slot holds the active `Stop` event (settles `accepted` with no change
+if there is no active vacation). The **Vacation** text sensor shows the active
+range; the **Single Events** sensor labels each event `(run)` or `(off)`.
 
 ## Behavior change (v0.11)
 

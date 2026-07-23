@@ -1174,17 +1174,51 @@ std::string ScheduleService::format_single_events_display() const {
     localtime_r(&begin_t, &begin_tm);
     localtime_r(&end_t, &end_tm);
 
-    char buf[80];
-    snprintf(buf, sizeof(buf), "[%d] %04d-%02d-%02d %02d:%02d - %02d:%02d",
+    // action 0x01 = Stop (pump off / vacation), 0x02 = Auto (one-time run).
+    const char *action = ev.action == 0x01 ? "off" : "run";
+    char buf[96];
+    snprintf(buf, sizeof(buf), "[%d] %04d-%02d-%02d %02d:%02d - %02d:%02d (%s)",
              ev.index, begin_tm.tm_year + 1900, begin_tm.tm_mon + 1,
              begin_tm.tm_mday, begin_tm.tm_hour, begin_tm.tm_min,
-             end_tm.tm_hour, end_tm.tm_min);
+             end_tm.tm_hour, end_tm.tm_min, action);
 
     if (!result.empty())
       result += "\n";
     result += buf;
   }
   return result;
+}
+
+int ScheduleService::find_vacation_slot() const {
+  if (!single_events_cached_)
+    return -1;
+  for (const auto &ev : cached_single_events_) {
+    if (ev.enabled && ev.action == 0x01)  // Stop = vacation
+      return ev.index;
+  }
+  return -1;
+}
+
+std::string ScheduleService::format_vacation_display() const {
+  if (!single_events_cached_)
+    return "unknown";
+  for (const auto &ev : cached_single_events_) {
+    if (!ev.enabled || ev.action != 0x01)  // only Stop events are vacations
+      continue;
+    time_t begin_t = (time_t) ev.begin_timestamp;
+    time_t end_t = (time_t) ev.end_timestamp;
+    struct tm begin_tm, end_tm;
+    localtime_r(&begin_t, &begin_tm);
+    localtime_r(&end_t, &end_tm);
+    char buf[96];
+    snprintf(buf, sizeof(buf), "%04d-%02d-%02d %02d:%02d - %04d-%02d-%02d %02d:%02d",
+             begin_tm.tm_year + 1900, begin_tm.tm_mon + 1, begin_tm.tm_mday,
+             begin_tm.tm_hour, begin_tm.tm_min,
+             end_tm.tm_year + 1900, end_tm.tm_mon + 1, end_tm.tm_mday,
+             end_tm.tm_hour, end_tm.tm_min);
+    return std::string(buf);
+  }
+  return "No vacation";
 }
 
 // -------------------------------------------------------------------------

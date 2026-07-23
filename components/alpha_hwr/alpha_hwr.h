@@ -186,6 +186,9 @@ public:
   void set_single_events_text_sensor(text_sensor::TextSensor *sensor) {
     single_events_text_sensor_ = sensor;
   }
+  void set_vacation_text_sensor(text_sensor::TextSensor *sensor) {
+    vacation_text_sensor_ = sensor;
+  }
   void set_event_log_text_sensor(text_sensor::TextSensor *sensor) {
     event_log_text_sensor_ = sensor;
   }
@@ -348,6 +351,7 @@ private:
   // (before any connection) so it is available as a pre-connection discriminator.
   text_sensor::TextSensor *product_version_sensor_{nullptr};
   text_sensor::TextSensor *single_events_text_sensor_{nullptr};
+  text_sensor::TextSensor *vacation_text_sensor_{nullptr};
   text_sensor::TextSensor *event_log_text_sensor_{nullptr};
   text_sensor::TextSensor *history_text_sensor_{nullptr};
   text_sensor::TextSensor *cycle_timestamps_text_sensor_{nullptr};
@@ -452,6 +456,12 @@ public:
   }
   void submit_clear_single_event(uint8_t slot, const std::string &op_id) {
     write_op_service_.submit_clear_single_event(slot, op_id);
+  }
+  void submit_set_vacation(uint32_t begin_ts, uint32_t end_ts, const std::string &op_id) {
+    write_op_service_.submit_set_vacation(begin_ts, end_ts, op_id);
+  }
+  void submit_clear_vacation(const std::string &op_id) {
+    write_op_service_.submit_clear_vacation(op_id);
   }
   void submit_refresh_schedule(const std::string &op_id) {
     write_op_service_.submit_refresh_schedule(op_id);
@@ -676,6 +686,10 @@ public:
             if (this->single_events_text_sensor_) {
               this->single_events_text_sensor_->publish_state(
                   schedule_service_.format_single_events_display());
+            }
+            if (this->vacation_text_sensor_) {
+              this->vacation_text_sensor_->publish_state(
+                  schedule_service_.format_vacation_display());
             }
 #endif
           }

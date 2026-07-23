@@ -47,6 +47,9 @@ void AlphaHwrApiBridge::setup(AlphaHwrComponent *component) {
                    {"data", "op_id"});
   register_service(&AlphaHwrApiBridge::on_refresh_single_events, "refresh_single_events",
                    {"op_id"});
+  register_service(&AlphaHwrApiBridge::on_set_vacation, "set_vacation",
+                   {"data", "op_id"});
+  register_service(&AlphaHwrApiBridge::on_clear_vacation, "clear_vacation", {"op_id"});
 
   // Terminal results reach fire_write_settled() through the component's
   // central write-result hook (see AlphaHwrComponent::setup()), which also
@@ -293,6 +296,21 @@ void AlphaHwrApiBridge::on_clear_single_event(std::string data, std::string op_i
 
 void AlphaHwrApiBridge::on_refresh_single_events(std::string op_id) {
   component_->submit_refresh_single_events(op_id);
+}
+
+void AlphaHwrApiBridge::on_set_vacation(std::string data, std::string op_id) {
+  // A vacation is a multi-day Stop single-event overriding the weekly schedule.
+  unsigned long begin_ts = 0, end_ts = 0;
+  if (sscanf(data.c_str(), "%lu,%lu", &begin_ts, &end_ts) != 2 || begin_ts >= end_ts) {
+    reject_(WriteCommand::SET_SINGLE_EVENT, op_id, "parse error: " + data);
+    return;
+  }
+  component_->submit_set_vacation(static_cast<uint32_t>(begin_ts),
+                                  static_cast<uint32_t>(end_ts), op_id);
+}
+
+void AlphaHwrApiBridge::on_clear_vacation(std::string op_id) {
+  component_->submit_clear_vacation(op_id);
 }
 
 }  // namespace alpha_hwr

@@ -203,13 +203,23 @@ class WriteOperationService {
   void submit_set_schedule_enabled(bool enabled, const std::string &op_id,
                                    std::function<void(bool)> done = nullptr,
                                    WriteOrigin origin = WriteOrigin::SERVICE);
-  /** slot < 0 auto-resolves the first free slot; the chosen slot is echoed in the result. */
+  /** slot < 0 auto-resolves the first free slot; the chosen slot is echoed in the result.
+   *  action: 0x02 = Auto (one-time run), 0x01 = Stop (vacation / pump-off period). */
   void submit_set_single_event(uint32_t begin_ts, uint32_t end_ts, const std::string &op_id,
                                std::function<void(bool)> done = nullptr, int slot = -1,
-                               WriteOrigin origin = WriteOrigin::SERVICE);
+                               WriteOrigin origin = WriteOrigin::SERVICE,
+                               uint8_t action = 0x02);
   void submit_clear_single_event(uint8_t slot, const std::string &op_id,
                                  std::function<void(bool)> done = nullptr,
                                  WriteOrigin origin = WriteOrigin::SERVICE);
+  /** Vacation = a multi-day Stop single-event overriding the weekly schedule. */
+  void submit_set_vacation(uint32_t begin_ts, uint32_t end_ts, const std::string &op_id,
+                           std::function<void(bool)> done = nullptr,
+                           WriteOrigin origin = WriteOrigin::SERVICE);
+  /** Clears the active vacation (auto-resolves the Stop single-event slot). */
+  void submit_clear_vacation(const std::string &op_id,
+                             std::function<void(bool)> done = nullptr,
+                             WriteOrigin origin = WriteOrigin::SERVICE);
   // Reads, but they contend for the same transport, so they run through the
   // same operation queue and get the same terminal-event guarantee.
   void submit_refresh_schedule(const std::string &op_id,
@@ -280,6 +290,11 @@ class WriteOperationService {
     int16_t slot{-1};
     uint32_t begin_ts{0}, end_ts{0};
     int16_t event_count{-1};
+    // Single-event action (SchedulingActionType): 0x02 = Auto (one-time run),
+    // 0x01 = Stop (vacation / pump-off period). clear_by_vacation makes a
+    // CLEAR_SINGLE_EVENT auto-resolve to the active Stop (vacation) slot.
+    uint8_t single_event_action{0x02};
+    bool clear_by_vacation{false};
 
     // UPLOAD_SCHEDULE fields
     codec::UploadRequest upload;

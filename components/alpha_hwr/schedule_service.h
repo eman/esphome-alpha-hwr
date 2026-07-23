@@ -443,6 +443,15 @@ public:
   int find_free_single_event_slot(uint32_t reusable_before_ts = 0) const;
 
   /**
+   * Slot index of the active vacation — the first enabled single-event whose
+   * action is Stop (0x01) — or -1 if none. A vacation is a Stop single-event.
+   */
+  int find_vacation_slot() const;
+
+  /** Human-readable active vacation range, or "No vacation". */
+  std::string format_vacation_display() const;
+
+  /**
    * Get cached single events.
    */
   const std::vector<SingleEvent> &get_cached_single_events() const {

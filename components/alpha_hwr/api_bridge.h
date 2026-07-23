@@ -69,6 +69,8 @@ class AlphaHwrApiBridge : public api::CustomAPIDevice {
   void on_set_single_event(std::string data, std::string op_id);      // "begin_ts,end_ts"
   void on_clear_single_event(std::string data, std::string op_id);    // "slot"
   void on_refresh_single_events(std::string op_id);
+  void on_set_vacation(std::string data, std::string op_id);          // "begin_ts,end_ts" (Stop event)
+  void on_clear_vacation(std::string op_id);
 
   /** Immediate terminal rejection for arguments the bridge cannot parse. */
   void reject_(services::WriteCommand command, const std::string &op_id, const std::string &detail);

@@ -1270,6 +1270,62 @@ static void test_clear_single_event() {
   TEST_ASSERT(h.sim.single_events[3][0] == 0, "pump slot 3 is disabled");
 }
 
+static void test_set_vacation_writes_stop_event() {
+  std::cout << "\n=== set_vacation: writes a Stop single-event ===" << std::endl;
+  Harness h;
+  h.prime_cache();
+
+  // Multi-day range: begin 1000000, end 2000000.
+  h.write_op.submit_set_vacation(1000000, 2000000, "vac1");
+  h.advance(60000);
+
+  TEST_ASSERT(h.events_for("vac1") == 1, "exactly one terminal event");
+  const WriteResult *r = h.result_for("vac1");
+  TEST_ASSERT(r && r->status == WriteStatus::ACCEPTED, "status is accepted");
+  int slot = r ? r->slot : -1;
+  TEST_ASSERT(slot >= 0 && h.sim.single_events[slot][0] == 1, "slot holds an enabled event");
+  TEST_ASSERT(slot >= 0 && h.sim.single_events[slot][1] == 0x01,
+              "action byte is Stop (0x01), not Auto");
+}
+
+static void test_clear_vacation_targets_stop_slot() {
+  std::cout << "\n=== clear_vacation: clears the Stop slot, leaves run events ===" << std::endl;
+  Harness h;
+  h.prime_cache();
+  // Slot 1 = a one-time RUN event (action Auto); slot 2 = a vacation (Stop).
+  h.sim.single_events[1][0] = 1; h.sim.single_events[1][1] = 0x02;
+  h.sim.single_events[1][9] = 0x40;  // some future end
+  h.sim.single_events[2][0] = 1; h.sim.single_events[2][1] = 0x01;  // Stop = vacation
+  h.sim.single_events[2][9] = 0x40;
+
+  h.write_op.submit_clear_vacation("vac2");
+  h.advance(60000);
+
+  TEST_ASSERT(h.events_for("vac2") == 1, "exactly one terminal event");
+  const WriteResult *r = h.result_for("vac2");
+  TEST_ASSERT(r && r->status == WriteStatus::ACCEPTED, "status is accepted");
+  TEST_ASSERT(r && r->slot == 2, "auto-resolved the vacation (Stop) slot 2");
+  TEST_ASSERT(h.sim.single_events[2][0] == 0, "vacation slot 2 is now disabled");
+  TEST_ASSERT(h.sim.single_events[1][0] == 1, "run event in slot 1 left untouched");
+}
+
+static void test_clear_vacation_none_active() {
+  std::cout << "\n=== clear_vacation: no active vacation settles accepted ===" << std::endl;
+  Harness h;
+  h.prime_cache();
+  // Only a RUN event present, no Stop event.
+  h.sim.single_events[0][0] = 1; h.sim.single_events[0][1] = 0x02;
+  h.sim.single_events[0][9] = 0x40;
+
+  h.write_op.submit_clear_vacation("vac3");
+  h.advance(60000);
+
+  const WriteResult *r = h.result_for("vac3");
+  TEST_ASSERT(h.events_for("vac3") == 1, "exactly one terminal event");
+  TEST_ASSERT(r && r->status == WriteStatus::ACCEPTED, "accepted (nothing to clear)");
+  TEST_ASSERT(h.sim.single_events[0][0] == 1, "run event untouched");
+}
+
 static void test_schedule_supersede_keys() {
   std::cout << "\n=== schedule supersede: per-(layer,day) keys ===" << std::endl;
   Harness h;
@@ -1527,6 +1583,9 @@ int main() {
   test_schedule_enabled_verified_rmw();
   test_single_event_auto_slot();
   test_single_event_reuses_expired_slot();
+  test_set_vacation_writes_stop_event();
+  test_clear_vacation_targets_stop_slot();
+  test_clear_vacation_none_active();
   test_clear_single_event();
   test_schedule_supersede_keys();
   test_refresh_ops();

@@ -2,6 +2,20 @@
 
 ## [Unreleased]
 
+### Added
+
+- **Vacation scheduling** — new `set_vacation` (`"begin_ts,end_ts"`) and
+  `clear_vacation` Home Assistant services put the pump into a multi-day
+  pump-off period, matching the Grundfos Home app's vacation feature (which the
+  GO app does not expose). A vacation is a `Stop`-action single-event
+  (`ClockProgramSingleEvent`, Object 84) that overrides the weekly schedule for
+  its range; bench-confirmed on hardware that it idles a running pump. The
+  single-event write path now carries the action byte (`Auto` = one-time run,
+  `Stop` = vacation) instead of hardcoding `Auto`; `clear_vacation`
+  auto-resolves the active `Stop` slot. New **Vacation** text sensor shows the
+  active range, and the Single Events display now labels each event `(run)` or
+  `(off)`. Host tests cover the `Stop` write and the clear-by-action resolution.
+
 ### Fixed
 
 - **Schedules showed as "pump will be idle" in the Grundfos app** — the

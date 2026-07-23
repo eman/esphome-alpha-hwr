@@ -60,6 +60,7 @@ CONF_BLE_VERSION = "ble_version"
 CONF_PRODUCT_NAME = "product_name"
 CONF_PRODUCT_VERSION = "product_version"
 CONF_SINGLE_EVENTS = "single_events"
+CONF_VACATION = "vacation"
 CONF_EVENT_LOG = "event_log"
 CONF_HISTORY = "history"
 CONF_CYCLE_TIMESTAMPS = "cycle_timestamps"
@@ -216,6 +217,9 @@ CONFIG_SCHEMA = cv.Schema(
         ),
         cv.Optional(CONF_SINGLE_EVENTS): text_sensor.text_sensor_schema(
             icon="mdi:calendar-star",
+        ),
+        cv.Optional(CONF_VACATION): text_sensor.text_sensor_schema(
+            icon="mdi:airplane",
         ),
         cv.Optional(CONF_EVENT_LOG): text_sensor.text_sensor_schema(
             icon="mdi:history",
@@ -392,6 +396,10 @@ async def to_code(config):
     if CONF_SINGLE_EVENTS in config:
         sens = await text_sensor.new_text_sensor(config[CONF_SINGLE_EVENTS])
         cg.add(var.set_single_events_text_sensor(sens))
+
+    if CONF_VACATION in config:
+        sens = await text_sensor.new_text_sensor(config[CONF_VACATION])
+        cg.add(var.set_vacation_text_sensor(sens))
 
     if CONF_EVENT_LOG in config:
         sens = await text_sensor.new_text_sensor(config[CONF_EVENT_LOG])

@@ -179,7 +179,11 @@ alpha_hwr:
    # Single Events Display
    single_events:
       name: "Single Events"
-   
+
+   # Vacation (active pump-off period; multi-day Stop single-event)
+   vacation:
+      name: "Vacation"
+
    # Event Log Display
    event_log:
       name: "Event Log"
