@@ -14,6 +14,15 @@
   `Stop` slot. Entities are `internal: true`; documented in
   [docs/schedule-management.md](docs/schedule-management.md).
 
+### Changed
+
+- **Lovelace schedule card (v4)** — `homeassistant/www/alpha-hwr-schedule-card.js`
+  now reads the schedule from the per-layer `schedule_layer_0..4` read-back
+  sensors and the `Schedule Enabled` switch instead of the removed aggregate
+  Weekly Schedule JSON sensor. Config is simplified: `device` is the only
+  required option (layer/enabled/single-event entity IDs are derived from it and
+  can be overridden). The write path (edit/save/enable) is unchanged.
+
 ### Fixed
 
 - Schedule layer writes (Obj `0xDE01`) no longer log a spurious `Command
