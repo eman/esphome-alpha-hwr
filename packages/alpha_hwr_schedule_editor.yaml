@@ -250,6 +250,52 @@ number:
     step: 1
     initial_value: 0
 
+  # Vacation date inputs (whole-day granularity — a vacation is a multi-day
+  # Stop single-event running 00:00 of the start day to 23:59 of the end day).
+  - platform: template
+    name: "Vacation Start Month"
+    id: vacation_start_month
+    icon: "mdi:calendar-start"
+    internal: true
+    optimistic: true
+    min_value: 1
+    max_value: 12
+    step: 1
+    initial_value: 1
+
+  - platform: template
+    name: "Vacation Start Day"
+    id: vacation_start_day
+    icon: "mdi:calendar-start"
+    internal: true
+    optimistic: true
+    min_value: 1
+    max_value: 31
+    step: 1
+    initial_value: 1
+
+  - platform: template
+    name: "Vacation End Month"
+    id: vacation_end_month
+    icon: "mdi:calendar-end"
+    internal: true
+    optimistic: true
+    min_value: 1
+    max_value: 12
+    step: 1
+    initial_value: 1
+
+  - platform: template
+    name: "Vacation End Day"
+    id: vacation_end_day
+    icon: "mdi:calendar-end"
+    internal: true
+    optimistic: true
+    min_value: 1
+    max_value: 31
+    step: 1
+    initial_value: 1
+
 button:
   - platform: template
     name: "Save Schedule Entry"
@@ -403,3 +449,63 @@ button:
               ESP_LOGI("single_event", "✓ Refreshed %zu events", events.size());
             }
           });
+
+  # --------------------------------------------------------------------------
+  # Vacation (multi-day Stop single-event overriding the weekly schedule)
+  # --------------------------------------------------------------------------
+
+  - platform: template
+    name: "Set Vacation"
+    icon: "mdi:beach"
+    internal: true
+    on_press:
+      - lambda: |-
+          uint16_t start_month = (uint16_t)id(vacation_start_month).state;
+          uint16_t start_day_val = (uint16_t)id(vacation_start_day).state;
+          uint16_t end_month = (uint16_t)id(vacation_end_month).state;
+          uint16_t end_day_val = (uint16_t)id(vacation_end_day).state;
+
+          // Build Unix timestamps using the current year. A vacation spans
+          // whole days: 00:00 of the start day through 23:59 of the end day.
+          time_t now = ::time(nullptr);
+          struct tm *t = localtime(&now);
+          int year = t->tm_year;  // years since 1900
+
+          struct tm start_tm = {};
+          start_tm.tm_year = year;
+          start_tm.tm_mon = start_month - 1;
+          start_tm.tm_mday = start_day_val;
+          start_tm.tm_hour = 0;
+          start_tm.tm_min = 0;
+          start_tm.tm_sec = 0;
+          start_tm.tm_isdst = -1;
+          time_t begin_ts = mktime(&start_tm);
+
+          struct tm end_tm = {};
+          end_tm.tm_year = year;
+          end_tm.tm_mon = end_month - 1;
+          end_tm.tm_mday = end_day_val;
+          end_tm.tm_hour = 23;
+          end_tm.tm_min = 59;
+          end_tm.tm_sec = 0;
+          end_tm.tm_isdst = -1;
+          time_t end_ts = mktime(&end_tm);
+
+          if (begin_ts >= end_ts) {
+            ESP_LOGW("vacation", "Start must be before end");
+            return;
+          }
+
+          ESP_LOGI("vacation", "Setting vacation: %02d/%02d 00:00 - %02d/%02d 23:59",
+                   start_month, start_day_val, end_month, end_day_val);
+
+          id(pump).submit_set_vacation((uint32_t)begin_ts, (uint32_t)end_ts, "");
+
+  - platform: template
+    name: "Clear Vacation"
+    icon: "mdi:beach"
+    internal: true
+    on_press:
+      - lambda: |-
+          ESP_LOGI("vacation", "Clearing active vacation");
+          id(pump).submit_clear_vacation("");

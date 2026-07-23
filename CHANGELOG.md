@@ -2,6 +2,38 @@
 
 ## [Unreleased]
 
+### Added
+
+- **Vacation editor controls** — `alpha_hwr_schedule_editor.yaml` now provides
+  Lovelace helper entities for setting a vacation without calling the service
+  by hand: four `number` inputs (**Vacation Start Month/Day**, **Vacation End
+  Month/Day**) plus **Set Vacation** and **Clear Vacation** buttons. "Set
+  Vacation" holds the pump off from 00:00 of the start day through 23:59 of the
+  end day (current year, whole-day granularity) via `submit_set_vacation`;
+  "Clear Vacation" calls `submit_clear_vacation`, which auto-resolves the active
+  `Stop` slot. Entities are `internal: true`; documented in
+  [docs/schedule-management.md](docs/schedule-management.md).
+
+### Fixed
+
+- Schedule layer writes (Obj `0xDE01`) no longer log a spurious `Command
+  timeout waiting for Obj 56833 Sub 0` **warning**. These writes are
+  fire-and-forget — the pump commits on timeout and its ACK arrives outside the
+  response window — so the expected timeout is now logged at DEBUG via a new
+  `quiet_timeout` transport flag. All other commands still warn on timeout,
+  where it signals a real error; the timeout duration is unchanged so a late
+  ACK can still be matched.
+
+### Removed
+
+- Removed the unused aggregate **Weekly Schedule** JSON text sensor
+  (`schedule:` in `alpha_hwr_pairing.yaml`, `CONF_SCHEDULE`). It was the sole
+  source of the `Schedule JSON truncated to 255 chars` warning — a full
+  schedule overflowed HA's 255-char entity-state cap and truncated to invalid
+  JSON. Nothing consumed it: the schedule editor reads the cache directly, and
+  full-grid read-back is served by the per-layer `Schedule Layer 0..4` sensors
+  plus `Schedule Hash`, which fit the cap by construction.
+
 ## [0.13.0] - 2026-07-23
 
 ### Added
