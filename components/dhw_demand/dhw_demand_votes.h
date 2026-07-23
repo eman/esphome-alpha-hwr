@@ -35,6 +35,7 @@ inline constexpr PumpOnVoteThresholds kDefaultPumpOnVoteThresholds{
 // Signals 1–6 of the pump-on branch: pressure transient, absolute low
 // pressure, pump-side flow collapse, current spike, power spike, and
 // corroborating head-rate spike. Returns 0.0f when no signal voted.
+// method_out is optional — pass nullptr to skip it.
 inline float compute_pump_on_confidence(float inlet_deriv, float inlet_psi,
                                         float pump_flow, float current_deriv,
                                         float power_deriv, float head_rate_peak,
@@ -88,7 +89,8 @@ inline float compute_pump_on_confidence(float inlet_deriv, float inlet_psi,
   static const float conf_map[7] = {0.0f, 0.50f, 0.65f, 0.80f, 0.90f, 0.95f, 0.95f};
   float confidence = (votes < 7) ? conf_map[votes] : 0.95f;
 
-  *method_out = "deterministic_pump_on";
+  if (method_out != nullptr)
+    *method_out = "deterministic_pump_on";
   return confidence;
 }
 
