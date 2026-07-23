@@ -256,7 +256,7 @@ void AlphaHwrComponent::setup() {
       case WriteCommand::CLEAR_SCHEDULE_ENTRY:
       case WriteCommand::SET_SCHEDULE_ENABLED:
       case WriteCommand::REFRESH_SCHEDULE:
-        if (applied) this->publish_schedule_json();
+        if (applied) this->publish_schedule_hash();
         break;
       case WriteCommand::SET_SINGLE_EVENT:
       case WriteCommand::CLEAR_SINGLE_EVENT:
@@ -297,18 +297,11 @@ void AlphaHwrComponent::setup() {
       });
 
   schedule_service_.set_state_change_callback(
-      [this](bool enabled) { this->publish_schedule_json(); });
-
-  // Initialize schedule text sensor with "Loading..." state
-#ifdef USE_TEXT_SENSOR
-  if (this->schedule_text_sensor_) {
-    this->schedule_text_sensor_->publish_state("Loading schedule...");
-  }
+      [this](bool enabled) { this->publish_schedule_hash(); });
 
   // Control mode text sensor will be populated when we receive the passive
   // notification from the pump during authentication. Do NOT publish a
   // default/unknown value here.
-#endif
 }
 
 bool AlphaHwrComponent::parse_device(

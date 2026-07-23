@@ -266,8 +266,9 @@ entities). Home Assistant sees them as:
 - `esphome.name: hwr-pump`
 - Home Assistant service: `esphome.hwr_pump_set_schedule_entry`
 
-The paired package also publishes schedule text sensors using the same node-name
-prefix, for example `text_sensor.hwr_pump_weekly_schedule`.
+The paired package also publishes schedule read-back text sensors using the same
+node-name prefix, for example `text_sensor.hwr_pump_schedule_layer_0` and
+`text_sensor.hwr_pump_schedule_hash`.
 
 More detail and automation examples are in
 [`docs/schedule-management.md`](docs/schedule-management.md).
@@ -300,8 +301,9 @@ frontend resource, so ESPHome does not install it automatically.
 
 ### Prerequisites
 
-- Use `alpha_hwr_pairing.yaml` so Home Assistant gets the weekly schedule and
-  single-event text sensors.
+- Use `alpha_hwr_pairing.yaml` so Home Assistant gets the per-layer schedule
+  read-back sensors, the `Schedule Enabled` switch, and the single-event text
+  sensor.
 - Use `alpha_hwr_schedule_editor.yaml` so Home Assistant gets the
   `esphome.<node_name>_*` services the card calls when you edit schedules.
 
@@ -323,25 +325,37 @@ frontend resource, so ESPHome does not install it automatically.
 type: custom:alpha-hwr-schedule-card
 title: Pump Schedule
 device: hwr_pump
-entity: text_sensor.hwr_pump_weekly_schedule
+```
+
+`device` is the only required option. From it the card derives the per-layer
+read-back sensors (`text_sensor.<device>_schedule_layer_0..4`), the
+`Schedule Enabled` switch (`switch.<device>_schedule_enabled`), and the
+single-event sensor (`text_sensor.<device>_single_events`). Override any of them
+only if your entity IDs differ from the defaults:
+
+```yaml
+type: custom:alpha-hwr-schedule-card
+title: Pump Schedule
+device: hwr_pump
+enabled_entity: switch.hwr_pump_schedule_enabled
 single_events_entity: text_sensor.hwr_pump_single_events
+layer_entities:
+  - text_sensor.hwr_pump_schedule_layer_0
+  - text_sensor.hwr_pump_schedule_layer_1
+  - text_sensor.hwr_pump_schedule_layer_2
+  - text_sensor.hwr_pump_schedule_layer_3
+  - text_sensor.hwr_pump_schedule_layer_4
 ```
 
 ### Choosing the right names
 
 - `device` must match the ESPHome node-derived service prefix: `esphome.name`
-  with `-` converted to `_`.
-- `entity` should point at the weekly schedule text sensor from the paired
-  package.
-- `single_events_entity` is optional, but enables the card's quick-run and
-  single-event display features.
-
-For example, if `esphome.name: hwr-pump`, then Home Assistant service names use
-`hwr_pump`, so the card config should use:
-
-- `device: hwr_pump`
-- `entity: text_sensor.hwr_pump_weekly_schedule`
-- `single_events_entity: text_sensor.hwr_pump_single_events`
+  with `-` converted to `_`. For example, if `esphome.name: hwr-pump`, use
+  `device: hwr_pump`.
+- The default entity IDs assume the standard names from `alpha_hwr_pairing.yaml`
+  (`Schedule Layer 0..4`, `Schedule Enabled`) and
+  `alpha_hwr_schedule_editor.yaml`. Set `layer_entities` / `enabled_entity` /
+  `single_events_entity` only to point at non-default IDs.
 
 ## References
 

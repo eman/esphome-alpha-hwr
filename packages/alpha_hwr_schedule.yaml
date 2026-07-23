@@ -7,7 +7,7 @@
 #
 # Features:
 # - Schedule Enable/Disable switch (toggle pump schedule on/off)
-# - Weekly schedule display (text sensor showing current schedule)
+# - Schedule read-back (per-layer text sensors + canonical hash sensor)
 # - Control Mode selector (set pump operation mode)
 # - Remote Mode buttons (enable/disable remote control)
 # - Advanced APIs for programmatic schedule manipulation
@@ -164,9 +164,9 @@ select:
 #        // Handle completion
 #      });
 #
-# 5. Display schedule in text sensor:
+# 5. Refresh schedule read-back sensors:
 #    id(pump).update_schedule_display();
-#    // This reads the current schedule and updates the "Weekly Schedule" text sensor
+#    // This reads the current schedule and updates the per-layer + hash sensors
 #
 # Supported days: "Monday", "Tuesday", "Wednesday", "Thursday",
 #                 "Friday", "Saturday", "Sunday"

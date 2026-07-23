@@ -1,26 +1,40 @@
 /**
- * Alpha HWR Schedule Card — v3
+ * Alpha HWR Schedule Card — v4
  *
  * Custom Lovelace card for managing the Grundfos ALPHA HWR pump's weekly schedule.
- * Reads schedule JSON from an ESPHome text sensor and writes changes via ESPHome services.
+ * Reads the schedule from the per-layer ESPHome read-back sensors and writes
+ * changes via ESPHome services.
  *
  * Card config:
  *   type: custom:alpha-hwr-schedule-card
- *   entity: text_sensor.alpha_hwr_schedule
- *   device: hwr_pump                         # ESPHome device name (for service calls)
- *   single_events_entity: text_sensor.hwr_pump_single_events  # Optional
+ *   device: hwr_pump                         # ESPHome device name — required.
+ *                                            #   Used for service calls and to
+ *                                            #   derive the default entity IDs.
  *   title: Pump Schedule                     # Optional
+ *   layer_entities:                          # Optional — defaults to
+ *     - text_sensor.hwr_pump_schedule_layer_0 #   text_sensor.<device>_schedule_layer_0..4
+ *     - text_sensor.hwr_pump_schedule_layer_1
+ *     - text_sensor.hwr_pump_schedule_layer_2
+ *     - text_sensor.hwr_pump_schedule_layer_3
+ *     - text_sensor.hwr_pump_schedule_layer_4
+ *   enabled_entity: switch.hwr_pump_schedule_enabled          # Optional (default derived)
+ *   single_events_entity: text_sensor.hwr_pump_single_events  # Optional (default derived)
  *
- * Schedule JSON format (from ESPHome text sensor):
- *   {"e":1,"s":{"0":[[360,480],[360,480],0,0,0,0,0]}}
- *   - "e": schedule enabled (1/0)
- *   - "s": layers keyed by number, only non-empty layers included
- *   - Each layer: array of 7 entries (Mon=0..Sun=6)
- *   - Entry: [start_minutes, end_minutes] or 0 (disabled)
+ * Schedule data model (current architecture):
+ *   - Five per-layer text sensors `schedule_layer_0..4`, each a JSON array of 7
+ *     day cells (Mon=0..Sun=6): [start_min,end_min] (enabled) or 0 (disabled).
+ *       e.g. [[360,480],0,0,0,0,0,0]
+ *   - Schedule on/off comes from the `Schedule Enabled` switch ("on"/"off").
+ *   The card reassembles these into { e, s:{ layer: [7 cells] } } internally, so
+ *   the rest of the card is unchanged.
  *
  * Single Events text sensor format:
  *   [slot] YYYY-MM-DD HH:MM - HH:MM
  *   (one line per active event)
+ *
+ * v4 Changes:
+ *   - Migrated off the removed aggregate "Weekly Schedule" JSON sensor to the
+ *     per-layer read-back sensors + `Schedule Enabled` switch.
  *
  * v3 Changes:
  *   - Quick Run panel for one-time schedules (single events)
@@ -66,19 +80,24 @@ class AlphaHwrScheduleCard extends HTMLElement {
   }
 
   setConfig(config) {
-    if (!config.entity) throw new Error('Please define an entity');
     if (!config.device) throw new Error('Please define device (ESPHome device name)');
+    const device = config.device;
     this._config = {
-      entity: config.entity,
-      device: config.device,
+      device,
       title: config.title || 'Pump Schedule',
-      single_events_entity: config.single_events_entity || `text_sensor.${config.device}_single_events`,
+      // Per-layer schedule read-back sensors (schedule_layer_0..4). Override with
+      // `layer_entities:` if your entity IDs differ from the derived defaults.
+      layer_entities: config.layer_entities ||
+        Array.from({ length: MAX_LAYERS }, (_, l) => `text_sensor.${device}_schedule_layer_${l}`),
+      // Schedule on/off switch (state "on"/"off").
+      enabled_entity: config.enabled_entity || `switch.${device}_schedule_enabled`,
+      single_events_entity: config.single_events_entity || `text_sensor.${device}_single_events`,
     };
     this._render();
   }
 
   connectedCallback() {
-    if (this._config.entity) this._render();
+    if (this._config.device) this._render();
     // Update current-time line every minute
     this._nowInterval = setInterval(() => {
       const line = this.shadowRoot?.querySelector('.now-line');
@@ -97,13 +116,19 @@ class AlphaHwrScheduleCard extends HTMLElement {
   set hass(hass) {
     this._hass = hass;
     let needRender = false;
-    const state = hass.states[this._config.entity];
-    const newState = state ? state.state : '';
-    if (newState !== this._lastState) {
-      this._lastState = newState;
-      this._parseSchedule(newState);
+
+    // The schedule grid + enabled flag come from the per-layer read-back sensors
+    // and the Schedule Enabled switch. Concatenate their states into a single
+    // change signature so we only rebuild/re-render when something actually moves.
+    const sig = this._config.layer_entities
+      .map(e => (hass.states[e] ? hass.states[e].state : ''))
+      .join('|') + '|' + (hass.states[this._config.enabled_entity]?.state ?? '');
+    if (sig !== this._lastState) {
+      this._lastState = sig;
+      this._rebuildSchedule();
       needRender = true;
     }
+
     // Watch single events text sensor
     const seState = hass.states[this._config.single_events_entity];
     const newSE = seState ? seState.state : '';
@@ -115,16 +140,36 @@ class AlphaHwrScheduleCard extends HTMLElement {
     if (needRender) this._render();
   }
 
-  _parseSchedule(stateStr) {
-    try {
-      if (stateStr && stateStr.startsWith('{')) {
-        this._schedule = JSON.parse(stateStr);
-      } else {
-        this._schedule = null;
-      }
-    } catch (e) {
-      this._schedule = null;
-    }
+  /** Rebuild the internal schedule model { e, s:{ layer: [7 cells] } } from the
+   *  per-layer read-back sensors and the Schedule Enabled switch. Each layer
+   *  sensor is a JSON array of 7 cells: [start_min,end_min] or 0. Malformed or
+   *  not-yet-cached layers are skipped so the rest of the grid still renders. */
+  _rebuildSchedule() {
+    if (!this._hass) { this._schedule = null; return; }
+    const s = {};
+    let anyLayer = false;
+    this._config.layer_entities.forEach((ent, l) => {
+      const st = this._hass.states[ent];
+      if (!st) return;
+      const raw = st.state;
+      if (!raw || !raw.startsWith('[')) return; // '', 'unknown', 'unavailable'
+      try {
+        const arr = JSON.parse(raw);
+        if (Array.isArray(arr) && arr.length === 7) {
+          s[String(l)] = arr;
+          anyLayer = true;
+        }
+      } catch (e) { /* skip a malformed layer, keep the others */ }
+    });
+
+    const enSt = this._hass.states[this._config.enabled_entity];
+    const enabled = enSt
+      ? (enSt.state === 'on' || enSt.state === '1' || enSt.state === 'true')
+      : false;
+
+    // Keep null (→ "empty" rendering) until at least one source reports, so the
+    // card doesn't flash an empty grid before the pump state is cached.
+    this._schedule = (anyLayer || enSt) ? { e: enabled ? 1 : 0, s } : null;
   }
 
   /** Parse single events text sensor: "[slot] YYYY-MM-DD HH:MM - HH:MM" per line */
@@ -1537,7 +1582,6 @@ class AlphaHwrScheduleCard extends HTMLElement {
 
   static getStubConfig() {
     return {
-      entity: 'sensor.alpha_hwr_weekly_schedule',
       device: 'hwr_pump',
       title: 'Pump Schedule',
     };
