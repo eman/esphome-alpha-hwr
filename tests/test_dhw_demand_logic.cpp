@@ -1,13 +1,18 @@
 /**
  * Unit tests for DHW demand pump-on hydraulic voting.
  *
- * These tests mirror the production vote logic to verify that recirculation
- * pump startup transients do not falsely declare DHW demand while genuine
- * open-loop signals remain detectable.
+ * These tests call the production vote logic directly (dhw_demand_votes.h)
+ * to verify that recirculation pump startup transients do not falsely
+ * declare DHW demand while genuine open-loop signals remain detectable.
  */
 
+#include "../components/dhw_demand/dhw_demand_votes.h"
 #include <cmath>
 #include <iostream>
+
+using esphome::dhw_demand::apply_dhw_in_use_boost;
+using esphome::dhw_demand::compute_pump_on_confidence;
+using esphome::dhw_demand::kDefaultPumpOnVoteThresholds;
 
 int tests_passed = 0;
 int tests_failed = 0;
@@ -36,48 +41,11 @@ static float deterministic_pump_on_conf(float inlet_deriv, float inlet_psi,
                                         float pump_flow, float current_deriv,
                                         float power_deriv, float head_rate_peak,
                                         bool suppress_transient_votes) {
-  constexpr float inlet_pressure_transient_threshold = 0.07f;
-  constexpr float inlet_pressure_demand_floor = 5.0f;
-  constexpr float pump_flow_collapse_threshold = 0.2f;
-  constexpr float motor_current_spike_threshold = 0.001f;
-  constexpr float pump_power_spike_threshold = 5.0f;
-  // Must track dhw_demand.h. The units audit moved head to meters, so this is
-  // m/s (it was 3.0f kPa/s before that change).
-  constexpr float pump_head_rate_threshold = 0.31f;
-
-  int votes = 0;
-
-  if (!suppress_transient_votes) {
-    if (!std::isnan(inlet_deriv) &&
-        std::fabs(inlet_deriv) > inlet_pressure_transient_threshold)
-      votes++;
-  }
-
-  if (!std::isnan(inlet_psi) && inlet_psi < inlet_pressure_demand_floor)
-    votes++;
-
-  if (!std::isnan(pump_flow) && pump_flow < pump_flow_collapse_threshold)
-    votes++;
-
-  if (!suppress_transient_votes) {
-    if (!std::isnan(current_deriv) &&
-        std::fabs(current_deriv) > motor_current_spike_threshold)
-      votes++;
-
-    if (!std::isnan(power_deriv) &&
-        power_deriv > pump_power_spike_threshold)
-      votes++;
-
-    if (votes >= 1 && head_rate_peak > pump_head_rate_threshold)
-      votes++;
-  }
-
-  if (votes == 0)
-    return 0.0f;
-
-  static const float conf_map[7] = {0.0f, 0.50f, 0.65f, 0.80f,
-                                    0.90f, 0.95f, 0.95f};
-  return (votes < 7) ? conf_map[votes] : 0.95f;
+  const char *method = nullptr;
+  return compute_pump_on_confidence(inlet_deriv, inlet_psi, pump_flow,
+                                    current_deriv, power_deriv, head_rate_peak,
+                                    suppress_transient_votes,
+                                    kDefaultPumpOnVoteThresholds, &method);
 }
 
 static bool pump_off_flow_onset_is_confirmed(bool flow_present,
@@ -159,16 +127,6 @@ void test_flow_only_onset_requires_one_full_off_tick() {
               "Flow carried from a pump-on tick stays ambiguous on the first off tick");
   TEST_ASSERT(charge_only_first_tick_confirmed,
               "Charge-drop corroboration confirms a first-tick flow onset");
-}
-
-// Mirrors the "DHW in-use confidence boost" step in update(). The flag is only
-// trustworthy while the pump is off; with the pump running it latches high for
-// a fixed ~60 s with no real draw behind it.
-static float apply_dhw_in_use_boost(float confidence, bool demand, bool pump_on,
-                                    float dhw_in_use) {
-  if (demand && !pump_on && !std::isnan(dhw_in_use) && dhw_in_use >= 0.5f)
-    return std::min(1.0f, confidence + 0.05f);
-  return confidence;
 }
 
 void test_dhw_in_use_boost_is_gated_to_pump_off() {

@@ -16,6 +16,10 @@
   vote never fired in the test and the unguarded-startup case silently checked
   two votes instead of three. Synced the constant and corrected the
   expectation (0.65 → 0.80); added coverage for the boost gating above.
+  Extracted the pump-on vote logic and threshold defaults into
+  `dhw_demand_votes.h`, a header with no ESPHome dependency, so the test
+  calls production code directly instead of hand-mirroring it — the class
+  of drift above can't recur.
 
 ## [0.13.0] - 2026-07-23
 
