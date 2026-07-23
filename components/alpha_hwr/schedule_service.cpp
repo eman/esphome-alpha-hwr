@@ -698,7 +698,10 @@ bool ScheduleService::write_entries_async(
           on_complete(true);
         }
       },
-      3000);
+      // quiet_timeout=true: this write is fire-and-forget (the pump commits on
+      // timeout), so the transport logs the expected timeout at DEBUG, not WARN.
+      3000, /*allow_register_read=*/false, /*expect_short_ack=*/false,
+      /*quiet_timeout=*/true);
 
   return true;
 }
@@ -1009,7 +1012,10 @@ void ScheduleService::write_cached_layer_async(
         if (on_complete)
           on_complete(true);
       },
-      3000);
+      // quiet_timeout=true: fire-and-forget write (pump commits on timeout); the
+      // expected response timeout is logged at DEBUG, not WARN.
+      3000, /*allow_register_read=*/false, /*expect_short_ack=*/false,
+      /*quiet_timeout=*/true);
 }
 
 // -------------------------------------------------------------------------
