@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+## [0.13.0] - 2026-07-23
+
 ### Added
 
 - **Vacation scheduling** — new `set_vacation` (`"begin_ts,end_ts"`) and

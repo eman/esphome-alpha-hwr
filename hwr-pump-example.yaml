@@ -18,7 +18,7 @@ substitutions:
   mac_address: "00:00:00:00:00:00"  # ← CHANGE THIS to your pump's MAC
 
 packages:
-  alpha_hwr: github://eman/esphome-alpha-hwr/packages/alpha_hwr_base.yaml@v0.12.0
+  alpha_hwr: github://eman/esphome-alpha-hwr/packages/alpha_hwr_base.yaml@v0.13.0
 
 esp32:
   board: esp32-c3-devkitm-1
