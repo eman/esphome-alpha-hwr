@@ -31,6 +31,7 @@
 #include <esp_bt_defs.h>
 #include <esp_gap_ble_api.h>
 #include <esp_gattc_api.h>
+#include <ctime>
 
 namespace esphome {
 namespace alpha_hwr {
@@ -151,9 +152,6 @@ public:
   }
   void set_warnings_text_sensor(text_sensor::TextSensor *sensor) {
     sensor_publisher_.set_warnings_text_sensor(sensor);
-  }
-  void set_schedule_text_sensor(text_sensor::TextSensor *sensor) {
-    schedule_text_sensor_ = sensor;
   }
   void set_schedule_hash_text_sensor(text_sensor::TextSensor *sensor) {
     schedule_hash_text_sensor_ = sensor;
@@ -333,8 +331,7 @@ private:
   binary_sensor::BinarySensor *pairing_status_sensor_{nullptr};
   binary_sensor::BinarySensor *ready_sensor_{nullptr};
 #ifdef USE_TEXT_SENSOR
-  // Schedule display sensor
-  text_sensor::TextSensor *schedule_text_sensor_{nullptr};
+  // Schedule display sensors
   text_sensor::TextSensor *schedule_hash_text_sensor_{nullptr};
   text_sensor::TextSensor *schedule_layer_sensors_[5] = {nullptr, nullptr,
                                                          nullptr, nullptr,
@@ -712,6 +709,97 @@ public:
     return schedule_service_.find_free_single_event_slot();
   }
 
+  /**
+   * Build a begin/end Unix-timestamp pair from wall-clock month/day/hour/minute
+   * fields, anchored to the current local year. Shared by the "Add Single Event"
+   * and "Set Vacation" editor buttons (alpha_hwr_schedule_editor.yaml).
+   *
+   *  - Requires synced system time; refuses to build the pre-2020 timestamps an
+   *    unsynced (epoch-1970) clock would otherwise produce.
+   *  - Validates that both dates are real calendar dates (day-of-month, incl.
+   *    leap years).
+   *  - If the end falls strictly before the begin, rolls the end into the next
+   *    year so ranges spanning New Year (e.g. Dec 28 -> Jan 3) work. A same-day
+   *    range is fine as long as end > begin (e.g. 00:00 -> 23:59).
+   *
+   * @return true with *begin_ts/*end_ts set on success; false (with a reason
+   *         logged under `tag`) otherwise — callers should abort the write.
+   */
+  bool build_event_window(const char *tag,
+                          uint16_t begin_month, uint16_t begin_day,
+                          uint16_t begin_hour, uint16_t begin_minute,
+                          uint16_t end_month, uint16_t end_day,
+                          uint16_t end_hour, uint16_t end_minute,
+                          uint32_t *begin_ts, uint32_t *end_ts) const {
+    auto valid_ymd = [](uint16_t month, uint16_t day, int tm_year) -> bool {
+      if (month < 1 || month > 12 || day < 1)
+        return false;
+      static const uint8_t days_in_month[12] = {31, 28, 31, 30, 31, 30,
+                                                31, 31, 30, 31, 30, 31};
+      uint8_t max_day = days_in_month[month - 1];
+      if (month == 2) {
+        int full_year = tm_year + 1900;
+        bool leap = (full_year % 4 == 0 && full_year % 100 != 0) ||
+                    (full_year % 400 == 0);
+        if (leap)
+          max_day = 29;
+      }
+      return day <= max_day;
+    };
+    auto make_ts = [](int tm_year, uint16_t month, uint16_t day, uint16_t hour,
+                      uint16_t minute) -> time_t {
+      struct tm t = {};
+      t.tm_year = tm_year;
+      t.tm_mon = month - 1;
+      t.tm_mday = day;
+      t.tm_hour = hour;
+      t.tm_min = minute;
+      t.tm_sec = 0;
+      t.tm_isdst = -1;  // let mktime resolve DST for the local zone
+      return mktime(&t);
+    };
+
+    time_t now = ::time(nullptr);
+    struct tm *lt = ::localtime(&now);
+    if (lt == nullptr || lt->tm_year < 120 /* 2020 */) {
+      ESP_LOGW(tag, "System time not synced yet — cannot set a dated event");
+      return false;
+    }
+    int year = lt->tm_year;  // years since 1900
+
+    if (!valid_ymd(begin_month, begin_day, year)) {
+      ESP_LOGW(tag, "Invalid start date %02d/%02d", begin_month, begin_day);
+      return false;
+    }
+    if (!valid_ymd(end_month, end_day, year)) {
+      ESP_LOGW(tag, "Invalid end date %02d/%02d", end_month, end_day);
+      return false;
+    }
+
+    time_t begin = make_ts(year, begin_month, begin_day, begin_hour, begin_minute);
+    time_t end = make_ts(year, end_month, end_day, end_hour, end_minute);
+
+    // End strictly before begin means the range wraps the New Year: re-anchor
+    // the end to next year (re-validating day-of-month against the new year, in
+    // case Feb 29 leap status differs).
+    if (end < begin) {
+      if (!valid_ymd(end_month, end_day, year + 1)) {
+        ESP_LOGW(tag, "Invalid end date %02d/%02d", end_month, end_day);
+        return false;
+      }
+      end = make_ts(year + 1, end_month, end_day, end_hour, end_minute);
+    }
+
+    if (end <= begin) {
+      ESP_LOGW(tag, "Start must be before end");
+      return false;
+    }
+
+    *begin_ts = (uint32_t) begin;
+    *end_ts = (uint32_t) end;
+    return true;
+  }
+
   // Event log methods
   void read_event_log(std::function<void(bool)> on_complete) {
     event_log_service_.read_entries_async(
@@ -856,50 +944,14 @@ public:
   void perform_clock_sync();
 
   /**
-   * Asynchronously read the pump schedule and update the text sensor display.
-   *
-   * This is a convenience method for displaying the current schedule in Home
-   * Assistant. It reads all schedule layers from the pump and formats them into
-   * a readable string, then publishes to the schedule_text_sensor if one is
-   * configured.
-   *
-   * Usage in YAML button lambda:
-   *   on_press:
-   *     - lambda: id(pump).update_schedule_display();
-   */
-  /**
-   * Publish schedule data as JSON to the text sensor for the Lovelace card.
-   * Reads from the schedule cache (no BLE traffic). Call after reads/writes
-   * complete.
-   *
-   * JSON format (compact, fits HA 255-char state limit for typical usage):
-   *   {"e":1,"s":{"0":[[360,480],[360,480],0,0,0,0,0]}}
-   *   - "e": schedule enabled (1/0)
-   *   - "s": layers keyed by number, only non-empty layers included
-   *   - Each layer: array of 7 entries (Mon=0..Sun=6)
-   *   - Entry: [start_minutes, end_minutes] or 0 (disabled/empty)
-   */
-  void publish_schedule_json() {
-    this->publish_schedule_hash();
-#ifdef USE_TEXT_SENSOR
-    if (!this->schedule_text_sensor_)
-      return;
-
-    std::string json = schedule_service_.generate_json();
-    this->schedule_text_sensor_->publish_state(json);
-    ESP_LOGD(TAG, "Published schedule JSON (%zu chars)", json.size());
-#endif
-  }
-
-  /**
    * Publish the canonical schedule hash (RFC-005 §5.2) — the scheduler's
-   * sync-verification sensor. "unknown" until the full grid is cached.
+   * sync-verification sensor — plus the per-layer read-back sensors.
+   * "unknown" until the full grid is cached.
    */
   void publish_schedule_hash() {
 #ifdef USE_TEXT_SENSOR
     // Per-layer read-back sensors (dhw-sensor-apps issue #7): each layer's
-    // compact JSON always fits HA's 255-char cap, unlike the aggregate
-    // Weekly Schedule sensor.
+    // compact JSON always fits HA's 255-char state cap.
     for (uint8_t layer = 0; layer < 5; layer++) {
       if (this->schedule_layer_sensors_[layer] != nullptr) {
         this->schedule_layer_sensors_[layer]->publish_state(
@@ -926,7 +978,7 @@ public:
             ESP_LOGW(TAG, "Failed to read schedule for display update");
             return;
           }
-          this->publish_schedule_json();
+          this->publish_schedule_hash();
         });
   }
 };

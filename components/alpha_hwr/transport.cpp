@@ -112,6 +112,13 @@ void Transport::loop() {
         if (cmd.expect_obj_id == 0 && cmd.expect_sub_id == 0) {
           ESP_LOGD(TAG, "Command timeout (wildcard match) — pump did not respond (now=%" PRIu32 ", timestamp=%" PRIu32 ", timeout=%" PRIu32 ")",
                    now, cmd.timestamp_ms, cmd.timeout_ms);
+        } else if (cmd.quiet_timeout) {
+          // Fire-and-forget write (e.g. schedule layer commit): the pump commits
+          // on timeout and its ACK arrives outside the response window, so this
+          // timeout is the expected settling path, not an error. See the write
+          // callsites in schedule_service.cpp, which treat it as success.
+          ESP_LOGD(TAG, "Command timeout (expected, fire-and-forget) for Obj %d Sub %d (now=%" PRIu32 ", timestamp=%" PRIu32 ", timeout=%" PRIu32 ")",
+                   cmd.expect_obj_id, cmd.expect_sub_id, now, cmd.timestamp_ms, cmd.timeout_ms);
         } else {
           ESP_LOGW(TAG, "Command timeout waiting for Obj %d Sub %d (now=%" PRIu32 ", timestamp=%" PRIu32 ", timeout=%" PRIu32 ")",
                    cmd.expect_obj_id, cmd.expect_sub_id, now, cmd.timestamp_ms, cmd.timeout_ms);
@@ -129,9 +136,9 @@ void Transport::loop() {
   }
 }
 
-void Transport::send_command(const std::vector<uint8_t>& packet, uint16_t expect_obj_id, 
+void Transport::send_command(const std::vector<uint8_t>& packet, uint16_t expect_obj_id,
                              uint16_t expect_sub_id, CommandCallback callback, uint32_t timeout_ms,
-                             bool allow_register_read, bool expect_short_ack) {
+                             bool allow_register_read, bool expect_short_ack, bool quiet_timeout) {
   Command cmd;
   cmd.packet = packet;
   cmd.expect_obj_id = expect_obj_id;
@@ -140,7 +147,8 @@ void Transport::send_command(const std::vector<uint8_t>& packet, uint16_t expect
   cmd.timeout_ms = timeout_ms;
   cmd.allow_register_read = allow_register_read;
   cmd.expect_short_ack = expect_short_ack;
-  
+  cmd.quiet_timeout = quiet_timeout;
+
   this->command_queue_.push_back(cmd);
   ESP_LOGV(TAG, "Command queued (queue size: %zu)", this->command_queue_.size());
 }
@@ -148,7 +156,8 @@ void Transport::send_command(const std::vector<uint8_t>& packet, uint16_t expect
 void Transport::send_apdu_command(const uint8_t* apdu, size_t apdu_len,
                                   uint16_t expect_obj_id, uint16_t expect_sub_id,
                                   CommandCallback callback, uint32_t timeout_ms,
-                                  bool allow_register_read, bool expect_short_ack) {
+                                  bool allow_register_read, bool expect_short_ack,
+                                  bool quiet_timeout) {
   uint8_t packet_raw[256];
   // build_geni_packet uses SERVICE_ID_HIGH (0xE7) and SOURCE_ADDRESS (0xF8) automatically
   size_t packet_len = protocol::build_geni_packet(
@@ -168,7 +177,7 @@ void Transport::send_apdu_command(const uint8_t* apdu, size_t apdu_len,
 
   std::vector<uint8_t> packet(packet_raw, packet_raw + packet_len);
   
-  this->send_command(packet, expect_obj_id, expect_sub_id, callback, timeout_ms, allow_register_read, expect_short_ack);
+  this->send_command(packet, expect_obj_id, expect_sub_id, callback, timeout_ms, allow_register_read, expect_short_ack, quiet_timeout);
 }
 
 bool Transport::is_frame_start(uint8_t byte) {

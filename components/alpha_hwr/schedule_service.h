@@ -608,13 +608,6 @@ public:
   }
 
   /**
-   * Generate the compact JSON representation of the schedule state used by
-   * the Home Assistant text sensor (enabled flag + cached per-layer entries).
-   * Truncated to 255 chars to fit HA's text sensor state length limit.
-   */
-  std::string generate_json() const;
-
-  /**
    * Canonical schedule hash over the cached 7x5 grid + enabled flag
    * (RFC-005 §5.2; algorithm in schedule_codec.h). Returns "unknown"
    * until all 5 layers and the schedule state are cached, so the HA

@@ -70,6 +70,15 @@ whichever slot holds the active `Stop` event (settles `accepted` with no change
 if there is no active vacation). The **Vacation** text sensor shows the active
 range; the **Single Events** sensor labels each event `(run)` or `(off)`.
 
+For a click-driven UI, `alpha_hwr_schedule_editor.yaml` provides matching
+helper entities: four `number` inputs (**Vacation Start Month/Day**,
+**Vacation End Month/Day**) plus **Set Vacation** and **Clear Vacation**
+buttons. "Set Vacation" holds the pump off from 00:00 of the start day through
+23:59 of the end day (current year, whole-day granularity) by calling
+`set_vacation`; "Clear Vacation" calls `clear_vacation`. The helpers are
+`internal: true` — expose them on a dashboard or reference them from a Lovelace
+card. Automations should call the services directly rather than these buttons.
+
 ## Behavior change (v0.11)
 
 Schedule writes previously reported "OK" in the logs unconditionally — even
@@ -155,13 +164,18 @@ curl -X POST \
 
 | Entity | Description |
 | --- | --- |
-| `text_sensor.<node_name>_weekly_schedule` | Current weekly schedule JSON |
+| `text_sensor.<node_name>_schedule_layer_0..4` | Per-layer schedule read-back JSON (compact, one sensor per layer) |
+| `text_sensor.<node_name>_schedule_hash` | Canonical hash of the cached grid, for sync verification |
 | `text_sensor.<node_name>_single_events` | Human-readable active single events |
+| `text_sensor.<node_name>_vacation` | Active vacation range, or "No vacation" |
 
 ## Notes
 
-- `alpha_hwr_schedule_editor.yaml` provides the services; `alpha_hwr_pairing.yaml`
-  provides the schedule and single-event text sensors.
+- The services are registered by the component itself (`api_bridge.cpp`);
+  `alpha_hwr_schedule_editor.yaml` adds the optional Lovelace helper entities
+  (day/layer selects, time/date `number` inputs, save/clear/vacation buttons);
+  `alpha_hwr_pairing.yaml` provides the schedule, single-event, and vacation
+  text sensors.
 - Single events temporarily override the weekly schedule while active.
 - Schedule writes take a few seconds to propagate over BLE.
 - Call `refresh_schedule` or `refresh_single_events` after bulk updates if you
