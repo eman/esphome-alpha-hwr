@@ -79,6 +79,42 @@ buttons. "Set Vacation" holds the pump off from 00:00 of the start day through
 `internal: true` — expose them on a dashboard or reference them from a Lovelace
 card. Automations should call the services directly rather than these buttons.
 
+## Run state and the schedule
+
+The weekly schedule does not run the pump on its own — it **gates** an
+already-running pump. Bench-verified rule (motor RPM as ground truth):
+
+> the motor runs only when the run state is **on** (operation mode `AUTO`)
+> **and** the schedule is disabled (runs continuously) **or** a schedule window
+> is currently active (runs only in windows).
+
+So a pump whose run state is **off** (`STOP`) stays idle through every window
+even with the schedule enabled — enabling the schedule on a stopped pump does
+nothing until the pump is switched to `AUTO`.
+
+The two switches model this as three mutually-exclusive states, matching the
+Grundfos GO app (which won't let you start the pump while the schedule is on):
+
+| State | `Run Pump` | `Schedule Enabled` | Behavior |
+| --- | --- | --- | --- |
+| **Off** | off | off | pump stopped |
+| **Run** | **on** | off | runs continuously in its control mode |
+| **Scheduled** | off | **on** | runs only inside schedule windows |
+
+- **`Run Pump` on** → run continuously now, and **disable the schedule**.
+- **`Schedule Enabled` on** → switch the pump to `AUTO` so the schedule can
+  actually run it; `Run Pump` then reads off (the pump is gated, not continuous).
+- **`Schedule Enabled` off** → stop the pump.
+
+`Run Pump` reads on only when the pump is running continuously (`AUTO` **and**
+schedule off), so the two switches are always mutually exclusive. (Previously a
+"Pump Enabled" switch could read on while an enabled schedule held the motor
+idle — and a stopped pump with the schedule enabled silently never ran.)
+
+Automations that call the raw `pump_set_enabled` / `set_schedule_enabled`
+services bypass this coupling and can set any combination — see
+[programmatic-interface.md](programmatic-interface.md#run-state-and-the-schedule).
+
 ## Behavior change (v0.11)
 
 Schedule writes previously reported "OK" in the logs unconditionally — even

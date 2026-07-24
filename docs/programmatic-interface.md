@@ -54,6 +54,32 @@ ESPHome prefixes each service with the node name: `esphome.<node_name>_<service>
 Setpoint units and ranges: pressure modes in meters (0.5–10.0),
 `constant_speed` in RPM (500–4500), `constant_flow` in m³/h (0.1–10.0).
 
+### Run state and the schedule
+
+`pump_set_enabled` and `set_schedule_enabled` are **independent, uncoupled**
+writes — each does exactly what it says and never touches the other. The pump's
+*behavior*, however, couples them (bench-verified, motor RPM as ground truth):
+
+> the motor runs only when the run state is **on** (operation mode `AUTO`,
+> `pump_set_enabled true`) **and** the schedule is disabled (runs continuously)
+> **or** a schedule window is currently active (runs only in windows).
+
+Consequences for automations calling these raw services:
+
+- **A stopped pump ignores the schedule.** `set_schedule_enabled 1` while the
+  run state is `STOP` (`pump_set_enabled false`) leaves a *dead* schedule: the
+  enable flag is set, but the pump stays idle through every window. To run on
+  schedule the pump must be `AUTO` — also call `pump_set_enabled true`.
+- **Started + schedule disabled** → runs continuously (its control mode, 24/7).
+- **Started + schedule enabled** → runs only inside windows, idle between them.
+
+The `Run Pump` and `Schedule Enabled` **entities** hide this by enforcing a
+coupled three-state model (Off / Run / Scheduled) — see
+[schedule-management.md](schedule-management.md#run-state-and-the-schedule). The
+**services above stay raw** so automations can drive any combination directly;
+if you use them, set both the run state and the schedule flag to the
+combination you intend.
+
 ### Schedules
 
 These keep the names and single `data`-string formats of the original
