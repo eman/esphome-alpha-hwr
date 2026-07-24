@@ -23,32 +23,32 @@
 
 # Ensure switch and button components are included
 switch:
-  # Pump Enable/Disable Control
-  # Controls whether the pump is enabled to operate in its configured mode.
-  # When enabled, the motor may cycle on/off per the control mode (e.g., temperature range).
-  # When disabled, the pump is explicitly stopped and will not run.
+  # Run Pump (continuous) — mutually exclusive with the schedule, like the
+  # Grundfos GO app's start/stop button. "Run Pump" means "run continuously
+  # right now": operation_mode AUTO and NOT gated by an enabled schedule.
+  # Turning it on disables the schedule; turning it off stops the pump. The
+  # switch reads derived state from the pump, so "Schedule Enabled" flips off on
+  # its own — no optimistic faking. (Bench-proven: the schedule only runs the
+  # pump while it is AUTO, so the reconciliation forces AUTO when scheduling and
+  # never leaves a dead STOP+schedule state.)
   - platform: template
-    name: "Pump Enabled"
-    id: pump_enabled_switch
+    name: "Run Pump"
+    id: run_pump_switch
     icon: "mdi:pump"
     optimistic: false
     lambda: |-
-      if (!id(pump).is_pump_enabled_valid()) return {};
-      return id(pump).is_pump_enabled();
+      bool state = false;
+      if (id(pump).get_run_pump_state(&state)) return state;
+      return {};  // unknown until run-state + schedule are cached
     turn_on_action:
-      - lambda: |-
-          ESP_LOGI("switch", "Enabling pump...");
-          id(pump).pump_start();
-          // Immediate UI feedback
-          id(pump_enabled_switch).publish_state(true);
+      - lambda: 'id(pump).set_run_pump(true);'
     turn_off_action:
-      - lambda: |-
-          ESP_LOGI("switch", "Disabling pump...");
-          id(pump).pump_stop();
-          // Immediate UI feedback
-          id(pump_enabled_switch).publish_state(false);
+      - lambda: 'id(pump).set_run_pump(false);'
 
-  # Schedule Enable/Disable Control
+  # Schedule Enable/Disable Control.
+  # Enabling forces the pump to AUTO so the schedule can actually run it (a
+  # STOP + schedule-enabled pump never runs); disabling stops the pump. "Run
+  # Pump" reflects the coupling on its own via the pump readback.
   - platform: template
     name: "Schedule Enabled"
     icon: "mdi:calendar-clock"
@@ -60,15 +60,9 @@ switch:
       }
       return {};  // Return unknown if state not cached yet
     turn_on_action:
-      - lambda: |-
-          ESP_LOGI("switch", "Enabling pump schedule...");
-          bool result = id(pump).enable_schedule();
-          ESP_LOGI("switch", "Enable schedule result: %s", result ? "SUCCESS" : "FAILED");
+      - lambda: 'id(pump).set_schedule(true);'
     turn_off_action:
-      - lambda: |-
-          ESP_LOGI("switch", "Disabling pump schedule...");
-          bool result = id(pump).disable_schedule();
-          ESP_LOGI("switch", "Disable schedule result: %s", result ? "SUCCESS" : "FAILED");
+      - lambda: 'id(pump).set_schedule(false);'
 
   # Remote Mode Toggle
   - platform: template

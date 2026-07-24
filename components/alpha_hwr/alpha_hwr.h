@@ -20,6 +20,7 @@
 #include "event_log_service.h"
 #include "frame_builder.h"
 #include "history_service.h"
+#include "pump_schedule_ux.h"
 #include "schedule_entry.h"
 #include "schedule_service.h"
 #include "sensor_publisher.h"
@@ -264,6 +265,34 @@ public:
   }
 
 private:
+  // Converge the pump to a Run/Schedule target, writing only the fields that
+  // differ from the current cached state (both writes if a field is unknown).
+  // Ordering avoids a transient dead/gated state: disable the schedule before
+  // touching run state when turning it off; set AUTO before enabling the
+  // schedule when turning it on (so there is never a STOP+schedule moment).
+  void apply_pump_schedule_target_(const ux::PumpScheduleTarget &target) {
+    bool cur_schedule = false;
+    bool schedule_known = schedule_service_.get_state(&cur_schedule);
+    bool pump_known = control_service_.is_pump_enabled_valid();
+    bool cur_pump = control_service_.is_pump_enabled();
+
+    bool write_schedule = !schedule_known || cur_schedule != target.schedule_enabled;
+    bool write_pump = !pump_known || cur_pump != target.pump_enabled;
+
+    if (write_schedule && !target.schedule_enabled) {
+      write_op_service_.submit_set_schedule_enabled(false, "", nullptr,
+                                                    services::WriteOrigin::ENTITY);
+    }
+    if (write_pump) {
+      write_op_service_.submit_set_enabled(target.pump_enabled, "", nullptr,
+                                           services::WriteOrigin::ENTITY);
+    }
+    if (write_schedule && target.schedule_enabled) {
+      write_op_service_.submit_set_schedule_enabled(true, "", nullptr,
+                                                    services::WriteOrigin::ENTITY);
+    }
+  }
+
   // Helper for retrying the initial cache sync
   void do_control_cache_sync(uint32_t gen);
 
@@ -609,6 +638,43 @@ public:
   bool get_schedule_state(bool *result) {
     return schedule_service_.get_state(result);
   }
+
+  // ---- "Run Pump" vs "Schedule Enabled" reconciliation (issue: pump/schedule
+  // switch reconciliation). These back the two UI switches and keep them
+  // mutually exclusive like the Grundfos GO app, without ever creating a dead
+  // schedule (STOP + schedule enabled never runs — bench-proven). The three
+  // states are Off (STOP), Run (AUTO + schedule off), Scheduled (AUTO +
+  // schedule on). Pure target/display logic lives in pump_schedule_ux.h; the
+  // programmatic services (submit_set_enabled / submit_set_schedule_enabled)
+  // stay raw and uncoupled for automations that want direct control.
+
+  // "Run Pump" switch: running continuously *now* = AUTO and not schedule-gated.
+  // Returns false when either input is not yet cached (switch shows unknown).
+  bool get_run_pump_state(bool *result) {
+    bool schedule_on = false;
+    if (!control_service_.is_pump_enabled_valid() ||
+        !schedule_service_.get_state(&schedule_on)) {
+      return false;
+    }
+    *result = ux::run_pump_display(control_service_.is_pump_enabled(), schedule_on);
+    return true;
+  }
+
+  // Toggle "Run Pump": ON = run continuously (AUTO + schedule off), OFF = Off (STOP).
+  void set_run_pump(bool on) {
+    if (!check_ready(on ? "run_pump_on" : "run_pump_off")) return;
+    apply_pump_schedule_target_(on ? ux::run_pump_on_target()
+                                   : ux::run_pump_off_target());
+  }
+
+  // Toggle "Schedule Enabled": ON = Scheduled (AUTO so it can actually run +
+  // schedule on), OFF = Off (stop the pump + schedule off).
+  void set_schedule(bool on) {
+    if (!check_ready(on ? "schedule_on" : "schedule_off")) return;
+    apply_pump_schedule_target_(on ? ux::schedule_on_target()
+                                   : ux::schedule_off_target());
+  }
+
   bool read_schedule_entries(std::vector<ScheduleEntry> *entries,
                              int layer = -1) {
     return schedule_service_.read_entries(entries, layer);
