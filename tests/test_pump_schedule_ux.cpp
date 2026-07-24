@@ -11,6 +11,7 @@
  */
 
 #include <iostream>
+#include <string>
 #include "../components/alpha_hwr/pump_schedule_ux.h"
 
 using namespace esphome::alpha_hwr::ux;

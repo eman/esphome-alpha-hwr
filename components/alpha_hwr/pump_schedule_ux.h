@@ -14,9 +14,10 @@
 //   Run       = AUTO + schedule OFF   (continuous — the app's start/stop button)
 //   Scheduled = AUTO + schedule ON    (runs only inside weekly windows)
 //
-// Extracted as a header so tests/test_control_state.cpp exercises the exact
+// Extracted as a header so tests/test_pump_schedule_ux.cpp exercises the exact
 // production logic — no hand-mirrored copy to drift (same pattern as
-// dhw_demand_votes.h). See memory: pump-enabled-schedule-arbitration.
+// dhw_demand_votes.h). See docs/schedule-management.md ("Run state and the
+// schedule") for the user-facing behavior.
 
 namespace esphome {
 namespace alpha_hwr {
