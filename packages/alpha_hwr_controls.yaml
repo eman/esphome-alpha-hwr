@@ -23,31 +23,34 @@
 
 # Ensure switch and button components are included
 switch:
-  # Run Pump (continuous) — mutually exclusive with the schedule, like the
-  # Grundfos GO app's start/stop button. "Run Pump" means "run continuously
-  # right now": operation_mode AUTO and NOT gated by an enabled schedule.
-  # Turning it on disables the schedule; turning it off stops the pump. The
-  # switch reads derived state from the pump, so "Schedule Enabled" flips off on
-  # its own — no optimistic faking. (Bench-proven: the schedule only runs the
-  # pump while it is AUTO, so the reconciliation forces AUTO when scheduling and
-  # never leaves a dead STOP+schedule state.)
+  # Engage Pump — mutually exclusive with the schedule, like the Grundfos GO
+  # app's start/stop button. It engages the pump's configured mode now
+  # (operation_mode AUTO) and NOT gated by an enabled schedule. Whether the
+  # motor physically spins is mode-dependent: continuous in the constant modes
+  # (speed/flow/pressure), cycling per the mode in Temperature/Cycle-Time — see
+  # the "Pump Motor Active" binary sensor for the actual motor state. Turning it
+  # on disables the schedule; turning it off stops the pump. The switch reads
+  # derived state from the pump, so "Schedule Enabled" flips off on its own — no
+  # optimistic faking. (Bench-proven: the schedule only runs the pump while it
+  # is AUTO, so the reconciliation forces AUTO when scheduling and never leaves
+  # a dead STOP+schedule state.)
   - platform: template
-    name: "Run Pump"
-    id: run_pump_switch
+    name: "Engage Pump"
+    id: engage_pump_switch
     icon: "mdi:pump"
     optimistic: false
     lambda: |-
       bool state = false;
-      if (id(pump).get_run_pump_state(&state)) return state;
+      if (id(pump).get_engage_pump_state(&state)) return state;
       return {};  // unknown until run-state + schedule are cached
     turn_on_action:
-      - lambda: 'id(pump).set_run_pump(true);'
+      - lambda: 'id(pump).set_engage_pump(true);'
     turn_off_action:
-      - lambda: 'id(pump).set_run_pump(false);'
+      - lambda: 'id(pump).set_engage_pump(false);'
 
   # Schedule Enable/Disable Control.
   # Enabling forces the pump to AUTO so the schedule can actually run it (a
-  # STOP + schedule-enabled pump never runs); disabling stops the pump. "Run
+  # STOP + schedule-enabled pump never runs); disabling stops the pump. "Engage
   # Pump" reflects the coupling on its own via the pump readback.
   - platform: template
     name: "Schedule Enabled"

@@ -16,25 +16,29 @@
 
 ### Changed
 
-- **"Pump Enabled" switch renamed to "Run Pump", and the pump/schedule controls
-  are now mutually exclusive** (matching the Grundfos GO app). Bench testing
-  (motor RPM as ground truth) established that the pump runs only when
+- **"Pump Enabled" switch renamed to "Engage Pump", and the pump/schedule
+  controls are now mutually exclusive** (matching the Grundfos GO app). Bench
+  testing (motor RPM as ground truth) established that the pump runs only when
   `operation_mode == AUTO` **and** the schedule is off (continuous) or inside a
   window (scheduled) — so a `STOP` + schedule-enabled pump never runs, and the
   old independent switches let you sit in that dead state while "Pump Enabled"
   misleadingly read on. The two switches now model three states — **Off**
-  (`STOP`), **Run** (`AUTO` + schedule off, continuous), **Scheduled** (`AUTO` +
-  schedule on, gated to windows): turning on **Run Pump** disables the schedule;
-  turning on **Schedule Enabled** forces `AUTO` (so it can actually run) and the
-  Run Pump switch reads off; turning the schedule off stops the pump. "Run Pump"
-  reads derived state (`AUTO && schedule-off`) from the pump, so the two switches
-  are mutually exclusive without optimistic faking. The coupling lives in
-  `AlphaHwr` (`set_run_pump` / `set_schedule`) with pure target/display logic in
-  `pump_schedule_ux.h` (host-tested in `tests/test_pump_schedule_ux.cpp`); the
-  programmatic services (`pump_set_enabled`, `set_schedule_enabled`) stay raw and
-  uncoupled. **Migration:** the switch's entity_id changes from
-  `switch.<node>_pump_enabled` to `switch.<node>_run_pump` — update any
-  automations/dashboards that referenced it.
+  (`STOP`), **Engaged** (`AUTO` + schedule off), **Scheduled** (`AUTO` +
+  schedule on, gated to windows): turning on **Engage Pump** disables the
+  schedule; turning on **Schedule Enabled** forces `AUTO` (so it can actually
+  run) and the Engage Pump switch reads off; turning the schedule off stops the
+  pump. "Engage Pump" reads derived state (`AUTO && schedule-off`) from the
+  pump, so the two switches are mutually exclusive without optimistic faking. It
+  engages the pump's *mode* (`operation_mode == AUTO`); whether the motor spins
+  is mode-dependent — continuous in the constant modes, cycling in
+  Temperature/Cycle-Time (see the `Pump Motor Active` sensor for the real motor
+  state). The coupling lives in `AlphaHwr` (`set_engage_pump` / `set_schedule`)
+  with pure target/display logic in `pump_schedule_ux.h` (host-tested in
+  `tests/test_pump_schedule_ux.cpp`); the programmatic services
+  (`pump_set_enabled`, `set_schedule_enabled`) stay raw and uncoupled.
+  **Migration:** the switch's entity_id changes from `switch.<node>_pump_enabled`
+  to `switch.<node>_engage_pump` — update any automations/dashboards that
+  referenced it.
 - **Lovelace schedule card (v4)** — `homeassistant/www/alpha-hwr-schedule-card.js`
   now reads the schedule from the per-layer `schedule_layer_0..4` read-back
   sensors and the `Schedule Enabled` switch instead of the removed aggregate

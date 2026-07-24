@@ -95,21 +95,26 @@ nothing until the pump is switched to `AUTO`.
 The two switches model this as three mutually-exclusive states, matching the
 Grundfos GO app (which won't let you start the pump while the schedule is on):
 
-| State | `Run Pump` | `Schedule Enabled` | Behavior |
+| State | `Engage Pump` | `Schedule Enabled` | Behavior |
 | --- | --- | --- | --- |
 | **Off** | off | off | pump stopped |
-| **Run** | **on** | off | runs continuously in its control mode |
-| **Scheduled** | off | **on** | runs only inside schedule windows |
+| **Engaged** | **on** | off | pump's mode engaged continuously (not schedule-gated) |
+| **Scheduled** | off | **on** | pump's mode engaged only inside schedule windows |
 
-- **`Run Pump` on** → run continuously now, and **disable the schedule**.
+- **`Engage Pump` on** → engage the pump's mode now, and **disable the schedule**.
 - **`Schedule Enabled` on** → switch the pump to `AUTO` so the schedule can
-  actually run it; `Run Pump` then reads off (the pump is gated, not continuous).
+  actually run it; `Engage Pump` then reads off (the pump is gated to windows).
 - **`Schedule Enabled` off** → stop the pump.
 
-`Run Pump` reads on only when the pump is running continuously (`AUTO` **and**
-schedule off), so the two switches are always mutually exclusive. (Previously a
-"Pump Enabled" switch could read on while an enabled schedule held the motor
-idle — and a stopped pump with the schedule enabled silently never ran.)
+`Engage Pump` engages `operation_mode == AUTO`; whether the **motor** actually
+spins is mode-dependent — it runs continuously in the constant modes
+(speed/flow/pressure) and cycles per the mode in Temperature/Cycle-Time. Watch
+`binary_sensor.<node_name>_pump_motor_active` for the real motor state. The
+switch reads on only when the mode is engaged *and* not schedule-gated (`AUTO`
+**and** schedule off), so the two switches are always mutually exclusive.
+(Previously a "Pump Enabled" switch could read on while an enabled schedule held
+the motor idle — and a stopped pump with the schedule enabled silently never
+ran.)
 
 Automations that call the raw `pump_set_enabled` / `set_schedule_enabled`
 services bypass this coupling and can set any combination — see

@@ -73,8 +73,8 @@ Consequences for automations calling these raw services:
 - **Started + schedule disabled** → runs continuously (its control mode, 24/7).
 - **Started + schedule enabled** → runs only inside windows, idle between them.
 
-The `Run Pump` and `Schedule Enabled` **entities** hide this by enforcing a
-coupled three-state model (Off / Run / Scheduled) — see
+The `Engage Pump` and `Schedule Enabled` **entities** hide this by enforcing a
+coupled three-state model (Off / Engaged / Scheduled) — see
 [schedule-management.md](schedule-management.md#run-state-and-the-schedule). The
 **services above stay raw** so automations can drive any combination directly;
 if you use them, set both the run state and the schedule flag to the

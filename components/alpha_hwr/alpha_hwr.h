@@ -639,32 +639,36 @@ public:
     return schedule_service_.get_state(result);
   }
 
-  // ---- "Run Pump" vs "Schedule Enabled" reconciliation (issue: pump/schedule
-  // switch reconciliation). These back the two UI switches and keep them
-  // mutually exclusive like the Grundfos GO app, without ever creating a dead
-  // schedule (STOP + schedule enabled never runs — bench-proven). The three
-  // states are Off (STOP), Run (AUTO + schedule off), Scheduled (AUTO +
-  // schedule on). Pure target/display logic lives in pump_schedule_ux.h; the
-  // programmatic services (submit_set_enabled / submit_set_schedule_enabled)
-  // stay raw and uncoupled for automations that want direct control.
+  // ---- "Engage Pump" vs "Schedule Enabled" reconciliation (issue: pump/
+  // schedule switch reconciliation). These back the two UI switches and keep
+  // them mutually exclusive like the Grundfos GO app, without ever creating a
+  // dead schedule (STOP + schedule enabled never runs — bench-proven). The
+  // three states are Off (STOP), Engaged (AUTO + schedule off), Scheduled
+  // (AUTO + schedule on). "Engage Pump" engages the pump's mode (operation_mode
+  // AUTO); whether the motor spins is mode-dependent (continuous in constant
+  // modes, cycling in temperature/cycle-time). Pure target/display logic lives
+  // in pump_schedule_ux.h; the programmatic services (submit_set_enabled /
+  // submit_set_schedule_enabled) stay raw and uncoupled for automations.
 
-  // "Run Pump" switch: running continuously *now* = AUTO and not schedule-gated.
-  // Returns false when either input is not yet cached (switch shows unknown).
-  bool get_run_pump_state(bool *result) {
+  // "Engage Pump" switch: mode engaged continuously *now* = AUTO and not
+  // schedule-gated. Returns false when either input is not yet cached (switch
+  // shows unknown).
+  bool get_engage_pump_state(bool *result) {
     bool schedule_on = false;
     if (!control_service_.is_pump_enabled_valid() ||
         !schedule_service_.get_state(&schedule_on)) {
       return false;
     }
-    *result = ux::run_pump_display(control_service_.is_pump_enabled(), schedule_on);
+    *result = ux::engage_pump_display(control_service_.is_pump_enabled(), schedule_on);
     return true;
   }
 
-  // Toggle "Run Pump": ON = run continuously (AUTO + schedule off), OFF = Off (STOP).
-  void set_run_pump(bool on) {
-    if (!check_ready(on ? "run_pump_on" : "run_pump_off")) return;
-    apply_pump_schedule_target_(on ? ux::run_pump_on_target()
-                                   : ux::run_pump_off_target());
+  // Toggle "Engage Pump": ON = engage continuously (AUTO + schedule off),
+  // OFF = Off (STOP).
+  void set_engage_pump(bool on) {
+    if (!check_ready(on ? "engage_pump_on" : "engage_pump_off")) return;
+    apply_pump_schedule_target_(on ? ux::engage_pump_on_target()
+                                   : ux::engage_pump_off_target());
   }
 
   // Toggle "Schedule Enabled": ON = Scheduled (AUTO so it can actually run +
