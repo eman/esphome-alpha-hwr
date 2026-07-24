@@ -1,5 +1,5 @@
 /**
- * Alpha HWR Schedule Card — v4
+ * Alpha HWR Schedule Card — v5
  *
  * Custom Lovelace card for managing the Grundfos ALPHA HWR pump's weekly schedule.
  * Reads the schedule from the per-layer ESPHome read-back sensors and writes
@@ -31,6 +31,13 @@
  * Single Events text sensor format:
  *   [slot] YYYY-MM-DD HH:MM - HH:MM
  *   (one line per active event)
+ *
+ * v5 Changes:
+ *   - The Enable/Disable Schedule button now toggles the `Schedule Enabled`
+ *     switch entity (coupled) instead of calling the raw set_schedule_enabled
+ *     service, so enabling the schedule from the card forces the pump to AUTO
+ *     (never a dead STOP+schedule) and disabling stops it — matching the
+ *     Engage Pump / Schedule Enabled mutual-exclusion model.
  *
  * v4 Changes:
  *   - Migrated off the removed aggregate "Weekly Schedule" JSON sensor to the
@@ -1507,10 +1514,15 @@ class AlphaHwrScheduleCard extends HTMLElement {
   }
 
   _toggleSchedule() {
-    const device = this._config.device;
     const enabled = this._schedule ? this._schedule.e : 0;
-    this._hass.callService('esphome', `${device}_set_schedule_enabled`, {
-      data: enabled ? '0' : '1',
+    // Toggle the Schedule Enabled *switch* (not the raw set_schedule_enabled
+    // service) so the card gets the switch's coupled behavior: enabling forces
+    // the pump to AUTO so the schedule can actually run it (a stopped pump with
+    // the schedule enabled never runs), and disabling stops the pump. This
+    // keeps the card consistent with the Engage Pump / Schedule Enabled
+    // mutual-exclusion model.
+    this._hass.callService('switch', enabled ? 'turn_off' : 'turn_on', {
+      entity_id: this._config.enabled_entity,
     });
     setTimeout(() => this._callRefresh(), 2000);
   }
