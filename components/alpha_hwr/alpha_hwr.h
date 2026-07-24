@@ -792,7 +792,7 @@ public:
    *    year so ranges spanning New Year (e.g. Dec 28 -> Jan 3) work. A same-day
    *    range is fine as long as end > begin (e.g. 00:00 -> 23:59).
    *
-   * @return true with *begin_ts/*end_ts set on success; false (with a reason
+   * @return true with `*begin_ts` and `*end_ts` set on success; false (with a reason
    *         logged under `tag`) otherwise — callers should abort the write.
    */
   bool build_event_window(const char *tag,
