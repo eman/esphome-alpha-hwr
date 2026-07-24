@@ -1,5 +1,9 @@
 #pragma once
 
+#include <functional>
+#include <memory>
+#include <string>
+
 #include "esphome/components/binary_sensor/binary_sensor.h"
 #include "esphome/components/ble_client/ble_client.h"
 #include "esphome/components/sensor/sensor.h"
@@ -476,6 +480,76 @@ public:
   }
   void submit_set_schedule_enabled(bool enabled, const std::string &op_id) {
     write_op_service_.submit_set_schedule_enabled(enabled, op_id);
+  }
+
+  // Coupled `pump_set_state` service: a single selector over the three-state
+  // machine (off / engaged / scheduled), the programmatic sibling of the two
+  // switches. Composed from the raw SET_PUMP_ENABLED + SET_SCHEDULE_ENABLED
+  // writes (so each keeps its own pump-verified readback), then reports ONE
+  // aggregate outcome via on_complete(ok, actual_engaged, actual_scheduled,
+  // detail). on_complete fires exactly once: immediately for a no-op (already
+  // in the target state), otherwise after every issued sub-write settles. `ok`
+  // is false if any sub-write was not accepted; actual_* are read back from the
+  // pump so a partial failure (e.g. the second write fails) reports the real
+  // end state. The underlying flag writes surface as their own op_id="" settle
+  // events (like entity writes); this call adds the one event under the op_id.
+  void submit_set_pump_state(
+      ux::PumpScheduleTarget target,
+      std::function<void(bool, bool, bool, const std::string &)> on_complete) {
+    if (!check_ready("set_pump_state")) {
+      bool ce = control_service_.is_pump_enabled();
+      bool cs = false;
+      schedule_service_.get_state(&cs);
+      if (on_complete) on_complete(false, ce, cs, "pump not connected/synchronized");
+      return;
+    }
+
+    bool cur_engaged = control_service_.is_pump_enabled();
+    bool engaged_known = control_service_.is_pump_enabled_valid();
+    bool cur_scheduled = false;
+    bool sched_known = schedule_service_.get_state(&cur_scheduled);
+
+    bool need_engaged = !engaged_known || cur_engaged != target.pump_enabled;
+    bool need_scheduled = !sched_known || cur_scheduled != target.schedule_enabled;
+
+    if (!need_engaged && !need_scheduled) {
+      // No-op: already in the requested state. Still fire exactly one terminal
+      // result so a client waiting on this op_id never hangs.
+      if (on_complete) on_complete(true, cur_engaged, cur_scheduled, "no change");
+      return;
+    }
+
+    struct Agg {
+      int pending{0};
+      bool ok{true};
+      std::function<void(bool, bool, bool, const std::string &)> on_complete;
+    };
+    auto agg = std::make_shared<Agg>();
+    agg->pending = (need_engaged ? 1 : 0) + (need_scheduled ? 1 : 0);
+    agg->on_complete = std::move(on_complete);
+
+    auto *self = this;
+    auto step = [self, agg](bool accepted) {
+      agg->ok = agg->ok && accepted;
+      if (--agg->pending > 0) return;
+      bool ae = self->control_service_.is_pump_enabled();
+      bool as = false;
+      self->schedule_service_.get_state(&as);
+      std::string detail = agg->ok ? "" : "one or more writes were not accepted";
+      if (agg->on_complete) agg->on_complete(agg->ok, ae, as, detail);
+    };
+
+    // Order avoids a transient dead/gated state: disable the schedule before
+    // touching run state; enable it only after AUTO is set.
+    if (need_scheduled && !target.schedule_enabled) {
+      write_op_service_.submit_set_schedule_enabled(false, "", step, services::WriteOrigin::SERVICE);
+    }
+    if (need_engaged) {
+      write_op_service_.submit_set_enabled(target.pump_enabled, "", step, services::WriteOrigin::SERVICE);
+    }
+    if (need_scheduled && target.schedule_enabled) {
+      write_op_service_.submit_set_schedule_enabled(true, "", step, services::WriteOrigin::SERVICE);
+    }
   }
   void submit_set_single_event(uint32_t begin_ts, uint32_t end_ts, const std::string &op_id) {
     write_op_service_.submit_set_single_event(begin_ts, end_ts, op_id);

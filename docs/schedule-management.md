@@ -116,8 +116,10 @@ switch reads on only when the mode is engaged *and* not schedule-gated (`AUTO`
 the motor idle — and a stopped pump with the schedule enabled silently never
 ran.)
 
-Automations that call the raw `pump_set_enabled` / `set_schedule_enabled`
-services bypass this coupling and can set any combination — see
+From an automation, the `pump_set_state` service (`off` | `engaged` |
+`scheduled`) gives you these same three states in one safe call. The raw
+`pump_set_enabled` / `set_schedule_enabled` services stay available for writing
+a single flag deliberately — see
 [programmatic-interface.md](programmatic-interface.md#run-state-and-the-schedule).
 
 ## Behavior change (v0.11)

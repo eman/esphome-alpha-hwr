@@ -32,6 +32,10 @@ enum class WriteCommand : uint8_t {
   REFRESH_SCHEDULE,
   REFRESH_SINGLE_EVENTS,
   UPLOAD_SCHEDULE,  // bulk full-state grid upload (RFC-005 / issue #5)
+  SET_PUMP_STATE,   // coupled run-state+schedule selector; composed at the api
+                    // bridge from SET_PUMP_ENABLED + SET_SCHEDULE_ENABLED, so it
+                    // is never enqueued as an Operation — only used to label its
+                    // one aggregate settle event.
 };
 
 /**

@@ -1,5 +1,7 @@
 #pragma once
 
+#include <cstring>
+
 // Pure, ESPHome-free reconciliation logic for the two user-facing pump
 // controls — "Engage Pump" (engage the pump's configured mode now) and
 // "Schedule Enabled" — so they behave like the Grundfos GO app: mutually
@@ -51,6 +53,30 @@ inline PumpScheduleTarget engage_pump_on_target()  { return {/*pump*/ true,  /*s
 inline PumpScheduleTarget engage_pump_off_target() { return {/*pump*/ false, /*schedule*/ false}; }  // Off
 inline PumpScheduleTarget schedule_on_target()     { return {/*pump*/ true,  /*schedule*/ true};  }  // Scheduled (AUTO so never dead)
 inline PumpScheduleTarget schedule_off_target()    { return {/*pump*/ false, /*schedule*/ false}; }  // Off (stop pump)
+
+// ---- The three legal states as first-class targets, for the `pump_set_state`
+// service (a single selector over the same three-state machine the two switches
+// express jointly). off = STOP; engaged = AUTO + schedule off; scheduled =
+// AUTO + schedule on.
+inline PumpScheduleTarget state_off_target()       { return {/*pump*/ false, /*schedule*/ false}; }
+inline PumpScheduleTarget state_engaged_target()   { return {/*pump*/ true,  /*schedule*/ false}; }
+inline PumpScheduleTarget state_scheduled_target() { return {/*pump*/ true,  /*schedule*/ true};  }
+
+// Parse a `pump_set_state` value ("off" | "engaged" | "scheduled") into a
+// target. Returns false on an unknown string (caller settles `invalid`).
+inline bool parse_pump_state(const char *s, PumpScheduleTarget *out) {
+  if (std::strcmp(s, "off") == 0)       { *out = state_off_target();       return true; }
+  if (std::strcmp(s, "engaged") == 0)   { *out = state_engaged_target();   return true; }
+  if (std::strcmp(s, "scheduled") == 0) { *out = state_scheduled_target(); return true; }
+  return false;
+}
+
+// The state name for a given (operation_mode AUTO?, schedule on?) — the inverse
+// of the targets above, used to report the settled state back to callers.
+inline const char *state_name(bool pump_auto, bool schedule_on) {
+  if (!pump_auto) return "off";
+  return schedule_on ? "scheduled" : "engaged";
+}
 
 }  // namespace ux
 }  // namespace alpha_hwr

@@ -27,6 +27,7 @@ const char *write_command_to_string(WriteCommand cmd) {
     case WriteCommand::REFRESH_SCHEDULE:      return "refresh_schedule";
     case WriteCommand::REFRESH_SINGLE_EVENTS: return "refresh_single_events";
     case WriteCommand::UPLOAD_SCHEDULE:       return "upload_schedule";
+    case WriteCommand::SET_PUMP_STATE:        return "set_pump_state";
   }
   return "unknown";
 }
@@ -84,6 +85,10 @@ std::vector<std::string> WriteOperationService::resource_keys_(const Operation &
   switch (op.command) {
     case WriteCommand::SET_PUMP_ENABLED:
       return {"enabled"};
+    case WriteCommand::SET_PUMP_STATE:
+      // Composed at the api bridge from the two flag writes; never enqueued as
+      // an Operation, so it never reaches resource superseding.
+      return {};
     case WriteCommand::SET_MODE:
       return {"mode"};
     case WriteCommand::SET_SETPOINT:
@@ -207,6 +212,10 @@ void WriteOperationService::start_front_() {
     case WriteCommand::REFRESH_SCHEDULE:      run_refresh_schedule_(seq); break;
     case WriteCommand::REFRESH_SINGLE_EVENTS: run_refresh_single_events_(seq); break;
     case WriteCommand::UPLOAD_SCHEDULE:       run_upload_schedule_(seq); break;
+    case WriteCommand::SET_PUMP_STATE:
+      // Composed at the api bridge, never enqueued; fail safe if it ever is.
+      finish_(seq, WriteStatus::REJECTED, "internal: SET_PUMP_STATE is not enqueueable");
+      break;
   }
 }
 
@@ -334,6 +343,8 @@ void WriteOperationService::finish_(uint32_t seq, WriteStatus status, const std:
       result.sched_enabled = op.upload.enabled;
       break;
     }
+    case WriteCommand::SET_PUMP_STATE:
+      break;  // never enqueued; its aggregate settle event is built at the api bridge
   }
 
   ESP_LOGI(TAG, "%s (op_id='%s') settled: %s%s%s",

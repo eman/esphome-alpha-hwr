@@ -75,6 +75,31 @@ int main() {
   TEST_ASSERT(schedule_off_target().pump_enabled == false,
               "Schedule OFF stops the pump");
 
+  // ---- pump_set_state service: three-state targets ----------------------
+  TEST_ASSERT(!state_off_target().pump_enabled && !state_off_target().schedule_enabled,
+              "state 'off' -> STOP + schedule off");
+  TEST_ASSERT(state_engaged_target().pump_enabled && !state_engaged_target().schedule_enabled,
+              "state 'engaged' -> AUTO + schedule off");
+  TEST_ASSERT(state_scheduled_target().pump_enabled && state_scheduled_target().schedule_enabled,
+              "state 'scheduled' -> AUTO + schedule on");
+
+  // ---- parse_pump_state: valid values round-trip, unknown rejected -------
+  PumpScheduleTarget t{};
+  TEST_ASSERT(parse_pump_state("off", &t) && !t.pump_enabled && !t.schedule_enabled,
+              "parse 'off'");
+  TEST_ASSERT(parse_pump_state("engaged", &t) && t.pump_enabled && !t.schedule_enabled,
+              "parse 'engaged'");
+  TEST_ASSERT(parse_pump_state("scheduled", &t) && t.pump_enabled && t.schedule_enabled,
+              "parse 'scheduled'");
+  TEST_ASSERT(!parse_pump_state("running", &t), "parse unknown -> false");
+  TEST_ASSERT(!parse_pump_state("", &t), "parse empty -> false");
+
+  // ---- state_name: inverse of the targets (settled-state reporting) ------
+  TEST_ASSERT(std::string(state_name(false, false)) == "off", "state_name STOP -> off");
+  TEST_ASSERT(std::string(state_name(false, true)) == "off", "state_name STOP+sched -> off");
+  TEST_ASSERT(std::string(state_name(true, false)) == "engaged", "state_name AUTO -> engaged");
+  TEST_ASSERT(std::string(state_name(true, true)) == "scheduled", "state_name AUTO+sched -> scheduled");
+
   std::cout << "\n" << tests_passed << " passed, " << tests_failed << " failed" << std::endl;
   return tests_failed == 0 ? 0 : 1;
 }

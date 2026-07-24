@@ -4,6 +4,18 @@
 
 ### Added
 
+- **`pump_set_state` service** — a coupled run-state + schedule selector for
+  automations, the programmatic sibling of the `Engage Pump` / `Schedule
+  Enabled` switches. Takes `state: off | engaged | scheduled` and reaches that
+  legal state in one call: `off` → `STOP`; `engaged` → `AUTO` + schedule off
+  (continuous); `scheduled` → `AUTO` + schedule on (gated, never the dead
+  `STOP`+schedule combo). It writes only the flags that differ, and honors the
+  one-terminal-event contract in the tricky cases — a no-op (already in the
+  requested state) still fires its `write_settled` event, and a partial failure
+  reports the *actual* end state (read back from the pump) with a non-accepted
+  status. Composed from the raw `pump_set_enabled` + `set_schedule_enabled`
+  writes, which remain as escape hatches for writing a single flag deliberately.
+  Documented in [docs/programmatic-interface.md](docs/programmatic-interface.md#run-state-and-the-schedule).
 - **Vacation editor controls** — `alpha_hwr_schedule_editor.yaml` now provides
   Lovelace helper entities for setting a vacation without calling the service
   by hand: four `number` inputs (**Vacation Start Month/Day**, **Vacation End
