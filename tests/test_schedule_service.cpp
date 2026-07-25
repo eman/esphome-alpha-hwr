@@ -75,12 +75,37 @@ void test_schedule_write_payload() {
   TEST_ASSERT(full_packet[7] == 0x03 && full_packet[8] == 0xE9, "SubID 1001 (Layer 1)");
 }
 
+// Single-event timestamps live in the pump's LOCAL-Unix clock domain on the
+// wire, while our SingleEvent fields hold UTC. Verify the shift helpers.
+void test_single_event_tz_shift() {
+  using esphome::alpha_hwr::services::utc_to_local_unix;
+  using esphome::alpha_hwr::services::local_unix_to_utc;
+
+  const uint32_t utc = 1784908899;  // arbitrary real epoch
+  const int32_t pdt = -25200;       // seconds east of UTC (PDT)
+  const int32_t cet = 3600;         // a positive offset
+
+  TEST_ASSERT(utc_to_local_unix(utc, pdt) == utc - 25200,
+              "UTC->local shifts west by the offset (PDT)");
+  TEST_ASSERT(utc_to_local_unix(utc, cet) == utc + 3600,
+              "UTC->local shifts east by the offset (CET)");
+  // Round trip is exact for any offset (same offset both ways).
+  TEST_ASSERT(local_unix_to_utc(utc_to_local_unix(utc, pdt), pdt) == utc,
+              "UTC->local->UTC round-trips exactly (negative offset)");
+  TEST_ASSERT(local_unix_to_utc(utc_to_local_unix(utc, cet), cet) == utc,
+              "UTC->local->UTC round-trips exactly (positive offset)");
+  // 0 is the disabled/cleared sentinel and is never shifted (in either dir).
+  TEST_ASSERT(utc_to_local_unix(0, pdt) == 0, "sentinel 0 not shifted (encode)");
+  TEST_ASSERT(local_unix_to_utc(0, pdt) == 0, "sentinel 0 not shifted (decode)");
+}
+
 int main() {
   std::cout << "===========================================================" << std::endl;
   std::cout << "  Schedule Service Test Suite" << std::endl;
   std::cout << "===========================================================" << std::endl;
-  
+
   test_schedule_write_payload();
+  test_single_event_tz_shift();
   
   std::cout << "\n===========================================================" << std::endl;
   std::cout << "  Test Results" << std::endl;

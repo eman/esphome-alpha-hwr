@@ -45,6 +45,22 @@ class Session;
 
 namespace services {
 
+// The pump's clock program stores single-event begin/end as **LOCAL** Unix
+// time — the GENI `unix_rtc` object is explicitly "local Unix time", not UTC.
+// Our timestamps are UTC epoch (what callers pass and what `mktime` yields), so
+// they must be shifted by the local UTC offset when crossing the wire, or the
+// pump opens the run window offset by the timezone and it never fires (it still
+// round-trips byte-identically, so a naive confirm reports success). These pure
+// helpers do that shift; `SingleEvent` itself always holds UTC. `0` is the
+// disabled/cleared sentinel and is never shifted. `offset_s` = seconds east of
+// UTC (e.g. -25200 for PDT), i.e. `struct tm::tm_gmtoff`.
+inline uint32_t utc_to_local_unix(uint32_t utc, int32_t offset_s) {
+  return utc == 0 ? 0u : static_cast<uint32_t>(static_cast<int64_t>(utc) + offset_s);
+}
+inline uint32_t local_unix_to_utc(uint32_t local, int32_t offset_s) {
+  return local == 0 ? 0u : static_cast<uint32_t>(static_cast<int64_t>(local) - offset_s);
+}
+
 /**
  * Single event entry (non-recurring, timestamp-based).
  * Protocol: Object 84, SubIDs 900-999, Type 220 (10 bytes)
@@ -52,8 +68,9 @@ namespace services {
  * Byte layout:
  *   [0]   enable (bool)
  *   [1]   action (SchedulingActionType, 0x02=RUN)
- *   [2-5] begin (uint32 BE, Unix timestamp)
- *   [6-9] end (uint32 BE, Unix timestamp)
+ *   [2-5] begin (uint32 BE, **LOCAL** Unix time on the wire — see
+ *         utc_to_local_unix; the struct field holds UTC)
+ *   [6-9] end   (uint32 BE, LOCAL Unix time on the wire; struct field UTC)
  *
  * Single events override the weekly schedule when active.
  * In case of overlapping events, the one with lowest SubID wins.
