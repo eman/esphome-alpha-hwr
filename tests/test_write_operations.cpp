@@ -12,8 +12,10 @@
 
 #include <cstdint>
 #include <cstdio>
+#include <cstdlib>
 #include <cmath>
 #include <cstring>
+#include <ctime>
 #include <functional>
 #include <iostream>
 #include <map>
@@ -1537,6 +1539,14 @@ static void test_upload_enabled_flag() {
 
 
 int main() {
+  // Pin the timezone to UTC so single-event timestamp assertions are
+  // deterministic across CI machines: schedule_service shifts single-event
+  // timestamps by the local UTC offset (the pump's clock is local Unix time),
+  // which under UTC is a no-op. The offset math itself is covered by
+  // test_schedule_service (utc_to_local_unix with explicit offsets).
+  setenv("TZ", "UTC", 1);
+  tzset();
+
   std::cout << "===========================================================" << std::endl;
   std::cout << "  Write Operation Service Test Suite (issue #92)" << std::endl;
   std::cout << "===========================================================" << std::endl;

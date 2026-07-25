@@ -64,6 +64,22 @@
 
 ### Fixed
 
+- **Single events (and vacations) never ran at the intended time — the
+  `begin`/`end` timestamps were written as UTC, but the pump's clock is *local*
+  Unix time.** The pump's RTC is local Unix time (GENI `unix_rtc`), while our
+  service/`mktime` timestamps are UTC epoch, so every single event opened its
+  window offset by the local UTC offset (~7 h in PDT) and the pump never fired
+  it during the intended period. It still round-tripped byte-identically, so the
+  write settled `accepted` and the slot looked correct — the bug was invisible
+  to verification. `schedule_service` now shifts single-event timestamps to the
+  pump's local-Unix domain on write and back to UTC on read (`utc_to_local_unix`
+  / `local_unix_to_utc`); `SingleEvent` stays UTC everywhere else, so confirm,
+  cache, and display are unchanged. Verified three ways: the GENI profile
+  (`unix_rtc` is "local Unix time"), a bench A/B (a raw-UTC event never fires; an
+  offset-corrected one runs at the right wall time), and the Grundfos app's own
+  captured single-event bytes (`0x697dc634` = `timegm(09:07 wall)` = local-unix,
+  byte-identical to what the fix now writes). This was the reason single-event /
+  nowcast runs silently did nothing.
 - Schedule layer writes (Obj `0xDE01`) no longer log a spurious `Command
   timeout waiting for Obj 56833 Sub 0` **warning**. These writes are
   fire-and-forget — the pump commits on timeout and its ACK arrives outside the
