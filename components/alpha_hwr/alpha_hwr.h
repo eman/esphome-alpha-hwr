@@ -1,5 +1,9 @@
 #pragma once
 
+#include <functional>
+#include <memory>
+#include <string>
+
 #include "esphome/components/binary_sensor/binary_sensor.h"
 #include "esphome/components/ble_client/ble_client.h"
 #include "esphome/components/sensor/sensor.h"
@@ -20,6 +24,7 @@
 #include "event_log_service.h"
 #include "frame_builder.h"
 #include "history_service.h"
+#include "pump_schedule_ux.h"
 #include "schedule_entry.h"
 #include "schedule_service.h"
 #include "sensor_publisher.h"
@@ -264,6 +269,34 @@ public:
   }
 
 private:
+  // Converge the pump to a Run/Schedule target, writing only the fields that
+  // differ from the current cached state (both writes if a field is unknown).
+  // Ordering avoids a transient dead/gated state: disable the schedule before
+  // touching run state when turning it off; set AUTO before enabling the
+  // schedule when turning it on (so there is never a STOP+schedule moment).
+  void apply_pump_schedule_target_(const ux::PumpScheduleTarget &target) {
+    bool cur_schedule = false;
+    bool schedule_known = schedule_service_.get_state(&cur_schedule);
+    bool pump_known = control_service_.is_pump_enabled_valid();
+    bool cur_pump = control_service_.is_pump_enabled();
+
+    bool write_schedule = !schedule_known || cur_schedule != target.schedule_enabled;
+    bool write_pump = !pump_known || cur_pump != target.pump_enabled;
+
+    if (write_schedule && !target.schedule_enabled) {
+      write_op_service_.submit_set_schedule_enabled(false, "", nullptr,
+                                                    services::WriteOrigin::ENTITY);
+    }
+    if (write_pump) {
+      write_op_service_.submit_set_enabled(target.pump_enabled, "", nullptr,
+                                           services::WriteOrigin::ENTITY);
+    }
+    if (write_schedule && target.schedule_enabled) {
+      write_op_service_.submit_set_schedule_enabled(true, "", nullptr,
+                                                    services::WriteOrigin::ENTITY);
+    }
+  }
+
   // Helper for retrying the initial cache sync
   void do_control_cache_sync(uint32_t gen);
 
@@ -448,6 +481,85 @@ public:
   void submit_set_schedule_enabled(bool enabled, const std::string &op_id) {
     write_op_service_.submit_set_schedule_enabled(enabled, op_id);
   }
+
+  // Coupled `pump_set_state` service: a single selector over the three-state
+  // machine (off / engaged / scheduled), the programmatic sibling of the two
+  // switches. Composed from the raw SET_PUMP_ENABLED + SET_SCHEDULE_ENABLED
+  // writes (so each keeps its own pump-verified readback), then reports ONE
+  // aggregate outcome via on_complete(ok, actual_engaged, actual_scheduled,
+  // detail). on_complete fires exactly once: immediately for a no-op (already
+  // in the target state), otherwise after every issued sub-write settles. `ok`
+  // is false if any sub-write was not accepted; actual_* are read back from the
+  // pump so a partial failure (e.g. the second write fails) reports the real
+  // end state. The underlying flag writes surface as their own op_id="" settle
+  // events (like entity writes); this call adds the one event under the op_id.
+  void submit_set_pump_state(
+      ux::PumpScheduleTarget target,
+      std::function<void(services::WriteStatus, bool, bool, const std::string &)> on_complete) {
+    using services::WriteStatus;
+    if (!check_ready("set_pump_state")) {
+      bool ce = control_service_.is_pump_enabled();
+      bool cs = false;
+      schedule_service_.get_state(&cs);
+      if (on_complete) on_complete(WriteStatus::REJECTED, ce, cs, "pump not connected/synchronized");
+      return;
+    }
+
+    bool cur_engaged = control_service_.is_pump_enabled();
+    bool engaged_known = control_service_.is_pump_enabled_valid();
+    bool cur_scheduled = false;
+    bool sched_known = schedule_service_.get_state(&cur_scheduled);
+
+    bool need_engaged = !engaged_known || cur_engaged != target.pump_enabled;
+    bool need_scheduled = !sched_known || cur_scheduled != target.schedule_enabled;
+
+    if (!need_engaged && !need_scheduled) {
+      // No-op: already in the requested state. Still fire exactly one terminal
+      // result so a client waiting on this op_id never hangs.
+      if (on_complete) on_complete(WriteStatus::ACCEPTED, cur_engaged, cur_scheduled, "no change");
+      return;
+    }
+
+    struct Agg {
+      int pending{0};
+      WriteStatus worst{WriteStatus::ACCEPTED};
+      std::function<void(WriteStatus, bool, bool, const std::string &)> on_complete;
+    };
+    auto agg = std::make_shared<Agg>();
+    agg->pending = (need_engaged ? 1 : 0) + (need_scheduled ? 1 : 0);
+    agg->on_complete = std::move(on_complete);
+
+    auto *self = this;
+    // Each sub-write reports its real terminal WriteStatus; keep the most severe
+    // across them (a coupled call is only as good as its worst leg), so
+    // TIMEOUT / SUPERSEDED / REJECTED stay distinguishable for retry logic.
+    auto step = [self, agg](WriteStatus st) {
+      if (services::write_status_severity(st) > services::write_status_severity(agg->worst)) {
+        agg->worst = st;
+      }
+      if (--agg->pending > 0) return;
+      bool ae = self->control_service_.is_pump_enabled();
+      bool as = false;
+      self->schedule_service_.get_state(&as);
+      bool ok = agg->worst == WriteStatus::ACCEPTED || agg->worst == WriteStatus::CLAMPED;
+      std::string detail =
+          ok ? "" : std::string("a sub-write settled ") + services::write_status_to_string(agg->worst);
+      if (agg->on_complete) agg->on_complete(agg->worst, ae, as, detail);
+    };
+
+    // Order avoids a transient dead/gated state: disable the schedule before
+    // touching run state; enable it only after AUTO is set. The status callback
+    // is the 5th arg (bool `done` stays null — we only need the full status).
+    if (need_scheduled && !target.schedule_enabled) {
+      write_op_service_.submit_set_schedule_enabled(false, "", nullptr, services::WriteOrigin::SERVICE, step);
+    }
+    if (need_engaged) {
+      write_op_service_.submit_set_enabled(target.pump_enabled, "", nullptr, services::WriteOrigin::SERVICE, step);
+    }
+    if (need_scheduled && target.schedule_enabled) {
+      write_op_service_.submit_set_schedule_enabled(true, "", nullptr, services::WriteOrigin::SERVICE, step);
+    }
+  }
   void submit_set_single_event(uint32_t begin_ts, uint32_t end_ts, const std::string &op_id) {
     write_op_service_.submit_set_single_event(begin_ts, end_ts, op_id);
   }
@@ -609,6 +721,47 @@ public:
   bool get_schedule_state(bool *result) {
     return schedule_service_.get_state(result);
   }
+
+  // ---- "Engage Pump" vs "Schedule Enabled" reconciliation (issue: pump/
+  // schedule switch reconciliation). These back the two UI switches and keep
+  // them mutually exclusive like the Grundfos GO app, without ever creating a
+  // dead schedule (STOP + schedule enabled never runs — bench-proven). The
+  // three states are Off (STOP), Engaged (AUTO + schedule off), Scheduled
+  // (AUTO + schedule on). "Engage Pump" engages the pump's mode (operation_mode
+  // AUTO); whether the motor spins is mode-dependent (continuous in constant
+  // modes, cycling in temperature/cycle-time). Pure target/display logic lives
+  // in pump_schedule_ux.h; the programmatic services (submit_set_enabled /
+  // submit_set_schedule_enabled) stay raw and uncoupled for automations.
+
+  // "Engage Pump" switch: mode engaged continuously *now* = AUTO and not
+  // schedule-gated. Returns false when either input is not yet cached (switch
+  // shows unknown).
+  bool get_engage_pump_state(bool *result) {
+    bool schedule_on = false;
+    if (!control_service_.is_pump_enabled_valid() ||
+        !schedule_service_.get_state(&schedule_on)) {
+      return false;
+    }
+    *result = ux::engage_pump_display(control_service_.is_pump_enabled(), schedule_on);
+    return true;
+  }
+
+  // Toggle "Engage Pump": ON = engage continuously (AUTO + schedule off),
+  // OFF = Off (STOP).
+  void set_engage_pump(bool on) {
+    if (!check_ready(on ? "engage_pump_on" : "engage_pump_off")) return;
+    apply_pump_schedule_target_(on ? ux::engage_pump_on_target()
+                                   : ux::engage_pump_off_target());
+  }
+
+  // Toggle "Schedule Enabled": ON = Scheduled (AUTO so it can actually run +
+  // schedule on), OFF = Off (stop the pump + schedule off).
+  void set_schedule(bool on) {
+    if (!check_ready(on ? "schedule_on" : "schedule_off")) return;
+    apply_pump_schedule_target_(on ? ux::schedule_on_target()
+                                   : ux::schedule_off_target());
+  }
+
   bool read_schedule_entries(std::vector<ScheduleEntry> *entries,
                              int layer = -1) {
     return schedule_service_.read_entries(entries, layer);
@@ -722,7 +875,7 @@ public:
    *    year so ranges spanning New Year (e.g. Dec 28 -> Jan 3) work. A same-day
    *    range is fine as long as end > begin (e.g. 00:00 -> 23:59).
    *
-   * @return true with *begin_ts/*end_ts set on success; false (with a reason
+   * @return true with `*begin_ts` and `*end_ts` set on success; false (with a reason
    *         logged under `tag`) otherwise — callers should abort the write.
    */
   bool build_event_window(const char *tag,

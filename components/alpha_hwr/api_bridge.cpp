@@ -31,6 +31,7 @@ void AlphaHwrApiBridge::setup(AlphaHwrComponent *component) {
                    {"min_c", "max_c", "autoadapt", "op_id"});
   register_service(&AlphaHwrApiBridge::on_set_cycle_times, "pump_set_cycle_times",
                    {"on_minutes", "off_minutes", "flow", "op_id"});
+  register_service(&AlphaHwrApiBridge::on_set_pump_state, "pump_set_state", {"state", "op_id"});
 
   register_service(&AlphaHwrApiBridge::on_upload_schedule, "upload_schedule",
                    {"data", "op_id"});
@@ -139,6 +140,15 @@ void AlphaHwrApiBridge::fire_write_settled(const WriteResult &result) {
       if (result.off_minutes >= 0) data["off_minutes"] = std::to_string(result.off_minutes);
       put_float("flow", result.flow, "%.3f");
       break;
+    case WriteCommand::SET_PUMP_STATE:
+      // Coupled selector: report both underlying flags plus the derived state
+      // name, so the settled state is self-contained.
+      put_bool("enabled", result.enabled);
+      put_bool("schedule_enabled", result.sched_enabled);
+      if (result.enabled >= 0 && result.sched_enabled >= 0) {
+        data["state"] = ux::state_name(result.enabled != 0, result.sched_enabled != 0);
+      }
+      break;
     default: {
       // Schedule commands. Settled values come from the verify readbacks.
       static const char *DAY_NAMES[7] = {"Monday",   "Tuesday", "Wednesday", "Thursday",
@@ -222,6 +232,34 @@ void AlphaHwrApiBridge::on_set_cycle_times(float on_minutes, float off_minutes, 
   }
   component_->submit_set_cycle_times(static_cast<uint8_t>(on_minutes),
                                      static_cast<uint8_t>(off_minutes), flow, op_id);
+}
+
+void AlphaHwrApiBridge::on_set_pump_state(std::string state, std::string op_id) {
+  // Coupled three-state selector (off | engaged | scheduled). The component
+  // composes it from raw enable/schedule writes and reports one aggregate
+  // outcome; we turn that into the single terminal settle event for this op_id.
+  ux::PumpScheduleTarget target;
+  if (!ux::parse_pump_state(state.c_str(), &target)) {
+    reject_(WriteCommand::SET_PUMP_STATE, op_id,
+            "unknown state '" + state + "' (off|engaged|scheduled)");
+    return;
+  }
+  component_->submit_set_pump_state(
+      target, [this, op_id](services::WriteStatus status, bool actual_engaged,
+                            bool actual_scheduled, const std::string &detail) {
+        // Surface the composed op's most-severe leg (accepted / timeout /
+        // superseded / rejected …) so automations can retry/back off correctly,
+        // rather than flattening every failure to `rejected`.
+        WriteResult result;
+        result.op_id = op_id;
+        result.command = WriteCommand::SET_PUMP_STATE;
+        result.origin = services::WriteOrigin::SERVICE;
+        result.status = status;
+        result.detail = detail;
+        result.enabled = actual_engaged ? 1 : 0;
+        result.sched_enabled = actual_scheduled ? 1 : 0;
+        fire_write_settled(result);
+      });
 }
 
 // ---------------------------------------------------------------------------

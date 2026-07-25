@@ -41,16 +41,12 @@ switch:
         return enabled;
       }
       return {};  // Return unknown if state not cached yet
+    # Enabling forces the pump to AUTO so the schedule can actually run it (a
+    # STOP + schedule-enabled pump never runs); disabling stops the pump.
     turn_on_action:
-      - lambda: |-
-          ESP_LOGI("switch", "Enabling pump schedule...");
-          bool result = id(pump).enable_schedule();
-          ESP_LOGI("switch", "Enable schedule result: %s", result ? "SUCCESS" : "FAILED");
+      - lambda: 'id(pump).set_schedule(true);'
     turn_off_action:
-      - lambda: |-
-          ESP_LOGI("switch", "Disabling pump schedule...");
-          bool result = id(pump).disable_schedule();
-          ESP_LOGI("switch", "Disable schedule result: %s", result ? "SUCCESS" : "FAILED");
+      - lambda: 'id(pump).set_schedule(false);'
 
 button:
   # Control Mode Buttons

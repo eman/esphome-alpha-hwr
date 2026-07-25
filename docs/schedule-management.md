@@ -79,6 +79,49 @@ buttons. "Set Vacation" holds the pump off from 00:00 of the start day through
 `internal: true` — expose them on a dashboard or reference them from a Lovelace
 card. Automations should call the services directly rather than these buttons.
 
+## Run state and the schedule
+
+The weekly schedule does not run the pump on its own — it **gates** an
+already-running pump. Bench-verified rule (motor RPM as ground truth):
+
+> the motor runs only when the run state is **on** (operation mode `AUTO`)
+> **and** the schedule is disabled (runs continuously) **or** a schedule window
+> is currently active (runs only in windows).
+
+So a pump whose run state is **off** (`STOP`) stays idle through every window
+even with the schedule enabled — enabling the schedule on a stopped pump does
+nothing until the pump is switched to `AUTO`.
+
+The two switches model this as three mutually-exclusive states, matching the
+Grundfos GO app (which won't let you start the pump while the schedule is on):
+
+| State | `Engage Pump` | `Schedule Enabled` | Behavior |
+| --- | --- | --- | --- |
+| **Off** | off | off | pump stopped |
+| **Engaged** | **on** | off | pump's mode engaged continuously (not schedule-gated) |
+| **Scheduled** | off | **on** | pump's mode engaged only inside schedule windows |
+
+- **`Engage Pump` on** → engage the pump's mode now, and **disable the schedule**.
+- **`Schedule Enabled` on** → switch the pump to `AUTO` so the schedule can
+  actually run it; `Engage Pump` then reads off (the pump is gated to windows).
+- **`Schedule Enabled` off** → stop the pump.
+
+`Engage Pump` engages `operation_mode == AUTO`; whether the **motor** actually
+spins is mode-dependent — it runs continuously in the constant modes
+(speed/flow/pressure) and cycles per the mode in Temperature/Cycle-Time. Watch
+`binary_sensor.<node_name>_pump_motor_active` for the real motor state. The
+switch reads on only when the mode is engaged *and* not schedule-gated (`AUTO`
+**and** schedule off), so the two switches are always mutually exclusive.
+(Previously a "Pump Enabled" switch could read on while an enabled schedule held
+the motor idle — and a stopped pump with the schedule enabled silently never
+ran.)
+
+From an automation, the `pump_set_state` service (`off` | `engaged` |
+`scheduled`) gives you these same three states in one safe call. The raw
+`pump_set_enabled` / `set_schedule_enabled` services stay available for writing
+a single flag deliberately — see
+[programmatic-interface.md](programmatic-interface.md#run-state-and-the-schedule).
+
 ## Behavior change (v0.11)
 
 Schedule writes previously reported "OK" in the logs unconditionally — even

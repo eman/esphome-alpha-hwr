@@ -4,6 +4,18 @@
 
 ### Added
 
+- **`pump_set_state` service** — a coupled run-state + schedule selector for
+  automations, the programmatic sibling of the `Engage Pump` / `Schedule
+  Enabled` switches. Takes `state: off | engaged | scheduled` and reaches that
+  legal state in one call: `off` → `STOP`; `engaged` → `AUTO` + schedule off
+  (continuous); `scheduled` → `AUTO` + schedule on (gated, never the dead
+  `STOP`+schedule combo). It writes only the flags that differ, and honors the
+  one-terminal-event contract in the tricky cases — a no-op (already in the
+  requested state) still fires its `write_settled` event, and a partial failure
+  reports the *actual* end state (read back from the pump) with a non-accepted
+  status. Composed from the raw `pump_set_enabled` + `set_schedule_enabled`
+  writes, which remain as escape hatches for writing a single flag deliberately.
+  Documented in [docs/programmatic-interface.md](docs/programmatic-interface.md#run-state-and-the-schedule).
 - **Vacation editor controls** — `alpha_hwr_schedule_editor.yaml` now provides
   Lovelace helper entities for setting a vacation without calling the service
   by hand: four `number` inputs (**Vacation Start Month/Day**, **Vacation End
@@ -16,12 +28,39 @@
 
 ### Changed
 
-- **Lovelace schedule card (v4)** — `homeassistant/www/alpha-hwr-schedule-card.js`
-  now reads the schedule from the per-layer `schedule_layer_0..4` read-back
-  sensors and the `Schedule Enabled` switch instead of the removed aggregate
-  Weekly Schedule JSON sensor. Config is simplified: `device` is the only
-  required option (layer/enabled/single-event entity IDs are derived from it and
-  can be overridden). The write path (edit/save/enable) is unchanged.
+- **"Pump Enabled" switch renamed to "Engage Pump", and the pump/schedule
+  controls are now mutually exclusive** (matching the Grundfos GO app). Bench
+  testing (motor RPM as ground truth) established that the pump runs only when
+  `operation_mode == AUTO` **and** the schedule is off (continuous) or inside a
+  window (scheduled) — so a `STOP` + schedule-enabled pump never runs, and the
+  old independent switches let you sit in that dead state while "Pump Enabled"
+  misleadingly read on. The two switches now model three states — **Off**
+  (`STOP`), **Engaged** (`AUTO` + schedule off), **Scheduled** (`AUTO` +
+  schedule on, gated to windows): turning on **Engage Pump** disables the
+  schedule; turning on **Schedule Enabled** forces `AUTO` (so it can actually
+  run) and the Engage Pump switch reads off; turning the schedule off stops the
+  pump. "Engage Pump" reads derived state (`AUTO && schedule-off`) from the
+  pump, so the two switches are mutually exclusive without optimistic faking. It
+  engages the pump's *mode* (`operation_mode == AUTO`); whether the motor spins
+  is mode-dependent — continuous in the constant modes, cycling in
+  Temperature/Cycle-Time (see the `Pump Motor Active` sensor for the real motor
+  state). The coupling lives in `AlphaHwr` (`set_engage_pump` / `set_schedule`)
+  with pure target/display logic in `pump_schedule_ux.h` (host-tested in
+  `tests/test_pump_schedule_ux.cpp`); the programmatic services
+  (`pump_set_enabled`, `set_schedule_enabled`) stay raw and uncoupled.
+  **Migration:** the switch's entity_id changes from `switch.<node>_pump_enabled`
+  to `switch.<node>_engage_pump` — update any automations/dashboards that
+  referenced it.
+- **Lovelace schedule card (v5)** — `homeassistant/www/alpha-hwr-schedule-card.js`.
+  v4 moved it off the removed aggregate Weekly Schedule JSON sensor to the
+  per-layer `schedule_layer_0..4` read-back sensors and the `Schedule Enabled`
+  switch. v5 changes the **Enable/Disable Schedule button** to toggle the
+  `Schedule Enabled` *switch entity* (coupled behavior) instead of calling the
+  raw `set_schedule_enabled` service, so enabling the schedule from the card
+  forces the pump to `AUTO` (never a dead `STOP`+schedule) and disabling stops
+  it — matching the Engage-Pump reconciliation. Config is simplified: `device`
+  is the only required option (layer/enabled/single-event entity IDs are derived
+  from it and can be overridden); the grid edit/save path is unchanged.
 
 ### Fixed
 

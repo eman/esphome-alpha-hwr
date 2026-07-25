@@ -6,7 +6,7 @@ CXXFLAGS = -std=c++17 -Wall -Wextra -O2 -I. -I./mocks -I../
 LDFLAGS =
 
 # Test executables
-TESTS = test_protocol test_control_state test_dhw_demand_logic test_transport_matching test_transport_fsm test_schedule_service test_write_operations test_schedule_codec test_telemetry_units
+TESTS = test_protocol test_control_state test_dhw_demand_logic test_transport_matching test_transport_fsm test_schedule_service test_write_operations test_schedule_codec test_telemetry_units test_pump_schedule_ux
 
 # Default target
 all: $(TESTS)
@@ -17,6 +17,9 @@ test_protocol: test_protocol.cpp protocol.h
 
 test_control_state: test_control_state.cpp
 	$(CXX) $(CXXFLAGS) test_control_state.cpp -o test_control_state $(LDFLAGS)
+
+test_pump_schedule_ux: test_pump_schedule_ux.cpp ../components/alpha_hwr/pump_schedule_ux.h
+	$(CXX) $(CXXFLAGS) test_pump_schedule_ux.cpp -o test_pump_schedule_ux $(LDFLAGS)
 
 test_dhw_demand_logic: test_dhw_demand_logic.cpp ../components/dhw_demand/dhw_demand_votes.h
 	$(CXX) $(CXXFLAGS) test_dhw_demand_logic.cpp -o test_dhw_demand_logic $(LDFLAGS)
@@ -53,6 +56,11 @@ test: $(TESTS)
 	@echo "Running Control State Tests..."
 	@echo "=========================================="
 	@./test_control_state
+	@echo ""
+	@echo "=========================================="
+	@echo "Running Pump/Schedule Reconciliation Tests..."
+	@echo "=========================================="
+	@./test_pump_schedule_ux
 	@echo ""
 	@echo "=========================================="
 	@echo "Running DHW Detector Logic Tests..."

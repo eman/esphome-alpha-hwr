@@ -27,6 +27,7 @@ const char *write_command_to_string(WriteCommand cmd) {
     case WriteCommand::REFRESH_SCHEDULE:      return "refresh_schedule";
     case WriteCommand::REFRESH_SINGLE_EVENTS: return "refresh_single_events";
     case WriteCommand::UPLOAD_SCHEDULE:       return "upload_schedule";
+    case WriteCommand::SET_PUMP_STATE:        return "set_pump_state";
   }
   return "unknown";
 }
@@ -84,6 +85,10 @@ std::vector<std::string> WriteOperationService::resource_keys_(const Operation &
   switch (op.command) {
     case WriteCommand::SET_PUMP_ENABLED:
       return {"enabled"};
+    case WriteCommand::SET_PUMP_STATE:
+      // Composed at the api bridge from the two flag writes; never enqueued as
+      // an Operation, so it never reaches resource superseding.
+      return {};
     case WriteCommand::SET_MODE:
       return {"mode"};
     case WriteCommand::SET_SETPOINT:
@@ -207,6 +212,10 @@ void WriteOperationService::start_front_() {
     case WriteCommand::REFRESH_SCHEDULE:      run_refresh_schedule_(seq); break;
     case WriteCommand::REFRESH_SINGLE_EVENTS: run_refresh_single_events_(seq); break;
     case WriteCommand::UPLOAD_SCHEDULE:       run_upload_schedule_(seq); break;
+    case WriteCommand::SET_PUMP_STATE:
+      // Composed at the api bridge, never enqueued; fail safe if it ever is.
+      finish_(seq, WriteStatus::REJECTED, "internal: SET_PUMP_STATE is not enqueueable");
+      break;
   }
 }
 
@@ -334,6 +343,8 @@ void WriteOperationService::finish_(uint32_t seq, WriteStatus status, const std:
       result.sched_enabled = op.upload.enabled;
       break;
     }
+    case WriteCommand::SET_PUMP_STATE:
+      break;  // never enqueued; its aggregate settle event is built at the api bridge
   }
 
   ESP_LOGI(TAG, "%s (op_id='%s') settled: %s%s%s",
@@ -341,10 +352,12 @@ void WriteOperationService::finish_(uint32_t seq, WriteStatus status, const std:
            write_status_to_string(status), detail.empty() ? "" : " — ", detail.c_str());
 
   auto done = op.done;
+  auto status_done = op.status_done;
   queue_.erase(queue_.begin() + index);
 
   if (result_callback_) result_callback_(result);
   if (done) done(status == WriteStatus::ACCEPTED || status == WriteStatus::CLAMPED);
+  if (status_done) status_done(status);
 
   if (was_front_running || index == 0) start_front_();
 }
@@ -366,13 +379,15 @@ void WriteOperationService::on_disconnect() {
 // ---------------------------------------------------------------------------
 
 void WriteOperationService::submit_set_enabled(bool enabled, const std::string &op_id,
-                                               std::function<void(bool)> done, WriteOrigin origin) {
+                                               std::function<void(bool)> done, WriteOrigin origin,
+                                               std::function<void(WriteStatus)> on_status) {
   Operation op;
   op.command = WriteCommand::SET_PUMP_ENABLED;
   op.op_id = op_id;
   op.origin = origin;
   op.enabled = enabled;
   op.done = std::move(done);
+  op.status_done = std::move(on_status);
   submit_(std::move(op));
 }
 
@@ -976,13 +991,15 @@ void WriteOperationService::submit_clear_schedule_entry(uint8_t layer, uint8_t d
 }
 
 void WriteOperationService::submit_set_schedule_enabled(bool enabled, const std::string &op_id,
-                                                        std::function<void(bool)> done, WriteOrigin origin) {
+                                                        std::function<void(bool)> done, WriteOrigin origin,
+                                                        std::function<void(WriteStatus)> on_status) {
   Operation op;
   op.command = WriteCommand::SET_SCHEDULE_ENABLED;
   op.op_id = op_id;
   op.origin = origin;
   op.enabled = enabled;
   op.done = std::move(done);
+  op.status_done = std::move(on_status);
   submit_(std::move(op));
 }
 

@@ -46,6 +46,7 @@ ESPHome prefixes each service with the node name: `esphome.<node_name>_<service>
 | `pump_set_setpoint` | `mode: string`, `value: float`, `op_id: string` | **Switches the pump into `mode` AND sets that mode's setpoint** — `mode` is not merely selecting which stored setpoint to edit; after this call the pump is running (or armed) in that mode. This is exactly the pair the pump fuses in one write. Use `pump_set_mode` to switch modes without touching a setpoint. The pump stores an independent setpoint per mode, so setpoint writes to different modes never supersede each other. |
 | `pump_set_temperature_range` | `min_c: float`, `max_c: float`, `autoadapt: bool`, `op_id: string` | The temperature-range config object (its own fused write), after switching to temperature-range mode. |
 | `pump_set_cycle_times` | `on_minutes: float`, `off_minutes: float`, `flow: float`, `op_id: string` | The cycle-time config object, after switching to cycle-time mode. Minutes are whole, 1–60 (float-typed for platform reasons; fractional values settle `invalid`). `flow` is the flow the pump targets during ON periods, in m³/h (0.1–10.0). **Each field accepts `0` = keep existing**: kept fields are resolved from a fresh read of the pump's stored config (a kept flow is echoed back byte-for-byte, no float round trip), so flow-only or single-period writes are safe. All three at `0` settles `invalid`. |
+| `pump_set_state` | `state: string` (`off`\|`engaged`\|`scheduled`), `op_id: string` | **Coupled run-state + schedule selector** — the safe, one-call way to reach a legal state (see [Run state and the schedule](#run-state-and-the-schedule)). Writes only the flags that differ from the current state, in an order that never passes through the dead `STOP`+schedule combo. Unknown `state` settles `invalid`. |
 
 `mode` strings: `constant_pressure`, `proportional_pressure`, `constant_speed`,
 `constant_flow`, `auto_adapt_radiator`, `auto_adapt_underfloor`,
@@ -53,6 +54,59 @@ ESPHome prefixes each service with the node name: `esphome.<node_name>_<service>
 
 Setpoint units and ranges: pressure modes in meters (0.5–10.0),
 `constant_speed` in RPM (500–4500), `constant_flow` in m³/h (0.1–10.0).
+
+### Run state and the schedule
+
+`pump_set_enabled` and `set_schedule_enabled` are **independent, uncoupled**
+writes — each does exactly what it says and never touches the other. The pump's
+*behavior*, however, couples them (bench-verified, motor RPM as ground truth):
+
+> the motor runs only when the run state is **on** (operation mode `AUTO`,
+> `pump_set_enabled true`) **and** the schedule is disabled (runs continuously)
+> **or** a schedule window is currently active (runs only in windows).
+
+Consequences for automations calling these raw services:
+
+- **A stopped pump ignores the schedule.** `set_schedule_enabled 1` while the
+  run state is `STOP` (`pump_set_enabled false`) leaves a *dead* schedule: the
+  enable flag is set, but the pump stays idle through every window. To run on
+  schedule the pump must be `AUTO` — also call `pump_set_enabled true`.
+- **Started + schedule disabled** → runs continuously (its control mode, 24/7).
+- **Started + schedule enabled** → runs only inside windows, idle between them.
+
+The `Engage Pump` and `Schedule Enabled` **entities** hide this by enforcing a
+coupled three-state model (Off / Engaged / Scheduled) — see
+[schedule-management.md](schedule-management.md#run-state-and-the-schedule).
+
+**For automations, use `pump_set_state`** — the programmatic equivalent, which
+gives you the same safety in one call:
+
+| `state` | Result | Legal? |
+| --- | --- | --- |
+| `off` | `STOP` | pump stopped |
+| `engaged` | `AUTO` + schedule off | runs continuously (motor behavior is mode-dependent) |
+| `scheduled` | `AUTO` + schedule on | runs only inside schedule windows |
+
+It writes only the flags that differ (a request already satisfied still fires a
+terminal event), forces `AUTO` when you ask for `scheduled` (so you can't create
+the dead schedule), and orders the writes to avoid a transient `STOP`+schedule
+state. The settle event reports the actual `enabled` / `schedule_enabled` flags
+and the resulting `state`, so a partial failure surfaces the real end state.
+
+```yaml
+service: esphome.hwr_pump_pump_set_state
+data:
+  state: engaged        # off | engaged | scheduled
+  op_id: "run-now"
+```
+
+Because `pump_set_state` composes two underlying flag writes, those surface as
+their own `op_id: ""` settle events (exactly like an entity toggle); your
+`op_id` still gets **exactly one** terminal event with the aggregate result.
+
+The raw `pump_set_enabled` / `set_schedule_enabled` services **stay** as escape
+hatches for when you deliberately want to write a single flag without the
+coupling.
 
 ### Schedules
 
