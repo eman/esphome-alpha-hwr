@@ -352,10 +352,12 @@ void WriteOperationService::finish_(uint32_t seq, WriteStatus status, const std:
            write_status_to_string(status), detail.empty() ? "" : " — ", detail.c_str());
 
   auto done = op.done;
+  auto status_done = op.status_done;
   queue_.erase(queue_.begin() + index);
 
   if (result_callback_) result_callback_(result);
   if (done) done(status == WriteStatus::ACCEPTED || status == WriteStatus::CLAMPED);
+  if (status_done) status_done(status);
 
   if (was_front_running || index == 0) start_front_();
 }
@@ -377,13 +379,15 @@ void WriteOperationService::on_disconnect() {
 // ---------------------------------------------------------------------------
 
 void WriteOperationService::submit_set_enabled(bool enabled, const std::string &op_id,
-                                               std::function<void(bool)> done, WriteOrigin origin) {
+                                               std::function<void(bool)> done, WriteOrigin origin,
+                                               std::function<void(WriteStatus)> on_status) {
   Operation op;
   op.command = WriteCommand::SET_PUMP_ENABLED;
   op.op_id = op_id;
   op.origin = origin;
   op.enabled = enabled;
   op.done = std::move(done);
+  op.status_done = std::move(on_status);
   submit_(std::move(op));
 }
 
@@ -987,13 +991,15 @@ void WriteOperationService::submit_clear_schedule_entry(uint8_t layer, uint8_t d
 }
 
 void WriteOperationService::submit_set_schedule_enabled(bool enabled, const std::string &op_id,
-                                                        std::function<void(bool)> done, WriteOrigin origin) {
+                                                        std::function<void(bool)> done, WriteOrigin origin,
+                                                        std::function<void(WriteStatus)> on_status) {
   Operation op;
   op.command = WriteCommand::SET_SCHEDULE_ENABLED;
   op.op_id = op_id;
   op.origin = origin;
   op.enabled = enabled;
   op.done = std::move(done);
+  op.status_done = std::move(on_status);
   submit_(std::move(op));
 }
 

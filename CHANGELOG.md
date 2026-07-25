@@ -51,12 +51,16 @@
   **Migration:** the switch's entity_id changes from `switch.<node>_pump_enabled`
   to `switch.<node>_engage_pump` — update any automations/dashboards that
   referenced it.
-- **Lovelace schedule card (v4)** — `homeassistant/www/alpha-hwr-schedule-card.js`
-  now reads the schedule from the per-layer `schedule_layer_0..4` read-back
-  sensors and the `Schedule Enabled` switch instead of the removed aggregate
-  Weekly Schedule JSON sensor. Config is simplified: `device` is the only
-  required option (layer/enabled/single-event entity IDs are derived from it and
-  can be overridden). The write path (edit/save/enable) is unchanged.
+- **Lovelace schedule card (v5)** — `homeassistant/www/alpha-hwr-schedule-card.js`.
+  v4 moved it off the removed aggregate Weekly Schedule JSON sensor to the
+  per-layer `schedule_layer_0..4` read-back sensors and the `Schedule Enabled`
+  switch. v5 changes the **Enable/Disable Schedule button** to toggle the
+  `Schedule Enabled` *switch entity* (coupled behavior) instead of calling the
+  raw `set_schedule_enabled` service, so enabling the schedule from the card
+  forces the pump to `AUTO` (never a dead `STOP`+schedule) and disabling stops
+  it — matching the Engage-Pump reconciliation. Config is simplified: `device`
+  is the only required option (layer/enabled/single-event entity IDs are derived
+  from it and can be overridden); the grid edit/save path is unchanged.
 
 ### Fixed
 

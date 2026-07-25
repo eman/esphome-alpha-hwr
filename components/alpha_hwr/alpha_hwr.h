@@ -495,12 +495,13 @@ public:
   // events (like entity writes); this call adds the one event under the op_id.
   void submit_set_pump_state(
       ux::PumpScheduleTarget target,
-      std::function<void(bool, bool, bool, const std::string &)> on_complete) {
+      std::function<void(services::WriteStatus, bool, bool, const std::string &)> on_complete) {
+    using services::WriteStatus;
     if (!check_ready("set_pump_state")) {
       bool ce = control_service_.is_pump_enabled();
       bool cs = false;
       schedule_service_.get_state(&cs);
-      if (on_complete) on_complete(false, ce, cs, "pump not connected/synchronized");
+      if (on_complete) on_complete(WriteStatus::REJECTED, ce, cs, "pump not connected/synchronized");
       return;
     }
 
@@ -515,40 +516,48 @@ public:
     if (!need_engaged && !need_scheduled) {
       // No-op: already in the requested state. Still fire exactly one terminal
       // result so a client waiting on this op_id never hangs.
-      if (on_complete) on_complete(true, cur_engaged, cur_scheduled, "no change");
+      if (on_complete) on_complete(WriteStatus::ACCEPTED, cur_engaged, cur_scheduled, "no change");
       return;
     }
 
     struct Agg {
       int pending{0};
-      bool ok{true};
-      std::function<void(bool, bool, bool, const std::string &)> on_complete;
+      WriteStatus worst{WriteStatus::ACCEPTED};
+      std::function<void(WriteStatus, bool, bool, const std::string &)> on_complete;
     };
     auto agg = std::make_shared<Agg>();
     agg->pending = (need_engaged ? 1 : 0) + (need_scheduled ? 1 : 0);
     agg->on_complete = std::move(on_complete);
 
     auto *self = this;
-    auto step = [self, agg](bool accepted) {
-      agg->ok = agg->ok && accepted;
+    // Each sub-write reports its real terminal WriteStatus; keep the most severe
+    // across them (a coupled call is only as good as its worst leg), so
+    // TIMEOUT / SUPERSEDED / REJECTED stay distinguishable for retry logic.
+    auto step = [self, agg](WriteStatus st) {
+      if (services::write_status_severity(st) > services::write_status_severity(agg->worst)) {
+        agg->worst = st;
+      }
       if (--agg->pending > 0) return;
       bool ae = self->control_service_.is_pump_enabled();
       bool as = false;
       self->schedule_service_.get_state(&as);
-      std::string detail = agg->ok ? "" : "one or more writes were not accepted";
-      if (agg->on_complete) agg->on_complete(agg->ok, ae, as, detail);
+      bool ok = agg->worst == WriteStatus::ACCEPTED || agg->worst == WriteStatus::CLAMPED;
+      std::string detail =
+          ok ? "" : std::string("a sub-write settled ") + services::write_status_to_string(agg->worst);
+      if (agg->on_complete) agg->on_complete(agg->worst, ae, as, detail);
     };
 
     // Order avoids a transient dead/gated state: disable the schedule before
-    // touching run state; enable it only after AUTO is set.
+    // touching run state; enable it only after AUTO is set. The status callback
+    // is the 5th arg (bool `done` stays null — we only need the full status).
     if (need_scheduled && !target.schedule_enabled) {
-      write_op_service_.submit_set_schedule_enabled(false, "", step, services::WriteOrigin::SERVICE);
+      write_op_service_.submit_set_schedule_enabled(false, "", nullptr, services::WriteOrigin::SERVICE, step);
     }
     if (need_engaged) {
-      write_op_service_.submit_set_enabled(target.pump_enabled, "", step, services::WriteOrigin::SERVICE);
+      write_op_service_.submit_set_enabled(target.pump_enabled, "", nullptr, services::WriteOrigin::SERVICE, step);
     }
     if (need_scheduled && target.schedule_enabled) {
-      write_op_service_.submit_set_schedule_enabled(true, "", step, services::WriteOrigin::SERVICE);
+      write_op_service_.submit_set_schedule_enabled(true, "", nullptr, services::WriteOrigin::SERVICE, step);
     }
   }
   void submit_set_single_event(uint32_t begin_ts, uint32_t end_ts, const std::string &op_id) {

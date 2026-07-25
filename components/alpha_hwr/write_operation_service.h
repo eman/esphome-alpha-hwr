@@ -63,6 +63,23 @@ enum class WriteOrigin : uint8_t {
 const char *write_command_to_string(WriteCommand cmd);
 const char *write_status_to_string(WriteStatus status);
 
+// Severity ordering used to fold several sub-write results into one terminal
+// status (higher = worse / more informative to surface). ACCEPTED/CLAMPED are
+// "ok"; a coupled op like pump_set_state reports its most-severe leg so an
+// automation can still tell TIMEOUT from REJECTED from SUPERSEDED.
+inline int write_status_severity(WriteStatus s) {
+  switch (s) {
+    case WriteStatus::ACCEPTED:   return 0;
+    case WriteStatus::CLAMPED:    return 1;
+    case WriteStatus::SUPERSEDED: return 2;
+    case WriteStatus::TIMEOUT:    return 3;
+    case WriteStatus::PARTIAL:    return 4;
+    case WriteStatus::REJECTED:   return 5;
+    case WriteStatus::INVALID:    return 6;
+  }
+  return 0;
+}
+
 /**
  * Terminal result of a write operation. Only the value fields relevant to
  * `command` are populated; the rest keep their "unknown" defaults. For
@@ -175,7 +192,8 @@ class WriteOperationService {
   // through the result callback instead.
   void submit_set_enabled(bool enabled, const std::string &op_id,
                           std::function<void(bool)> done = nullptr,
-                          WriteOrigin origin = WriteOrigin::SERVICE);
+                          WriteOrigin origin = WriteOrigin::SERVICE,
+                          std::function<void(WriteStatus)> on_status = nullptr);
   void submit_set_mode(ControlMode mode, const std::string &op_id,
                        std::function<void(bool)> done = nullptr,
                        WriteOrigin origin = WriteOrigin::SERVICE);
@@ -206,7 +224,8 @@ class WriteOperationService {
                                    WriteOrigin origin = WriteOrigin::SERVICE);
   void submit_set_schedule_enabled(bool enabled, const std::string &op_id,
                                    std::function<void(bool)> done = nullptr,
-                                   WriteOrigin origin = WriteOrigin::SERVICE);
+                                   WriteOrigin origin = WriteOrigin::SERVICE,
+                                   std::function<void(WriteStatus)> on_status = nullptr);
   /** slot < 0 auto-resolves the first free slot; the chosen slot is echoed in the result.
    *  action: 0x02 = Auto (one-time run), 0x01 = Stop (vacation / pump-off period). */
   void submit_set_single_event(uint32_t begin_ts, uint32_t end_ts, const std::string &op_id,
@@ -265,6 +284,11 @@ class WriteOperationService {
     Phase phase{Phase::QUEUED};
     uint8_t attempts{0};
     std::function<void(bool)> done;
+    // Like `done` but carries the full terminal WriteStatus (not just
+    // accepted/not). Used by the coupled pump_set_state composition so it can
+    // report TIMEOUT / SUPERSEDED / REJECTED distinctly instead of flattening
+    // every failure to one bool.
+    std::function<void(WriteStatus)> status_done;
 
     // Requested fields; the confirm handlers overwrite them with the SETTLED
     // values before finishing, so finish_() can copy them into the result.

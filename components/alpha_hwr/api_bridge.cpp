@@ -245,13 +245,16 @@ void AlphaHwrApiBridge::on_set_pump_state(std::string state, std::string op_id) 
     return;
   }
   component_->submit_set_pump_state(
-      target, [this, op_id](bool ok, bool actual_engaged, bool actual_scheduled,
-                            const std::string &detail) {
+      target, [this, op_id](services::WriteStatus status, bool actual_engaged,
+                            bool actual_scheduled, const std::string &detail) {
+        // Surface the composed op's most-severe leg (accepted / timeout /
+        // superseded / rejected …) so automations can retry/back off correctly,
+        // rather than flattening every failure to `rejected`.
         WriteResult result;
         result.op_id = op_id;
         result.command = WriteCommand::SET_PUMP_STATE;
         result.origin = services::WriteOrigin::SERVICE;
-        result.status = ok ? WriteStatus::ACCEPTED : WriteStatus::REJECTED;
+        result.status = status;
         result.detail = detail;
         result.enabled = actual_engaged ? 1 : 0;
         result.sched_enabled = actual_scheduled ? 1 : 0;
