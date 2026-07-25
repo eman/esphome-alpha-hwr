@@ -35,16 +35,16 @@ static const char *TAG = "schedule_service";
 // exact; near a DST boundary a far-future event could be off by the DST hour —
 // acceptable for nowcast/vacation and consistent with how build_event_window
 // already resolves DST at creation time.
-static int32_t local_utc_offset_seconds() {
-  // Local UTC offset (seconds east of UTC), e.g. -25200 for PDT, +3600 for CET.
-  // Computed as the wall-clock difference between localtime and gmtime of the
-  // same instant — using only localtime_r/gmtime_r, both of which work on
-  // ESP-IDF newlib (mktime() there does NOT apply the TZ to a UTC-field tm, so
-  // the mktime(gmtime()) idiom returns 0). localtime already resolved DST.
-  time_t now = ::time(nullptr);
+// Local UTC offset (seconds east of UTC) at instant `ref`, e.g. -25200 for PDT,
+// +3600 for CET. Computed at the event's *own* timestamp (not "now") so an event
+// on the far side of a DST transition gets the right shift. Uses only
+// localtime_r/gmtime_r, both of which work on ESP-IDF newlib (mktime() there does
+// NOT apply the TZ to a UTC-field tm, so the mktime(gmtime()) idiom returns 0);
+// localtime already resolved DST at `ref`.
+static int32_t local_utc_offset_seconds(time_t ref) {
   struct tm lt {}, gt {};
-  localtime_r(&now, &lt);
-  gmtime_r(&now, &gt);
+  localtime_r(&ref, &lt);
+  gmtime_r(&ref, &gt);
   int32_t off = (lt.tm_hour - gt.tm_hour) * 3600 + (lt.tm_min - gt.tm_min) * 60 +
                 (lt.tm_sec - gt.tm_sec);
   // Correct for a date rollover between the two representations.
@@ -372,9 +372,10 @@ void ScheduleService::read_single_event_async(
         // Shift pump LOCAL-Unix -> UTC so callers (confirm, cache, display)
         // always see UTC (see utc_to_local_unix).
         SingleEvent ev = SingleEvent::from_bytes(payload + 3, index);
-        int32_t off = local_utc_offset_seconds();
-        ev.begin_timestamp = local_unix_to_utc(ev.begin_timestamp, off);
-        ev.end_timestamp = local_unix_to_utc(ev.end_timestamp, off);
+        ev.begin_timestamp = local_unix_to_utc(
+            ev.begin_timestamp, local_utc_offset_seconds((time_t) ev.begin_timestamp));
+        ev.end_timestamp = local_unix_to_utc(
+            ev.end_timestamp, local_utc_offset_seconds((time_t) ev.end_timestamp));
         if (on_complete)
           on_complete(true, ev);
       },
@@ -1099,9 +1100,10 @@ void ScheduleService::read_single_events_async(
           if (success && payload_len >= 13) {
             SingleEvent ev = SingleEvent::from_bytes(payload + 3, idx);
             // pump LOCAL-Unix -> UTC so the cache/display stay UTC.
-            int32_t off = local_utc_offset_seconds();
-            ev.begin_timestamp = local_unix_to_utc(ev.begin_timestamp, off);
-            ev.end_timestamp = local_unix_to_utc(ev.end_timestamp, off);
+            ev.begin_timestamp = local_unix_to_utc(
+                ev.begin_timestamp, local_utc_offset_seconds((time_t) ev.begin_timestamp));
+            ev.end_timestamp = local_unix_to_utc(
+                ev.end_timestamp, local_utc_offset_seconds((time_t) ev.end_timestamp));
             if (ev.enabled) {
               events->push_back(ev);
               ESP_LOGD(TAG, "Single event slot %d: active (%" PRIu32 " - %" PRIu32 ")", idx,
@@ -1146,10 +1148,11 @@ void ScheduleService::write_single_event_async(
   // Shift UTC -> pump LOCAL-Unix before serializing (the pump's RTC is local
   // Unix time). Serialize a copy so the caller's event stays UTC. ts 0
   // (disabled/cleared) is left untouched by utc_to_local_unix.
-  int32_t off = local_utc_offset_seconds();
   SingleEvent wire = event;
-  wire.begin_timestamp = utc_to_local_unix(event.begin_timestamp, off);
-  wire.end_timestamp = utc_to_local_unix(event.end_timestamp, off);
+  wire.begin_timestamp = utc_to_local_unix(
+      event.begin_timestamp, local_utc_offset_seconds((time_t) event.begin_timestamp));
+  wire.end_timestamp = utc_to_local_unix(
+      event.end_timestamp, local_utc_offset_seconds((time_t) event.end_timestamp));
   wire.to_bytes(apdu + 11);
 
   this->transport_.send_apdu_command(
