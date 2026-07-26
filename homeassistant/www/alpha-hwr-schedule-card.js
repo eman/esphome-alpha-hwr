@@ -1,5 +1,5 @@
 /**
- * Alpha HWR Schedule Card — v5
+ * Alpha HWR Schedule Card — v6
  *
  * Custom Lovelace card for managing the Grundfos ALPHA HWR pump's weekly schedule.
  * Reads the schedule from the per-layer ESPHome read-back sensors and writes
@@ -19,6 +19,13 @@
  *     - sensor.hwr_pump_schedule_layer_4
  *   enabled_entity: switch.hwr_pump_schedule_enabled          # Optional (default derived)
  *   single_events_entity: sensor.hwr_pump_single_events       # Optional (default derived)
+ *   forecast_entity: sensor.dhw_..._forecast_weekly_series    # Optional (v6)
+ *                                            #   Paints predicted demand as a
+ *                                            #   heat strip behind each day.
+ *   desired_entity: sensor.dhw_..._pump_schedule_series       # Optional (v6)
+ *                                            #   Dashed ghosts for intervals
+ *                                            #   the scheduler wants but the
+ *                                            #   device is not holding.
  *
  * Schedule data model (current architecture):
  *   - Five per-layer text sensors `schedule_layer_0..4`, each a JSON array of 7
@@ -31,6 +38,20 @@
  * Single Events text sensor format:
  *   [slot] YYYY-MM-DD HH:MM - HH:MM
  *   (one line per active event)
+ *
+ * v6 Changes:
+ *   - Optional forecast/desired overlays, both off unless configured, so
+ *     existing card configs render exactly as before.
+ *   - `forecast_entity` paints the weekly forecast's demand windows as a
+ *     translucent heat strip behind each day row, so you can see whether a
+ *     programmed burst actually lands in front of predicted demand — the one
+ *     thing the grid alone could never show.
+ *   - `desired_entity` outlines intervals the scheduler wants but the device
+ *     is not holding, surfacing scheduler-vs-device drift at the place you
+ *     would fix it. Matching intervals are not ghosted; they are already
+ *     drawn as real blocks.
+ *   - Both overlays are pointer-events:none and sit below the interactive
+ *     blocks, so dragging and editing are untouched.
  *
  * v5 Changes:
  *   - The Enable/Disable Schedule button now toggles the `Schedule Enabled`
@@ -99,7 +120,20 @@ class AlphaHwrScheduleCard extends HTMLElement {
       // Schedule on/off switch (state "on"/"off").
       enabled_entity: config.enabled_entity || `switch.${device}_schedule_enabled`,
       single_events_entity: config.single_events_entity || `sensor.${device}_single_events`,
+      // Optional overlays, both unset by default so existing configs render
+      // exactly as before.
+      //   forecast_entity: a dhw-series-publisher weekly series sensor. Its
+      //     `windows` attribute is painted as a heat strip behind each day,
+      //     so you can see whether a burst actually lands in front of
+      //     predicted demand.
+      //   desired_entity: the pump schedule series. Intervals the scheduler
+      //     wants but the device does not hold are outlined as ghosts,
+      //     surfacing scheduler-vs-device drift where you would fix it.
+      forecast_entity: config.forecast_entity || null,
+      desired_entity: config.desired_entity || null,
     };
+    this._forecastWindows = [];
+    this._desiredGhosts = [];
     this._render();
   }
 
@@ -129,8 +163,13 @@ class AlphaHwrScheduleCard extends HTMLElement {
     // change signature so we only rebuild/re-render when something actually moves.
     const sig = this._config.layer_entities
       .map(e => (hass.states[e] ? hass.states[e].state : ''))
-      .join('|') + '|' + (hass.states[this._config.enabled_entity]?.state ?? '');
+      .join('|') + '|' + (hass.states[this._config.enabled_entity]?.state ?? '')
+      + '|' + (this._config.forecast_entity
+        ? (hass.states[this._config.forecast_entity]?.last_changed ?? '') : '')
+      + '|' + (this._config.desired_entity
+        ? (hass.states[this._config.desired_entity]?.last_changed ?? '') : '');
     if (sig !== this._lastState) {
+      this._parseOverlays(hass);
       this._lastState = sig;
       this._rebuildSchedule();
       needRender = true;
@@ -337,9 +376,92 @@ class AlphaHwrScheduleCard extends HTMLElement {
     this._attachEvents();
   }
 
+  /** Fold dated intervals onto the card's (weekday, minute-of-day) grid.
+   *
+   * The grid is weekly-recurring while the series carry concrete dates, so
+   * an interval is projected onto the weekday it falls on. An interval that
+   * spans midnight is split, otherwise it would wrap and paint backwards
+   * across the row.
+   */
+  _foldToGrid(intervals, valueOf) {
+    const out = [];
+    (intervals || []).forEach(iv => {
+      let start = new Date(iv.s !== undefined ? iv.s : iv[0]);
+      const end = new Date(iv.e !== undefined ? iv.e : iv[1]);
+      if (!(start < end)) return;
+      let guard = 0;
+      while (start < end && guard++ < 10) {
+        const day = (start.getDay() + 6) % 7; // JS 0=Sun -> card 0=Mon
+        const startMin = start.getHours() * 60 + start.getMinutes();
+        const midnight = new Date(start);
+        midnight.setHours(24, 0, 0, 0);
+        const segEnd = end < midnight ? end : midnight;
+        const endMin = segEnd.getHours() === 0 && segEnd.getMinutes() === 0
+          ? MINUTES_IN_DAY
+          : segEnd.getHours() * 60 + segEnd.getMinutes();
+        out.push({ day, start: startMin, end: endMin,
+                   value: valueOf ? valueOf(iv) : 1 });
+        start = midnight;
+      }
+    });
+    return out;
+  }
+
+  _parseOverlays(hass) {
+    this._forecastWindows = [];
+    this._desiredGhosts = [];
+
+    if (this._config.forecast_entity) {
+      const st = hass.states[this._config.forecast_entity];
+      // windows are [start_iso, end_iso, peak_pct] triples.
+      const wins = st?.attributes?.windows;
+      if (Array.isArray(wins)) {
+        this._forecastWindows = this._foldToGrid(
+          wins.map(w => ({ s: w[0], e: w[1], peak: w[2] })),
+          iv => iv.peak,
+        );
+      }
+    }
+
+    if (this._config.desired_entity) {
+      const st = hass.states[this._config.desired_entity];
+      const desired = st?.attributes?.desired;
+      const programmed = st?.attributes?.programmed;
+      if (Array.isArray(desired)) {
+        // Only show what the device is NOT holding — matching intervals are
+        // already drawn as real blocks, so ghosting them all would be noise.
+        const held = new Set((programmed || []).map(iv => `${iv.s}|${iv.e}`));
+        this._desiredGhosts = this._foldToGrid(
+          desired.filter(iv => !held.has(`${iv.s}|${iv.e}`)));
+      }
+    }
+  }
+
   _renderDayRow(day, dayIdx, nowPct) {
     const blocks = this._getDayBlocks(dayIdx);
     const isToday = new Date().getDay() === (dayIdx + 1) % 7; // JS: 0=Sun, card: 0=Mon
+
+    const forecastHtml = this._forecastWindows
+      .filter(w => w.day === dayIdx)
+      .map(w => {
+        const leftPct = (w.start / MINUTES_IN_DAY) * 100;
+        const widthPct = ((w.end - w.start) / MINUTES_IN_DAY) * 100;
+        const opacity = Math.min(0.10 + (w.value || 0) / 100 * 0.30, 0.42);
+        return `<div class="forecast-band"
+             style="left:${leftPct}%;width:${Math.max(widthPct, 0.4)}%;
+                    opacity:${opacity.toFixed(2)}"
+             title="predicted demand ${w.value}%"></div>`;
+      }).join('');
+
+    const ghostHtml = this._desiredGhosts
+      .filter(g => g.day === dayIdx)
+      .map(g => {
+        const leftPct = (g.start / MINUTES_IN_DAY) * 100;
+        const widthPct = ((g.end - g.start) / MINUTES_IN_DAY) * 100;
+        return `<div class="desired-ghost"
+             style="left:${leftPct}%;width:${Math.max(widthPct, 0.7)}%"
+             title="scheduler wants this; device is not holding it"></div>`;
+      }).join('');
 
     const blocksHtml = blocks.map(b => {
       const leftPct = (b.start / MINUTES_IN_DAY) * 100;
@@ -372,6 +494,8 @@ class AlphaHwrScheduleCard extends HTMLElement {
       <div class="day-row ${isToday ? 'today' : ''}">
         <div class="day-label ${isToday ? 'today-label' : ''}">${day}</div>
         <div class="timeline-bar" data-day="${dayIdx}">
+          ${forecastHtml}
+          ${ghostHtml}
           ${isToday ? `<div class="now-line" style="left:${nowPct}%"></div>` : ''}
           ${singleEventHtml}
           ${blocksHtml}
@@ -715,8 +839,30 @@ class AlphaHwrScheduleCard extends HTMLElement {
       }
 
       /* ─ Time Block ─ */
+      /* Optional overlays (forecast_entity / desired_entity). pointer-events
+         are disabled so they never intercept a drag on a real block. */
+      .forecast-band {
+        position: absolute;
+        top: 0; bottom: 0;
+        background: var(--info-color, #2a78d6);
+        pointer-events: none;
+        z-index: 0;
+        border-radius: 2px;
+      }
+      .desired-ghost {
+        position: absolute;
+        top: 3px; bottom: 3px;
+        border: 1px dashed var(--warning-color, #eebf41);
+        border-radius: 3px;
+        background: transparent;
+        pointer-events: none;
+        z-index: 1;
+      }
       .time-block {
         position: absolute;
+        /* Above the forecast band (0) and desired ghost (1), below the
+           single-event bars (4) so their existing precedence is unchanged. */
+        z-index: 2;
         top: 3px;
         bottom: 3px;
         background: linear-gradient(135deg, var(--block-gradient-start), var(--block-gradient-end));
