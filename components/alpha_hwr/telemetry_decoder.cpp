@@ -6,14 +6,11 @@
 
 #include "telemetry_decoder.h"
 #include "codec.h"
-#include "esphome/core/log.h"
 #include <cmath>
 
 namespace esphome {
 namespace alpha_hwr {
 namespace protocol {
-
-static const char* TAG = "alpha_hwr.telemetry_decoder";
 
 MotorStateTelemetry decode_motor_state_response(const uint8_t* data, size_t len) {
   MotorStateTelemetry result;
