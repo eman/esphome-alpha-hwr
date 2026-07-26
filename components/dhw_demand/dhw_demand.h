@@ -1,6 +1,6 @@
 #pragma once
 
-#include "dhw_demand_votes.h"
+#include "dhw_demand_logic.h"
 #include "esphome/components/binary_sensor/binary_sensor.h"
 #include "esphome/components/sensor/sensor.h"
 #include "esphome/components/text_sensor/text_sensor.h"
@@ -70,6 +70,7 @@ class DhwDemandComponent : public PollingComponent {
     pump_power_spike_threshold_ = v;
   }
   void set_flow_latch_seconds(int v) { flow_latch_seconds_ = v; }
+  void set_demand_release_seconds(int v) { demand_release_seconds_ = v; }
   void set_session_gap_tolerance_seconds(int v) {
     session_gap_tolerance_seconds_ = v;
   }
@@ -84,9 +85,8 @@ class DhwDemandComponent : public PollingComponent {
   bool detect_pump_on_(float motor_speed, float motor_current);
 
   // Pump-off branch: returns confidence > 0 if demand detected, else 0
-  float detect_pump_off_(float flow, bool prev_flow_present,
-                         bool prev_pump_confirmed_off, float temp_deriv,
-                         float charge_deriv, float tank_temp,
+  float detect_pump_off_(float flow, bool prev_flow_present, float temp_deriv,
+                         float charge_deriv,
                          bool *pre_pump_demand_eligible_out,
                          const char **method_out);
 
@@ -127,7 +127,7 @@ class DhwDemandComponent : public PollingComponent {
   float thermal_collapse_rate_{0.05f};         // °F/s
   float dhw_charge_drop_rate_{0.005f};         // %/s
   // Pump-on vote thresholds default from kDefaultPumpOnVoteThresholds — the
-  // single source of truth also used by the host test (dhw_demand_votes.h).
+  // single source of truth also used by the host test (dhw_demand_logic.h).
   float inlet_pressure_transient_threshold_{
       kDefaultPumpOnVoteThresholds.inlet_pressure_transient};  // PSI/s
   float inlet_pressure_demand_floor_{
@@ -142,6 +142,7 @@ class DhwDemandComponent : public PollingComponent {
       kDefaultPumpOnVoteThresholds.pump_head_rate};  // m/s
   int flow_latch_seconds_{30};                 // s
   int session_gap_tolerance_seconds_{60};      // s
+  int demand_release_seconds_{30};             // s
 
   // ── Head-rate peak tracker (updated by callback at ~1–2 Hz; reset per tick) ─
   float head_rate_peak_{0.0f};  // Maximum |m/s| seen since last update()
@@ -185,10 +186,11 @@ class DhwDemandComponent : public PollingComponent {
   // ── Tick timing ───────────────────────────────────────────────────────────
   // (per-sensor timestamps are used for derivative dt; see prev_*_ms_ above)
 
-  // ── Session state ─────────────────────────────────────────────────────────
-  bool session_active_{false};
-  uint32_t session_start_ms_{0};
-  uint32_t last_demand_ms_{0};
+  // ── Demand hold & session state ───────────────────────────────────────────
+  // Both are pure logic living in dhw_demand_logic.h so the host test drives
+  // them with injected timestamps; the component only supplies millis().
+  DemandHold demand_hold_{};
+  SessionTracker session_{};
 };
 
 }  // namespace dhw_demand

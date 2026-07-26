@@ -4,6 +4,24 @@
 
 ### Added
 
+- **`demand_release_seconds` option on `dhw_demand`** (default `30`) — demand is
+  recomputed from scratch every tick, so an input dithering around its threshold
+  used to chatter the demand binary sensor on and off. Rising edges still pass
+  through immediately; falling edges are now held for this long past the last
+  positive tick. Set to `0` for the previous raw per-tick behavior. Closes the
+  "threshold jitter" gap in issue #120. While the hold is what is keeping demand
+  on, `detection_method` reports a new `demand_release_hold` value rather than
+  the branch's own conclusion — otherwise the sensor would read ON alongside
+  `deterministic_idle` at 100 % confidence, which says the opposite.
+- **`dhw_demand` documentation** — a
+  [DHW Demand Detection](docs/architecture.md#dhw-demand-detection) section
+  covering the two-branch design, the signal set and the startup guard, and a
+  full [dhw_demand Component](docs/configuration.md#dhw_demand-component) option
+  reference for the sensors and all thirteen thresholds.
+- **Test coverage for the remaining `dhw_demand` gaps** (issue #120): NaN on each
+  of the six pump-on inputs in turn (BLE dropouts must not crash or vote),
+  sustained multi-tick draws with session-duration accrual across brief lulls,
+  and threshold jitter not chattering the output.
 - **`pump_set_state` service** — a coupled run-state + schedule selector for
   automations, the programmatic sibling of the `Engage Pump` / `Schedule
   Enabled` switches. Takes `state: off | engaged | scheduled` and reaches that
@@ -28,6 +46,31 @@
 
 ### Changed
 
+- **DHW demand now latches briefly instead of following every tick.** With
+  `demand_release_seconds` defaulting to `30`, the demand binary sensor holds for
+  30 s after the last positive tick. Because the session tracker sees the held
+  value, the effective end-of-session delay becomes `demand_release_seconds` +
+  `session_gap_tolerance_seconds` (30 + 60 s by default). Set
+  `demand_release_seconds: 0` to restore the previous behavior exactly.
+- **The head-pressure-rate vote stays firmware-only, permanently** (issue #120
+  item 1). The companion Python detector deprecated its head channel outright
+  rather than adding an equivalent, so the two implementations diverge here by
+  design. This is safe because the vote is gated on at least one other signal
+  having already fired, so it can only sharpen an existing detection, never
+  create one. Rationale recorded in `dhw_demand_logic.h` and
+  [docs/architecture.md](docs/architecture.md#dhw-demand-detection).
+- **`dhw_demand` pure logic consolidated into `dhw_demand_logic.h`** (renamed
+  from `dhw_demand_votes.h`, issue #120 item 2). It now also holds the pump-off
+  flow-onset predicate, the demand release-hold and session accounting, none of
+  which depend on ESPHome or `millis()` — anything time-dependent takes `now_ms`
+  as a parameter, so the host tests drive it with injected timestamps. This
+  removed the last hand-mirrored copy in the test suite, which had drifted: it
+  gated flow onset on `prev_pump_confirmed_off`, a parameter production declared
+  but never read, so the test asserted behavior the firmware did not have. The
+  now-shared predicate matches production — flow present on the previous tick is
+  the 2-tick debounce. Also dropped three dead parameters/locals from
+  `detect_pump_off_` and added a NaN guard to the head-rate vote for symmetry
+  with the other five.
 - **"Pump Enabled" switch renamed to "Engage Pump", and the pump/schedule
   controls are now mutually exclusive** (matching the Grundfos GO app). Bench
   testing (motor RPM as ground truth) established that the pump runs only when
@@ -100,12 +143,19 @@
   two votes instead of three. Synced the constant and corrected the
   expectation (0.65 → 0.80); added coverage for the boost gating above.
   Extracted the pump-on vote logic and threshold defaults into
-  `dhw_demand_votes.h`, a header with no ESPHome dependency, so the test
+  `dhw_demand_logic.h`, a header with no ESPHome dependency, so the test
   calls production code directly instead of hand-mirroring it — the class
   of drift above can't recur.
 
 ### Removed
 
+- **`tools/check_dhw_demand.py`** (issue #120 item 4). The live-snapshot
+  diagnostic held a fourth hand-copied set of detection thresholds with no test
+  guarding it, reimplemented only two of the six pump-on votes with no
+  derivatives or startup suppression, and queried a `text_sensor.` entity id in a
+  domain Home Assistant does not have. Nothing in the repo referenced it. Use the
+  component's own `confidence` and `detection_method` sensors instead —
+  `detection_method` names the exact rule that fired on each tick.
 - Removed the unused aggregate **Weekly Schedule** JSON text sensor
   (`schedule:` in `alpha_hwr_pairing.yaml`, `CONF_SCHEDULE`). It was the sole
   source of the `Schedule JSON truncated to 255 chars` warning — a full

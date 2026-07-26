@@ -50,6 +50,7 @@ CONF_PUMP_HEAD_RATE = "pump_head_rate"
 CONF_PUMP_HEAD_RATE_THRESHOLD = "pump_head_rate_threshold"
 CONF_FLOW_LATCH_SECONDS = "flow_latch_seconds"
 CONF_SESSION_GAP_TOLERANCE_SECONDS = "session_gap_tolerance_seconds"
+CONF_DEMAND_RELEASE_SECONDS = "demand_release_seconds"
 
 CONFIG_SCHEMA = (
     cv.Schema(
@@ -114,6 +115,8 @@ CONFIG_SCHEMA = (
             cv.Optional(CONF_FLOW_LATCH_SECONDS, default=30):
                 cv.positive_int,
             cv.Optional(CONF_SESSION_GAP_TOLERANCE_SECONDS, default=60):
+                cv.positive_int,
+            cv.Optional(CONF_DEMAND_RELEASE_SECONDS, default=30):
                 cv.positive_int,
         }
     )
@@ -185,3 +188,5 @@ async def to_code(config):
         config[CONF_FLOW_LATCH_SECONDS]))
     cg.add(var.set_session_gap_tolerance_seconds(
         config[CONF_SESSION_GAP_TOLERANCE_SECONDS]))
+    cg.add(var.set_demand_release_seconds(
+        config[CONF_DEMAND_RELEASE_SECONDS]))
