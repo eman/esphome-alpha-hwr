@@ -12,13 +12,13 @@
  *                                            #   derive the default entity IDs.
  *   title: Pump Schedule                     # Optional
  *   layer_entities:                          # Optional — defaults to
- *     - text_sensor.hwr_pump_schedule_layer_0 #   text_sensor.<device>_schedule_layer_0..4
- *     - text_sensor.hwr_pump_schedule_layer_1
- *     - text_sensor.hwr_pump_schedule_layer_2
- *     - text_sensor.hwr_pump_schedule_layer_3
- *     - text_sensor.hwr_pump_schedule_layer_4
+ *     - sensor.hwr_pump_schedule_layer_0      #   sensor.<device>_schedule_layer_0..4
+ *     - sensor.hwr_pump_schedule_layer_1
+ *     - sensor.hwr_pump_schedule_layer_2
+ *     - sensor.hwr_pump_schedule_layer_3
+ *     - sensor.hwr_pump_schedule_layer_4
  *   enabled_entity: switch.hwr_pump_schedule_enabled          # Optional (default derived)
- *   single_events_entity: text_sensor.hwr_pump_single_events  # Optional (default derived)
+ *   single_events_entity: sensor.hwr_pump_single_events       # Optional (default derived)
  *
  * Schedule data model (current architecture):
  *   - Five per-layer text sensors `schedule_layer_0..4`, each a JSON array of 7
@@ -95,10 +95,10 @@ class AlphaHwrScheduleCard extends HTMLElement {
       // Per-layer schedule read-back sensors (schedule_layer_0..4). Override with
       // `layer_entities:` if your entity IDs differ from the derived defaults.
       layer_entities: config.layer_entities ||
-        Array.from({ length: MAX_LAYERS }, (_, l) => `text_sensor.${device}_schedule_layer_${l}`),
+        Array.from({ length: MAX_LAYERS }, (_, l) => `sensor.${device}_schedule_layer_${l}`),
       // Schedule on/off switch (state "on"/"off").
       enabled_entity: config.enabled_entity || `switch.${device}_schedule_enabled`,
-      single_events_entity: config.single_events_entity || `text_sensor.${device}_single_events`,
+      single_events_entity: config.single_events_entity || `sensor.${device}_single_events`,
     };
     this._render();
   }
