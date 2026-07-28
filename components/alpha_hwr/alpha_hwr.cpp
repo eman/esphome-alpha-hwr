@@ -286,13 +286,18 @@ void AlphaHwrComponent::setup() {
     using services::WriteCommand;
     using services::WriteStatus;
     bool applied = result.status == WriteStatus::ACCEPTED || result.status == WriteStatus::CLAMPED;
+
+    // Schedule grid display (hash + per-layer sensors). The rule lives in
+    // write_operation_service.h so the host test exercises the production
+    // predicate; UPLOAD_SCHEDULE was missing from it entirely (issue #133),
+    // which left sensor.<device>_schedule_hash on its old value after every
+    // bulk upload. RFC-005's sync model is "poll that sensor until it
+    // matches", so a correctly-programmed pump read as a permanent sync
+    // failure and the scheduler re-uploaded the same grid indefinitely.
+    if (services::result_republishes_schedule(result))
+      this->publish_schedule_hash();
+
     switch (result.command) {
-      case WriteCommand::SET_SCHEDULE_ENTRY:
-      case WriteCommand::CLEAR_SCHEDULE_ENTRY:
-      case WriteCommand::SET_SCHEDULE_ENABLED:
-      case WriteCommand::REFRESH_SCHEDULE:
-        if (applied) this->publish_schedule_hash();
-        break;
       case WriteCommand::SET_SINGLE_EVENT:
       case WriteCommand::CLEAR_SINGLE_EVENT:
       case WriteCommand::REFRESH_SINGLE_EVENTS:

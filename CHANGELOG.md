@@ -157,6 +157,29 @@
 
 ### Fixed
 
+- **`upload_schedule` now republishes the schedule display** (issue #133).
+  `WriteCommand::UPLOAD_SCHEDULE` was missing from the component's write-result
+  switch, so a bulk grid upload recomputed the canonical hash for the
+  `write_settled` event but left `sensor.<device>_schedule_hash` — and the five
+  per-layer read-back sensors — on their old values until something else forced
+  a read-back. RFC-005 §3.1 specifies that the upload recomputes the hash
+  sensor, and its sync model is "poll that sensor until it matches", so every
+  grid change looked like a permanent sync failure: the scheduler timed out,
+  retried three times per reconcile, and re-uploaded the same grid to an
+  already-correctly-programmed pump. `in_sync` stuck false and `sync_failures`
+  climbed for a healthy device — the same shape as issue #124, with the
+  polarity flipped. Worse, changes landed invisibly, which is how a bad grid
+  reached the pump unnoticed.
+
+  The rule now lives in `result_republishes_schedule()`
+  (`write_operation_service.h`) so the host test drives the production
+  predicate. Uploads key on the post-op hash being present rather than on the
+  terminal status: an upload is five independent layer writes, so a `PARTIAL`
+  run has still moved the device grid, and the sensor must track the device
+  rather than the verdict. That is the same condition the event payload uses,
+  so the sensor and the event cannot disagree. Single-entry schedule writes
+  stay gated on the terminal status, where a rejection does mean nothing moved.
+
 - **Control entities no longer republish unchanged state every poll** (issue
   #127). ESPHome's `number` and `select` `publish_state()` fire their state
   callback unconditionally — unlike `switch`, which dedups — so the ten polled

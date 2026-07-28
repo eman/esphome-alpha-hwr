@@ -53,6 +53,7 @@ using esphome::alpha_hwr::services::WriteOperationService;
 using esphome::alpha_hwr::services::WriteOrigin;
 using esphome::alpha_hwr::services::WriteResult;
 using esphome::alpha_hwr::services::WriteStatus;
+using esphome::alpha_hwr::services::result_republishes_schedule;
 namespace protocol = esphome::alpha_hwr::protocol;
 
 // ---------------------------------------------------------------------------
@@ -1537,6 +1538,105 @@ static void test_upload_enabled_flag() {
   TEST_ASSERT(h.sim.sched_enabled, "pump schedule enabled by the upload");
 }
 
+static void test_upload_republishes_schedule_display() {
+  std::cout << "\n=== upload_schedule: republishes the schedule display (#133) ==="
+            << std::endl;
+  Harness h;
+  h.prime_cache();
+
+  // An upload that puts real layers on the wire.
+  h.write_op.submit_upload_schedule(make_upload({{0, 0, 6, 30, 7, 30}}), "rp1");
+  h.advance(120000);
+  // Copied by value: result_for() points into the harness's results vector,
+  // which reallocates when the second upload settles.
+  const WriteResult *first_ptr = h.result_for("rp1");
+  TEST_ASSERT(first_ptr != nullptr, "first upload settled");
+  WriteResult first = first_ptr ? *first_ptr : WriteResult{};
+  TEST_ASSERT(first.status == WriteStatus::ACCEPTED, "first upload accepted");
+  TEST_ASSERT(!first.layers_written.empty(), "first upload wrote layers");
+  TEST_ASSERT(!first.schedule_hash.empty(), "post-op hash is reported");
+  TEST_ASSERT(result_republishes_schedule(first),
+              "a writing upload republishes the schedule display");
+
+  // The same grid again: every layer already matches, so nothing goes on the
+  // wire. This is the case from the report — accepted, detail "no-op", every
+  // layer skipped — where the event carried the right hash and the sensor kept
+  // its old value. The bridge's cache and the published sensor had genuinely
+  // diverged, so "nothing changed" was true of the pump but not of HA.
+  h.write_op.submit_upload_schedule(make_upload({{0, 0, 6, 30, 7, 30}}), "rp2");
+  h.advance(120000);
+  const WriteResult *noop = h.result_for("rp2");
+  TEST_ASSERT(noop && noop->status == WriteStatus::ACCEPTED, "no-op upload accepted");
+  TEST_ASSERT(noop && noop->layers_written.empty(), "no-op upload wrote nothing");
+  TEST_ASSERT(noop && noop->layers_skipped == "0,1,2,3,4",
+              "no-op upload skipped every layer");
+  TEST_ASSERT(noop && !noop->schedule_hash.empty(),
+              "no-op upload still reports the post-op hash");
+  TEST_ASSERT(noop && result_republishes_schedule(*noop),
+              "a no-op upload republishes too — the sensor may still be stale");
+  TEST_ASSERT(noop && first.schedule_hash == noop->schedule_hash,
+              "the hash is unchanged across the no-op");
+}
+
+static void test_partial_upload_republishes_schedule_display() {
+  std::cout << "\n=== upload_schedule: a partial upload still republishes (#133) ==="
+            << std::endl;
+  Harness h;
+  h.prime_cache();
+  h.sim.honor_layer_writes = false;
+
+  h.write_op.submit_upload_schedule(make_upload({{0, 0, 6, 0, 7, 0}}), "rp3");
+  h.advance(60000);
+
+  const WriteResult *r = h.result_for("rp3");
+  TEST_ASSERT(r && r->status == WriteStatus::PARTIAL, "status is partial");
+  TEST_ASSERT(r && !r->schedule_hash.empty(), "a partial upload still reports a hash");
+  // PARTIAL is neither ACCEPTED nor CLAMPED, so the `applied` gate the
+  // single-entry writes use would have skipped this — yet an upload is five
+  // independent layer writes and a partial run is precisely the case where the
+  // device grid and the published sensor drift apart.
+  TEST_ASSERT(r && result_republishes_schedule(*r),
+              "a partial upload republishes despite not being 'applied'");
+}
+
+static void test_republish_predicate_arms() {
+  std::cout << "\n=== schedule-display republish predicate (#133) ===" << std::endl;
+  WriteResult r;
+
+  // Rejected before any wire write: schedule_hash is empty, nothing moved.
+  r.command = WriteCommand::UPLOAD_SCHEDULE;
+  r.status = WriteStatus::REJECTED;
+  r.schedule_hash = "";
+  TEST_ASSERT(!result_republishes_schedule(r),
+              "upload rejected before any write does not republish");
+
+  // Failed partway. An upload is five independent layer writes, so the device
+  // grid moved even though the verdict is a failure — the sensor tracks the
+  // device, not the verdict.
+  r.status = WriteStatus::TIMEOUT;
+  r.schedule_hash = "v1:e7197ac9e42729dd";
+  TEST_ASSERT(result_republishes_schedule(r),
+              "upload that failed partway still republishes what landed");
+
+  // Non-schedule writes never touch the schedule display.
+  r.command = WriteCommand::SET_SETPOINT;
+  r.status = WriteStatus::ACCEPTED;
+  TEST_ASSERT(!result_republishes_schedule(r),
+              "a setpoint write does not republish the schedule");
+
+  // Single-entry schedule writes stay gated on the terminal status: unlike an
+  // upload they are one wire write, so a rejection means nothing moved.
+  r.command = WriteCommand::SET_SCHEDULE_ENTRY;
+  r.status = WriteStatus::ACCEPTED;
+  TEST_ASSERT(result_republishes_schedule(r), "accepted schedule entry republishes");
+  r.status = WriteStatus::REJECTED;
+  TEST_ASSERT(!result_republishes_schedule(r),
+              "rejected schedule entry does not republish");
+
+  r.command = WriteCommand::REFRESH_SCHEDULE;
+  r.status = WriteStatus::ACCEPTED;
+  TEST_ASSERT(result_republishes_schedule(r), "refresh_schedule republishes");
+}
 
 int main() {
   // Pin the timezone to UTC so single-event timestamp assertions are
@@ -1607,6 +1707,9 @@ int main() {
   test_upload_supersedes_entry_ops();
   test_upload_disconnect_mid_op();
   test_upload_enabled_flag();
+  test_upload_republishes_schedule_display();
+  test_partial_upload_republishes_schedule_display();
+  test_republish_predicate_arms();
 
   std::cout << "\n===========================================================" << std::endl;
   std::cout << "  Test Results" << std::endl;
