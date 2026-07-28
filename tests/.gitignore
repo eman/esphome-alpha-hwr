@@ -22,3 +22,4 @@ test_schedule_codec
 test_telemetry_units
 test_pump_schedule_ux
 test_publish_gate
+test_dhw_publish_gate

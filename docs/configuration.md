@@ -161,6 +161,27 @@ detector. It is not a flow rate and should not be read as one. While
 `demand_release_seconds` is latching, the last live value is republished rather
 than 0.0.
 
+All five outputs publish **on change only** (issue #129), not once per
+`update_interval`. They are step-valued — `detection_method` names the rule that
+fired, `confidence` and `demand_level` are flat between transitions, and
+`session_duration` is `0` while nothing is drawing — so a per-tick republish sent
+an API state frame to every subscriber carrying no new information. A running
+draw is unaffected (`session_duration` moves every tick while a session is open),
+and Home Assistant still gets every entity's current state on connect, so this is
+invisible except in state traffic. If you need one of these as a liveness
+heartbeat, set `force_update: true` on that sensor — it restores the per-tick
+publish and also tells Home Assistant's recorder to store every repeat:
+
+```yaml
+dhw_demand:
+  confidence:
+    name: "DHW Detection Confidence"
+    force_update: true
+```
+
+`detection_method` is a `text_sensor` and has no `force_update`; use `demand` or
+the node's own connection state for availability instead.
+
 ### Input sensors
 
 | Option | Type | Default | Description |

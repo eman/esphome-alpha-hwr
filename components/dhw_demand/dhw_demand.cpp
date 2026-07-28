@@ -1,4 +1,5 @@
 #include "dhw_demand.h"
+#include "publish_gate.h"
 #include "esphome/core/hal.h"
 #include "esphome/core/log.h"
 #include <cstring>
@@ -249,20 +250,27 @@ float DhwDemandComponent::detect_pump_on_deterministic_(
 void DhwDemandComponent::publish_result_(bool demand, float confidence,
                                           float demand_level,
                                           const char *method) {
+  // Every publish below is gated on change (publish_gate.h, issue #129): these
+  // are step-valued outputs re-derived from scratch each tick, and on an idle
+  // system every tick recomputes the same four values. BinarySensor already
+  // dedups internally, so `demand` needs no gate.
   if (demand_sensor_ != nullptr)
     demand_sensor_->publish_state(demand);
 
   // Confidence is tracked internally as a 0.0–1.0 weight; publish as a percent.
   if (confidence_sensor_ != nullptr)
-    confidence_sensor_->publish_state(confidence * 100.0f);
+    publish_sensor_if_changed(confidence_sensor_, confidence * 100.0f);
 
   // Estimated draw intensity, 0.0–1.0. Part of the RFC-006 detector contract;
-  // the Python detector publishes the same field on its demand entity.
+  // the Python detector publishes the same field on its demand entity. Its
+  // ~10 s MQTT cadence is load-bearing there (the HA discovery config carries
+  // expire_after: 30), which is why that side stays unconditional; over the
+  // native API availability follows the connection, so repeats buy nothing.
   if (demand_level_sensor_ != nullptr)
-    demand_level_sensor_->publish_state(demand_level);
+    publish_sensor_if_changed(demand_level_sensor_, demand_level);
 
   if (detection_method_sensor_ != nullptr)
-    detection_method_sensor_->publish_state(method);
+    publish_text_sensor_if_changed(detection_method_sensor_, method);
 
   // Session duration is updated in update_session_(); we don't overwrite it
   // here to avoid clearing a running session count on a false tick.
@@ -282,9 +290,11 @@ void DhwDemandComponent::update_session_(bool demand, uint32_t now) {
   if (tick.just_ended)
     ESP_LOGI(TAG, "DHW session ended: %.0f s", tick.ended_duration_s);
 
-  // Publish live session duration (0 when inactive)
+  // Publish live session duration (0 when inactive). Gated on change: while a
+  // session runs the value moves every tick so the gate costs nothing, and it
+  // silences the idle 0 s stream that is the common case (issue #129).
   if (session_duration_sensor_ != nullptr)
-    session_duration_sensor_->publish_state(tick.live_duration_s);
+    publish_sensor_if_changed(session_duration_sensor_, tick.live_duration_s);
 }
 
 // ── Main update tick ──────────────────────────────────────────────────────────

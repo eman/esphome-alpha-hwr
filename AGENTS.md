@@ -93,11 +93,16 @@ Note: `hwr-pump-example.yaml` is for documentation and compilation testing only 
   packages via the `debug` component) when a session runs long, and check
   "Reset Reason" after any unexplained restart.
 * **Don't add periodically-publishing entities without a change gate.**
-  ESPHome's `number`/`select`/`text_sensor` `publish_state()` do *not* dedup, so
-  a polled template lambda emits a frame per subscriber per interval even when
+  ESPHome's `number`/`select`/`sensor`/`text_sensor` `publish_state()` do *not*
+  dedup (only `binary_sensor` and `switch` do), so a polled template lambda or a
+  per-tick component publish emits a frame per subscriber per interval even when
   nothing moved. Use `publish_number_if_changed()` /
   `publish_option_if_changed()` (`components/alpha_hwr/publish_gate.h`) in
-  polled lambdas, and fire C++ state callbacks only on actual transitions.
+  polled lambdas, `publish_sensor_if_changed()` /
+  `publish_text_sensor_if_changed()` (`components/dhw_demand/publish_gate.h`) for
+  a component's own `sensor`/`text_sensor` outputs, and fire C++ state callbacks
+  only on actual transitions. A consumer that genuinely needs the repeats asks
+  for them with `force_update: true` on the sensor, which the gate honours.
 
 ## 5. Documentation Requirements
 
