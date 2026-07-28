@@ -335,9 +335,18 @@ void WriteOperationService::finish_(uint32_t seq, WriteStatus status, const std:
       };
       result.layers_written = mask_to_list(op.upload_written_mask);
       result.layers_skipped = mask_to_list(op.upload_skipped_mask);
-      // Post-op hash: only meaningful once wire work happened; empty on
+      // Post-op hash: only meaningful once the layer loop has run; empty on
       // rejection before the first write.
-      if (op.upload_written_mask != 0 || op.upload_skipped_mask != 0) {
+      //
+      // The failed mask counts as much as the other two (issue #133 review).
+      // A layer that fails confirm has still been read back, and that readback
+      // refreshed the cache from the device — so current_hash() describes the
+      // pump whether or not the write took. Keying only on written|skipped
+      // reported an empty hash for the all-layers-failed rejection, which is
+      // after the wire work, not before it, and left consumers with no way to
+      // learn what the pump actually holds.
+      if (op.upload_written_mask != 0 || op.upload_skipped_mask != 0 ||
+          op.upload_failed_mask != 0) {
         result.schedule_hash = schedule_service_.current_hash();
       }
       result.sched_enabled = op.upload.enabled;

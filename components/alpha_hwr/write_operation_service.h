@@ -142,6 +142,42 @@ struct WriteResult {
   std::string requested_end_hhmm;
 };
 
+/**
+ * Does this settled write require republishing the schedule display — the
+ * canonical hash sensor plus the five per-layer read-back sensors?
+ *
+ * Pure and header-resident so the host test drives the production rule rather
+ * than a copy of it; the component's result callback is the only caller.
+ *
+ * UPLOAD_SCHEDULE is keyed on the post-op hash being present rather than on the
+ * terminal status (issue #133). An upload is five independent layer writes, so
+ * a run that fails partway has still moved the device grid, and the sensor has
+ * to track the device rather than the verdict.
+ *
+ * `schedule_hash` is populated once the layer loop has run — whether each layer
+ * was written, skipped as already-matching, or failed confirm. What those three
+ * have in common is a readback, which refreshes the cache from the device, so
+ * the hash describes the pump in all of them. It is empty only when the upload
+ * was rejected before the first layer, where nothing was read and the cache is
+ * untouched. That is the same condition the write_settled event uses, so the
+ * sensor and the event cannot disagree.
+ */
+inline bool result_republishes_schedule(const WriteResult &r) {
+  const bool applied =
+      r.status == WriteStatus::ACCEPTED || r.status == WriteStatus::CLAMPED;
+  switch (r.command) {
+    case WriteCommand::SET_SCHEDULE_ENTRY:
+    case WriteCommand::CLEAR_SCHEDULE_ENTRY:
+    case WriteCommand::SET_SCHEDULE_ENABLED:
+    case WriteCommand::REFRESH_SCHEDULE:
+      return applied;
+    case WriteCommand::UPLOAD_SCHEDULE:
+      return !r.schedule_hash.empty();
+    default:
+      return false;
+  }
+}
+
 class ScheduleService;
 
 /**
