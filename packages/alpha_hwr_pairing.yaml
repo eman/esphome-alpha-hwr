@@ -38,7 +38,7 @@ substitutions:
   # This component's release version, surfaced as the "Component Version"
   # diagnostic entity below (issue #95). Kept in sync automatically by
   # tools/bump_version.sh, which rewrites it alongside the @vX.Y.Z package pin.
-  component_version: "0.13.0"
+  component_version: "0.14.0"
 
 esphome:
   # Publish the (constant) component version once at boot (issue #95).
@@ -50,7 +50,7 @@ esphome:
           state: "${component_version}"
 
 external_components:
-  - source: github://eman/esphome-alpha-hwr@v0.13.0
+  - source: github://eman/esphome-alpha-hwr@v0.14.0
     components: [alpha_hwr, dhw_demand]
 
 esp32_ble_tracker:

@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+## [0.14.0] - 2026-07-28
+
 ### Added
 
 - **Heap diagnostics in both packages** (issue #127) — **Free Heap**, **Largest
