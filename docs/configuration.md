@@ -156,10 +156,20 @@ the detector is that a draw is happening, `demand_level` is how large it looks.
 The two move independently — a single hydraulic vote is a confident-enough
 detection at a low intensity. Intensity is derived from flow where flow is
 available (`min(1.0, GPM / 2.5)`), and from the vote count on the pump-on
-hydraulic branch (`0.3 + 0.15 × (votes − 1)`, capped at 1.0), matching the Python
-detector. It is not a flow rate and should not be read as one. While
+hydraulic branch (`0.3 + 0.15 × (votes − 1)`), matching the Python detector. It
+is not a flow rate and should not be read as one. While
 `demand_release_seconds` is latching, the last live value is republished rather
 than 0.0.
+
+The two also count votes differently, deliberately (issue #125). This firmware
+has a sixth pump-on signal the Python detector does not — a head-pressure rate
+spike, cheap here because the pump publishes head natively over BLE, and closed
+on the Python side because that detector deprecated its head channel. It feeds
+`confidence`, which is each detector's judgement of its own evidence, but not
+`demand_level`, which is part of the cross-detector contract and must mean the
+same thing whichever detector is publishing it. So on the pump-on branch
+`demand_level` counts only the five shared signals and tops out at **0.90**,
+exactly as Python does; a value of 1.0 arrives only from the flow branch.
 
 All five outputs publish **on change only** (issue #129), not once per
 `update_interval`. They are step-valued — `detection_method` names the rule that

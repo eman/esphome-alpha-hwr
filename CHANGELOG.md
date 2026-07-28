@@ -30,7 +30,13 @@
   unused local. Publishing it also required reconciling the pump-on branch, which
   emitted a flat `0.3` regardless of vote count against Python's
   `0.3 + 0.15 × (signal_count − 1)` (`detection.py:732`) — that scaling now
-  matches. While `demand_release_seconds` is latching, the last live intensity is
+  matches. The vote count behind it is the five signals shared with Python, not
+  all six: this firmware's head-pressure rate spike is deliberately firmware-only
+  and has no Python equivalent, so counting it would have put a +0.15 offset and
+  an otherwise unreachable 1.0 on a field the contract says both detectors
+  publish identically. It still sharpens `confidence`, which is each detector's
+  read on its own evidence and was never claimed to match.
+  While `demand_release_seconds` is latching, the last live intensity is
   republished rather than 0.0, for the same reason `detection_method` reports
   `demand_release_hold`: a 0.0 intensity alongside an ON demand sensor states the
   opposite of what the sensor says.
