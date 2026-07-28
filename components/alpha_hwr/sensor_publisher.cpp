@@ -166,6 +166,14 @@ void SensorPublisher::publish_alarms(const std::vector<uint16_t>& codes) {
   }
   
   std::string codes_str = format_codes(codes);
+  // Re-read on every telemetry poll and virtually always unchanged ("None").
+  // TextSensor::publish_state() has no dedup, so republishing identical text is
+  // an API state frame per subscriber per poll — as is the INFO line beside it
+  // (issue #127). Announce transitions; stay quiet otherwise.
+  if (alarms_sensor_->has_state() && alarms_sensor_->state == codes_str) {
+    ESP_LOGV(TAG, "Alarms unchanged: %s", codes_str.c_str());
+    return;
+  }
   ESP_LOGI(TAG, "✓ Alarms: %s", codes_str.c_str());
   alarms_sensor_->publish_state(codes_str);
 #endif
@@ -178,6 +186,11 @@ void SensorPublisher::publish_warnings(const std::vector<uint16_t>& codes) {
   }
   
   std::string codes_str = format_codes(codes);
+  // Same as publish_alarms(): transitions only (issue #127).
+  if (warnings_sensor_->has_state() && warnings_sensor_->state == codes_str) {
+    ESP_LOGV(TAG, "Warnings unchanged: %s", codes_str.c_str());
+    return;
+  }
   ESP_LOGI(TAG, "✓ Warnings: %s", codes_str.c_str());
   warnings_sensor_->publish_state(codes_str);
 #endif

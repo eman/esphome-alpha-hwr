@@ -256,6 +256,15 @@ void AlphaHwrComponent::setup() {
     // Only publish if the control service has a valid mode from the pump
     if (this->control_mode_sensor_ && this->control_service_.is_mode_valid()) {
       const char *mode_name = services::ControlService::get_mode_name(mode);
+      // The mode is re-read on every control-state poll, so this callback is
+      // usually confirming what the sensor already holds. TextSensor has no
+      // publish dedup, so republishing it costs an API frame per subscriber
+      // every poll for nothing (issue #127).
+      if (this->control_mode_sensor_->has_state() &&
+          this->control_mode_sensor_->state == mode_name) {
+        ESP_LOGV(TAG, "Control mode unchanged: %s", mode_name);
+        return;
+      }
       this->control_mode_sensor_->publish_state(mode_name);
       ESP_LOGI(TAG, "Published control mode to sensor: %s", mode_name);
     }

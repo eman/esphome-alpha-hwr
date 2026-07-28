@@ -77,6 +77,28 @@ Before marking a task as complete, verify on actual hardware using `hwr-pump.yam
 
 Note: `hwr-pump-example.yaml` is for documentation and compilation testing only (contains placeholder values). Use `hwr-pump.yaml` with real device configuration for actual hardware testing.
 
+#### Bench session hygiene (issue #127)
+
+* **At most one extra API subscriber beyond Home Assistant.** Every log line and
+  every state publish is an API frame fanned out to *each* subscriber. Stacking
+  HA + an `esphome logs` stream + `aioesphomeapi` polling scripts at
+  `level: DEBUG` has exhausted the heap in ESPHome's outgoing-frame buffer and
+  rebooted the node mid-session.
+* **A reboot is not automatically a regression in what you just flashed.** Check
+  the decoded backtrace first: `esp32.crash` reports the previous boot's fault,
+  and a crash inside `esphome::api::*` with no `alpha_hwr` frames is API buffer
+  pressure, not the change under test. Only the most recent boot's crash record
+  is readable, so decode it before reflashing.
+* **Watch Free Heap / Min Free Heap / Heap Fragmentation** (exposed by the
+  packages via the `debug` component) when a session runs long, and check
+  "Reset Reason" after any unexplained restart.
+* **Don't add periodically-publishing entities without a change gate.**
+  ESPHome's `number`/`select`/`text_sensor` `publish_state()` do *not* dedup, so
+  a polled template lambda emits a frame per subscriber per interval even when
+  nothing moved. Use `publish_number_if_changed()` /
+  `publish_option_if_changed()` (`components/alpha_hwr/publish_gate.h`) in
+  polled lambdas, and fire C++ state callbacks only on actual transitions.
+
 ## 5. Documentation Requirements
 
 * **Code Comments**: Explain *why* a specific byte sequence is used (reference the protocol doc).

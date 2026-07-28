@@ -4,6 +4,15 @@
 
 ### Added
 
+- **Heap diagnostics in both packages** (issue #127) — **Free Heap**, **Largest
+  Free Block**, **Min Free Heap**, **Heap Fragmentation** (60 s polling) and a
+  **Reset Reason** text sensor, via ESPHome's `debug` component. The node
+  rebooted on a heap exhaustion inside the API write path with nothing in Home
+  Assistant history to see it coming or to correlate against afterwards — the
+  static RAM figure the build prints doesn't capture runtime heap with the BLE
+  stack up. `Min Free Heap` is the one that survives the reboot's own
+  recovery, and `Reset Reason` distinguishes a panic from an OTA or a power cut.
+
 - **`demand_release_seconds` option on `dhw_demand`** (default `30`) — demand is
   recomputed from scratch every tick, so an input dithering around its threshold
   used to chatter the demand binary sensor on and off. Rising edges still pass
@@ -142,6 +151,32 @@
 
 ### Fixed
 
+- **Control entities no longer republish unchanged state every poll** (issue
+  #127). ESPHome's `number` and `select` `publish_state()` fire their state
+  callback unconditionally — unlike `switch`, which dedups — so the ten polled
+  template controls in `alpha_hwr_controls.yaml` emitted an API state frame to
+  *every* connected subscriber on every `update_interval` whether or not the
+  value moved: measured on hardware at **2.79 state frames/s per subscriber**,
+  essentially none of them carrying a change (`Pump Control Mode` alone ran at
+  1/s, always `Temperature Control`). The component's own text sensors did the
+  same on the poll cadence: the schedule-state poll fired its "state change"
+  callback on every poll rather than on an actual transition, republishing six
+  identical schedule text sensors (~450 bytes) every 10 s (0.60/s), and `Active
+  Alarms`, `Active Warnings` and `Control Mode` republished unchanged strings
+  with an INFO log line each. Together that was ~68 % of all state traffic.
+  The polled lambdas now gate on change (`publish_number_if_changed()` /
+  `publish_option_if_changed()`, `components/alpha_hwr/publish_gate.h`) and the
+  C++ publishers announce transitions only, taking the steady-state floor to
+  zero frames; `Pump Control Mode` also drops from a 1 s to a 5 s poll, matching
+  the setpoints. Nothing is lost: these entities only re-read a cache the
+  component already refreshes on its own (`control_state_poll_interval`, issue
+  #54), and ESPHome sends every entity's current state on connect, so a
+  reconnecting client still gets the full picture. This did not cause the
+  `std::bad_alloc` reboot in
+  `APIOverflowBuffer::enqueue_iov` — that abort is in ESPHome's API layer, with
+  no `alpha_hwr` frames in the backtrace — but it was a permanent, avoidable
+  load on exactly the buffer that overflowed, worst under the multi-subscriber
+  DEBUG conditions of a bench session.
 - **A stalled schedule (`STOP` + schedule enabled) is now detected, visible, and
   repaired** (issue #124, regression from the #121 reconciliation). That
   combination can never run — every window passes with the motor idle — and it

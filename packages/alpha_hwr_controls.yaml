@@ -158,7 +158,11 @@ select:
     id: pump_mode_select
     icon: "mdi:tune"
     optimistic: false  # Read actual state from pump state tracking
-    update_interval: 1s
+    # 5s to match the setpoint numbers below. The mode only moves when someone
+    # changes it (pump-side changes surface via control_state_poll_interval,
+    # 30s), and every poll used to emit an API state frame per subscriber
+    # whether or not it changed — see publish_option_if_changed() (#127).
+    update_interval: 5s
     options:
       - "Cycle Time Control"
       - "Constant Speed"
@@ -191,7 +195,9 @@ select:
       } else {
         return {};  // Return empty optional for unknown modes
       }
-      return mode_str;
+      // Publish only when the mode actually moved: an unconditional republish
+      // every interval costs one API state frame per subscriber (#127).
+      return esphome::alpha_hwr::publish_option_if_changed(id(pump_mode_select), mode_str);
     set_action:
       - lambda: |-
           ESP_LOGI("select", "Setting mode to: %s", x.c_str());
@@ -240,10 +246,12 @@ number:
     update_interval: 5s
     disabled_by_default: false
     lambda: |-
-      if (id(pump).get_control_mode() != esphome::alpha_hwr::services::ControlMode::CONSTANT_PRESSURE)
-        return NAN;
-      float sp = id(pump).get_cached_pressure_setpoint();
-      return std::isnan(sp) ? NAN : sp;
+      float v = NAN;  // NAN = not applicable in the active control mode
+      if (id(pump).get_control_mode() == esphome::alpha_hwr::services::ControlMode::CONSTANT_PRESSURE)
+        v = id(pump).get_cached_pressure_setpoint();
+      // Publish only on change: an unconditional republish every interval
+      // costs one API state frame per subscriber (#127).
+      return esphome::alpha_hwr::publish_number_if_changed(id(constant_pressure_setpoint), v);
     set_action:
       - lambda: |-
           ESP_LOGI("number", "Setting constant pressure setpoint to %.2f m", x);
@@ -274,10 +282,10 @@ number:
     update_interval: 5s
     disabled_by_default: false
     lambda: |-
-      if (id(pump).get_control_mode() != esphome::alpha_hwr::services::ControlMode::CONSTANT_SPEED)
-        return NAN;
-      float sp = id(pump).get_cached_speed_setpoint();
-      return std::isnan(sp) ? NAN : sp;
+      float v = NAN;  // NAN = not applicable in the active control mode
+      if (id(pump).get_control_mode() == esphome::alpha_hwr::services::ControlMode::CONSTANT_SPEED)
+        v = id(pump).get_cached_speed_setpoint();
+      return esphome::alpha_hwr::publish_number_if_changed(id(constant_speed_setpoint), v);  // on change only (#127)
     set_action:
       - lambda: |-
           ESP_LOGI("number", "Setting constant speed setpoint to %.0f RPM", x);
@@ -304,10 +312,10 @@ number:
     update_interval: 5s
     disabled_by_default: false
     lambda: |-
-      if (id(pump).get_control_mode() != esphome::alpha_hwr::services::ControlMode::CONSTANT_FLOW)
-        return NAN;
-      float sp = id(pump).get_cached_flow_setpoint();
-      return std::isnan(sp) ? NAN : sp;
+      float v = NAN;  // NAN = not applicable in the active control mode
+      if (id(pump).get_control_mode() == esphome::alpha_hwr::services::ControlMode::CONSTANT_FLOW)
+        v = id(pump).get_cached_flow_setpoint();
+      return esphome::alpha_hwr::publish_number_if_changed(id(constant_flow_setpoint), v);  // on change only (#127)
     set_action:
       - lambda: |-
           ESP_LOGI("number", "Setting constant flow setpoint to %.2f m³/h", x);
@@ -334,11 +342,10 @@ number:
     update_interval: 5s
     disabled_by_default: false
     lambda: |-
-      if (id(pump).get_control_mode() != esphome::alpha_hwr::services::ControlMode::TEMPERATURE_RANGE)
-        return NAN;
-      float val = id(pump).get_cached_temp_min();
-      if (!std::isnan(val)) return val;
-      return NAN;
+      float v = NAN;  // NAN = not applicable in the active control mode
+      if (id(pump).get_control_mode() == esphome::alpha_hwr::services::ControlMode::TEMPERATURE_RANGE)
+        v = id(pump).get_cached_temp_min();
+      return esphome::alpha_hwr::publish_number_if_changed(id(temp_range_min), v);  // on change only (#127)
     set_action:
       - lambda: |-
           float max_temp = id(pump).get_cached_temp_max();
@@ -377,11 +384,10 @@ number:
     update_interval: 5s
     disabled_by_default: false
     lambda: |-
-      if (id(pump).get_control_mode() != esphome::alpha_hwr::services::ControlMode::TEMPERATURE_RANGE)
-        return NAN;
-      float val = id(pump).get_cached_temp_max();
-      if (!std::isnan(val)) return val;
-      return NAN;
+      float v = NAN;  // NAN = not applicable in the active control mode
+      if (id(pump).get_control_mode() == esphome::alpha_hwr::services::ControlMode::TEMPERATURE_RANGE)
+        v = id(pump).get_cached_temp_max();
+      return esphome::alpha_hwr::publish_number_if_changed(id(temp_range_max), v);  // on change only (#127)
     set_action:
       - lambda: |-
           float min_temp = id(pump).get_cached_temp_min();
@@ -419,10 +425,10 @@ number:
     update_interval: 5s
     disabled_by_default: false
     lambda: |-
-      if (id(pump).get_control_mode() != esphome::alpha_hwr::services::ControlMode::PROPORTIONAL_PRESSURE)
-        return NAN;
-      float sp = id(pump).get_cached_proportional_setpoint();
-      return std::isnan(sp) ? NAN : sp;
+      float v = NAN;  // NAN = not applicable in the active control mode
+      if (id(pump).get_control_mode() == esphome::alpha_hwr::services::ControlMode::PROPORTIONAL_PRESSURE)
+        v = id(pump).get_cached_proportional_setpoint();
+      return esphome::alpha_hwr::publish_number_if_changed(id(proportional_pressure_setpoint), v);  // on change only (#127)
     set_action:
       - lambda: |-
           ESP_LOGI("number", "Setting proportional pressure setpoint to %.2f m", x);
@@ -452,8 +458,8 @@ number:
     disabled_by_default: false
     lambda: |-
       int8_t val = id(pump).get_cached_cycle_time_on();
-      if (val > 0) return (float) val;
-      return NAN;
+      float v = val > 0 ? (float) val : NAN;  // NAN = config not read from the pump yet
+      return esphome::alpha_hwr::publish_number_if_changed(id(cycle_time_on), v);  // on change only (#127)
     set_action:
       - lambda: |-
           // OFF period 0 = keep existing: the write layer resolves it from a
@@ -484,8 +490,8 @@ number:
     disabled_by_default: false
     lambda: |-
       int8_t val = id(pump).get_cached_cycle_time_off();
-      if (val > 0) return (float) val;
-      return NAN;
+      float v = val > 0 ? (float) val : NAN;  // NAN = config not read from the pump yet
+      return esphome::alpha_hwr::publish_number_if_changed(id(cycle_time_off), v);  // on change only (#127)
     set_action:
       - lambda: |-
           // ON period 0 = keep existing (see Cycle Time ON above).
@@ -518,9 +524,8 @@ number:
     update_interval: 5s
     disabled_by_default: false
     lambda: |-
-      float v = id(pump).get_cached_cycle_flow();
-      if (!std::isnan(v)) return v;
-      return NAN;
+      float v = id(pump).get_cached_cycle_flow();  // NAN until read from the pump
+      return esphome::alpha_hwr::publish_number_if_changed(id(cycle_flow), v);  // on change only (#127)
     set_action:
       - lambda: |-
           ESP_LOGI("number", "Setting cycle flow to %.3f m³/h", x);

@@ -82,6 +82,40 @@ available, e.g. a tarball install). The firmware build timestamp is appended, so
 two flashes of the same revision are still distinguishable. Include this value
 in bug reports.
 
+## Node Health Diagnostics
+
+Both packages expose the ESP32's runtime heap through ESPHome's `debug`
+component, polled every 60 s (issue #127):
+
+| Entity | What it answers |
+| --- | --- |
+| `Free Heap` | Headroom right now |
+| `Min Free Heap` | The worst moment since boot — the one that survives a spike you weren't watching |
+| `Largest Free Block` | Fragmentation's practical effect: a large allocation fails on this, not on `Free Heap` |
+| `Heap Fragmentation` | Trend, as a percentage |
+| `Reset Reason` | Why the node last rebooted — separates a panic from an OTA or a power cut |
+
+The build's static-RAM figure does not capture any of this: the interesting
+allocations happen at runtime with the BLE stack up and the API queueing
+outgoing frames.
+
+### Log level and API subscribers
+
+The packages set `logger: level: INFO`. Every log line, like every state change,
+is an API frame fanned out to **each** connected subscriber, so a node with Home
+Assistant plus an `esphome logs` stream plus a polling script pays each DEBUG
+line three times — and the node has run out of heap inside ESPHome's outgoing
+API buffer under exactly that load. Raise it deliberately when troubleshooting
+(your own config wins over the package):
+
+```yaml
+logger:
+  level: DEBUG
+```
+
+and prefer keeping at most one extra subscriber attached beyond Home Assistant
+while you do. Watch `Free Heap` / `Min Free Heap` during long debug sessions.
+
 ## Control State Polling
 
 Periodically reads pump control state to detect changes from internal schedules, manual button presses, or external apps. Keeps component state synchronized with pump reality.

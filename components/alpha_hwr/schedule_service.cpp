@@ -159,7 +159,9 @@ bool ScheduleService::poll_state_async(std::function<void(bool)> on_complete) {
     return false;
   }
 
-  ESP_LOGD(TAG, "Polling schedule state (Object 84, SubID 1)...");
+  // Runs on the telemetry cadence; at DEBUG this line alone is one API frame
+  // per subscriber every poll, so keep the routine case at VERBOSE (#127).
+  ESP_LOGV(TAG, "Polling schedule state (Object 84, SubID 1)...");
 
   // Build Class 10 READ request for Object 84, SubID 1
   uint8_t apdu[5];
@@ -181,15 +183,28 @@ bool ScheduleService::poll_state_async(std::function<void(bool)> on_complete) {
         }
 
         if (payload_len >= 13) {
+          // This poll runs on the telemetry cadence, so it is mostly a no-op
+          // confirmation. Only announce an actual transition (or the first
+          // cached value): the callback republishes the schedule text sensors,
+          // and an unconditional republish of identical state is an API frame
+          // per subscriber every poll for nothing (issue #127).
+          const bool changed = !this->schedule_state_cached_ ||
+                               this->schedule_enabled_ != (payload[7] != 0);
+
           this->schedule_enabled_ = (payload[7] != 0);
           this->schedule_state_cached_ = true;
           memcpy(this->overview_structure_, payload + 3, 10);
           this->overview_cached_ = true;
 
-          ESP_LOGD(TAG, "Schedule state updated: %s",
-                   this->schedule_enabled_ ? "enabled" : "disabled");
+          if (changed) {
+            ESP_LOGD(TAG, "Schedule state updated: %s",
+                     this->schedule_enabled_ ? "enabled" : "disabled");
+          } else {
+            ESP_LOGV(TAG, "Schedule state unchanged: %s",
+                     this->schedule_enabled_ ? "enabled" : "disabled");
+          }
 
-          if (this->state_change_callback_) {
+          if (changed && this->state_change_callback_) {
             this->state_change_callback_(this->schedule_enabled_);
           }
           if (on_complete)
