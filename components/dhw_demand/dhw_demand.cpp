@@ -234,7 +234,7 @@ float DhwDemandComponent::detect_pump_on_deterministic_(
     float inlet_deriv, float inlet_psi, float pump_flow,
     float current_deriv, float power_deriv, float head_rate_peak,
     bool suppress_transient_votes,
-    const char **method_out, int *votes_out) {
+    const char **method_out, PumpOnVotes *votes_out) {
   PumpOnVoteThresholds thresholds{
       inlet_pressure_transient_threshold_, inlet_pressure_demand_floor_,
       pump_flow_collapse_threshold_,       motor_current_spike_threshold_,
@@ -437,7 +437,7 @@ void DhwDemandComponent::update() {
         ESP_LOGD(TAG, "Suppressing startup transient votes (pump on for %.1f s)",
                  (now - pump_on_started_ms_) / 1000.0f);
       }
-      int votes = 0;
+      PumpOnVotes votes;
       confidence = detect_pump_on_deterministic_(inlet_deriv, inlet_psi,
                                                    pump_flow, current_deriv,
                                                    power_deriv, head_rate_peak_,
@@ -446,7 +446,9 @@ void DhwDemandComponent::update() {
       if (confidence > 0.0f) {
         // Hydraulic signals are indirect, so a lone vote stays low; each
         // corroborating vote raises it. Matches Python's detection.py:732.
-        demand_level = pump_on_demand_level(votes);
+        // Deliberately the shared count, not the total: demand_level is on the
+        // wire, so the firmware-only head-rate vote must not shift it (#125).
+        demand_level = pump_on_demand_level(votes.shared);
         demand = true;
       } else {
         method = "pump_on_uncertain";

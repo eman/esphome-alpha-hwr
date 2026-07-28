@@ -17,6 +17,7 @@ using esphome::dhw_demand::DemandHold;
 using esphome::dhw_demand::kDefaultPumpOnVoteThresholds;
 using esphome::dhw_demand::pump_off_flow_onset_is_confirmed;
 using esphome::dhw_demand::pump_on_demand_level;
+using esphome::dhw_demand::PumpOnVotes;
 using esphome::dhw_demand::SessionTracker;
 
 int tests_passed = 0;
@@ -309,33 +310,88 @@ void test_pump_on_demand_level_scales_with_votes() {
                    "Two votes yield 0.45");
   TEST_ASSERT_NEAR(pump_on_demand_level(3), 0.60f, 0.0001f,
                    "Three votes yield 0.60");
-  TEST_ASSERT_NEAR(pump_on_demand_level(6), 1.00f, 0.0001f,
-                   "All six votes cap at 1.0 rather than overshooting");
+  TEST_ASSERT_NEAR(pump_on_demand_level(5), 0.90f, 0.0001f,
+                   "All five shared votes reach 0.90, Python's ceiling");
 
   // The vote count the level is derived from must be the same one that drove
   // confidence, so read it back out of the production vote function. Low inlet
   // pressure plus pump-side flow collapse is the 65-of-73 pair from the July
   // evaluation window: two votes.
   const char *method = nullptr;
-  int votes = 0;
+  PumpOnVotes votes;
   float confidence = compute_pump_on_confidence(
       NAN, 3.0f, 0.05f, NAN, NAN, NAN, /*suppress_transient_votes=*/false,
       kDefaultPumpOnVoteThresholds, &method, &votes);
-  TEST_ASSERT(votes == 2, "Low pressure + flow collapse reports two votes");
+  TEST_ASSERT(votes.total == 2,
+              "Low pressure + flow collapse reports two votes");
+  TEST_ASSERT(votes.shared == 2,
+              "Neither is the head-rate vote, so shared matches total");
   TEST_ASSERT_NEAR(confidence, 0.65f, 0.0001f,
                    "Two votes map to 0.65 confidence");
-  TEST_ASSERT_NEAR(pump_on_demand_level(votes), 0.45f, 0.0001f,
+  TEST_ASSERT_NEAR(pump_on_demand_level(votes.shared), 0.45f, 0.0001f,
                    "That same vote count yields a 0.45 demand level");
 
   // votes_out must be left alone when no signal fires, so a caller reusing the
   // variable across ticks cannot publish a stale level as if it were fresh.
-  int untouched = -1;
+  PumpOnVotes untouched{-1, -1};
   confidence = compute_pump_on_confidence(
       NAN, 13.2f, 9.56f, NAN, NAN, NAN, /*suppress_transient_votes=*/false,
       kDefaultPumpOnVoteThresholds, &method, &untouched);
   TEST_ASSERT_NEAR(confidence, 0.0f, 0.0001f, "No signal, no confidence");
-  TEST_ASSERT(untouched == -1,
+  TEST_ASSERT(untouched.total == -1 && untouched.shared == -1,
               "votes_out is not written when no signal voted");
+}
+
+void test_head_rate_vote_moves_confidence_but_not_demand_level() {
+  std::cout << "\n=== Testing Head-Rate Vote Isolation ===" << std::endl;
+
+  // The head-rate vote (signal 6) is firmware-only and permanently so: the
+  // Python detector deprecated its head channel. Publishing demand_level made
+  // that divergence visible on the wire, because the level was derived from the
+  // total vote count (issue #125). It now comes from the shared count.
+  //
+  // Same telemetry twice — low inlet pressure plus pump-side flow collapse,
+  // once with a head-rate spike past the 0.31 m/s threshold and once without.
+  const char *method = nullptr;
+  PumpOnVotes without;
+  float conf_without = compute_pump_on_confidence(
+      NAN, 3.0f, 0.05f, NAN, NAN, NAN, /*suppress_transient_votes=*/false,
+      kDefaultPumpOnVoteThresholds, &method, &without);
+
+  PumpOnVotes with;
+  float conf_with = compute_pump_on_confidence(
+      NAN, 3.0f, 0.05f, NAN, NAN, 2.94f, /*suppress_transient_votes=*/false,
+      kDefaultPumpOnVoteThresholds, &method, &with);
+
+  TEST_ASSERT(with.total == without.total + 1,
+              "The head-rate spike casts one extra vote");
+  TEST_ASSERT(with.shared == without.shared,
+              "That vote is excluded from the shared count");
+
+  // Confidence is firmware-local, so it may reflect the extra evidence.
+  TEST_ASSERT_NEAR(conf_without, 0.65f, 0.0001f, "Two votes: 0.65 confidence");
+  TEST_ASSERT_NEAR(conf_with, 0.80f, 0.0001f,
+                   "The head-rate vote still sharpens confidence to 0.80");
+
+  // demand_level is on the wire and must not move.
+  TEST_ASSERT_NEAR(pump_on_demand_level(with.shared),
+                   pump_on_demand_level(without.shared), 0.0001f,
+                   "demand_level is identical with and without the head vote");
+  TEST_ASSERT_NEAR(pump_on_demand_level(with.shared), 0.45f, 0.0001f,
+                   "Both report the two-shared-vote level Python would report");
+
+  // All five shared signals plus the head vote: the case that used to publish
+  // 1.00, a value Python's five-signal ceiling makes unreachable.
+  PumpOnVotes saturated;
+  float conf_saturated = compute_pump_on_confidence(
+      1.32f, 3.0f, 0.05f, 0.015f, 12.0f, 2.94f,
+      /*suppress_transient_votes=*/false, kDefaultPumpOnVoteThresholds, &method,
+      &saturated);
+  TEST_ASSERT(saturated.total == 6, "All six signals vote");
+  TEST_ASSERT(saturated.shared == 5, "Five of them are shared with Python");
+  TEST_ASSERT_NEAR(conf_saturated, 0.95f, 0.0001f, "Confidence caps at 0.95");
+  TEST_ASSERT_NEAR(pump_on_demand_level(saturated.shared), 0.90f, 0.0001f,
+                   "Saturated demand_level is 0.90, not the old 1.00");
 }
 
 int main() {
@@ -355,6 +411,7 @@ int main() {
   test_sustained_demand_accrues_session();
   test_threshold_jitter_does_not_chatter();
   test_pump_on_demand_level_scales_with_votes();
+  test_head_rate_vote_moves_confidence_but_not_demand_level();
 
   std::cout << "\n==========================================================="
             << std::endl;

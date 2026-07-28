@@ -36,10 +36,27 @@ inline constexpr PumpOnVoteThresholds kDefaultPumpOnVoteThresholds{
     /*pump_head_rate=*/0.31f,              // m/s
 };
 
+// Vote counts from one pump-on evaluation. The two differ by at most one: the
+// head-rate vote (signal 6) is firmware-only, so it is excluded from `shared`.
+//
+// Which count to use depends on whether the quantity is on the wire. Confidence
+// is a firmware-local judgement of its own evidence, so it uses `total` — the
+// firmware knows more here and should say so. demand_level is part of the
+// RFC-006 detector contract and is published for consumers that must behave the
+// same whichever detector is feeding them, so it uses `shared` (issue #125).
+struct PumpOnVotes {
+  int total{0};   // signals 1–6, including the firmware-only head-rate vote
+  int shared{0};  // signals 1–5 only, the ones the Python detector also has
+};
+
 // Estimated draw intensity for a pump-on hydraulic detection, from the number
 // of signals that voted. Matches the Python detector's
 // `demand_level = 0.3 + 0.15 * (signal_count - 1)` (detection.py:732): a lone
-// vote is weak evidence, corroboration strengthens it. Capped at 1.0.
+// vote is weak evidence, corroboration strengthens it.
+//
+// Pass PumpOnVotes::shared, not ::total — see the note there. With five shared
+// signals the range is 0.3–0.9, the same ceiling Python reaches; the 1.0 cap is
+// a guard, not a reachable value.
 //
 // Only meaningful for votes >= 1; the caller never reaches here otherwise.
 inline float pump_on_demand_level(int votes) {
@@ -56,8 +73,9 @@ inline float compute_pump_on_confidence(float inlet_deriv, float inlet_psi,
                                         bool suppress_transient_votes,
                                         const PumpOnVoteThresholds &t,
                                         const char **method_out,
-                                        int *votes_out = nullptr) {
+                                        PumpOnVotes *votes_out = nullptr) {
   int votes = 0;
+  bool head_voted = false;
 
   if (!suppress_transient_votes) {
     // Pressure/current/power/head-rate spikes also occur when the recirculation
@@ -99,11 +117,16 @@ inline float compute_pump_on_confidence(float inlet_deriv, float inlet_psi,
     // head channel outright (7a4c972 dropped the 6-signal entry from its
     // confidence map; SIGNAL_SCHEMA.md lists pressure_head as deprecated), so
     // "add it to Python" is closed. The vote is safe to keep divergent because
-    // the votes >= 1 gate means it can never declare demand on its own — it
-    // only sharpens confidence once a real signal has already fired.
+    // it moves nothing that a cross-detector consumer can see: the votes >= 1
+    // gate means it can never declare demand on its own, and it is excluded
+    // from PumpOnVotes::shared so it cannot shift the published demand_level
+    // either (issue #125). It only sharpens confidence once a real signal has
+    // already fired.
     if (!std::isnan(head_rate_peak) && votes >= 1 &&
-        head_rate_peak > t.pump_head_rate)
+        head_rate_peak > t.pump_head_rate) {
       votes++;
+      head_voted = true;
+    }
   }
 
   if (votes == 0)
@@ -115,7 +138,7 @@ inline float compute_pump_on_confidence(float inlet_deriv, float inlet_psi,
   float confidence = (votes < 7) ? conf_map[votes] : 0.95f;
 
   if (votes_out != nullptr)
-    *votes_out = votes;
+    *votes_out = PumpOnVotes{votes, votes - (head_voted ? 1 : 0)};
   if (method_out != nullptr)
     *method_out = "deterministic_pump_on";
   return confidence;

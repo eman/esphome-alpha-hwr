@@ -98,7 +98,8 @@ class DhwDemandComponent : public PollingComponent {
                                        float pump_flow, float current_deriv,
                                        float power_deriv, float head_rate_peak,
                                        bool suppress_transient_votes,
-                                       const char **method_out, int *votes_out);
+                                       const char **method_out,
+                                       PumpOnVotes *votes_out);
 
   void publish_result_(bool demand, float confidence, float demand_level,
                        const char *method);
