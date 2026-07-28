@@ -2,6 +2,18 @@
 
 ## [Unreleased]
 
+### Changed
+
+- **`hwr-pump.yaml` no longer forces `logger.level: DEBUG`** (issue #139) — the
+  global level and an `esp32_ble_tracker: DEBUG` override were raised to
+  diagnose a BLE connection failure and left in place long after. The
+  `alpha_hwr_base` package already defaults to `INFO` for a documented reason
+  (every log line is an API frame fanned out to every subscriber, and that
+  pressure on the API write path is what rebooted the node in issue #127); the
+  main config was overriding it. The `level:` key is now dropped entirely so
+  the package owns the default, and the three `template.*: WARN` overrides are
+  kept.
+
 ## [0.14.0] - 2026-07-28
 
 ### Added
