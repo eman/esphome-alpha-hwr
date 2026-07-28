@@ -36,16 +36,27 @@ inline constexpr PumpOnVoteThresholds kDefaultPumpOnVoteThresholds{
     /*pump_head_rate=*/0.31f,              // m/s
 };
 
+// Estimated draw intensity for a pump-on hydraulic detection, from the number
+// of signals that voted. Matches the Python detector's
+// `demand_level = 0.3 + 0.15 * (signal_count - 1)` (detection.py:732): a lone
+// vote is weak evidence, corroboration strengthens it. Capped at 1.0.
+//
+// Only meaningful for votes >= 1; the caller never reaches here otherwise.
+inline float pump_on_demand_level(int votes) {
+  return std::min(1.0f, 0.3f + 0.15f * static_cast<float>(votes - 1));
+}
+
 // Signals 1–6 of the pump-on branch: pressure transient, absolute low
 // pressure, pump-side flow collapse, current spike, power spike, and
 // corroborating head-rate spike. Returns 0.0f when no signal voted.
-// method_out is optional — pass nullptr to skip it.
+// method_out and votes_out are optional — pass nullptr to skip either.
 inline float compute_pump_on_confidence(float inlet_deriv, float inlet_psi,
                                         float pump_flow, float current_deriv,
                                         float power_deriv, float head_rate_peak,
                                         bool suppress_transient_votes,
                                         const PumpOnVoteThresholds &t,
-                                        const char **method_out) {
+                                        const char **method_out,
+                                        int *votes_out = nullptr) {
   int votes = 0;
 
   if (!suppress_transient_votes) {
@@ -103,6 +114,8 @@ inline float compute_pump_on_confidence(float inlet_deriv, float inlet_psi,
   static const float conf_map[7] = {0.0f, 0.50f, 0.65f, 0.80f, 0.90f, 0.95f, 0.95f};
   float confidence = (votes < 7) ? conf_map[votes] : 0.95f;
 
+  if (votes_out != nullptr)
+    *votes_out = votes;
   if (method_out != nullptr)
     *method_out = "deterministic_pump_on";
   return confidence;
@@ -164,9 +177,14 @@ struct DemandHold {
 };
 
 // DHW session accounting. A session spans a whole draw even if demand flickers
-// off briefly: it closes only once demand has been absent for gap_ms. Duration
-// is measured to the last demand tick, not to the moment the gap expired, so a
-// trailing quiet period is not counted as part of the draw.
+// off briefly: it closes only once demand has been absent for longer than
+// gap_ms. Duration is measured to the last demand tick, not to the moment the
+// gap expired, so a trailing quiet period is not counted as part of the draw.
+//
+// The comparison is strictly greater, matching the Python SessionAggregator's
+// `gap > self.gap_tolerance_seconds` (session.py:175, :197). A gap of exactly
+// gap_ms keeps the session open in both. Immaterial at a 10 s tick, but the two
+// are meant to be the same rule (issue #125 item 3).
 struct SessionTracker {
   uint32_t gap_ms{0};
   bool active{false};
@@ -191,7 +209,7 @@ struct SessionTracker {
         t.just_started = true;
       }
       last_demand_ms = now_ms;
-    } else if (active && now_ms - last_demand_ms >= gap_ms) {
+    } else if (active && now_ms - last_demand_ms > gap_ms) {
       t.just_ended = true;
       t.ended_duration_s = (last_demand_ms - start_ms) / 1000.0f;
       active = false;

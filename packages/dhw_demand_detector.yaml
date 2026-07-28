@@ -98,6 +98,14 @@ dhw_demand:
     icon: "mdi:gauge"
     entity_category: diagnostic
 
+  # Estimated draw intensity, 0.0–1.0 (not a flow rate). Held at the last live
+  # value while demand_release_seconds is latching.
+  demand_level:
+    id: dhw_demand_level
+    name: "DHW Demand Level"
+    icon: "mdi:water-percent"
+    entity_category: diagnostic
+
   session_duration:
     id: dhw_session_duration
     name: "DHW Session Duration"

@@ -16,6 +16,7 @@ using esphome::dhw_demand::compute_pump_on_confidence;
 using esphome::dhw_demand::DemandHold;
 using esphome::dhw_demand::kDefaultPumpOnVoteThresholds;
 using esphome::dhw_demand::pump_off_flow_onset_is_confirmed;
+using esphome::dhw_demand::pump_on_demand_level;
 using esphome::dhw_demand::SessionTracker;
 
 int tests_passed = 0;
@@ -232,11 +233,20 @@ void test_sustained_demand_accrues_session() {
   TEST_ASSERT_NEAR(tick.live_duration_s, 340.0f, 0.001f,
                    "Duration keeps accruing across a brief lull");
 
-  // Now a gap past the tolerance closes it. Duration is measured to the last
-  // demand tick, not to the moment the gap expired.
+  // A gap of exactly the tolerance does NOT close the session: the comparison
+  // is strictly greater, matching Python's `gap > gap_tolerance_seconds`
+  // (session.py:175). This boundary is the whole of issue #125 item 3.
   t += 60000;
   tick = s.update(false, t);
-  TEST_ASSERT(tick.just_ended, "A 60 s gap ends the session");
+  TEST_ASSERT(!tick.just_ended && s.active,
+              "A gap of exactly the tolerance keeps the session open "
+              "(strictly-greater, matching Python)");
+
+  // One tick past it closes. Duration is measured to the last demand tick, not
+  // to the moment the gap expired.
+  t += 10000;
+  tick = s.update(false, t);
+  TEST_ASSERT(tick.just_ended, "A gap beyond the tolerance ends the session");
   TEST_ASSERT_NEAR(tick.ended_duration_s, 340.0f, 0.001f,
                    "Closed duration excludes the trailing quiet gap");
   TEST_ASSERT_NEAR(tick.live_duration_s, 0.0f, 0.001f,
@@ -287,6 +297,47 @@ void test_threshold_jitter_does_not_chatter() {
               "With release_ms 0 the raw value passes straight through");
 }
 
+void test_pump_on_demand_level_scales_with_votes() {
+  std::cout << "\n=== Testing Pump-On Demand Level Scaling ===" << std::endl;
+
+  // Mirrors Python's `demand_level = 0.3 + 0.15 * (signal_count - 1)`
+  // (detection.py:732), capped at 1.0. Previously the firmware published a
+  // flat 0.3 regardless of vote count (issue #125 item 1).
+  TEST_ASSERT_NEAR(pump_on_demand_level(1), 0.30f, 0.0001f,
+                   "A lone vote yields the 0.3 floor");
+  TEST_ASSERT_NEAR(pump_on_demand_level(2), 0.45f, 0.0001f,
+                   "Two votes yield 0.45");
+  TEST_ASSERT_NEAR(pump_on_demand_level(3), 0.60f, 0.0001f,
+                   "Three votes yield 0.60");
+  TEST_ASSERT_NEAR(pump_on_demand_level(6), 1.00f, 0.0001f,
+                   "All six votes cap at 1.0 rather than overshooting");
+
+  // The vote count the level is derived from must be the same one that drove
+  // confidence, so read it back out of the production vote function. Low inlet
+  // pressure plus pump-side flow collapse is the 65-of-73 pair from the July
+  // evaluation window: two votes.
+  const char *method = nullptr;
+  int votes = 0;
+  float confidence = compute_pump_on_confidence(
+      NAN, 3.0f, 0.05f, NAN, NAN, NAN, /*suppress_transient_votes=*/false,
+      kDefaultPumpOnVoteThresholds, &method, &votes);
+  TEST_ASSERT(votes == 2, "Low pressure + flow collapse reports two votes");
+  TEST_ASSERT_NEAR(confidence, 0.65f, 0.0001f,
+                   "Two votes map to 0.65 confidence");
+  TEST_ASSERT_NEAR(pump_on_demand_level(votes), 0.45f, 0.0001f,
+                   "That same vote count yields a 0.45 demand level");
+
+  // votes_out must be left alone when no signal fires, so a caller reusing the
+  // variable across ticks cannot publish a stale level as if it were fresh.
+  int untouched = -1;
+  confidence = compute_pump_on_confidence(
+      NAN, 13.2f, 9.56f, NAN, NAN, NAN, /*suppress_transient_votes=*/false,
+      kDefaultPumpOnVoteThresholds, &method, &untouched);
+  TEST_ASSERT_NEAR(confidence, 0.0f, 0.0001f, "No signal, no confidence");
+  TEST_ASSERT(untouched == -1,
+              "votes_out is not written when no signal voted");
+}
+
 int main() {
   std::cout << "==========================================================="
             << std::endl;
@@ -303,6 +354,7 @@ int main() {
   test_nan_inputs_do_not_vote();
   test_sustained_demand_accrues_session();
   test_threshold_jitter_does_not_chatter();
+  test_pump_on_demand_level_scales_with_votes();
 
   std::cout << "\n==========================================================="
             << std::endl;

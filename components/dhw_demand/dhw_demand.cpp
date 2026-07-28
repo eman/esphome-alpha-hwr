@@ -63,6 +63,7 @@ void DhwDemandComponent::dump_config() {
   ESP_LOGCONFIG(TAG, "    demand_release: %d s", demand_release_seconds_);
   LOG_BINARY_SENSOR("  ", "Demand", demand_sensor_);
   LOG_SENSOR("  ", "Confidence", confidence_sensor_);
+  LOG_SENSOR("  ", "Demand Level", demand_level_sensor_);
   LOG_SENSOR("  ", "Session Duration", session_duration_sensor_);
   LOG_TEXT_SENSOR("  ", "Detection Method", detection_method_sensor_);
 }
@@ -232,7 +233,7 @@ float DhwDemandComponent::detect_pump_on_deterministic_(
     float inlet_deriv, float inlet_psi, float pump_flow,
     float current_deriv, float power_deriv, float head_rate_peak,
     bool suppress_transient_votes,
-    const char **method_out) {
+    const char **method_out, int *votes_out) {
   PumpOnVoteThresholds thresholds{
       inlet_pressure_transient_threshold_, inlet_pressure_demand_floor_,
       pump_flow_collapse_threshold_,       motor_current_spike_threshold_,
@@ -240,7 +241,7 @@ float DhwDemandComponent::detect_pump_on_deterministic_(
   return compute_pump_on_confidence(inlet_deriv, inlet_psi, pump_flow,
                                     current_deriv, power_deriv, head_rate_peak,
                                     suppress_transient_votes, thresholds,
-                                    method_out);
+                                    method_out, votes_out);
 }
 
 // ── Publish & session helpers ─────────────────────────────────────────────────
@@ -255,6 +256,11 @@ void DhwDemandComponent::publish_result_(bool demand, float confidence,
   if (confidence_sensor_ != nullptr)
     confidence_sensor_->publish_state(confidence * 100.0f);
 
+  // Estimated draw intensity, 0.0–1.0. Part of the RFC-006 detector contract;
+  // the Python detector publishes the same field on its demand entity.
+  if (demand_level_sensor_ != nullptr)
+    demand_level_sensor_->publish_state(demand_level);
+
   if (detection_method_sensor_ != nullptr)
     detection_method_sensor_->publish_state(method);
 
@@ -262,10 +268,14 @@ void DhwDemandComponent::publish_result_(bool demand, float confidence,
   // here to avoid clearing a running session count on a false tick.
 }
 
-void DhwDemandComponent::update_session_(bool demand) {
+void DhwDemandComponent::update_session_(bool demand, uint32_t now) {
   // All the accounting lives in SessionTracker (dhw_demand_logic.h); this is
   // just the ESPHome shell that supplies the clock and publishes the result.
-  SessionTracker::Tick tick = session_.update(demand, millis());
+  //
+  // `now` is the caller's tick timestamp rather than a fresh millis(): the
+  // release hold and the session are deliberately coupled — the tracker sees
+  // the held value — so they must agree on the clock too (issue #125 item 2).
+  SessionTracker::Tick tick = session_.update(demand, now);
 
   if (tick.just_started)
     ESP_LOGI(TAG, "DHW session started");
@@ -417,14 +427,17 @@ void DhwDemandComponent::update() {
         ESP_LOGD(TAG, "Suppressing startup transient votes (pump on for %.1f s)",
                  (now - pump_on_started_ms_) / 1000.0f);
       }
+      int votes = 0;
       confidence = detect_pump_on_deterministic_(inlet_deriv, inlet_psi,
                                                    pump_flow, current_deriv,
                                                    power_deriv, head_rate_peak_,
                                                    suppress_transient_votes,
-                                                   &method);
+                                                   &method, &votes);
       if (confidence > 0.0f) {
+        // Hydraulic signals are indirect, so a lone vote stays low; each
+        // corroborating vote raises it. Matches Python's detection.py:732.
+        demand_level = pump_on_demand_level(votes);
         demand = true;
-        demand_level = 0.3f;  // Moderate: hydraulic signals are indirect
       } else {
         method = "pump_on_uncertain";
         confidence = 0.5f;  // Cannot distinguish demand from recirculation
@@ -445,18 +458,23 @@ void DhwDemandComponent::update() {
   // its threshold would otherwise chatter the binary sensor. Hold the falling
   // edge; the session tracker sees the held value too so the two agree.
   bool raw_demand = demand;
+  if (raw_demand)
+    last_true_demand_level_ = demand_level;
   demand = demand_hold_.update(raw_demand, now);
   if (demand && !raw_demand) {
     // Report the hold rather than whatever the no-demand branch concluded —
     // otherwise the sensor reads ON alongside "deterministic_idle" at 100 %
-    // confidence, which says the exact opposite.
+    // confidence, which says the exact opposite. Carry the last live intensity
+    // through for the same reason: a demand_level of 0.0 while the binary
+    // sensor is ON is that same contradiction in the other field.
     method = "demand_release_hold";
     confidence = 0.5f;
+    demand_level = last_true_demand_level_;
     ESP_LOGD(TAG, "Demand held through release window (raw=OFF)");
   }
 
   publish_result_(demand, confidence, demand_level, method);
-  update_session_(demand);
+  update_session_(demand, now);
 
   // Reset peak tracker for next window (callback will repopulate it between ticks)
   head_rate_peak_ = 0.0f;

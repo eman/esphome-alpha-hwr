@@ -84,8 +84,19 @@ casts no vote).
 | --- | --- | --- | --- |
 | `demand` | binary_sensor | — | Whether a draw is in progress |
 | `confidence` | sensor | — | Detection confidence, 0–100 % |
+| `demand_level` | sensor | — | Estimated draw intensity, 0.0–1.0 |
 | `session_duration` | sensor | — | Live duration of the current draw, seconds |
 | `detection_method` | text_sensor | — | Which rule fired (e.g. `deterministic_flow`) |
+
+`confidence` and `demand_level` answer different questions: confidence is how sure
+the detector is that a draw is happening, `demand_level` is how large it looks.
+The two move independently — a single hydraulic vote is a confident-enough
+detection at a low intensity. Intensity is derived from flow where flow is
+available (`min(1.0, GPM / 2.5)`), and from the vote count on the pump-on
+hydraulic branch (`0.3 + 0.15 × (votes − 1)`, capped at 1.0), matching the Python
+detector. It is not a flow rate and should not be read as one. While
+`demand_release_seconds` is latching, the last live value is republished rather
+than 0.0.
 
 ### Input sensors
 
@@ -139,6 +150,8 @@ dhw_demand:
     name: "DHW Demand"
   confidence:
     name: "DHW Detection Confidence"
+  demand_level:
+    name: "DHW Demand Level"
   session_duration:
     name: "DHW Session Duration"
   detection_method:

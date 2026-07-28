@@ -28,6 +28,7 @@ class DhwDemandComponent : public PollingComponent {
   // ── Output sensor setters ──────────────────────────────────────────────────
   void set_demand_sensor(binary_sensor::BinarySensor *s) { demand_sensor_ = s; }
   void set_confidence_sensor(sensor::Sensor *s) { confidence_sensor_ = s; }
+  void set_demand_level_sensor(sensor::Sensor *s) { demand_level_sensor_ = s; }
   void set_session_duration_sensor(sensor::Sensor *s) {
     session_duration_sensor_ = s;
   }
@@ -97,15 +98,16 @@ class DhwDemandComponent : public PollingComponent {
                                        float pump_flow, float current_deriv,
                                        float power_deriv, float head_rate_peak,
                                        bool suppress_transient_votes,
-                                       const char **method_out);
+                                       const char **method_out, int *votes_out);
 
   void publish_result_(bool demand, float confidence, float demand_level,
                        const char *method);
-  void update_session_(bool demand);
+  void update_session_(bool demand, uint32_t now);
 
   // ── Output sensors ─────────────────────────────────────────────────────────
   binary_sensor::BinarySensor *demand_sensor_{nullptr};
   sensor::Sensor *confidence_sensor_{nullptr};
+  sensor::Sensor *demand_level_sensor_{nullptr};
   sensor::Sensor *session_duration_sensor_{nullptr};
   text_sensor::TextSensor *detection_method_sensor_{nullptr};
 
@@ -191,6 +193,11 @@ class DhwDemandComponent : public PollingComponent {
   // them with injected timestamps; the component only supplies millis().
   DemandHold demand_hold_{};
   SessionTracker session_{};
+
+  // Last demand_level from a tick where demand was raw-true. Republished while
+  // the release hold is latching so intensity does not read 0.0 with the demand
+  // binary sensor ON.
+  float last_true_demand_level_{0.0f};
 };
 
 }  // namespace dhw_demand

@@ -13,6 +13,18 @@
   on, `detection_method` reports a new `demand_release_hold` value rather than
   the branch's own conclusion — otherwise the sensor would read ON alongside
   `deterministic_idle` at 100 % confidence, which says the opposite.
+- **`demand_level` output sensor on `dhw_demand`** (issue #125) — estimated draw
+  intensity, 0.0–1.0. The value was already computed on every tick and threaded
+  through the publish path, but nothing read it; the only consumer was a verbose
+  log line. It is part of the RFC-006 detector contract and the Python detector
+  publishes the same field, so its absence was a contract gap rather than an
+  unused local. Publishing it also required reconciling the pump-on branch, which
+  emitted a flat `0.3` regardless of vote count against Python's
+  `0.3 + 0.15 × (signal_count − 1)` (`detection.py:732`) — that scaling now
+  matches. While `demand_release_seconds` is latching, the last live intensity is
+  republished rather than 0.0, for the same reason `detection_method` reports
+  `demand_release_hold`: a 0.0 intensity alongside an ON demand sensor states the
+  opposite of what the sensor says.
 - **`dhw_demand` documentation** — a
   [DHW Demand Detection](docs/architecture.md#dhw-demand-detection) section
   covering the two-branch design, the signal set and the startup guard, and a
@@ -107,6 +119,18 @@
 
 ### Fixed
 
+- **`dhw_demand` session close was off by one tick against the Python
+  detector** (issue #125). `SessionTracker` closed a session once demand had
+  been absent for `>= session_gap_tolerance_seconds`, while the Python
+  `SessionAggregator` closes on strictly greater (`session.py:175`, `:197`). At
+  exactly the tolerance the firmware closed and Python did not. Both now keep the
+  session open at the boundary. Immaterial at a 10 s tick, but the two are meant
+  to be the same rule.
+- **`dhw_demand` read the clock twice per tick** (issue #125). `update()`
+  captured `millis()` for the release-hold decision and `update_session_()` then
+  called `millis()` again. The two ran microseconds apart so nothing misbehaved,
+  but the hold and the session are deliberately coupled — the tracker sees the
+  held value — so they now share one timestamp.
 - **Single events (and vacations) never ran at the intended time — the
   `begin`/`end` timestamps were written as UTC, but the pump's clock is *local*
   Unix time.** The pump's RTC is local Unix time (GENI `unix_rtc`), while our

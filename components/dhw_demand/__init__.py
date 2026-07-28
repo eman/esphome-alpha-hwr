@@ -33,6 +33,7 @@ CONF_DHW_IN_USE = "dhw_in_use"
 # ── Output sensor keys ───────────────────────────────────────────────────────
 CONF_DEMAND = "demand"
 CONF_CONFIDENCE = "confidence"
+CONF_DEMAND_LEVEL = "demand_level"
 CONF_SESSION_DURATION = "session_duration"
 CONF_DETECTION_METHOD = "detection_method"
 
@@ -65,6 +66,14 @@ CONFIG_SCHEMA = (
                 accuracy_decimals=0,
                 state_class=STATE_CLASS_MEASUREMENT,
                 entity_category=ENTITY_CATEGORY_DIAGNOSTIC,
+            ),
+            # Estimated draw intensity, 0.0–1.0. Part of the RFC-006 detector
+            # contract; the Python detector publishes the same field.
+            cv.Optional(CONF_DEMAND_LEVEL): sensor.sensor_schema(
+                accuracy_decimals=2,
+                state_class=STATE_CLASS_MEASUREMENT,
+                entity_category=ENTITY_CATEGORY_DIAGNOSTIC,
+                icon="mdi:water-percent",
             ),
             cv.Optional(CONF_SESSION_DURATION): sensor.sensor_schema(
                 unit_of_measurement=UNIT_SECOND,
@@ -136,6 +145,10 @@ async def to_code(config):
     if conf_config := config.get(CONF_CONFIDENCE):
         sens = await sensor.new_sensor(conf_config)
         cg.add(var.set_confidence_sensor(sens))
+
+    if level_config := config.get(CONF_DEMAND_LEVEL):
+        sens = await sensor.new_sensor(level_config)
+        cg.add(var.set_demand_level_sensor(sens))
 
     if dur_config := config.get(CONF_SESSION_DURATION):
         sens = await sensor.new_sensor(dur_config)
