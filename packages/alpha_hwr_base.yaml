@@ -101,3 +101,8 @@ alpha_hwr:
   ready_status:
     name: "Pump Ready"
     id: pump_ready
+  # Which build is installed: component source revision + firmware build time.
+  # "Component Version" above is the release version and only changes at a
+  # release, so it cannot tell two builds apart (issue #124).
+  component_build:
+    name: "Component Build"

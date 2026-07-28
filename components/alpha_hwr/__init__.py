@@ -1,3 +1,6 @@
+import os
+import subprocess
+
 import esphome.codegen as cg
 import esphome.config_validation as cv
 from esphome.components import (
@@ -24,6 +27,39 @@ from esphome.const import (
 CODEOWNERS = ["@eman"]
 DEPENDENCIES = ["ble_client"]
 AUTO_LOAD = ["binary_sensor", "sensor", "text_sensor"]
+
+
+def _component_source_revision() -> str:
+    """`git describe` of this component's own source tree, resolved at codegen.
+
+    Identifies which build is installed (issue #124). The release version can't:
+    it only changes at a release, so every build between two releases reports
+    the same value and installs cannot be correlated with behavior changes in
+    Home Assistant history — which is how a three-day outage went unattributed.
+
+    ESPHome clones `github://` sources with git, and a `type: local` source is
+    the developer's working tree, so both resolve here (a shallow clone without
+    tags still yields the commit via `--always`). Any failure — no git, tarball
+    install, unreadable directory — degrades to "unknown"; the firmware build
+    timestamp published alongside it still separates installs. A diagnostic must
+    never fail a build.
+    """
+    try:
+        result = subprocess.run(
+            ["git", "describe", "--tags", "--always", "--dirty"],
+            cwd=os.path.dirname(os.path.abspath(__file__)),
+            capture_output=True,
+            text=True,
+            timeout=5,
+            check=False,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return "unknown"
+    revision = result.stdout.strip()
+    if result.returncode != 0 or not revision:
+        return "unknown"
+    return revision
+
 
 alpha_hwr_ns = cg.esphome_ns.namespace("alpha_hwr")
 AlphaHwrComponent = alpha_hwr_ns.class_(
@@ -52,6 +88,9 @@ CONF_WARNINGS = "warnings"
 CONF_SCHEDULE_HASH = "schedule_hash"
 CONF_SCHEDULE_LAYERS = [f"schedule_layer_{n}" for n in range(5)]
 CONF_CONTROL_MODE = "control_mode"
+CONF_PUMP_RUN_STATE = "pump_run_state"
+CONF_SCHEDULE_STALLED = "schedule_stalled"
+CONF_COMPONENT_BUILD = "component_build"
 CONF_SERIAL_NUMBER = "serial_number"
 CONF_SOFTWARE_VERSION = "software_version"
 CONF_HARDWARE_VERSION = "hardware_version"
@@ -186,6 +225,26 @@ CONFIG_SCHEMA = cv.Schema(
         },
         cv.Optional(CONF_CONTROL_MODE): text_sensor.text_sensor_schema(
             icon="mdi:cog",
+        ),
+        # Run state: off / engaged / scheduled / stalled (issue #124). The only
+        # entity that separates AUTO from STOP while the schedule is enabled —
+        # "Engage Pump" reads off for both.
+        cv.Optional(CONF_PUMP_RUN_STATE): text_sensor.text_sensor_schema(
+            icon="mdi:pump",
+        ),
+        # Which build of this component is installed: source revision + firmware
+        # build timestamp, so HA history can be correlated with installs. The
+        # release version alone only changes at a release (issue #124).
+        cv.Optional(CONF_COMPONENT_BUILD): text_sensor.text_sensor_schema(
+            icon="mdi:source-commit",
+            entity_category=ENTITY_CATEGORY_DIAGNOSTIC,
+        ),
+        # Alarms the illegal "schedule enabled but pump stopped" state, which
+        # silently loses every window (issue #124).
+        cv.Optional(CONF_SCHEDULE_STALLED): binary_sensor.binary_sensor_schema(
+            device_class="problem",
+            icon="mdi:calendar-alert",
+            entity_category=ENTITY_CATEGORY_DIAGNOSTIC,
         ),
         cv.Optional(CONF_SERIAL_NUMBER): text_sensor.text_sensor_schema(
             icon="mdi:barcode",
@@ -360,6 +419,21 @@ async def to_code(config):
     if CONF_CONTROL_MODE in config:
         sens = await text_sensor.new_text_sensor(config[CONF_CONTROL_MODE])
         cg.add(var.set_control_mode_text_sensor(sens))
+
+    if CONF_PUMP_RUN_STATE in config:
+        sens = await text_sensor.new_text_sensor(config[CONF_PUMP_RUN_STATE])
+        cg.add(var.set_pump_run_state_text_sensor(sens))
+
+    if CONF_COMPONENT_BUILD in config:
+        # Resolved here, not at runtime: the firmware has no git. Only when the
+        # entity is configured, so no build pays for a subprocess it won't use.
+        cg.add(var.set_build_revision(_component_source_revision()))
+        sens = await text_sensor.new_text_sensor(config[CONF_COMPONENT_BUILD])
+        cg.add(var.set_component_build_text_sensor(sens))
+
+    if CONF_SCHEDULE_STALLED in config:
+        sens = await binary_sensor.new_binary_sensor(config[CONF_SCHEDULE_STALLED])
+        cg.add(var.set_schedule_stalled_binary_sensor(sens))
 
     if CONF_SERIAL_NUMBER in config:
         sens = await text_sensor.new_text_sensor(config[CONF_SERIAL_NUMBER])

@@ -60,6 +60,28 @@ alpha_hwr:
     name: "Motor Current"
 ```
 
+## Build Identification
+
+Two diagnostic entities answer "what is actually running on this node?", which
+matters when correlating a behavior change with an install (issue #124):
+
+| Entity | Source | Example |
+| --- | --- | --- |
+| `Component Version` | `${component_version}` substitution in the package, published at boot | `0.13.0` |
+| `Component Build` | `component_build:` on `alpha_hwr:` | `v0.13.0-30-g066640c-dirty (built 2026-07-27 20:08:58 -0700)` |
+
+`Component Version` is the **release** version — it changes only when a release
+is cut, so every build between two releases reports the same value. Use it to
+answer "which release is this?".
+
+`Component Build` identifies the **build**. The revision is `git describe` of
+the component's source tree, resolved at compile time: ESPHome clones
+`github://` sources with git and a `type: local` source is your working tree, so
+both resolve (`-dirty` marks uncommitted changes; `unknown` means git wasn't
+available, e.g. a tarball install). The firmware build timestamp is appended, so
+two flashes of the same revision are still distinguishable. Include this value
+in bug reports.
+
 ## Control State Polling
 
 Periodically reads pump control state to detect changes from internal schedules, manual button presses, or external apps. Keeps component state synchronized with pump reality.
@@ -69,6 +91,13 @@ Periodically reads pump control state to detect changes from internal schedules,
 **Customize:** Use any time interval (e.g., `60s`, `15s`)
 
 Polling is non-blocking and doesn't impact other component operations. Failures are logged but don't break anything.
+
+It is also what keeps the `pump_run_state` / `schedule_stalled` entities honest
+and drives the stalled-schedule repair (see
+[schedule-management.md](schedule-management.md#the-stalled-schedule-and-how-it-repairs-itself)).
+With polling set to `0s`, run state is only re-read after the component's own
+writes, so a stall introduced by the Grundfos GO app is not noticed until the
+next reconnect.
 
 ## dhw_demand Component
 

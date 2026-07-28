@@ -94,6 +94,51 @@ int main() {
   TEST_ASSERT(!parse_pump_state("running", &t), "parse unknown -> false");
   TEST_ASSERT(!parse_pump_state("", &t), "parse empty -> false");
 
+  // ---- the dead schedule: detection, repair target, display (issue #124) --
+  // args: is_dead_schedule(pump_auto, schedule_on, stop_event_active)
+  TEST_ASSERT(is_dead_schedule(false, true, false) == true,
+              "STOP + schedule on -> dead schedule (no window can ever run)");
+  TEST_ASSERT(is_dead_schedule(true, true, false) == false,
+              "AUTO + schedule on -> healthy Scheduled, not dead");
+  TEST_ASSERT(is_dead_schedule(false, false, false) == false,
+              "STOP + schedule off -> plain Off, not dead");
+  TEST_ASSERT(is_dead_schedule(true, false, false) == false,
+              "AUTO + schedule off -> Engaged, not dead");
+  // A Stop single-event (vacation) makes a stopped pump the *commanded* state,
+  // so it must never be reported or repaired as dead — repairing would run the
+  // pump through the user's vacation.
+  TEST_ASSERT(is_dead_schedule(false, true, true) == false,
+              "STOP + schedule on during a vacation -> commanded stop, not dead");
+
+  // Repair keeps the schedule intent and engages AUTO (converges to Scheduled);
+  // it must never repair by clearing the schedule, which would discard intent.
+  TEST_ASSERT(dead_schedule_repair_target().pump_enabled == true,
+              "dead-schedule repair engages AUTO");
+  TEST_ASSERT(dead_schedule_repair_target().schedule_enabled == true,
+              "dead-schedule repair keeps the schedule enabled");
+  TEST_ASSERT(!is_dead_schedule(dead_schedule_repair_target().pump_enabled,
+                                dead_schedule_repair_target().schedule_enabled, false),
+              "the repaired state is not dead (converges in one step)");
+
+  // The display is what makes the state visible in HA at all: with the schedule
+  // on, engage_pump_display() is false for BOTH AUTO and STOP, so before this
+  // sensor a dead schedule was byte-identical to a healthy scheduled pump.
+  TEST_ASSERT(engage_pump_display(true, true) == engage_pump_display(false, true),
+              "Engage Pump cannot distinguish AUTO from STOP with the schedule on");
+  TEST_ASSERT(std::string(run_state_display(false, true, false)) == "stalled",
+              "run_state_display STOP+sched -> stalled");
+  TEST_ASSERT(std::string(run_state_display(true, true, false)) == "scheduled",
+              "run_state_display AUTO+sched -> scheduled");
+  TEST_ASSERT(std::string(run_state_display(true, false, false)) == "engaged",
+              "run_state_display AUTO -> engaged");
+  TEST_ASSERT(std::string(run_state_display(false, false, false)) == "off",
+              "run_state_display STOP -> off");
+  TEST_ASSERT(std::string(run_state_display(false, true, true)) == "off",
+              "run_state_display STOP+sched during a vacation -> off (not stalled)");
+  TEST_ASSERT(std::string(run_state_display(false, true, false)) !=
+                  std::string(run_state_display(true, true, false)),
+              "run state distinguishes the dead schedule from a healthy one");
+
   // ---- state_name: inverse of the targets (settled-state reporting) ------
   TEST_ASSERT(std::string(state_name(false, false)) == "off", "state_name STOP -> off");
   TEST_ASSERT(std::string(state_name(false, true)) == "off", "state_name STOP+sched -> off");

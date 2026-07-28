@@ -151,6 +151,16 @@ public:
   void set_ready_binary_sensor(binary_sensor::BinarySensor *sensor) {
     ready_sensor_ = sensor;
   }
+  // Source revision of this component, resolved by `git describe` at codegen
+  // (see __init__.py). Published with the firmware build timestamp as
+  // "Component Build" — the release version only changes at a release, so it
+  // cannot tell two builds apart (issue #124). "unknown" when git is absent.
+  void set_build_revision(const char *revision) { build_revision_ = revision; }
+  // Diagnostic "problem" sensor for the dead schedule (issue #124): schedule
+  // enabled while the pump is STOP, so no window can run.
+  void set_schedule_stalled_binary_sensor(binary_sensor::BinarySensor *sensor) {
+    schedule_stalled_sensor_ = sensor;
+  }
 #ifdef USE_TEXT_SENSOR
   void set_alarms_text_sensor(text_sensor::TextSensor *sensor) {
     sensor_publisher_.set_alarms_text_sensor(sensor);
@@ -167,6 +177,15 @@ public:
   }
   void set_control_mode_text_sensor(text_sensor::TextSensor *sensor) {
     control_mode_sensor_ = sensor;
+  }
+  // "Pump Run State": off / engaged / scheduled / stalled — the one entity that
+  // separates AUTO from STOP once the schedule is on (issue #124).
+  void set_pump_run_state_text_sensor(text_sensor::TextSensor *sensor) {
+    pump_run_state_sensor_ = sensor;
+  }
+  // "Component Build": which build of this component is running (issue #124).
+  void set_component_build_text_sensor(text_sensor::TextSensor *sensor) {
+    component_build_sensor_ = sensor;
   }
   void set_serial_number_text_sensor(text_sensor::TextSensor *sensor) {
     serial_number_sensor_ = sensor;
@@ -274,7 +293,13 @@ private:
   // Ordering avoids a transient dead/gated state: disable the schedule before
   // touching run state when turning it off; set AUTO before enabling the
   // schedule when turning it on (so there is never a STOP+schedule moment).
-  void apply_pump_schedule_target_(const ux::PumpScheduleTarget &target) {
+  // origin/op_id let the autonomous dead-schedule repair (issue #124) report
+  // itself as INTERNAL with a stable op_id, so a client watching write_settled
+  // can tell a self-repair from a switch toggle. The switches keep the
+  // defaults.
+  void apply_pump_schedule_target_(const ux::PumpScheduleTarget &target,
+                                   services::WriteOrigin origin = services::WriteOrigin::ENTITY,
+                                   const std::string &op_id = "") {
     bool cur_schedule = false;
     bool schedule_known = schedule_service_.get_state(&cur_schedule);
     bool pump_known = control_service_.is_pump_enabled_valid();
@@ -284,18 +309,41 @@ private:
     bool write_pump = !pump_known || cur_pump != target.pump_enabled;
 
     if (write_schedule && !target.schedule_enabled) {
-      write_op_service_.submit_set_schedule_enabled(false, "", nullptr,
-                                                    services::WriteOrigin::ENTITY);
+      write_op_service_.submit_set_schedule_enabled(false, op_id, nullptr, origin);
     }
     if (write_pump) {
-      write_op_service_.submit_set_enabled(target.pump_enabled, "", nullptr,
-                                           services::WriteOrigin::ENTITY);
+      write_op_service_.submit_set_enabled(target.pump_enabled, op_id, nullptr, origin);
     }
     if (write_schedule && target.schedule_enabled) {
-      write_op_service_.submit_set_schedule_enabled(true, "", nullptr,
-                                                    services::WriteOrigin::ENTITY);
+      write_op_service_.submit_set_schedule_enabled(true, op_id, nullptr, origin);
     }
   }
+
+  // Publishes the run-state diagnostics and repairs a dead schedule (issue
+  // #124). Called from update() once the caches are synchronized. Defined in
+  // alpha_hwr.cpp.
+  void reconcile_run_state_();
+  // True while an enabled Stop single-event (vacation) covers now — a commanded
+  // stop, so a stopped pump there is expected rather than a dead schedule.
+  bool stop_single_event_active_() const;
+
+  // `git describe` of the component source, filled in at codegen (issue #124).
+  const char *build_revision_{"unknown"};
+
+  // Dead-schedule repair throttle (issue #124). A repair normally follows an
+  // *external* write that created the stall, so the component can never spin on
+  // its own. But a pump that reverts to STOP by itself (an alarm forcing it,
+  // say) would otherwise draw one write every poll forever, so attempts are
+  // spaced by at least this interval — measured across stall episodes and
+  // across reconnects, so neither a relapse nor a flapping BLE link can
+  // multiply them. The first attempt after boot is immediate.
+  static constexpr uint32_t DEAD_SCHEDULE_REPAIR_MIN_INTERVAL_MS = 300000;  // 5 min
+  uint32_t last_repair_attempt_ms_{0};
+  bool repair_attempted_{false};
+  // Last published run-state / stalled values, so both entities publish only on
+  // change (update() runs every 10s).
+  const char *run_state_published_{nullptr};
+  int8_t stalled_published_{-1};  // -1 = never published
 
   // Helper for retrying the initial cache sync
   void do_control_cache_sync(uint32_t gen);
@@ -363,6 +411,7 @@ private:
   // Pairing status sensor (separate from telemetry)
   binary_sensor::BinarySensor *pairing_status_sensor_{nullptr};
   binary_sensor::BinarySensor *ready_sensor_{nullptr};
+  binary_sensor::BinarySensor *schedule_stalled_sensor_{nullptr};
 #ifdef USE_TEXT_SENSOR
   // Schedule display sensors
   text_sensor::TextSensor *schedule_hash_text_sensor_{nullptr};
@@ -371,6 +420,10 @@ private:
                                                          nullptr};
   // Control mode display sensor
   text_sensor::TextSensor *control_mode_sensor_{nullptr};
+  // Run state (off/engaged/scheduled/stalled) — see reconcile_run_state_()
+  text_sensor::TextSensor *pump_run_state_sensor_{nullptr};
+  // Build identity, published once in setup()
+  text_sensor::TextSensor *component_build_sensor_{nullptr};
   // Device information text sensors
   text_sensor::TextSensor *serial_number_sensor_{nullptr};
   text_sensor::TextSensor *software_version_sensor_{nullptr};

@@ -48,6 +48,26 @@ inline bool engage_pump_display(bool pump_auto, bool schedule_on) {
   return pump_auto && !schedule_on;
 }
 
+// The illegal fourth state: the weekly schedule is enabled but operation_mode
+// is STOP, so no window can ever run the pump ("dead schedule"). The two
+// switches cannot produce it — but the raw uncoupled services, the Grundfos GO
+// app, or a state carried over from before this reconciliation existed all can,
+// and it survives reboots because nothing writes run state at boot (issue #124).
+//
+// stop_event_active = a Stop single-event (vacation) currently covers now. That
+// is a *commanded* stop overriding the weekly schedule, so STOP is the expected
+// state there and must not be reported or repaired as dead — otherwise the
+// repair would run the pump through the user's vacation.
+inline bool is_dead_schedule(bool pump_auto, bool schedule_on, bool stop_event_active) {
+  return schedule_on && !pump_auto && !stop_event_active;
+}
+
+// Repairing a dead schedule keeps the user's schedule intent and engages AUTO
+// so windows can actually run — i.e. it converges to Scheduled, the state the
+// schedule flag was asking for. Never repair by clearing the schedule: that
+// would silently discard intent.
+inline PumpScheduleTarget dead_schedule_repair_target() { return {/*pump*/ true, /*schedule*/ true}; }
+
 // Targets for the four switch actions.
 inline PumpScheduleTarget engage_pump_on_target()  { return {/*pump*/ true,  /*schedule*/ false}; }  // Engaged (continuous)
 inline PumpScheduleTarget engage_pump_off_target() { return {/*pump*/ false, /*schedule*/ false}; }  // Off
@@ -76,6 +96,18 @@ inline bool parse_pump_state(const char *s, PumpScheduleTarget *out) {
 inline const char *state_name(bool pump_auto, bool schedule_on) {
   if (!pump_auto) return "off";
   return schedule_on ? "scheduled" : "engaged";
+}
+
+// Display value for the "Pump Run State" diagnostic sensor. Same vocabulary as
+// state_name() plus a distinct "stalled" for the dead schedule, which
+// state_name() must keep reporting as "off" (that is the pump_set_state service
+// contract — off/engaged/scheduled — and callers parse it). Publishing this is
+// what makes a dead schedule visible in Home Assistant at all: "Engage Pump"
+// reads off for both AUTO and STOP once the schedule is on, so before this the
+// dead state was byte-identical to a healthy Scheduled pump (issue #124).
+inline const char *run_state_display(bool pump_auto, bool schedule_on, bool stop_event_active) {
+  if (is_dead_schedule(pump_auto, schedule_on, stop_event_active)) return "stalled";
+  return state_name(pump_auto, schedule_on);
 }
 
 }  // namespace ux

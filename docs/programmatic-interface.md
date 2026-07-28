@@ -71,6 +71,17 @@ Consequences for automations calling these raw services:
   run state is `STOP` (`pump_set_enabled false`) leaves a *dead* schedule: the
   enable flag is set, but the pump stays idle through every window. To run on
   schedule the pump must be `AUTO` — also call `pump_set_enabled true`.
+  The services stay uncoupled, but this end *state* does not persist: the
+  component detects `STOP` + schedule-on with its periodic state poll and
+  converges it to `AUTO` + schedule-on (attempts spaced at least five minutes
+  apart; suppressed while a vacation covers the current time). That repair
+  fires its own `write_settled` event with `origin: "internal"` and
+  `op_id: "auto:dead-schedule-repair"` — filter it out if your automation
+  reacts to pump-enable writes. Watch for it on
+  `sensor.<node_name>_pump_run_state` = `stalled` — see
+  [schedule-management.md](schedule-management.md#the-stalled-schedule-and-how-it-repairs-itself).
+  To hold the pump off from an automation, clear the schedule flag too
+  (`pump_set_state: off`) rather than stopping the pump under an enabled schedule.
 - **Started + schedule disabled** → runs continuously (its control mode, 24/7).
 - **Started + schedule enabled** → runs only inside windows, idle between them.
 
@@ -190,6 +201,7 @@ data:
   status: "clamped"          # accepted | clamped | rejected | invalid | timeout | superseded
   detail: "pump stored 1650" # short reason when relevant
   origin: "service"          # service (API call) | entity (dashboard write)
+                             #   | internal (the component's own self-repair)
   node: "recirc-controller"  # this controller's ESPHome node name
   seq: "42"                  # submission-order sequence number (per boot and per controller)
   # the command's settled values:

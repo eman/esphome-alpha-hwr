@@ -116,6 +116,49 @@ switch reads on only when the mode is engaged *and* not schedule-gated (`AUTO`
 the motor idle — and a stopped pump with the schedule enabled silently never
 ran.)
 
+### The stalled schedule, and how it repairs itself
+
+A fourth combination exists on the pump but not in the model above: **schedule
+enabled while the pump is `STOP`**. Nothing can run — every window passes with
+the motor idle. The two switches can't produce it, but the raw services, the
+Grundfos GO app, and any state predating this reconciliation can, and it used to
+be both permanent (nothing wrote run state at boot, so it survived every reboot)
+and invisible (`Engage Pump` reads off for *both* `AUTO` and `STOP` once the
+schedule is on, so it looked exactly like a healthy **Scheduled** pump).
+
+Two entities now make it observable, and the component repairs it:
+
+| Entity | Values |
+| --- | --- |
+| `sensor.<node_name>_pump_run_state` | `off` / `engaged` / `scheduled` / **`stalled`** |
+| `binary_sensor.<node_name>_schedule_stalled` | `on` while stalled (device class `problem`) |
+
+`Pump Run State` is the only entity that separates `AUTO` from `STOP` while the
+schedule is on. When the state *is* stalled, the component converges it to
+**Scheduled** — it engages `AUTO` and keeps the schedule enabled, honoring the
+intent the schedule flag expresses (it never repairs by clearing the schedule).
+The check runs with the periodic state poll, so it covers both boot and
+out-of-band changes. A repair normally follows an *external* write that created
+the stall, so the component can never spin on its own; as a backstop against a
+pump that reverts to `STOP` by itself, repair attempts are spaced at least five
+minutes apart (measured across stall episodes and reconnects alike, so neither a
+relapse nor a flapping BLE link can multiply them). The first attempt after boot
+is immediate.
+
+The repair announces itself: its `write_settled` event carries
+`origin: "internal"` and `op_id: "auto:dead-schedule-repair"`, so an automation
+can tell the node fixing itself from a user toggling a switch.
+
+One exception: while a **vacation** (a `Stop` single event) covers the current
+time, a stopped pump is the commanded state, so it is neither reported as
+stalled nor repaired — otherwise the repair would run the pump through your
+vacation.
+
+To hold the pump off deliberately, turn the **schedule** off (`Schedule Enabled`
+off, or `pump_set_state: off`); your weekly windows are retained. Stopping the
+pump while leaving the schedule enabled is not a way to pause it — that is the
+stalled state, and it will be repaired.
+
 From an automation, the `pump_set_state` service (`off` | `engaged` |
 `scheduled`) gives you these same three states in one safe call. The raw
 `pump_set_enabled` / `set_schedule_enabled` services stay available for writing
