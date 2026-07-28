@@ -19,6 +19,7 @@
 #include <functional>
 #include <iostream>
 #include <map>
+#include <set>
 #include <string>
 #include <vector>
 
@@ -78,6 +79,12 @@ struct PumpSim {
   bool sched_enabled{false};
   uint8_t layers[5][42] = {};        // 7 days x 6 bytes per layer, zero = disabled
   uint8_t single_events[35][10] = {};
+  // Slot count advertised in the ClockProgramOverview. 35 is the protocol
+  // maximum and the historical default here; real pumps report fewer (5 on
+  // the bench unit). Tests that let slot reads time out must lower this, or
+  // 35 x 3 s of APDU timeouts outruns the 60 s operation watchdog and the
+  // operation settles on the watchdog rather than on the read result.
+  uint8_t max_single_events{35};
   uint8_t last_overview_write[10] = {};
   int overview_writes{0};
 
@@ -94,6 +101,12 @@ struct PumpSim {
   bool honor_dhw_flow_writes{true};   // apply asserted setpoint bytes (issue #107)
   float dhw_flow_clamp_native{0};     // >0: pump caps the stored flow (m³/s)
   bool respond_overview_reads{true};
+  // Drop layer / single-event read replies so the APDU times out (issue #136).
+  // A set of these lets a test model the all-fail and partial-fail cases that
+  // the read-all chains used to report as success.
+  bool respond_layer_reads{true};
+  std::set<uint8_t> drop_layer_reads;        // specific layers to drop
+  bool respond_single_event_reads{true};
   bool honor_layer_writes{true};
   bool honor_overview_writes{true};
   bool ack_class3{true};              // reply to Class 3 START/STOP at all
@@ -261,9 +274,12 @@ struct Harness {
         if (sub == 1) {
           if (sim.respond_overview_reads) inject_overview_frame();
         } else if (sub >= 1000 && sub <= 1004) {
-          inject_layer_frame(static_cast<uint8_t>(sub - 1000));
+          uint8_t layer = static_cast<uint8_t>(sub - 1000);
+          if (sim.respond_layer_reads && !sim.drop_layer_reads.count(layer))
+            inject_layer_frame(layer);
         } else if (sub >= 900 && sub < 935) {
-          inject_single_event_frame(static_cast<uint8_t>(sub - 900));
+          if (sim.respond_single_event_reads)
+            inject_single_event_frame(static_cast<uint8_t>(sub - 900));
         }
       } else if (opspec == 0xB3 && sub >= 1000 && sub <= 1004 && apdu_len >= 53) {
         // Whole-layer write (42 bytes at apdu+11)
@@ -350,7 +366,7 @@ struct Harness {
   }
 
   void inject_overview_frame() {
-    uint8_t overview[10] = {0x8C, 0x23, 0x05, 0x05,
+    uint8_t overview[10] = {0x8C, sim.max_single_events, 0x05, 0x05,
                             static_cast<uint8_t>(sim.sched_enabled ? 1 : 0),
                             0x01, 0x00, 0x00, 0x00, 0x00};
     inject_obj84_frame(0xDA, 0x01, overview, 10);
@@ -1376,6 +1392,113 @@ static void test_refresh_ops() {
   TEST_ASSERT(re && re->event_count == 1, "refresh_single_events counted the event");
 }
 
+// ---------------------------------------------------------------------------
+// Issue #136: the read-all chains used to report success unconditionally.
+// ---------------------------------------------------------------------------
+
+static void test_refresh_schedule_all_layers_fail() {
+  std::cout << "\n=== refresh_schedule: every layer read fails (issue #136) ===" << std::endl;
+  Harness h;
+  h.prime_cache();
+  // Layers hold real data, but the pump answers no layer read at all. Before
+  // #136 the chain reported success with an empty grid, so refresh settled
+  // ACCEPTED and an automation could not tell "schedule is genuinely empty"
+  // from "every read failed".
+  h.sim.layers[2][0] = 1;
+  h.sim.layers[2][2] = 6;
+  h.sim.layers[2][4] = 8;
+  h.sim.respond_layer_reads = false;
+
+  h.write_op.submit_refresh_schedule("rs_fail");
+  h.advance(120000);  // 5 layers x 3 s APDU timeout, with headroom
+
+  TEST_ASSERT(h.events_for("rs_fail") == 1, "exactly one terminal event");
+  const WriteResult *r = h.result_for("rs_fail");
+  TEST_ASSERT(r && r->status == WriteStatus::TIMEOUT,
+              "all layers failing settles TIMEOUT, not ACCEPTED");
+}
+
+static void test_refresh_schedule_partial_layer_failure() {
+  std::cout << "\n=== refresh_schedule: one layer fails (issue #136) ===" << std::endl;
+  Harness h;
+  h.prime_cache();
+  h.sim.layers[0][0] = 1;
+  h.sim.layers[0][2] = 6;
+  h.sim.layers[0][4] = 8;
+  // Layers 0-3 answer; layer 4 does not. A partial grid cannot support the
+  // claim the success boolean makes ("the pump's schedule is now known"), so
+  // the all-or-nothing rule fails the whole read.
+  h.sim.drop_layer_reads.insert(4);
+
+  h.write_op.submit_refresh_schedule("rs_part");
+  h.advance(120000);
+
+  TEST_ASSERT(h.events_for("rs_part") == 1, "exactly one terminal event");
+  const WriteResult *r = h.result_for("rs_part");
+  TEST_ASSERT(r && r->status == WriteStatus::TIMEOUT,
+              "a single failed layer fails the whole read");
+}
+
+static void test_refresh_single_events_all_slots_fail() {
+  std::cout << "\n=== refresh_single_events: every slot read fails (issue #136) ===" << std::endl;
+  Harness h;
+  h.prime_cache();
+  h.sim.max_single_events = 5;  // stay inside the 60 s operation watchdog
+  h.sim.single_events[3][0] = 1;
+  // refresh_single_events has no overview precondition of its own, so cache
+  // the overview first -- otherwise get_max_single_events() falls back to the
+  // 35-slot protocol maximum. Production caches it during the boot chain.
+  h.schedule.poll_state_async(nullptr);
+  h.advance(200);
+  h.sim.respond_single_event_reads = false;
+
+  h.write_op.submit_refresh_single_events("re_fail");
+  h.advance(45000);  // 5 slots x 3 s of timeouts, with headroom
+
+  TEST_ASSERT(h.events_for("re_fail") == 1, "exactly one terminal event");
+  const WriteResult *r = h.result_for("re_fail");
+  TEST_ASSERT(r && r->status == WriteStatus::TIMEOUT,
+              "all slots failing settles TIMEOUT, not ACCEPTED");
+  // Pin the reason: without this the test also passes when the operation
+  // watchdog fires first, which would not exercise the #136 fix at all.
+  TEST_ASSERT(r && r->detail == "single event read failed",
+              "settled on the read result, not the operation watchdog");
+  TEST_ASSERT(!h.schedule.is_single_events_cached(),
+              "a failed read does not mark the single-event cache valid");
+}
+
+static void test_single_event_read_failure_blocks_slot_allocation() {
+  std::cout << "\n=== set_single_event: unread slots must not be allocated (issue #136) ===" << std::endl;
+  Harness h;
+  h.prime_cache();
+  // Slot 0 holds a live, future event on the pump -- but no slot read is
+  // answered. The old code cached an empty vector and set the cached flag, so
+  // find_free_single_event_slot() returned slot 0 and the write clobbered a
+  // live event. That is the class issue #92 exists to prevent.
+  h.sim.single_events[0][0] = 1;
+  h.sim.single_events[0][1] = 0x02;
+  h.sim.single_events[0][6] = 0x00;
+  h.sim.single_events[0][7] = 0x2D;
+  h.sim.single_events[0][8] = 0xC6;
+  h.sim.single_events[0][9] = 0xC0;  // ends 3000000, after the new begin
+  h.sim.max_single_events = 5;  // stay inside the 60 s operation watchdog
+  h.sim.respond_single_event_reads = false;
+
+  h.write_op.submit_set_single_event(1000000, 2000000, "ev_fail");
+  h.advance(45000);
+
+  TEST_ASSERT(h.events_for("ev_fail") == 1, "exactly one terminal event");
+  const WriteResult *r = h.result_for("ev_fail");
+  TEST_ASSERT(r && r->status == WriteStatus::REJECTED,
+              "the write is rejected rather than attempted blind");
+  TEST_ASSERT(r && r->detail == "could not read single events; write not attempted",
+              "settled on the read result, not the operation watchdog");
+  TEST_ASSERT(h.sim.single_events[0][9] == 0xC0,
+              "the live event in slot 0 was not clobbered");
+  TEST_ASSERT(!h.schedule.is_single_events_cached(),
+              "the single-event cache is still not valid");
+}
+
 static void test_mode_strings() {
   std::cout << "\n=== mode string round trip ===" << std::endl;
   ControlMode m;
@@ -1734,6 +1857,10 @@ int main() {
   test_clear_single_event();
   test_schedule_supersede_keys();
   test_refresh_ops();
+  test_refresh_schedule_all_layers_fail();
+  test_refresh_schedule_partial_layer_failure();
+  test_refresh_single_events_all_slots_fail();
+  test_single_event_read_failure_blocks_slot_allocation();
   test_mode_strings();
   test_upload_accepted();
   test_upload_skip_identical();
