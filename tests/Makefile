@@ -21,7 +21,7 @@ test_control_state: test_control_state.cpp
 test_pump_schedule_ux: test_pump_schedule_ux.cpp ../components/alpha_hwr/pump_schedule_ux.h
 	$(CXX) $(CXXFLAGS) test_pump_schedule_ux.cpp -o test_pump_schedule_ux $(LDFLAGS)
 
-test_dhw_demand_logic: test_dhw_demand_logic.cpp ../components/dhw_demand/dhw_demand_votes.h
+test_dhw_demand_logic: test_dhw_demand_logic.cpp ../components/dhw_demand/dhw_demand_logic.h
 	$(CXX) $(CXXFLAGS) test_dhw_demand_logic.cpp -o test_dhw_demand_logic $(LDFLAGS)
 
 test_transport_matching: test_transport_matching.cpp

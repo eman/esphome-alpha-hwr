@@ -1,18 +1,23 @@
 /**
  * Unit tests for DHW demand pump-on hydraulic voting.
  *
- * These tests call the production vote logic directly (dhw_demand_votes.h)
+ * These tests call the production vote logic directly (dhw_demand_logic.h)
  * to verify that recirculation pump startup transients do not falsely
  * declare DHW demand while genuine open-loop signals remain detectable.
  */
 
-#include "../components/dhw_demand/dhw_demand_votes.h"
+#include "../components/dhw_demand/dhw_demand_logic.h"
 #include <cmath>
 #include <iostream>
+#include <string>
 
 using esphome::dhw_demand::apply_dhw_in_use_boost;
 using esphome::dhw_demand::compute_pump_on_confidence;
+using esphome::dhw_demand::DemandHold;
 using esphome::dhw_demand::kDefaultPumpOnVoteThresholds;
+using esphome::dhw_demand::pump_off_flow_onset_is_confirmed;
+using esphome::dhw_demand::pump_on_demand_level;
+using esphome::dhw_demand::SessionTracker;
 
 int tests_passed = 0;
 int tests_failed = 0;
@@ -46,18 +51,6 @@ static float deterministic_pump_on_conf(float inlet_deriv, float inlet_psi,
                                     current_deriv, power_deriv, head_rate_peak,
                                     suppress_transient_votes,
                                     kDefaultPumpOnVoteThresholds, &method);
-}
-
-static bool pump_off_flow_onset_is_confirmed(bool flow_present,
-                                             bool prev_flow_present,
-                                             bool prev_pump_confirmed_off,
-                                             bool onset_corroborating_signal_present) {
-  if (!flow_present)
-    return false;
-  if (!onset_corroborating_signal_present &&
-      (!prev_flow_present || !prev_pump_confirmed_off))
-    return false;
-  return true;
 }
 
 void test_startup_transients_are_suppressed() {
@@ -104,18 +97,21 @@ void test_startup_guard_keeps_open_loop_signals() {
 void test_flow_only_onset_requires_one_full_off_tick() {
   std::cout << "\n=== Testing Flow-Only Onset Confirmation ===" << std::endl;
 
+  // Args: (flow_present, prev_flow_present, onset_corroborating).
   bool first_tick_confirmed =
-      pump_off_flow_onset_is_confirmed(true, false, false, false);
+      pump_off_flow_onset_is_confirmed(true, false, false);
   bool second_tick_confirmed =
-      pump_off_flow_onset_is_confirmed(true, true, true, false);
+      pump_off_flow_onset_is_confirmed(true, true, false);
   bool corroborated_first_tick =
-      pump_off_flow_onset_is_confirmed(true, false, false, true);
+      pump_off_flow_onset_is_confirmed(true, false, true);
+  bool no_flow_passes_through =
+      pump_off_flow_onset_is_confirmed(false, false, false);
+  // Flow already present on the previous tick, whatever the pump was doing then.
+  // Until issue #120 this test hand-mirrored the predicate and asserted the
+  // opposite — the mirror gated on prev_pump_confirmed_off, which production
+  // has never read. prev_flow_present alone is the debounce.
   bool carried_recirc_flow_confirmed =
-      pump_off_flow_onset_is_confirmed(true, true, false, false);
-  // After fix M4: charge-drop now correctly sets onset_corroborating_signal_present,
-  // so it should confirm a first-tick flow onset (matching the intent in AGENTS.md §10.4).
-  bool charge_only_first_tick_confirmed =
-      pump_off_flow_onset_is_confirmed(true, false, true, true);
+      pump_off_flow_onset_is_confirmed(true, true, false);
 
   TEST_ASSERT(!first_tick_confirmed,
               "A brand-new flow-only onset is treated as ambiguous");
@@ -123,10 +119,10 @@ void test_flow_only_onset_requires_one_full_off_tick() {
               "Flow-only demand is accepted after one full off tick");
   TEST_ASSERT(corroborated_first_tick,
               "Corroborated first-tick flow is accepted immediately");
-  TEST_ASSERT(!carried_recirc_flow_confirmed,
-              "Flow carried from a pump-on tick stays ambiguous on the first off tick");
-  TEST_ASSERT(charge_only_first_tick_confirmed,
-              "Charge-drop corroboration confirms a first-tick flow onset");
+  TEST_ASSERT(no_flow_passes_through,
+              "The predicate only gates flow onset; no-flow passes through");
+  TEST_ASSERT(carried_recirc_flow_confirmed,
+              "Flow present on the previous tick is confirmed (2-tick debounce)");
 }
 
 void test_dhw_in_use_boost_is_gated_to_pump_off() {
@@ -162,6 +158,186 @@ void test_ambiguous_flow_onset_does_not_prime_continuation() {
               "Pump-on continuation is not primed by an ambiguous flow-only onset");
 }
 
+void test_nan_inputs_do_not_vote() {
+  std::cout << "\n=== Testing NaN Input Handling (BLE dropouts) ===" << std::endl;
+
+  // Baseline: every input at a value that does NOT vote. Inlet pressure and
+  // pump flow must sit above their floors, since those two vote on absolute
+  // values and fire when low.
+  const float kQuiet[6] = {0.0f, 13.2f, 9.56f, 0.0f, 0.0f, 0.0f};
+
+  TEST_ASSERT_NEAR(
+      deterministic_pump_on_conf(kQuiet[0], kQuiet[1], kQuiet[2], kQuiet[3],
+                                 kQuiet[4], kQuiet[5], false),
+      0.0f, 0.0001f, "Baseline quiet inputs cast no votes");
+
+  // A dropped BLE sensor reads NaN. Each one in turn must neither crash nor
+  // vote — an absent signal is not evidence of demand.
+  const char *names[6] = {"inlet_deriv",   "inlet_psi",   "pump_flow",
+                          "current_deriv", "power_deriv", "head_rate_peak"};
+  for (int i = 0; i < 6; i++) {
+    float a[6] = {kQuiet[0], kQuiet[1], kQuiet[2],
+                  kQuiet[3], kQuiet[4], kQuiet[5]};
+    a[i] = NAN;
+    float conf =
+        deterministic_pump_on_conf(a[0], a[1], a[2], a[3], a[4], a[5], false);
+    TEST_ASSERT_NEAR(conf, 0.0f, 0.0001f,
+                     std::string("NaN ") + names[i] + " does not vote");
+  }
+
+  // Total BLE loss: every input NaN at once.
+  TEST_ASSERT_NEAR(
+      deterministic_pump_on_conf(NAN, NAN, NAN, NAN, NAN, NAN, false), 0.0f,
+      0.0001f, "All-NaN inputs declare no demand");
+
+  // A NaN must not suppress a genuine signal reported by a working sensor.
+  TEST_ASSERT_NEAR(
+      deterministic_pump_on_conf(NAN, 2.5f, NAN, NAN, NAN, NAN, false), 0.50f,
+      0.0001f, "A real low-pressure vote survives NaN on every other input");
+}
+
+void test_sustained_demand_accrues_session() {
+  std::cout << "\n=== Testing Sustained Demand Session Accrual ===" << std::endl;
+
+  SessionTracker s;
+  s.gap_ms = 60000;  // matches session_gap_tolerance_seconds default of 60 s
+
+  uint32_t t = 100000;
+  SessionTracker::Tick tick = s.update(true, t);
+  TEST_ASSERT(tick.just_started, "First demand tick opens a session");
+
+  // A sustained draw: 30 ticks at the 10 s default update interval.
+  bool restarted = false;
+  for (int i = 1; i <= 30; i++) {
+    t += 10000;
+    tick = s.update(true, t);
+    if (tick.just_started)
+      restarted = true;
+  }
+  TEST_ASSERT(!restarted, "A sustained draw does not restart the session");
+  TEST_ASSERT_NEAR(tick.live_duration_s, 300.0f, 0.001f,
+                   "Duration accrues across a 300 s draw");
+  TEST_ASSERT(s.active, "Session is still open during the draw");
+
+  // A gap shorter than the tolerance must not close the session.
+  t += 30000;
+  tick = s.update(false, t);
+  TEST_ASSERT(!tick.just_ended && s.active,
+              "A 30 s lull does not end a session (gap tolerance 60 s)");
+
+  // Demand resumes: still the same session, and the lull counts toward it.
+  t += 10000;
+  tick = s.update(true, t);
+  TEST_ASSERT(!tick.just_started && s.active,
+              "Demand resuming inside the gap continues the same session");
+  TEST_ASSERT_NEAR(tick.live_duration_s, 340.0f, 0.001f,
+                   "Duration keeps accruing across a brief lull");
+
+  // A gap of exactly the tolerance does NOT close the session: the comparison
+  // is strictly greater, matching Python's `gap > gap_tolerance_seconds`
+  // (session.py:175). This boundary is the whole of issue #125 item 3.
+  t += 60000;
+  tick = s.update(false, t);
+  TEST_ASSERT(!tick.just_ended && s.active,
+              "A gap of exactly the tolerance keeps the session open "
+              "(strictly-greater, matching Python)");
+
+  // One tick past it closes. Duration is measured to the last demand tick, not
+  // to the moment the gap expired.
+  t += 10000;
+  tick = s.update(false, t);
+  TEST_ASSERT(tick.just_ended, "A gap beyond the tolerance ends the session");
+  TEST_ASSERT_NEAR(tick.ended_duration_s, 340.0f, 0.001f,
+                   "Closed duration excludes the trailing quiet gap");
+  TEST_ASSERT_NEAR(tick.live_duration_s, 0.0f, 0.001f,
+                   "Live duration reads 0 once the session closes");
+
+  // A later draw opens a genuinely new session.
+  t += 600000;
+  tick = s.update(true, t);
+  TEST_ASSERT(tick.just_started, "A later draw opens a new session");
+  TEST_ASSERT_NEAR(tick.live_duration_s, 0.0f, 0.001f,
+                   "The new session starts its duration from zero");
+}
+
+void test_threshold_jitter_does_not_chatter() {
+  std::cout << "\n=== Testing Threshold Jitter Does Not Chatter ===" << std::endl;
+
+  DemandHold hold;
+  hold.release_ms = 30000;  // demand_release_seconds default
+
+  uint32_t t = 50000;
+  TEST_ASSERT(hold.update(true, t), "Rising edge passes through immediately");
+
+  // An input dithering around its threshold: demand alternates every tick.
+  // The published value must stay continuously true.
+  bool stayed_high = true;
+  for (int i = 0; i < 20; i++) {
+    t += 10000;
+    if (!hold.update(i % 2 == 0, t))
+      stayed_high = false;
+  }
+  TEST_ASSERT(stayed_high,
+              "Alternating demand does not chatter the published output");
+
+  // A clean quiet period longer than the release window does drop it. The last
+  // true tick was one iteration before the loop ended.
+  t += 10000;
+  TEST_ASSERT(hold.update(false, t),
+              "Demand is still held part-way through the release window");
+  t += 30000;
+  TEST_ASSERT(!hold.update(false, t),
+              "Demand releases after a full quiet release window");
+
+  // release_ms == 0 disables the hold entirely.
+  DemandHold passthrough;
+  passthrough.release_ms = 0;
+  TEST_ASSERT(passthrough.update(true, 1000), "Passthrough follows a true tick");
+  TEST_ASSERT(!passthrough.update(false, 1000),
+              "With release_ms 0 the raw value passes straight through");
+}
+
+void test_pump_on_demand_level_scales_with_votes() {
+  std::cout << "\n=== Testing Pump-On Demand Level Scaling ===" << std::endl;
+
+  // Mirrors Python's `demand_level = 0.3 + 0.15 * (signal_count - 1)`
+  // (detection.py:732), capped at 1.0. Previously the firmware published a
+  // flat 0.3 regardless of vote count (issue #125 item 1).
+  TEST_ASSERT_NEAR(pump_on_demand_level(1), 0.30f, 0.0001f,
+                   "A lone vote yields the 0.3 floor");
+  TEST_ASSERT_NEAR(pump_on_demand_level(2), 0.45f, 0.0001f,
+                   "Two votes yield 0.45");
+  TEST_ASSERT_NEAR(pump_on_demand_level(3), 0.60f, 0.0001f,
+                   "Three votes yield 0.60");
+  TEST_ASSERT_NEAR(pump_on_demand_level(6), 1.00f, 0.0001f,
+                   "All six votes cap at 1.0 rather than overshooting");
+
+  // The vote count the level is derived from must be the same one that drove
+  // confidence, so read it back out of the production vote function. Low inlet
+  // pressure plus pump-side flow collapse is the 65-of-73 pair from the July
+  // evaluation window: two votes.
+  const char *method = nullptr;
+  int votes = 0;
+  float confidence = compute_pump_on_confidence(
+      NAN, 3.0f, 0.05f, NAN, NAN, NAN, /*suppress_transient_votes=*/false,
+      kDefaultPumpOnVoteThresholds, &method, &votes);
+  TEST_ASSERT(votes == 2, "Low pressure + flow collapse reports two votes");
+  TEST_ASSERT_NEAR(confidence, 0.65f, 0.0001f,
+                   "Two votes map to 0.65 confidence");
+  TEST_ASSERT_NEAR(pump_on_demand_level(votes), 0.45f, 0.0001f,
+                   "That same vote count yields a 0.45 demand level");
+
+  // votes_out must be left alone when no signal fires, so a caller reusing the
+  // variable across ticks cannot publish a stale level as if it were fresh.
+  int untouched = -1;
+  confidence = compute_pump_on_confidence(
+      NAN, 13.2f, 9.56f, NAN, NAN, NAN, /*suppress_transient_votes=*/false,
+      kDefaultPumpOnVoteThresholds, &method, &untouched);
+  TEST_ASSERT_NEAR(confidence, 0.0f, 0.0001f, "No signal, no confidence");
+  TEST_ASSERT(untouched == -1,
+              "votes_out is not written when no signal voted");
+}
+
 int main() {
   std::cout << "==========================================================="
             << std::endl;
@@ -175,6 +351,10 @@ int main() {
   test_flow_only_onset_requires_one_full_off_tick();
   test_dhw_in_use_boost_is_gated_to_pump_off();
   test_ambiguous_flow_onset_does_not_prime_continuation();
+  test_nan_inputs_do_not_vote();
+  test_sustained_demand_accrues_session();
+  test_threshold_jitter_does_not_chatter();
+  test_pump_on_demand_level_scales_with_votes();
 
   std::cout << "\n==========================================================="
             << std::endl;

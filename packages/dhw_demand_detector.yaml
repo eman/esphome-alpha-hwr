@@ -98,6 +98,14 @@ dhw_demand:
     icon: "mdi:gauge"
     entity_category: diagnostic
 
+  # Estimated draw intensity, 0.0–1.0 (not a flow rate). Held at the last live
+  # value while demand_release_seconds is latching.
+  demand_level:
+    id: dhw_demand_level
+    name: "DHW Demand Level"
+    icon: "mdi:water-percent"
+    entity_category: diagnostic
+
   session_duration:
     id: dhw_session_duration
     name: "DHW Session Duration"
@@ -127,3 +135,7 @@ dhw_demand:
   pump_head_rate_threshold: 0.31        # m/s (corroborating vote; only fires when pump is on)
   flow_latch_seconds: 30
   session_gap_tolerance_seconds: 60
+  # How long demand stays latched after the last positive tick. Stops an input
+  # dithering around its threshold from chattering the demand binary sensor.
+  # Set to 0 to disable and publish the raw per-tick result.
+  demand_release_seconds: 30

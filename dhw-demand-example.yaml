@@ -34,17 +34,14 @@ substitutions:
   tank_lower_temp_entity: sensor.your_tank_lower_temperature  # ← CHANGE to your tank temp entity
   dhw_charge_entity:      sensor.your_dhw_charge              # ← CHANGE to your DHW charge entity
 
+# The packages declare their own matching `external_components` at the same tag,
+# so no separate block is needed here. Do not add one pointing at a local
+# checkout: a release-pinned package against a working-tree component disagree
+# whenever a config key changes between releases, and the config stops
+# validating.
 packages:
   alpha_hwr: github://eman/esphome-alpha-hwr/packages/alpha_hwr_pairing.yaml@v0.13.0
   dhw_demand: github://eman/esphome-alpha-hwr/packages/dhw_demand_detector.yaml@v0.13.0
-
-# Override component source to use local development files instead of GitHub cache.
-# Remove or comment this block when deploying from the published GitHub packages.
-external_components:
-  - source:
-      type: local
-      path: components
-    components: [alpha_hwr, dhw_demand]
 
 esp32:
   board: esp32dev
