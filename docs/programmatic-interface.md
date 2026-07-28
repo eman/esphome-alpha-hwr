@@ -71,6 +71,14 @@ Consequences for automations calling these raw services:
   run state is `STOP` (`pump_set_enabled false`) leaves a *dead* schedule: the
   enable flag is set, but the pump stays idle through every window. To run on
   schedule the pump must be `AUTO` — also call `pump_set_enabled true`.
+  The services stay uncoupled, but this end *state* does not persist: the
+  component detects `STOP` + schedule-on with its periodic state poll and
+  converges it to `AUTO` + schedule-on (once per BLE connection; suppressed
+  while a vacation covers the current time). Watch for it on
+  `sensor.<node_name>_pump_run_state` = `stalled` — see
+  [schedule-management.md](schedule-management.md#the-stalled-schedule-and-how-it-repairs-itself).
+  To hold the pump off from an automation, clear the schedule flag too
+  (`pump_set_state: off`) rather than stopping the pump under an enabled schedule.
 - **Started + schedule disabled** → runs continuously (its control mode, 24/7).
 - **Started + schedule enabled** → runs only inside windows, idle between them.
 

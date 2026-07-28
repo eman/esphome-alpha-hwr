@@ -1,6 +1,8 @@
 #include "alpha_hwr.h"
 #include "frame_parser.h"
 #include "telemetry_decoder.h"
+#include "esphome/core/application.h"  // App.get_build_time_string() for "Component Build"
+#include "esphome/core/version.h"      // ESPHOME_VERSION_CODE / VERSION_CODE
 #include <cinttypes>
 
 namespace esphome {
@@ -24,6 +26,30 @@ void AlphaHwrComponent::setup() {
   if (this->ready_sensor_) {
     this->ready_sensor_->publish_state(false);
   }
+
+#ifdef USE_TEXT_SENSOR
+  // "Component Build" (issue #124): which build of this component is running —
+  // the source revision resolved by `git describe` at codegen, plus the
+  // firmware build timestamp, which separates two flashes of the same revision.
+  // The release version can't do this: it changes only at a release, so every
+  // post-release build reports the same value and a behavior change cannot be
+  // pinned to an install from Home Assistant history.
+  if (this->component_build_sensor_ != nullptr) {
+#if defined(ESPHOME_VERSION_CODE) && ESPHOME_VERSION_CODE >= VERSION_CODE(2026, 1, 0)
+    char build_time[Application::BUILD_TIME_STR_SIZE];
+    App.get_build_time_string(build_time);
+#else
+    // get_build_time_string() landed in 2026.1; older cores only have the
+    // (now deprecated) std::string accessor.
+    const std::string build_time_str = App.get_compilation_time();
+    const char *build_time = build_time_str.c_str();
+#endif
+    char build_id[96];
+    snprintf(build_id, sizeof(build_id), "%s (built %s)", this->build_revision_, build_time);
+    this->component_build_sensor_->publish_state(build_id);
+    ESP_LOGI(TAG, "Component build: %s", build_id);
+  }
+#endif
 
   // Initialize BLE connection manager
   ble_manager_.set_ble_client(parent_);
@@ -69,6 +95,9 @@ void AlphaHwrComponent::setup() {
     // Invalidate caches so old values don't falsely satisfy ready gating
     this->control_service_.invalidate_cache();
     this->schedule_service_.invalidate_cache();
+    // Re-arm the dead-schedule repair for the next connection (issue #124), so
+    // a repair that was lost with the link is retried once we are back.
+    this->dead_schedule_repair_done_ = false;
     // Terminal-event every pending write operation (issue #92): a client
     // waiting on a settle event must never be left hanging across a BLE drop.
     this->write_op_service_.on_disconnect();
@@ -415,6 +444,83 @@ void AlphaHwrComponent::evaluate_link_status() {
 #endif
 }
 
+// True when an enabled Stop single-event (a vacation) covers *now*. During one
+// the pump is commanded to stay stopped, so STOP + schedule-on is expected, not
+// a dead schedule (issue #124). Single-event timestamps are UTC epoch seconds.
+// Unknown time or an uncached single-event list answers false: the dead-schedule
+// repair matters more than a hypothetical vacation we cannot confirm, and the
+// repair is capped at one attempt per connection either way.
+bool AlphaHwrComponent::stop_single_event_active_() const {
+  if (!schedule_service_.is_single_events_cached()) return false;
+  time_t now = ::time(nullptr);
+#ifdef USE_TIME
+  if (this->time_id_ != nullptr) now = this->time_id_->now().timestamp;
+#endif
+  if (now < 1609459200) return false;  // System clock not synced yet
+  const uint32_t now_ts = static_cast<uint32_t>(now);
+  for (const auto &ev : schedule_service_.get_cached_single_events()) {
+    if (!ev.enabled || ev.action != 0x01) continue;  // 0x01 = Stop (vacation)
+    if (ev.begin_timestamp <= now_ts && now_ts < ev.end_timestamp) return true;
+  }
+  return false;
+}
+
+// Run-state reconciliation (issue #124). Two jobs, both driven off the polled
+// caches so they also catch out-of-band changes (issue #54's 30s control poll):
+//
+//   1. Publish the run state (off/engaged/scheduled/stalled) and the "schedule
+//      stalled" problem flag. Needed because "Engage Pump" reads AUTO &&
+//      !schedule, so with the schedule on it shows off for BOTH AUTO and STOP —
+//      a dead schedule was indistinguishable from a healthy scheduled pump.
+//   2. Repair the dead schedule. STOP + schedule-on can never run a window, and
+//      apply_pump_schedule_target_() is only reachable from command paths, so
+//      before this the state survived every reboot. Converging it to Scheduled
+//      keeps the schedule intent and engages AUTO so windows run again.
+//
+// The repair fires at most once per BLE connection and only when the caches are
+// valid and no write is in flight, so it cannot fight a user command or spin.
+void AlphaHwrComponent::reconcile_run_state_() {
+  bool schedule_on = false;
+  if (!control_service_.is_pump_enabled_valid() ||
+      !schedule_service_.get_state(&schedule_on)) {
+    return;  // Not cached yet — nothing honest to publish or repair.
+  }
+  const bool pump_auto = control_service_.is_pump_enabled();
+  const bool stop_event = this->stop_single_event_active_();
+  const bool stalled = ux::is_dead_schedule(pump_auto, schedule_on, stop_event);
+
+  const char *run_state = ux::run_state_display(pump_auto, schedule_on, stop_event);
+  if (run_state_published_ == nullptr || std::strcmp(run_state_published_, run_state) != 0) {
+    run_state_published_ = run_state;
+#ifdef USE_TEXT_SENSOR
+    if (this->pump_run_state_sensor_ != nullptr) {
+      this->pump_run_state_sensor_->publish_state(run_state);
+    }
+#endif
+    ESP_LOGD(TAG, "Pump run state: %s", run_state);
+  }
+  if (this->schedule_stalled_sensor_ != nullptr &&
+      this->stalled_published_ != static_cast<int8_t>(stalled)) {
+    this->stalled_published_ = static_cast<int8_t>(stalled);
+    this->schedule_stalled_sensor_->publish_state(stalled);
+  }
+
+  if (!stalled) {
+    // Healthy again (repaired here, or by a command / the app): re-arm so a
+    // later relapse on this same connection is still repaired.
+    this->dead_schedule_repair_done_ = false;
+    return;
+  }
+  if (this->dead_schedule_repair_done_ || write_op_service_.pending_count() > 0) {
+    return;
+  }
+  this->dead_schedule_repair_done_ = true;
+  ESP_LOGW(TAG,
+           "Schedule is enabled but the pump is STOP - no window can run it. "
+           "Engaging AUTO to repair (issue #124).");
+  this->apply_pump_schedule_target_(ux::dead_schedule_repair_target());
+}
+
 bool AlphaHwrComponent::is_state_synchronized() const {
   if (!session_.is_ready() || !initial_data_read_done_) return false;
   return control_service_.is_cache_valid() && schedule_service_.is_overview_cache_valid();
@@ -599,6 +705,13 @@ void AlphaHwrComponent::update() {
       if (ready_sensor_ && !ready_sensor_->state && is_state_synchronized()) {
         ESP_LOGI(TAG, "Cache synchronized: pump is fully READY for control");
         ready_sensor_->publish_state(true);
+      }
+
+      // Publish the run state and repair a dead schedule (issue #124). Gated on
+      // full sync so it never acts on a half-populated cache; this is also the
+      // only path that reconciles run state at boot.
+      if (is_state_synchronized()) {
+        reconcile_run_state_();
       }
     }
 

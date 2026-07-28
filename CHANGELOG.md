@@ -34,6 +34,24 @@
   of the six pump-on inputs in turn (BLE dropouts must not crash or vote),
   sustained multi-tick draws with session-duration accrual across brief lulls,
   and threshold jitter not chattering the output.
+- **`Component Build` entity** (issue #124) — identifies the installed *build*,
+  not just the release: `git describe` of the component's source tree (resolved
+  at codegen — ESPHome clones `github://` sources with git, and a `type: local`
+  source is your working tree) plus the firmware build timestamp, e.g.
+  `v0.13.0-30-g066640c-dirty (built 2026-07-27 20:08:58 -0700)`. `Component
+  Version` reports the release version and so is identical across every build
+  between two releases, which made it impossible to pin a behavior change to an
+  install from Home Assistant history — how a three-day outage went unattributed.
+  Degrades to `unknown` when git is unavailable (tarball install); the build
+  timestamp still separates installs. Optional (`component_build:` on
+  `alpha_hwr:`) and included in both packages; no subprocess runs unless it is
+  configured. See [docs/configuration.md](docs/configuration.md#build-identification).
+- **`Pump Run State` and `Schedule Stalled` entities** (issue #124) — the run
+  state as `off` / `engaged` / `scheduled` / `stalled`, plus a diagnostic
+  `problem` binary sensor that alarms on `stalled`. `Pump Run State` is the only
+  entity that distinguishes `AUTO` from `STOP` while the schedule is enabled,
+  since `Engage Pump` reads off for both. Both are optional entries on the
+  `alpha_hwr:` component and are included in `packages/alpha_hwr_pairing.yaml`.
 - **`pump_set_state` service** — a coupled run-state + schedule selector for
   automations, the programmatic sibling of the `Engage Pump` / `Schedule
   Enabled` switches. Takes `state: off | engaged | scheduled` and reaches that
@@ -119,6 +137,24 @@
 
 ### Fixed
 
+- **A stalled schedule (`STOP` + schedule enabled) is now detected, visible, and
+  repaired** (issue #124, regression from the #121 reconciliation). That
+  combination can never run — every window passes with the motor idle — and it
+  was both permanent and invisible: the reconciliation ran only from command
+  paths, so nothing reconciled run state at boot and the state survived every
+  reboot, while `Engage Pump` reads off for *both* `AUTO` and `STOP` once the
+  schedule is on, making a stalled pump byte-identical to a healthy scheduled one
+  in Home Assistant (the pre-#121 switch tracked raw `operation_mode`, so the
+  rename removed the last observable). A real installation sat stopped for three
+  days with every health entity green. The check now runs with the periodic state
+  poll — so it covers boot *and* out-of-band changes made by the Grundfos GO app
+  or the raw services — and converges the pump to **Scheduled** (`AUTO` +
+  schedule on), keeping the schedule intent rather than clearing it. It is capped
+  at one repair attempt per BLE connection so it can never become a write loop,
+  and it is suppressed while a vacation (`Stop` single event) covers the current
+  time, where a stopped pump is the commanded state. To hold the pump off, turn
+  the schedule off (`pump_set_state: off`) — stopping the pump under an enabled
+  schedule is the stalled state, not a pause.
 - **`dhw_demand` session close was off by one tick against the Python
   detector** (issue #125). `SessionTracker` closed a session once demand had
   been absent for `>= session_gap_tolerance_seconds`, while the Python

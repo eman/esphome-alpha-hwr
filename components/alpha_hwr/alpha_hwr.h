@@ -151,6 +151,16 @@ public:
   void set_ready_binary_sensor(binary_sensor::BinarySensor *sensor) {
     ready_sensor_ = sensor;
   }
+  // Source revision of this component, resolved by `git describe` at codegen
+  // (see __init__.py). Published with the firmware build timestamp as
+  // "Component Build" — the release version only changes at a release, so it
+  // cannot tell two builds apart (issue #124). "unknown" when git is absent.
+  void set_build_revision(const char *revision) { build_revision_ = revision; }
+  // Diagnostic "problem" sensor for the dead schedule (issue #124): schedule
+  // enabled while the pump is STOP, so no window can run.
+  void set_schedule_stalled_binary_sensor(binary_sensor::BinarySensor *sensor) {
+    schedule_stalled_sensor_ = sensor;
+  }
 #ifdef USE_TEXT_SENSOR
   void set_alarms_text_sensor(text_sensor::TextSensor *sensor) {
     sensor_publisher_.set_alarms_text_sensor(sensor);
@@ -167,6 +177,15 @@ public:
   }
   void set_control_mode_text_sensor(text_sensor::TextSensor *sensor) {
     control_mode_sensor_ = sensor;
+  }
+  // "Pump Run State": off / engaged / scheduled / stalled — the one entity that
+  // separates AUTO from STOP once the schedule is on (issue #124).
+  void set_pump_run_state_text_sensor(text_sensor::TextSensor *sensor) {
+    pump_run_state_sensor_ = sensor;
+  }
+  // "Component Build": which build of this component is running (issue #124).
+  void set_component_build_text_sensor(text_sensor::TextSensor *sensor) {
+    component_build_sensor_ = sensor;
   }
   void set_serial_number_text_sensor(text_sensor::TextSensor *sensor) {
     serial_number_sensor_ = sensor;
@@ -297,6 +316,26 @@ private:
     }
   }
 
+  // Publishes the run-state diagnostics and repairs a dead schedule (issue
+  // #124). Called from update() once the caches are synchronized. Defined in
+  // alpha_hwr.cpp.
+  void reconcile_run_state_();
+  // True while an enabled Stop single-event (vacation) covers now — a commanded
+  // stop, so a stopped pump there is expected rather than a dead schedule.
+  bool stop_single_event_active_() const;
+
+  // `git describe` of the component source, filled in at codegen (issue #124).
+  const char *build_revision_{"unknown"};
+
+  // One repair attempt per BLE connection: enough to fix a state that survived
+  // a reboot, but it can never become a write loop against a pump that keeps
+  // reverting. Cleared on disconnect so a reconnect re-arms it.
+  bool dead_schedule_repair_done_{false};
+  // Last published run-state / stalled values, so both entities publish only on
+  // change (update() runs every 10s).
+  const char *run_state_published_{nullptr};
+  int8_t stalled_published_{-1};  // -1 = never published
+
   // Helper for retrying the initial cache sync
   void do_control_cache_sync(uint32_t gen);
 
@@ -363,6 +402,7 @@ private:
   // Pairing status sensor (separate from telemetry)
   binary_sensor::BinarySensor *pairing_status_sensor_{nullptr};
   binary_sensor::BinarySensor *ready_sensor_{nullptr};
+  binary_sensor::BinarySensor *schedule_stalled_sensor_{nullptr};
 #ifdef USE_TEXT_SENSOR
   // Schedule display sensors
   text_sensor::TextSensor *schedule_hash_text_sensor_{nullptr};
@@ -371,6 +411,10 @@ private:
                                                          nullptr};
   // Control mode display sensor
   text_sensor::TextSensor *control_mode_sensor_{nullptr};
+  // Run state (off/engaged/scheduled/stalled) — see reconcile_run_state_()
+  text_sensor::TextSensor *pump_run_state_sensor_{nullptr};
+  // Build identity, published once in setup()
+  text_sensor::TextSensor *component_build_sensor_{nullptr};
   // Device information text sensors
   text_sensor::TextSensor *serial_number_sensor_{nullptr};
   text_sensor::TextSensor *software_version_sensor_{nullptr};

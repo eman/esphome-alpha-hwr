@@ -106,11 +106,26 @@ alpha_hwr:
    ready_status:
      name: "Pump Ready"
 
+   # Which build is installed: component source revision + firmware build time.
+   # "Component Version" below is the release version and only changes at a
+   # release, so it cannot tell two builds apart (issue #124).
+   component_build:
+     name: "Component Build"
+
    # Pump Link Status (coarse connection health) + latched last-failure detail
    pump_link_status:
      name: "Pump Link Status"
    pump_last_link_failure:
      name: "Pump Link Fault"
+
+   # Run state, and the alarm for the illegal "schedule on but pump stopped"
+   # state that silently loses every window (issue #124). "Engage Pump" reads
+   # off for both AUTO and STOP once the schedule is on, so these are the only
+   # entities that distinguish a scheduled pump from a stalled one.
+   pump_run_state:
+     name: "Pump Run State"
+   schedule_stalled:
+     name: "Schedule Stalled"
 
    # Enhanced Electrical (requires pairing)
    voltage:
