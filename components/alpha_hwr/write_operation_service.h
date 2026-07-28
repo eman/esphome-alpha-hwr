@@ -56,8 +56,12 @@ enum class WriteStatus : uint8_t {
 
 /** Where a write operation originated (reported in the settle event). */
 enum class WriteOrigin : uint8_t {
-  SERVICE,  // programmatic API call (op_id may still be empty)
-  ENTITY,   // dashboard entity / helper button
+  SERVICE,   // programmatic API call (op_id may still be empty)
+  ENTITY,    // dashboard entity / helper button
+  INTERNAL,  // autonomous self-repair by the component; nobody asked for it
+             // (issue #124's dead-schedule reconciliation). Distinct so a
+             // client watching write_settled can tell "the node fixed itself"
+             // from a write it or a user actually made.
 };
 
 const char *write_command_to_string(WriteCommand cmd);

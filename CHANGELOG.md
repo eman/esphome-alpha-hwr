@@ -34,6 +34,11 @@
   of the six pump-on inputs in turn (BLE dropouts must not crash or vote),
   sustained multi-tick draws with session-duration accrual across brief lulls,
   and threshold jitter not chattering the output.
+- **`internal` write origin** — the `write_settled` event's `origin` field can
+  now read `internal` alongside `service` and `entity`, marking a write the
+  component made on its own (currently only the dead-schedule repair, issue
+  #124). Clients that switch on `origin` should treat an unknown value as
+  not-mine rather than assuming `service`.
 - **`Component Build` entity** (issue #124) — identifies the installed *build*,
   not just the release: `git describe` of the component's source tree (resolved
   at codegen — ESPHome clones `github://` sources with git, and a `type: local`
@@ -149,10 +154,15 @@
   days with every health entity green. The check now runs with the periodic state
   poll — so it covers boot *and* out-of-band changes made by the Grundfos GO app
   or the raw services — and converges the pump to **Scheduled** (`AUTO` +
-  schedule on), keeping the schedule intent rather than clearing it. It is capped
-  at one repair attempt per BLE connection so it can never become a write loop,
-  and it is suppressed while a vacation (`Stop` single event) covers the current
-  time, where a stopped pump is the commanded state. To hold the pump off, turn
+  schedule on), keeping the schedule intent rather than clearing it. A repair
+  normally follows an external write that created the stall, so the component
+  cannot spin on its own; as a backstop against a pump that reverts to `STOP` by
+  itself, attempts are spaced at least five minutes apart (across stall episodes
+  and reconnects alike). It is suppressed while a vacation (`Stop` single event)
+  covers the current time, where a stopped pump is the commanded state. The
+  repair reports itself with the new `origin: "internal"` and
+  `op_id: "auto:dead-schedule-repair"` on its `write_settled` event, so an
+  automation can distinguish the node repairing itself from a user action. To hold the pump off, turn
   the schedule off (`pump_set_state: off`) — stopping the pump under an enabled
   schedule is the stalled state, not a pause.
 - **`dhw_demand` session close was off by one tick against the Python

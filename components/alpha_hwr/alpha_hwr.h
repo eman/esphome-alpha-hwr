@@ -293,7 +293,13 @@ private:
   // Ordering avoids a transient dead/gated state: disable the schedule before
   // touching run state when turning it off; set AUTO before enabling the
   // schedule when turning it on (so there is never a STOP+schedule moment).
-  void apply_pump_schedule_target_(const ux::PumpScheduleTarget &target) {
+  // origin/op_id let the autonomous dead-schedule repair (issue #124) report
+  // itself as INTERNAL with a stable op_id, so a client watching write_settled
+  // can tell a self-repair from a switch toggle. The switches keep the
+  // defaults.
+  void apply_pump_schedule_target_(const ux::PumpScheduleTarget &target,
+                                   services::WriteOrigin origin = services::WriteOrigin::ENTITY,
+                                   const std::string &op_id = "") {
     bool cur_schedule = false;
     bool schedule_known = schedule_service_.get_state(&cur_schedule);
     bool pump_known = control_service_.is_pump_enabled_valid();
@@ -303,16 +309,13 @@ private:
     bool write_pump = !pump_known || cur_pump != target.pump_enabled;
 
     if (write_schedule && !target.schedule_enabled) {
-      write_op_service_.submit_set_schedule_enabled(false, "", nullptr,
-                                                    services::WriteOrigin::ENTITY);
+      write_op_service_.submit_set_schedule_enabled(false, op_id, nullptr, origin);
     }
     if (write_pump) {
-      write_op_service_.submit_set_enabled(target.pump_enabled, "", nullptr,
-                                           services::WriteOrigin::ENTITY);
+      write_op_service_.submit_set_enabled(target.pump_enabled, op_id, nullptr, origin);
     }
     if (write_schedule && target.schedule_enabled) {
-      write_op_service_.submit_set_schedule_enabled(true, "", nullptr,
-                                                    services::WriteOrigin::ENTITY);
+      write_op_service_.submit_set_schedule_enabled(true, op_id, nullptr, origin);
     }
   }
 
@@ -327,10 +330,16 @@ private:
   // `git describe` of the component source, filled in at codegen (issue #124).
   const char *build_revision_{"unknown"};
 
-  // One repair attempt per BLE connection: enough to fix a state that survived
-  // a reboot, but it can never become a write loop against a pump that keeps
-  // reverting. Cleared on disconnect so a reconnect re-arms it.
-  bool dead_schedule_repair_done_{false};
+  // Dead-schedule repair throttle (issue #124). A repair normally follows an
+  // *external* write that created the stall, so the component can never spin on
+  // its own. But a pump that reverts to STOP by itself (an alarm forcing it,
+  // say) would otherwise draw one write every poll forever, so attempts are
+  // spaced by at least this interval — measured across stall episodes and
+  // across reconnects, so neither a relapse nor a flapping BLE link can
+  // multiply them. The first attempt after boot is immediate.
+  static constexpr uint32_t DEAD_SCHEDULE_REPAIR_MIN_INTERVAL_MS = 300000;  // 5 min
+  uint32_t last_repair_attempt_ms_{0};
+  bool repair_attempted_{false};
   // Last published run-state / stalled values, so both entities publish only on
   // change (update() runs every 10s).
   const char *run_state_published_{nullptr};

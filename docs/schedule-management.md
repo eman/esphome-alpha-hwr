@@ -138,8 +138,16 @@ schedule is on. When the state *is* stalled, the component converges it to
 **Scheduled** — it engages `AUTO` and keeps the schedule enabled, honoring the
 intent the schedule flag expresses (it never repairs by clearing the schedule).
 The check runs with the periodic state poll, so it covers both boot and
-out-of-band changes, and it attempts the repair at most once per BLE connection
-so it can never become a write loop.
+out-of-band changes. A repair normally follows an *external* write that created
+the stall, so the component can never spin on its own; as a backstop against a
+pump that reverts to `STOP` by itself, repair attempts are spaced at least five
+minutes apart (measured across stall episodes and reconnects alike, so neither a
+relapse nor a flapping BLE link can multiply them). The first attempt after boot
+is immediate.
+
+The repair announces itself: its `write_settled` event carries
+`origin: "internal"` and `op_id: "auto:dead-schedule-repair"`, so an automation
+can tell the node fixing itself from a user toggling a switch.
 
 One exception: while a **vacation** (a `Stop` single event) covers the current
 time, a stopped pump is the commanded state, so it is neither reported as

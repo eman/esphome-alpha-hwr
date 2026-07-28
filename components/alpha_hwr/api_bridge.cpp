@@ -64,7 +64,9 @@ void AlphaHwrApiBridge::fire_write_settled(const WriteResult &result) {
   data["command"] = services::write_command_to_string(result.command);
   data["status"] = services::write_status_to_string(result.status);
   data["detail"] = result.detail;
-  data["origin"] = result.origin == services::WriteOrigin::ENTITY ? "entity" : "service";
+  data["origin"] = result.origin == services::WriteOrigin::ENTITY      ? "entity"
+                   : result.origin == services::WriteOrigin::INTERNAL ? "internal"
+                                                                      : "service";
   // Node name (App.get_name()) makes the event self-identifying across a
   // multi-controller install, unlike HA's opaque, re-add-unstable device_id
   // (issue #113). Present on every event, including empty-op_id entity writes.

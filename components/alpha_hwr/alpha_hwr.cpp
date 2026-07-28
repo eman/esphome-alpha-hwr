@@ -95,9 +95,6 @@ void AlphaHwrComponent::setup() {
     // Invalidate caches so old values don't falsely satisfy ready gating
     this->control_service_.invalidate_cache();
     this->schedule_service_.invalidate_cache();
-    // Re-arm the dead-schedule repair for the next connection (issue #124), so
-    // a repair that was lost with the link is retried once we are back.
-    this->dead_schedule_repair_done_ = false;
     // Terminal-event every pending write operation (issue #92): a client
     // waiting on a settle event must never be left hanging across a BLE drop.
     this->write_op_service_.on_disconnect();
@@ -477,8 +474,11 @@ bool AlphaHwrComponent::stop_single_event_active_() const {
 //      before this the state survived every reboot. Converging it to Scheduled
 //      keeps the schedule intent and engages AUTO so windows run again.
 //
-// The repair fires at most once per BLE connection and only when the caches are
-// valid and no write is in flight, so it cannot fight a user command or spin.
+// The repair only runs with valid caches and an idle write queue, and attempts
+// are throttled to one per DEAD_SCHEDULE_REPAIR_MIN_INTERVAL_MS, so it cannot
+// fight a user command or spin against a pump that keeps reverting. It reports
+// itself as WriteOrigin::INTERNAL with op_id "auto:dead-schedule-repair" so a
+// write_settled consumer can tell a self-repair from a user action.
 void AlphaHwrComponent::reconcile_run_state_() {
   bool schedule_on = false;
   if (!control_service_.is_pump_enabled_valid() ||
@@ -505,20 +505,22 @@ void AlphaHwrComponent::reconcile_run_state_() {
     this->schedule_stalled_sensor_->publish_state(stalled);
   }
 
-  if (!stalled) {
-    // Healthy again (repaired here, or by a command / the app): re-arm so a
-    // later relapse on this same connection is still repaired.
-    this->dead_schedule_repair_done_ = false;
+  if (!stalled || write_op_service_.pending_count() > 0) return;
+
+  // Throttle: unsigned subtraction is rollover-correct.
+  const uint32_t now = millis();
+  if (this->repair_attempted_ &&
+      (now - this->last_repair_attempt_ms_) < DEAD_SCHEDULE_REPAIR_MIN_INTERVAL_MS) {
     return;
   }
-  if (this->dead_schedule_repair_done_ || write_op_service_.pending_count() > 0) {
-    return;
-  }
-  this->dead_schedule_repair_done_ = true;
+  this->repair_attempted_ = true;
+  this->last_repair_attempt_ms_ = now;
   ESP_LOGW(TAG,
            "Schedule is enabled but the pump is STOP - no window can run it. "
            "Engaging AUTO to repair (issue #124).");
-  this->apply_pump_schedule_target_(ux::dead_schedule_repair_target());
+  this->apply_pump_schedule_target_(ux::dead_schedule_repair_target(),
+                                    services::WriteOrigin::INTERNAL,
+                                    "auto:dead-schedule-repair");
 }
 
 bool AlphaHwrComponent::is_state_synchronized() const {
