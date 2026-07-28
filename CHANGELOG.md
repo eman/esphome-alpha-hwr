@@ -2,6 +2,19 @@
 
 ## [Unreleased]
 
+### Added
+
+- **Schedule card v6: optional forecast and desired-schedule overlays** — the
+  grid showed what the pump is programmed to do but never why, so there was no
+  way to see whether a pre-heat burst actually lands in front of predicted
+  demand. `forecast_entity` paints a weekly forecast's demand windows as a
+  translucent heat strip behind each day row, opacity scaled by peak
+  probability; `desired_entity` outlines intervals the scheduler wants but the
+  device is not holding, putting scheduler-vs-device drift where someone would
+  act on it. Both default to null, so every existing card config renders
+  exactly as before, and both are `pointer-events: none` beneath the
+  interactive blocks — dragging and editing are untouched.
+
 ## [0.14.0] - 2026-07-28
 
 ### Added
