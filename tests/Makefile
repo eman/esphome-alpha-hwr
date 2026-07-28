@@ -6,7 +6,7 @@ CXXFLAGS = -std=c++17 -Wall -Wextra -O2 -I. -I./mocks -I../
 LDFLAGS =
 
 # Test executables
-TESTS = test_protocol test_control_state test_dhw_demand_logic test_transport_matching test_transport_fsm test_schedule_service test_write_operations test_schedule_codec test_telemetry_units test_pump_schedule_ux
+TESTS = test_protocol test_control_state test_dhw_demand_logic test_transport_matching test_transport_fsm test_schedule_service test_write_operations test_schedule_codec test_telemetry_units test_pump_schedule_ux test_publish_gate
 
 # Default target
 all: $(TESTS)
@@ -20,6 +20,9 @@ test_control_state: test_control_state.cpp
 
 test_pump_schedule_ux: test_pump_schedule_ux.cpp ../components/alpha_hwr/pump_schedule_ux.h
 	$(CXX) $(CXXFLAGS) test_pump_schedule_ux.cpp -o test_pump_schedule_ux $(LDFLAGS)
+
+test_publish_gate: test_publish_gate.cpp ../components/alpha_hwr/publish_gate.h
+	$(CXX) $(CXXFLAGS) test_publish_gate.cpp -o test_publish_gate $(LDFLAGS)
 
 test_dhw_demand_logic: test_dhw_demand_logic.cpp ../components/dhw_demand/dhw_demand_logic.h
 	$(CXX) $(CXXFLAGS) test_dhw_demand_logic.cpp -o test_dhw_demand_logic $(LDFLAGS)
@@ -96,6 +99,11 @@ test: $(TESTS)
 	@echo "Running Telemetry Units Tests..."
 	@echo "=========================================="
 	@./test_telemetry_units
+	@echo ""
+	@echo "=========================================="
+	@echo "Running Publish Gate Tests..."
+	@echo "=========================================="
+	@./test_publish_gate
 
 # Alternative targets for specific compilers
 test-gcc: CXX = g++

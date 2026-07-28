@@ -24,6 +24,7 @@
 #include "event_log_service.h"
 #include "frame_builder.h"
 #include "history_service.h"
+#include "publish_gate.h"  // publish-on-change gates for the YAML control entities (#127)
 #include "pump_schedule_ux.h"
 #include "schedule_entry.h"
 #include "schedule_service.h"

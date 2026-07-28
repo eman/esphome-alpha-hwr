@@ -20,6 +20,13 @@ in the component stack directly from GitHub.
 | `packages/alpha_hwr_schedule_editor.yaml` | ESPHome services and helper entities for weekly/single-event editing | Pair with `alpha_hwr_pairing.yaml` |
 | `packages/dhw_demand_detector.yaml` | DHW detector outputs plus Home Assistant supplementary sensors | Works standalone or alongside `alpha_hwr` |
 
+Both pump packages also set `logger: level: INFO` and expose node-health
+diagnostics (`Free Heap`, `Min Free Heap`, `Largest Free Block`, `Heap
+Fragmentation`, `Reset Reason`). Log lines and state changes are API frames
+delivered to every connected subscriber, so DEBUG is opt-in — put your own
+`logger:` block in your config to override the package. See
+[Node Health Diagnostics](docs/configuration.md#node-health-diagnostics).
+
 ## Requirements
 
 - **alpha_hwr**: ESP32-class board with BLE (`ESP32`, `ESP32-C3`, `ESP32-S3`)

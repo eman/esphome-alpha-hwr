@@ -99,6 +99,64 @@ void test_single_event_tz_shift() {
   TEST_ASSERT(local_unix_to_utc(0, pdt) == 0, "sentinel 0 not shifted (decode)");
 }
 
+// The schedule state poll runs on the telemetry cadence (~10s) and is almost
+// always a no-op confirmation. Its callback republishes the schedule text
+// sensors, so firing it on every poll cost an API state frame per subscriber
+// per poll for identical content (issue #127): announce transitions only.
+void test_state_change_callback_fires_only_on_change() {
+  std::cout << "\n=== Testing schedule state change callback ===" << std::endl;
+  esphome::alpha_hwr::core::Transport transport;
+  esphome::alpha_hwr::core::Session session;
+  esphome::alpha_hwr::services::ScheduleService service(transport, session);
+
+  transport.set_write_callback([](const uint8_t *, size_t) -> bool { return true; });
+  session.on_authenticated();
+
+  int callbacks = 0;
+  bool last_reported = false;
+  service.set_state_change_callback([&](bool enabled) {
+    callbacks++;
+    last_reported = enabled;
+  });
+
+  // One poll round trip: issue the request, run the FSM out, answer it with an
+  // Object 84 overview frame (OpSpec 0x13, [00 00 0A] header + 10-byte body,
+  // byte 4 of the body = schedule enabled).
+  auto poll_with_enabled = [&](bool enabled) {
+    service.poll_state();
+    for (int i = 0; i < 4; i++) {
+      mock_millis += 51;
+      transport.loop();
+    }
+    std::vector<uint8_t> frame = {0x24, 0x00, 0xF8, 0xE7, 0x0A, 0x13, 0x00, 0x00, 0xDA, 0x01,
+                                  0x00, 0x00, 0x0A,
+                                  0x8C, 0x23, 0x05, 0x05, static_cast<uint8_t>(enabled ? 1 : 0),
+                                  0x01, 0x00, 0x00, 0x00, 0x00,
+                                  0xAA, 0xBB};
+    frame[1] = static_cast<uint8_t>(frame.size() - 4);
+    transport.on_notification(frame.data(), frame.size());
+    mock_millis += 51;
+    transport.loop();
+  };
+
+  poll_with_enabled(true);
+  TEST_ASSERT(callbacks == 1 && last_reported, "First cached state fires the callback");
+
+  for (int i = 0; i < 5; i++)
+    poll_with_enabled(true);
+  TEST_ASSERT(callbacks == 1, "Repeat polls of unchanged state fire nothing");
+
+  poll_with_enabled(false);
+  TEST_ASSERT(callbacks == 2 && !last_reported, "An actual transition fires the callback");
+
+  poll_with_enabled(false);
+  TEST_ASSERT(callbacks == 2, "...and then goes quiet again");
+
+  bool cached = true;
+  TEST_ASSERT(service.get_state(&cached) && !cached,
+              "Cached state still tracks every poll, callback or not");
+}
+
 int main() {
   std::cout << "===========================================================" << std::endl;
   std::cout << "  Schedule Service Test Suite" << std::endl;
@@ -106,6 +164,7 @@ int main() {
 
   test_schedule_write_payload();
   test_single_event_tz_shift();
+  test_state_change_callback_fires_only_on_change();
   
   std::cout << "\n===========================================================" << std::endl;
   std::cout << "  Test Results" << std::endl;

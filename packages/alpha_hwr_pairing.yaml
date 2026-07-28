@@ -72,6 +72,32 @@ ble_client:
   - mac_address: ${mac_address}
     id: hwr_pump_client
 
+logger:
+  # INFO by default: every log line is an API frame fanned out to *every*
+  # subscriber, and a node being actively debugged (Home Assistant + an
+  # `esphome logs` stream + a script) is exactly when heap pressure on the API
+  # write path can reboot it (issue #127). Override with `logger: level: DEBUG`
+  # in your own config when you need it — the main config wins over the package.
+  level: INFO
+
+# Runtime heap, so a slow leak or fragmentation trend is visible before it
+# aborts in the API write path, and answerable afterwards (issue #127).
+# These publish on every 60s poll — heap genuinely moves, so unlike the control
+# entities there is nothing here to gate on change.
+debug:
+  update_interval: 60s
+
+sensor:
+  - platform: debug
+    free:
+      name: "Free Heap"
+    block:
+      name: "Largest Free Block"
+    min_free:
+      name: "Min Free Heap"
+    fragmentation:
+      name: "Heap Fragmentation"
+
 # Ensure text_sensor component is included in build
 text_sensor:
   # This ESPHome component's own version (issue #95). Distinct from the pump's
@@ -84,6 +110,12 @@ text_sensor:
     icon: "mdi:package-variant"
     entity_category: diagnostic
     update_interval: never  # constant value; published once at boot (see esphome.on_boot)
+
+  # Why the node last rebooted — published once at boot. A panic reboot is
+  # otherwise indistinguishable from an OTA or a power cycle after the fact.
+  - platform: debug
+    reset_reason:
+      name: "Reset Reason"
 
 api:
   # Required by the alpha_hwr programmatic write services + write_settled event (issue #92)
