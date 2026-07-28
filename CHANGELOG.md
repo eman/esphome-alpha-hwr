@@ -177,6 +177,30 @@
   no `alpha_hwr` frames in the backtrace — but it was a permanent, avoidable
   load on exactly the buffer that overflowed, worst under the multi-subscriber
   DEBUG conditions of a bench session.
+- **`dhw_demand` no longer republishes unchanged detector outputs every tick**
+  (issue #129) — the same defect class as #127, in the component left out of that
+  fix's scope. `sensor::publish_state()` and `text_sensor::publish_state()` notify
+  the frontend unconditionally, so `DHW Detection Method`, `DHW Detection
+  Confidence`, `DHW Demand Level` and `DHW Session Duration` each emitted an API
+  state frame per subscriber on every 10 s tick: measured over a 495 s idle window
+  at **0.40 frames/s per subscriber with not one distinct value among the 200
+  publishes**, which after #127 was 23 % of all remaining state traffic on the
+  node. `DHW Demand` was quiet throughout, because `BinarySensor::publish_state()`
+  dedups internally — one tick publishing one deduped entity and four undeduped
+  ones was an accident of which base class each output happened to use, not a
+  design choice. The four now gate on change
+  (`publish_sensor_if_changed()` / `publish_text_sensor_if_changed()`,
+  `components/dhw_demand/publish_gate.h`), taking an idle window to four frames
+  total. Nothing is lost: these are step-valued detector outputs, flat between
+  transitions, and ESPHome sends every entity's current state on connect. A
+  running draw is unaffected — `session_duration` moves every tick while a session
+  is open, so only the idle `0 s` stream is silenced. The gate honours
+  `force_update: true`, so a consumer that wants one of these as a per-tick
+  heartbeat can still have it. The Python detector deliberately stays
+  unconditional: its RFC-006 MQTT contract publishes all four fields in one
+  message whose HA discovery config carries `expire_after: 30`, making cadence
+  load-bearing for availability there, whereas over the native API availability
+  follows the connection.
 - **A stalled schedule (`STOP` + schedule enabled) is now detected, visible, and
   repaired** (issue #124, regression from the #121 reconciliation). That
   combination can never run — every window passes with the motor idle — and it
