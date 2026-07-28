@@ -1599,16 +1599,51 @@ static void test_partial_upload_republishes_schedule_display() {
               "a partial upload republishes despite not being 'applied'");
 }
 
+static void test_all_layers_failed_upload_republishes() {
+  std::cout << "\n=== upload_schedule: all layers fail -> still republishes (#133) ==="
+            << std::endl;
+  Harness h;
+  h.prime_cache();
+  h.sim.honor_layer_writes = false;
+
+  // Every layer differs from the cache, so every one is attempted as a write
+  // and every one fails confirm. written_mask is cleared bit by bit and
+  // skipped_mask never gets set, so the upload ends REJECTED with both masks
+  // zero — the case the review flagged, where the old written|skipped test
+  // reported an empty hash despite the readbacks having refreshed the cache.
+  h.write_op.submit_upload_schedule(
+      make_upload({{0, 0, 6, 0, 7, 0},
+                   {1, 0, 8, 0, 9, 0},
+                   {2, 0, 10, 0, 11, 0},
+                   {3, 0, 12, 0, 13, 0},
+                   {4, 0, 14, 0, 15, 0}}),
+      "rp4");
+  h.advance(120000);
+
+  const WriteResult *r = h.result_for("rp4");
+  TEST_ASSERT(r && r->status == WriteStatus::REJECTED, "status is rejected");
+  TEST_ASSERT(r && r->detail == "no layer could be written", "detail names the cause");
+  TEST_ASSERT(r && r->layers_written.empty(), "no layer confirmed as written");
+  TEST_ASSERT(r && r->layers_skipped.empty(), "no layer was already matching");
+  TEST_ASSERT(r && !r->schedule_hash.empty(),
+              "the hash is still reported — the readbacks refreshed the cache");
+  TEST_ASSERT(r && result_republishes_schedule(*r),
+              "an all-failed upload republishes so the sensor tracks the device");
+}
+
 static void test_republish_predicate_arms() {
   std::cout << "\n=== schedule-display republish predicate (#133) ===" << std::endl;
   WriteResult r;
 
-  // Rejected before any wire write: schedule_hash is empty, nothing moved.
+  // Rejected before the first layer: nothing was read, the cache is untouched,
+  // and schedule_hash is empty. Note the status is not what decides this — an
+  // all-layers-failed upload is REJECTED too and does republish
+  // (test_all_layers_failed_upload_republishes); the empty hash is.
   r.command = WriteCommand::UPLOAD_SCHEDULE;
   r.status = WriteStatus::REJECTED;
   r.schedule_hash = "";
   TEST_ASSERT(!result_republishes_schedule(r),
-              "upload rejected before any write does not republish");
+              "upload rejected before the first layer does not republish");
 
   // Failed partway. An upload is five independent layer writes, so the device
   // grid moved even though the verdict is a failure — the sensor tracks the
@@ -1709,6 +1744,7 @@ int main() {
   test_upload_enabled_flag();
   test_upload_republishes_schedule_display();
   test_partial_upload_republishes_schedule_display();
+  test_all_layers_failed_upload_republishes();
   test_republish_predicate_arms();
 
   std::cout << "\n===========================================================" << std::endl;

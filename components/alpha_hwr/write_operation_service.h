@@ -152,9 +152,15 @@ struct WriteResult {
  * UPLOAD_SCHEDULE is keyed on the post-op hash being present rather than on the
  * terminal status (issue #133). An upload is five independent layer writes, so
  * a run that fails partway has still moved the device grid, and the sensor has
- * to track the device rather than the verdict. `schedule_hash` is populated
- * exactly when wire work happened, which is the same condition the
- * write_settled event uses — so the sensor and the event cannot disagree.
+ * to track the device rather than the verdict.
+ *
+ * `schedule_hash` is populated once the layer loop has run — whether each layer
+ * was written, skipped as already-matching, or failed confirm. What those three
+ * have in common is a readback, which refreshes the cache from the device, so
+ * the hash describes the pump in all of them. It is empty only when the upload
+ * was rejected before the first layer, where nothing was read and the cache is
+ * untouched. That is the same condition the write_settled event uses, so the
+ * sensor and the event cannot disagree.
  */
 inline bool result_republishes_schedule(const WriteResult &r) {
   const bool applied =

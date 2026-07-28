@@ -180,6 +180,14 @@
   so the sensor and the event cannot disagree. Single-entry schedule writes
   stay gated on the terminal status, where a rejection does mean nothing moved.
 
+  The `write_settled` event now also carries `schedule_hash` when an upload is
+  rejected because *every* layer failed confirm (review feedback on #133).
+  Those failures each ran a readback, which refreshes the cache from the pump,
+  so the hash describes the device — the old written-or-skipped test reported
+  an empty hash there, which is a rejection *after* the wire work rather than
+  before it, leaving consumers no way to learn what the pump actually holds.
+  It is still empty when the upload is rejected before the first layer.
+
 - **Control entities no longer republish unchanged state every poll** (issue
   #127). ESPHome's `number` and `select` `publish_state()` fire their state
   callback unconditionally — unlike `switch`, which dedups — so the ten polled
