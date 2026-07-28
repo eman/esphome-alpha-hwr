@@ -531,6 +531,16 @@ bool ScheduleService::read_entries_async(
     struct ReadAllState {
       ScheduleService *service;
       uint8_t current_layer = 0;
+      // Counted explicitly rather than inferred from all_entries.size():
+      // a layer that reads back cleanly but holds no enabled entries is a
+      // legitimate success with an empty contribution, so emptiness says
+      // nothing about whether the read worked.
+      uint8_t layers_ok = 0;
+      uint8_t layers_failed = 0;
+      // Guards the terminal callback. Both the completion path and the
+      // queue-failure path below can fire on_complete, and callers settle a
+      // write operation from it; firing twice would settle twice.
+      bool terminated = false;
       std::vector<ScheduleEntry> all_entries;
       std::function<void(bool success, const std::vector<ScheduleEntry> &)> on_complete;
     };
@@ -541,10 +551,25 @@ bool ScheduleService::read_entries_async(
 
     auto read_next_layer = [](auto& self, std::shared_ptr<ReadAllState> st) -> void {
       if (st->current_layer > 4) {
-        ESP_LOGD(TAG, "Read %zu total schedule entries from all layers",
-                 st->all_entries.size());
-        if (st->on_complete)
-          st->on_complete(true, st->all_entries);
+        // All-or-nothing: callers treat this boolean as "the pump's schedule
+        // is now known" and act on it -- publishing the schedule hash,
+        // settling refresh_schedule as ACCEPTED. A partially-read grid does
+        // not support either claim, so any failed layer fails the whole read.
+        // Entries from the layers that did succeed are still passed through
+        // for logging.
+        bool all_ok = st->layers_failed == 0;
+        ESP_LOGD(TAG,
+                 "Read %zu total schedule entries from all layers "
+                 "(%u/5 layers OK)",
+                 st->all_entries.size(), st->layers_ok);
+        if (!all_ok)
+          ESP_LOGW(TAG, "%u of 5 schedule layers failed to read; "
+                        "reporting the read as failed",
+                   st->layers_failed);
+        if (st->on_complete && !st->terminated) {
+          st->terminated = true;
+          st->on_complete(all_ok, st->all_entries);
+        }
         return;
       }
 
@@ -553,12 +578,14 @@ bool ScheduleService::read_entries_async(
           layer_to_read,
           [st, self](bool success, const std::vector<ScheduleEntry> &entries) {
             if (success) {
+              st->layers_ok++;
               for (const auto &entry : entries) {
                 st->all_entries.push_back(entry);
               }
               ESP_LOGV(TAG, "Layer %d contributed %zu entries", st->current_layer,
                        entries.size());
             } else {
+              st->layers_failed++;
               ESP_LOGW(TAG,
                        "Failed to read layer %d (continuing with other layers)",
                        st->current_layer);
@@ -575,8 +602,10 @@ bool ScheduleService::read_entries_async(
         // read explicitly instead.
         ESP_LOGW(TAG, "Failed to queue read for layer %d - aborting read-all-layers",
                  layer_to_read);
-        if (st->on_complete)
+        if (st->on_complete && !st->terminated) {
+          st->terminated = true;
           st->on_complete(false, st->all_entries);
+        }
       }
     };
 
@@ -1086,17 +1115,34 @@ void ScheduleService::read_single_events_async(
 
   // Read single events sequentially to avoid flooding the transport queue
   auto events = std::make_shared<std::vector<SingleEvent>>();
+  // Counted explicitly: an empty result is legitimate for a pump with no
+  // active events, so emptiness cannot stand in for "the read failed".
+  auto slots_failed = std::make_shared<uint8_t>(0);
   auto read_next = std::make_shared<std::function<void(uint8_t)>>();
 
-  *read_next = [this, events, on_complete, max_events, read_next](uint8_t idx) {
+  *read_next = [this, events, slots_failed, on_complete, max_events,
+                read_next](uint8_t idx) {
     if (idx >= max_events) {
-      // All done
-      this->cached_single_events_ = *events;
-      this->single_events_cached_ = true;
-      ESP_LOGD(TAG, "Read %zu active single events (of %d slots)",
-               events->size(), max_events);
+      // All-or-nothing. single_events_cached_ is what
+      // find_free_single_event_slot() gates on, and an unread slot looks
+      // free -- so caching a partial read lets a later set_single_event
+      // overwrite a live event that was simply never read back. That is the
+      // clobber class issue #92 exists to prevent, so a partial read must
+      // leave the previous cache (and its cached flag) untouched.
+      bool all_ok = *slots_failed == 0;
+      if (all_ok) {
+        this->cached_single_events_ = *events;
+        this->single_events_cached_ = true;
+        ESP_LOGD(TAG, "Read %zu active single events (of %d slots)",
+                 events->size(), max_events);
+      } else {
+        ESP_LOGW(TAG,
+                 "%u of %d single event slots failed to read; leaving the "
+                 "cache untouched and reporting the read as failed",
+                 *slots_failed, max_events);
+      }
       if (on_complete)
-        on_complete(true, *events);
+        on_complete(all_ok, *events);
       return;
     }
 
@@ -1110,9 +1156,14 @@ void ScheduleService::read_single_events_async(
 
     this->transport_.send_apdu_command(
       apdu, 5, 0xDC01, 0,
-        [idx, events, on_complete,
+        [idx, events, slots_failed, on_complete,
          read_next](bool success, const uint8_t *payload, size_t payload_len) {
-          if (success && payload_len >= 13) {
+          if (!success || payload_len < 13) {
+            (*slots_failed)++;
+            ESP_LOGW(TAG, "Failed to read single event slot %d "
+                          "(continuing with other slots)",
+                     idx);
+          } else {
             SingleEvent ev = SingleEvent::from_bytes(payload + 3, idx);
             // pump LOCAL-Unix -> UTC so the cache/display stay UTC.
             ev.begin_timestamp = local_unix_to_utc(

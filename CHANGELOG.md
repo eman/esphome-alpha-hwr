@@ -15,6 +15,25 @@
   exactly as before, and both are `pointer-events: none` beneath the
   interactive blocks — dragging and editing are untouched.
 
+### Fixed
+
+- **Read-all schedule and single-event chains no longer report success when
+  reads fail** (issue #136) — `read_entries_async(-1)` walked all five layers,
+  logged a warning for any that failed, and then terminated with a hardcoded
+  `on_complete(true, ...)`; `read_single_events_async` discarded its per-slot
+  `success` flag entirely and set `single_events_cached_ = true` regardless.
+  Callers treat that boolean as "the pump's schedule is now known", so an
+  all-fail read made `refresh_schedule` settle **ACCEPTED** with a
+  `write_settled` event saying the refresh worked, published the hash of an
+  empty grid, and let `find_free_single_event_slot()` hand out slot 0 — able to
+  overwrite a live event that was simply never read back, which is the clobber
+  class issue #92 exists to prevent. Both chains now count failures explicitly
+  and report success only when every layer (respectively every slot) read back;
+  a partial single-event read leaves the previous cache and its cached flag
+  untouched. Failure is not inferred from an empty result, since a layer or
+  pump with no enabled entries legitimately reads back empty. Every consumer
+  branch this makes reachable was already written — the paths were simply dead.
+
 ## [0.14.0] - 2026-07-28
 
 ### Added
