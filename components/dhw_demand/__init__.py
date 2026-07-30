@@ -179,8 +179,6 @@ CONFIG_SCHEMA = (
                 cv.int_range(min=1, max=3600),
             cv.Optional(CONF_DROPLET_MAX_STALE_SECONDS, default=60):
                 cv.int_range(min=1, max=3600),
-            # m/s. Head telemetry is meters of head; 0.31 m/s ≈ the former
-            # 3.0 kPa/s threshold (÷9.80665).
             cv.Optional(CONF_FLOW_LATCH_SECONDS, default=30):
                 cv.positive_int,
             cv.Optional(CONF_SESSION_GAP_TOLERANCE_SECONDS, default=60):

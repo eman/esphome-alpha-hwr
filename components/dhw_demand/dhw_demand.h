@@ -119,8 +119,15 @@ class DhwDemandComponent : public PollingComponent {
       kDefaultPumpOnThresholds.demand_flow};  // GPM of computed demand
   float pump_on_demand_min_speed_rpm_{
       kDefaultPumpOnThresholds.min_speed_rpm};  // RPM
-  int pump_on_demand_max_stale_seconds_{30};    // s, pump loop-flow channel
-  int droplet_max_stale_seconds_{60};           // s, household meter channel
+  // Derived from the same constant rather than restated, so the header and the
+  // host test cannot drift apart — the promise two lines up has to be kept by
+  // construction, not by remembering. (Stored in seconds because that is the
+  // config surface; pump_on_thresholds_() converts back.)
+  int pump_on_demand_max_stale_seconds_{
+      static_cast<int>(kDefaultPumpOnThresholds.pump_flow_max_stale_ms /
+                       1000)};  // s, pump loop-flow channel
+  int droplet_max_stale_seconds_{static_cast<int>(
+      kDefaultPumpOnThresholds.droplet_max_stale_ms / 1000)};  // s, meter
   int flow_latch_seconds_{30};                 // s
   int session_gap_tolerance_seconds_{60};      // s
   int demand_release_seconds_{30};             // s
