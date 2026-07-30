@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+## [0.15.0] - 2026-07-30
+
 ### Added
 
 - **`dhw_demand`: the heater's DHW in-use flag can declare a pump-on draw, after

@@ -22,17 +22,17 @@
 #     dhw_charge_entity:      sensor.nwp500_dhw_charge
 #
 #   external_components:
-#     - source: github://eman/esphome-alpha-hwr@v0.14.0
+#     - source: github://eman/esphome-alpha-hwr@v0.15.0
 #       components: [dhw_demand]
 #
 #   packages:
-#     dhw_demand: github://eman/esphome-alpha-hwr/packages/dhw_demand_detector.yaml@v0.14.0
+#     dhw_demand: github://eman/esphome-alpha-hwr/packages/dhw_demand_detector.yaml@v0.15.0
 #
 # Usage with alpha_hwr pump (see dhw-demand-example.yaml for full example):
 #
 #   packages:
-#     alpha_hwr: github://eman/esphome-alpha-hwr/packages/alpha_hwr_pairing.yaml@v0.14.0
-#     dhw_demand: github://eman/esphome-alpha-hwr/packages/dhw_demand_detector.yaml@v0.14.0
+#     alpha_hwr: github://eman/esphome-alpha-hwr/packages/alpha_hwr_pairing.yaml@v0.15.0
+#     dhw_demand: github://eman/esphome-alpha-hwr/packages/dhw_demand_detector.yaml@v0.15.0
 #
 #   # The alpha_hwr package already declares external_components for both
 #   # alpha_hwr and dhw_demand, so no separate declaration is needed.
