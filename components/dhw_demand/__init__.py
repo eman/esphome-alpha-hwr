@@ -44,6 +44,7 @@ CONF_PUMP_ON_DEMAND_FLOW_THRESHOLD = "pump_on_demand_flow_threshold"
 CONF_PUMP_ON_DEMAND_MIN_SPEED_RPM = "pump_on_demand_min_speed_rpm"
 CONF_PUMP_ON_DEMAND_MAX_STALE_SECONDS = "pump_on_demand_max_stale_seconds"
 CONF_DROPLET_MAX_STALE_SECONDS = "droplet_max_stale_seconds"
+CONF_DHW_IN_USE_MIN_SECONDS = "dhw_in_use_min_seconds"
 CONF_FLOW_LATCH_SECONDS = "flow_latch_seconds"
 CONF_SESSION_GAP_TOLERANCE_SECONDS = "session_gap_tolerance_seconds"
 CONF_DEMAND_RELEASE_SECONDS = "demand_release_seconds"
@@ -179,6 +180,10 @@ CONFIG_SCHEMA = (
                 cv.int_range(min=1, max=3600),
             cv.Optional(CONF_DROPLET_MAX_STALE_SECONDS, default=60):
                 cv.int_range(min=1, max=3600),
+            # Bounded for the same uint32_t wrap reason as the staleness keys,
+            # and 0 is legal and meaningful: "high right now is enough".
+            cv.Optional(CONF_DHW_IN_USE_MIN_SECONDS, default=70):
+                cv.int_range(min=0, max=3600),
             cv.Optional(CONF_FLOW_LATCH_SECONDS, default=30):
                 cv.positive_int,
             cv.Optional(CONF_SESSION_GAP_TOLERANCE_SECONDS, default=60):
@@ -252,6 +257,8 @@ async def to_code(config):
         config[CONF_PUMP_ON_DEMAND_MAX_STALE_SECONDS]))
     cg.add(var.set_droplet_max_stale_seconds(
         config[CONF_DROPLET_MAX_STALE_SECONDS]))
+    cg.add(var.set_dhw_in_use_min_seconds(
+        config[CONF_DHW_IN_USE_MIN_SECONDS]))
     cg.add(var.set_flow_latch_seconds(
         config[CONF_FLOW_LATCH_SECONDS]))
     cg.add(var.set_session_gap_tolerance_seconds(

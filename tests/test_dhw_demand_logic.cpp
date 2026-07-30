@@ -23,6 +23,7 @@ using esphome::dhw_demand::PumpOnInputs;
 using esphome::dhw_demand::PumpOnResult;
 using esphome::dhw_demand::PumpOnThresholds;
 using esphome::dhw_demand::reading_is_fresh;
+using esphome::dhw_demand::SustainedHigh;
 using esphome::dhw_demand::SessionTracker;
 
 int tests_passed = 0;
@@ -366,6 +367,80 @@ void test_pump_on_demand_flow_guards() {
               "The 29-day production minimum of 1971 rpm is admitted");
 }
 
+void test_dhw_in_use_sustain_rejects_short_events() {
+  std::cout << "\n=== Testing DHW In-Use Sustain Guard ===" << std::endl;
+
+  SustainedHigh sustain;
+  sustain.min_ms = 70000;  // the shipped default
+
+  uint32_t t = 100000;  // arbitrary, non-zero: no first-tick special case
+  bool armed_before_70s = false;
+  for (int i = 0; i < 7; i++) {  // t=100s..160s, i.e. 0..60 s of continuous high
+    if (sustain.update(1.0f, t))
+      armed_before_70s = true;
+    t += 10000;
+  }
+  TEST_ASSERT(!armed_before_70s,
+              "Flag high for 60 s does not arm (the phantom band)");
+
+  bool armed_at_70s = sustain.update(1.0f, t);  // t = 170s → exactly 70 s
+  TEST_ASSERT(armed_at_70s, "Flag high for exactly 70 s arms (>= boundary)");
+}
+
+void test_dhw_in_use_sustain_resets_on_break() {
+  std::cout << "\n=== Testing DHW In-Use Sustain Reset ===" << std::endl;
+
+  // A low sample mid-run restarts the clock from scratch.
+  SustainedHigh low_break;
+  low_break.min_ms = 70000;
+  uint32_t t = 0;
+  for (int i = 0; i < 7; i++, t += 10000)
+    low_break.update(1.0f, t);
+  low_break.update(0.0f, t);
+  t += 10000;
+  TEST_ASSERT(!low_break.update(1.0f, t),
+              "A low sample restarts the run, so 70 s of prior high is discarded");
+
+  // NaN breaks the run identically. This is the parity-critical case: a BLE
+  // dropout is a break in Python's window walk (detection.py:377, :382), not a
+  // hold-last-value.
+  SustainedHigh nan_break;
+  nan_break.min_ms = 70000;
+  t = 0;
+  for (int i = 0; i < 7; i++, t += 10000)
+    nan_break.update(1.0f, t);
+  nan_break.update(NAN, t);
+  t += 10000;
+  TEST_ASSERT(!nan_break.update(1.0f, t),
+              "A NaN sample breaks the run exactly as a low sample does");
+
+  // And the run does rearm, given another full window after the break.
+  for (int i = 0; i < 7; i++) {
+    t += 10000;
+    nan_break.update(1.0f, t);
+  }
+  TEST_ASSERT(nan_break.active, "The run rearms after a fresh 70 s of high");
+}
+
+void test_dhw_in_use_sustain_never_arms_without_the_sensor() {
+  std::cout << "\n=== Testing DHW In-Use Sustain Without Sensor ==="
+            << std::endl;
+
+  // read_sensor_ returns NaN forever when no dhw_in_use sensor is configured,
+  // so installs that never wired the flag must never reach the tier.
+  SustainedHigh unwired;
+  unwired.min_ms = 70000;
+  uint32_t t = 0;
+  bool ever_armed = false;
+  for (int i = 0; i < 100; i++, t += 10000) {
+    if (unwired.update(NAN, t))
+      ever_armed = true;
+  }
+  TEST_ASSERT(!ever_armed,
+              "An all-NaN stream never arms the tier (sensor not configured)");
+}
+
+
 void test_pump_on_tier_ordering() {
   std::cout << "\n=== Testing Pump-On Tier Ordering ===" << std::endl;
 
@@ -473,6 +548,68 @@ void test_pump_on_tier_ordering() {
               "All-NaN inputs fall through to pump_on_uncertain");
   TEST_ASSERT(!r.demand, "All-NaN inputs declare no demand");
 
+  // ── Tier 3 sits below the subtraction and cannot displace it ────────────
+  // The flag sustained *and* a measured draw: the subtraction must win, because
+  // it is the stronger claim and the one that knows how large the draw is.
+  PumpOnInputs flag_and_measurement = measured;
+  flag_and_measurement.dhw_in_use_sustained = true;
+  r = decide_pump_on(flag_and_measurement, t);
+  TEST_ASSERT(std::string(r.method) == "deterministic_pump_on_subtraction",
+              "The subtraction outranks the dhw_in_use tier");
+
+  // Continuation outranks it too.
+  PumpOnInputs flag_and_continuation = both;
+  flag_and_continuation.dhw_in_use_sustained = true;
+  TEST_ASSERT(std::string(decide_pump_on(flag_and_continuation, t).method) ==
+                  "deterministic_continuation",
+              "Continuation outranks the dhw_in_use tier");
+
+  // Reached only when everything above declines. This is the recall case it
+  // exists for: a low-signal draw the subtraction could not measure.
+  PumpOnInputs flag_only = live_tick();
+  flag_only.dhw_in_use_sustained = true;
+  r = decide_pump_on(flag_only, t);
+  TEST_ASSERT(std::string(r.method) == "deterministic_dhw_in_use",
+              "The flag decides once continuation and the subtraction decline");
+  TEST_ASSERT(r.demand, "The dhw_in_use tier declares demand");
+  TEST_ASSERT_NEAR(r.confidence, 0.6f, 0.0001f,
+                   "The dhw_in_use tier reports 0.6 confidence");
+  TEST_ASSERT_NEAR(r.demand_level, 0.4f, 0.0001f,
+                   "With no measurement it publishes the no-claim constant, "
+                   "not a value derived from meter flow");
+
+  // Where the subtraction *is* available but simply below threshold, intensity
+  // still comes from the measurement rather than the meter. This is the whole
+  // of issue #143: scaling off pump-on meter flow inverts the ordering, since a
+  // quiet 2.2 GPM loop would publish 0.88 while a real 0.25 GPM draw publishes
+  // 0.4.
+  PumpOnInputs flag_with_small_draw = live_tick();
+  flag_with_small_draw.dhw_in_use_sustained = true;
+  flag_with_small_draw.flow = 1.54f;   // 1.54 - 1.34 = 0.20 GPM, under 0.30
+  r = decide_pump_on(flag_with_small_draw, t);
+  TEST_ASSERT(std::string(r.method) == "deterministic_dhw_in_use",
+              "0.20 GPM is below the subtraction threshold, so the flag decides");
+  TEST_ASSERT_NEAR(r.demand_level, 0.20f / 2.5f, 0.0001f,
+                   "Intensity comes from the measurement, not from meter flow");
+
+  // A stale channel means no measurement, so the tier falls back to the
+  // no-claim constant rather than inventing intensity from the meter.
+  PumpOnInputs flag_with_stale = live_tick();
+  flag_with_stale.dhw_in_use_sustained = true;
+  flag_with_stale.flow = 2.22f;  // would look like a big draw on the meter alone
+  flag_with_stale.pump_flow_last_update_ms = 900000;
+  r = decide_pump_on(flag_with_stale, t);
+  TEST_ASSERT_NEAR(decide_pump_on(flag_with_stale, t).demand_level, 0.4f,
+                   0.0001f,
+                   "A 2.22 GPM meter reading with no measurement still "
+                   "publishes 0.4, not 0.89");
+
+  // An unsustained flag changes nothing — the guard is the whole tier.
+  PumpOnInputs unsustained = live_tick();
+  TEST_ASSERT(std::string(decide_pump_on(unsustained, t).method) ==
+                  "pump_on_uncertain",
+              "Without the sustain guard the flag never reaches a decision");
+
   // ── No rule may key off raw meter flow while the pump runs ──────────────
   // The whole point of the subtraction. Two ticks with the *same* meter
   // reading, differing only in what the loop is doing: one is a quiet loop at
@@ -530,6 +667,9 @@ int main() {
   test_pump_on_continuation_predicate();
   test_reading_freshness();
   test_pump_on_demand_flow_guards();
+  test_dhw_in_use_sustain_rejects_short_events();
+  test_dhw_in_use_sustain_resets_on_break();
+  test_dhw_in_use_sustain_never_arms_without_the_sensor();
   test_pump_on_tier_ordering();
 
   std::cout << "\n==========================================================="

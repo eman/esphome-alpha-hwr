@@ -2,6 +2,57 @@
 
 ## [Unreleased]
 
+### Added
+
+- **`dhw_demand`: the heater's DHW in-use flag can declare a pump-on draw, after
+  a guard** (issue #138) — a third tier now sits below continuation and the
+  subtraction. If `dhw_in_use` has been *continuously* high for
+  `dhw_in_use_min_seconds` (new key, default 70), it declares demand at
+  confidence 0.6. It casts no vote, cannot displace a stronger tier, and only
+  ever adds demand.
+
+  The flag is unusable bare: measured over 2026-07-21→28 it fires ~77 times a
+  day with a median duration of 15 s, and 89.7 % of its events are at or under
+  70 s. The guard is the whole tier. What justifies trusting the survivors is
+  corroboration from a channel sharing no sensor with the flag — on pump-on runs
+  ≥60 s the lower tank falls a median **−0.390 °F/min** when it fires (n=26)
+  against **−0.043 °F/min** when it stays silent (n=7). A 9× gap, and the right
+  shape: cold makeup water entering the tank, not recirculation's slow bleed.
+  The tier is finding real draws in the one regime where loop flow blinds the
+  meter — worth ~20 minutes a week of otherwise-invisible draws, across 9
+  windows totalling 121 of 60 480 cells.
+
+  The guard is a new `SustainedHigh` tracker in `dhw_demand_logic.h`, mirroring
+  Python's `_dhw_in_use_sustained` including the part that looks like a bug and
+  is not: **a NaN sample breaks the run exactly as a low one does**, so a BLE
+  dropout resets the timer rather than holding the last value. Python re-derives
+  the run from a rolling window each tick, where a missing sample *is* a break;
+  hold-last-value would be the more forgiving choice and would diverge. The
+  tracker ticks in **both** pump branches, because the run has to be free to
+  start while the pump is still off — otherwise the guard would silently cost
+  another 70 s after every pump start.
+
+  Intensity comes from the subtraction where it is available,
+  `min(1, demand_gpm / 2.5)`, and otherwise from the shared no-claim constant
+  `0.4` — **never from raw meter flow**. That was issue #143: scaling intensity
+  off pump-on meter flow inverts the ordering, since a quiet 2.2 GPM loop would
+  publish 0.88 while a real 0.25 GPM draw publishes 0.4.
+
+  The pump-off `apply_dhw_in_use_boost` gate is unchanged. Boosting confidence
+  on a bare flag read and declaring demand on a flag that has held for 70 s are
+  different acts. `detection_method` gains `deterministic_dhw_in_use`.
+
+  **On the record, two caveats.** The control group is seven no-draw pump-on
+  runs over one week — a large, one-directional effect, but a week and not a
+  season. And the measurement #138 named as the one that would actually settle
+  the reopened question — how many of those pump-on cells the subtraction
+  already catches — has **not** been run; the tier lands on the strength of
+  being strictly additive rather than on knowing its marginal contribution.
+  Separately, the same flag is a bad *oracle* and a useful *input*: scored
+  against physics, 988 of its positive cells had no water behind them, which is
+  why it is scored nowhere. Those two roles are easy to conflate and the answers
+  are opposite.
+
 ### Changed
 
 - **BREAKING — `dhw_demand` measures pump-on demand instead of voting on it**

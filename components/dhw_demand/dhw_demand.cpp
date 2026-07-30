@@ -17,6 +17,7 @@ void DhwDemandComponent::setup() {
   // Config setters have all run by now, so seed the pure-logic helpers.
   demand_hold_.release_ms = (uint32_t) demand_release_seconds_ * 1000;
   session_.gap_ms = (uint32_t) session_gap_tolerance_seconds_ * 1000;
+  dhw_in_use_sustained_.min_ms = (uint32_t) dhw_in_use_min_seconds_ * 1000;
 
   // Stamp when each side of the pump-on subtraction last reported. ESPHome has
   // no provenance on a sensor's state — `has_state()` says a value exists, not
@@ -57,6 +58,7 @@ void DhwDemandComponent::dump_config() {
   ESP_LOGCONFIG(TAG, "    pump_on_demand_max_stale: %d s",
                 pump_on_demand_max_stale_seconds_);
   ESP_LOGCONFIG(TAG, "    droplet_max_stale: %d s", droplet_max_stale_seconds_);
+  ESP_LOGCONFIG(TAG, "    dhw_in_use_min: %d s", dhw_in_use_min_seconds_);
   ESP_LOGCONFIG(TAG, "    flow_latch: %d s", flow_latch_seconds_);
   ESP_LOGCONFIG(TAG, "    session_gap_tolerance: %d s",
                 session_gap_tolerance_seconds_);
@@ -290,6 +292,9 @@ void DhwDemandComponent::update() {
   float tank_temp = read_sensor_(tank_lower_temp_);
   float dhw_charge = read_sensor_(dhw_charge_);
   float dhw_in_use = read_sensor_(dhw_in_use_);
+  // Accrued every tick in both branches — see the member's comment.
+  bool dhw_in_use_sustained = dhw_in_use_sustained_.update(dhw_in_use, now);
+
   // The 2-tick flow-onset debounce; the contract, and why the pump-off
   // qualifier is load-bearing, are with the predicate in dhw_demand_logic.h.
   // `prev_pump_confirmed_off_` still holds the previous tick's value here — it
@@ -416,6 +421,7 @@ void DhwDemandComponent::update() {
     in.now_ms = now;
     in.flow_last_update_ms = flow_last_update_ms_;
     in.pump_flow_last_update_ms = pump_flow_last_update_ms_;
+    in.dhw_in_use_sustained = dhw_in_use_sustained;
 
     PumpOnResult result = decide_pump_on(in, pump_on_thresholds_());
     demand = result.demand;

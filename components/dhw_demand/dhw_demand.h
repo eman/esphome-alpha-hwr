@@ -62,6 +62,7 @@ class DhwDemandComponent : public PollingComponent {
     pump_on_demand_max_stale_seconds_ = v;
   }
   void set_droplet_max_stale_seconds(int v) { droplet_max_stale_seconds_ = v; }
+  void set_dhw_in_use_min_seconds(int v) { dhw_in_use_min_seconds_ = v; }
   void set_flow_latch_seconds(int v) { flow_latch_seconds_ = v; }
   void set_demand_release_seconds(int v) { demand_release_seconds_ = v; }
   void set_session_gap_tolerance_seconds(int v) {
@@ -128,6 +129,9 @@ class DhwDemandComponent : public PollingComponent {
                        1000)};  // s, pump loop-flow channel
   int droplet_max_stale_seconds_{static_cast<int>(
       kDefaultPumpOnThresholds.droplet_max_stale_ms / 1000)};  // s, meter
+  // How long the heater's DHW in-use flag must stay continuously high before it
+  // may declare a pump-on draw on its own. 0 means "high right now is enough".
+  int dhw_in_use_min_seconds_{70};              // s
   int flow_latch_seconds_{30};                 // s
   int session_gap_tolerance_seconds_{60};      // s
   int demand_release_seconds_{30};             // s
@@ -151,6 +155,12 @@ class DhwDemandComponent : public PollingComponent {
   // cadences that set the two bounds. 0 means "never reported".
   uint32_t flow_last_update_ms_{0};
   uint32_t pump_flow_last_update_ms_{0};
+
+  // ── DHW in-use sustain guard ──────────────────────────────────────────────
+  // Ticked in *both* pump branches: the run has to be free to start while the
+  // pump is still off, or the guard would silently cost another
+  // dhw_in_use_min_seconds after every pump start.
+  SustainedHigh dhw_in_use_sustained_{};
 
   // ── Pump state tracking ───────────────────────────────────────────────────
   // When both motor sensors are NaN (BLE disconnect), forward-fill the last

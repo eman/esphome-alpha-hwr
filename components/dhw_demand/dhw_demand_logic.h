@@ -88,6 +88,12 @@ inline constexpr PumpOnThresholds kDefaultPumpOnThresholds{
     /*droplet_max_stale_ms=*/60000,
 };
 
+// The intensity a tier publishes when it is confident a draw is happening but
+// has no measurement of how large it is. Shared with the Python detector, where
+// it is _NO_INTENSITY_CLAIM — a deliberate constant rather than a guess, so a
+// consumer can tell "we do not know" from a measured small draw.
+inline constexpr float kNoIntensityClaim = 0.4f;
+
 // Has a sensor reported a real value recently enough to be differenced?
 //
 // ESPHome has no provenance column, so the component stamps millis() into a
@@ -135,6 +141,48 @@ inline float pump_on_demand_flow(float droplet, float pump_flow,
   return droplet - pump_flow;
 }
 
+// Continuous-high tracker for the heater's DHW in-use flag. The flag is a weak
+// proxy for movement, not ground truth: measured over 2026-07-21→28 it fires
+// ~77 times a day with a median duration of 15 s, and 89.7 % of those events
+// are at or under 70 s. Requiring it to stay continuously high past that point
+// is what separates the blips from a real draw, and it is the only thing that
+// makes the flag usable as a standalone pump-on demand signal (issue #138).
+//
+// The threshold's rationale has been restated since it was first written. It
+// originally rested on a "60-second phantom event" story; that mechanism turned
+// out to account for only 4.5 % of this flag's errors. The 70 s survives on the
+// duration distribution above, not on the 60 s story.
+//
+// Mirrors Python's _dhw_in_use_sustained, including the part that looks like a
+// bug and is not: NaN breaks the run exactly as a low sample does. Python
+// re-derives the run from a rolling window each tick and a missing sample there
+// is a break, so a BLE dropout must reset the timer here too. Hold-last-value
+// would be the more forgiving choice and would diverge.
+//
+// min_ms == 0 means "high right now is enough" (no sustain requirement).
+struct SustainedHigh {
+  uint32_t min_ms{0};
+  bool high{false};
+  uint32_t high_since_ms{0};
+  bool active{false};
+
+  bool update(float value, uint32_t now_ms) {
+    if (std::isnan(value) || value < 0.5f) {
+      high = false;
+      active = false;
+      return false;
+    }
+    if (!high) {
+      high = true;
+      high_since_ms = now_ms;
+    }
+    // Unsigned subtraction is intentional: it wraps correctly across the
+    // ~49-day millis() rollover.
+    active = (now_ms - high_since_ms) >= min_ms;
+    return active;
+  }
+};
+
 // Pump-on continuation. Demand was already established just before the pump
 // turned on, and household flow is still above threshold now — so the draw that
 // was being detected has not stopped, whatever the recirculation loop is doing
@@ -158,6 +206,13 @@ struct PumpOnInputs {
   float flow{NAN};              // household flow now, GPM
   float pump_flow{NAN};         // the pump's own loop reading, GPM
   float motor_speed{NAN};       // rpm
+
+  // Has the heater's DHW in-use flag been continuously high for
+  // dhw_in_use_min_seconds? Driven by SustainedHigh in the component, which
+  // ticks in both pump branches — the run has to be free to start while the
+  // pump is still off, or the guard would silently cost another 70 s after
+  // every pump start.
+  bool dhw_in_use_sustained{false};
 
   uint32_t now_ms{0};
   uint32_t flow_last_update_ms{0};
@@ -186,7 +241,10 @@ struct PumpOnResult {
 // Tiers, strongest first:
 //   1. continuation      — a draw already established before the pump started
 //   2. subtraction       — droplet − loop, the draw measured directly
-//   3. pump_on_uncertain — the fallback; claim nothing at 0.5 confidence rather
+//   3. dhw_in_use        — the heater's own flag, once it has held long enough
+//                          to be worth believing; a last-resort recall path for
+//                          low-signal draws the subtraction could not measure
+//   4. pump_on_uncertain — the fallback; claim nothing at 0.5 confidence rather
 //                          than guess either way
 //
 // Each tier is reached only when everything above it declines.
@@ -232,6 +290,31 @@ inline PumpOnResult decide_pump_on(const PumpOnInputs &in,
     r.confidence = std::min(0.90f, 0.60f + 0.30f * std::min(1.0f, margin));
     r.demand_level = std::min(1.0f, r.demand_gpm / 2.5f);
     r.method = "deterministic_pump_on_subtraction";
+    return r;
+  }
+
+  // Tier 3 — the heater's own flag, guarded. Strictly additive: it sits below
+  // everything and cannot displace a stronger tier, and it only ever adds
+  // demand. Measured in the companion detector its whole footprint is 121 of
+  // 60 480 cells over a week — 9 windows, 20.3 minutes — but those firings
+  // corroborate against a channel sharing no sensor with the flag: on pump-on
+  // runs ≥60 s the lower tank falls a median −0.390 °F/min when it fires
+  // against −0.043 °F/min when it stays silent. A 9× gap, and the right shape:
+  // cold makeup water entering the tank, not recirculation's slow bleed.
+  //
+  // The same flag is a bad *oracle* and a useful *input* — scored against
+  // physics, 988 of its positive cells had no water behind them. Those two
+  // roles are easy to conflate and the answers are opposite (issue #138).
+  if (in.dhw_in_use_sustained) {
+    r.demand = true;
+    r.confidence = 0.6f;
+    // Intensity from the measurement where it is available. Raw meter flow is
+    // uninformative in this regime, so where the subtraction declined there is
+    // no honest intensity to publish and the no-claim constant says so.
+    r.demand_level = (!std::isnan(r.demand_gpm) && r.demand_gpm > 0.0f)
+                         ? std::min(1.0f, r.demand_gpm / 2.5f)
+                         : kNoIntensityClaim;
+    r.method = "deterministic_dhw_in_use";
     return r;
   }
 

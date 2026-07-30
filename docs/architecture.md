@@ -103,6 +103,17 @@ two are normally paired, with pump telemetry feeding the detector.
   threshold exists. The "~2.2 GPM recirculation baseline" quoted for years was
   the p90 of the no-draw case. This is settled, not merely untried; see
   [issue #138](https://github.com/eman/esphome-alpha-hwr/issues/138).
+- **`dhw_in_use` recall tier**: below the subtraction sits one more path — the
+  heater's own DHW in-use flag, once it has been *continuously* high for
+  `dhw_in_use_min_seconds` (70). The flag is far too noisy bare (~77 events/day,
+  median 15 s), and the guard is what makes it usable; its survivors corroborate
+  against a channel sharing no sensor with it, the lower tank falling a median
+  −0.390 °F/min when it fires against −0.043 when it stays silent. Strictly
+  additive: it sits below everything, only ever adds demand, and its whole
+  measured footprint is 9 windows totalling ~20 minutes a week. Where the
+  subtraction declined there is no honest intensity to publish, so it reports
+  the shared no-claim constant 0.4 rather than deriving one from meter flow.
+  See [issue #138](https://github.com/eman/esphome-alpha-hwr/issues/138).
 - **Release-hold on the output**: demand is recomputed from scratch each tick, so an
   input dithering around its threshold would chatter the binary sensor. Rising edges
   pass through immediately; falling edges are held for `demand_release_seconds`.

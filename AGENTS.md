@@ -392,7 +392,7 @@ All inputs are optional — missing sensors produce `NAN` and the affected detec
 | `flow` | GPM | Household inline DHW circuit meter; detects **both** recirculation and demand flow, so it is only unambiguous when the pump is off — while the pump runs it is one term of the subtraction, never a threshold in its own right; **30-sample circular buffer** (5 min at 10 s grid) |
 | `tank_lower_temp` | °F | Tank thermal collapse derivative |
 | `dhw_charge` | % | DHW charge-drop derivative |
-| `dhw_in_use` | boolean (as float) | NWP500 native flag; corroborates demand when pump is off |
+| `dhw_in_use` | boolean (as float) | Heater's native DHW flag. Boosts confidence by +0.05 when the pump is off, and — guarded by `dhw_in_use_min_seconds` — is the last-resort pump-on recall tier |
 
 ### 11.4 Detection Algorithm
 
@@ -435,7 +435,9 @@ When the pump is running the household flow meter sees recirculation flow in add
    | Both readings current | 30 s pump / 60 s meter | The channels do not report alike: the pump every 10 s, the meter on change at a median 28 s. Gaps in the pump channel beyond 20 s are 1 % of gaps but **14 % of pump running time** |
    | Minimum pump speed | `pump_on_demand_min_speed_rpm`, 1950 | The pump *estimates* loop flow rather than metering it; below ~2000 RPM the estimate reads low and the difference goes spuriously positive with the tap shut (+0.45 GPM measured at 1650) |
 
-3. **Fallback** — `pump_on_uncertain`, `demand=false` at 0.5 confidence. Reached when the subtraction measured no draw *or* any guard declined.
+3. **`dhw_in_use` recall tier** — the heater's own DHW in-use flag, once it has been *continuously* high for `dhw_in_use_min_seconds` (70), declares demand at confidence 0.6. The flag is unusable bare — ~77 events/day, median 15 s, of which 70 s clears 89.7 % — and the guard is the whole tier. NaN breaks the run exactly as a low sample does, so a BLE dropout resets the timer rather than holding the last value; this mirrors Python, where a missing sample in the rolling window is a break. Strictly additive: it sits below everything, cannot displace a stronger tier, and only ever adds demand. Intensity comes from the subtraction where available, else the shared no-claim constant 0.4 — never from raw meter flow (issue #143). The tracker ticks in **both** pump branches, because the run has to be free to start while the pump is still off.
+
+4. **Fallback** — `pump_on_uncertain`, `demand=false` at 0.5 confidence. Reached when everything above declined.
 
 > **This replaced a five-signal hydraulic vote tier (issue #149), and that is not to be undone.** The votes thresholded inlet pressure, pump-side flow collapse, and current/power/head derivatives. Controlled measurement showed they could not be made correct: the two absolute votes were scalars on quantities that move with pump speed, so the quiet case can sit 6 PSI *below* the drawing case; and 73 % of the derivative votes' production firings over 29 days fell within 25 s of a self-initiated pump speed change — they were reading the pump's own modulation. Scored on the same 209 cells: votes precision 0.530 / recall 0.936 with 23 pump-on false positives, subtraction 0.808 / 0.894 with **0**.
 
@@ -470,6 +472,7 @@ All thresholds are exposed as YAML config keys with defaults matching the Python
 | `pump_on_demand_min_speed_rpm` | 1950 | RPM | Below this the pump's own loop-flow estimate reads low, so the difference goes spuriously positive with no draw |
 | `pump_on_demand_max_stale_seconds` | 30 | s | How old the `pump_flow` reading may be and still be differenced |
 | `droplet_max_stale_seconds` | 60 | s | The same bound for `flow`; looser because the meter reports on change |
+| `dhw_in_use_min_seconds` | 70 | s | How long the heater's DHW flag must hold continuously before it may declare a pump-on draw alone |
 | `flow_latch_seconds` | 30 | s | Falling-edge hold-off duration |
 | `session_gap_tolerance_seconds` | 60 | s | Max gap before ending a session |
 
