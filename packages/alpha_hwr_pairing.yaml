@@ -178,7 +178,6 @@ alpha_hwr:
    head:
      name: "Head Pressure"
    head_rate:
-     id: pump_head_rate_sensor
      name: "Head Pressure Rate"
      entity_category: diagnostic
    

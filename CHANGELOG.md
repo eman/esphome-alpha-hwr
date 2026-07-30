@@ -2,6 +2,26 @@
 
 ## [Unreleased]
 
+### Removed
+
+- **BREAKING — `packages/alpha_hwr_pairing.yaml` no longer assigns
+  `id: pump_head_rate_sensor`** — the id existed for exactly one consumer,
+  `dhw_demand`'s `pump_head_rate:` key, which wired the head-rate vote. That vote
+  was gated on `votes >= 1` and became unreachable the moment the five shared
+  votes retired, so issue #149 removed it and the config key with it. Nothing has
+  referenced the id since.
+
+  **The `head_rate` entity is unchanged.** The pump publishes head rate natively
+  over BLE, it is useful diagnostic telemetry, and it is still exported as "Head
+  Pressure Rate" with the same `entity_category: diagnostic`. Only the id is
+  gone — "the head-rate *vote* was retired" is not "stop reporting head rate".
+
+  **Migration, one line:** if your own lambda or automation resolves
+  `pump_head_rate_sensor`, re-add `id: pump_head_rate_sensor` under `head_rate:`
+  in your own `alpha_hwr:` block. That is where a config wanting a handle on this
+  sensor should declare it anyway, rather than depending on an id the package
+  happens to assign.
+
 ### Added
 
 - **`dhw_demand`: the heater's DHW in-use flag can declare a pump-on draw, after
