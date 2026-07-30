@@ -358,7 +358,7 @@ The theoretical foundation is fully documented in the companion research project
 * **`docs/hot-water-research.md`** — exhaustive treatment of hydrodynamic and thermodynamic signatures that separate recirculation from genuine DHW demand. Key insight: the instant an occupant opens a valve the system topology changes from **closed-loop** to **open-loop**, producing measurable hydraulic transients (pressure drop, flow-rate collapse at the pump, current/power spike) that cannot be explained by normal recirculation.
 * **`docs/esp32-detector.md`** — describes how the detection algorithm is ported to an ESP32/ESPHome environment, including sensor requirements, memory footprint, threshold defaults, and the MQTT output format.
 
-**Design philosophy:** We take a **heuristic, threshold-based approach** — no ML, no model training, no InfluxDB dependency. Each physical signal votes independently; confidence is computed from vote weight and count. The thresholds are derived from observed hardware behaviour and can be tuned without reflashing via ESPHome `substitutions`.
+**Design philosophy:** We take an explicit, on-device approach — no ML, no model training, no InfluxDB dependency. On the pump-off branch each physical signal votes independently and confidence comes from vote weight and count. On the pump-on branch there are no votes: household demand is *measured* as `flow − pump_flow` (issue #149), because controlled measurement showed the hydraulic votes could not be made correct at any threshold. Prefer measuring a quantity over voting on proxies for it; where a threshold is unavoidable, it must be placed from data and the data recorded next to it.
 
 ### 11.2 Architecture
 
@@ -379,17 +379,17 @@ All inputs are optional — missing sensors produce `NAN` and the affected detec
 
 | Config key | Signal | Notes |
 |---|---|---|
-| `motor_speed` | RPM | Primary pump-state indicator |
-| `motor_current` | A | Fallback pump-state; current-spike derivative |
-| `inlet_pressure` | PSI | Pressure transient derivative; absolute low-pressure floor |
-| `pump_flow` | GPM | Pump-side flow collapse (reads 0 when pump is off) |
-| `pump_power` | W | Power-spike derivative |
+| `motor_speed` | RPM | Primary pump-state indicator; also gates the pump-on subtraction below `pump_on_demand_min_speed_rpm` |
+| `motor_current` | A | Fallback pump-state indicator when RPM is absent |
+| `pump_flow` | GPM | The pump's own recirculation-loop reading, subtracted from `flow` to measure household demand while the pump runs (reads 0 when the pump is off, so the same expression collapses to the pump-off rule) |
+
+`inlet_pressure`, `pump_power` and `pump_head_rate` were removed in issue #149 with the vote tier that read them. The keys are still in the schema, mapped to a validator that fails with an explanation.
 
 #### Supplementary sensors (fetched from Home Assistant via `platform: homeassistant`)
 
 | Config key | Signal | Notes |
 |---|---|---|
-| `flow` | GPM | Droplet D1 inline DHW circuit meter; detects **both** recirculation and demand flow — only unambiguous when pump is off; **30-sample circular buffer** (5 min at 10 s grid) |
+| `flow` | GPM | Household inline DHW circuit meter; detects **both** recirculation and demand flow, so it is only unambiguous when the pump is off — while the pump runs it is one term of the subtraction, never a threshold in its own right; **30-sample circular buffer** (5 min at 10 s grid) |
 | `tank_lower_temp` | °F | Tank thermal collapse derivative |
 | `dhw_charge` | % | DHW charge-drop derivative |
 | `dhw_in_use` | boolean (as float) | NWP500 native flag; corroborates demand when pump is off |
@@ -398,7 +398,7 @@ All inputs are optional — missing sensors produce `NAN` and the affected detec
 
 The tick runs in `update()` every 10 seconds. Steps:
 
-1. **Read sensors & compute derivatives** — `Δx/Δt` using actual elapsed ms so jitter in the update interval doesn't bias rates.
+1. **Read sensors & compute derivatives** — `Δx/Δt` using actual elapsed ms so jitter in the update interval doesn't bias rates. Only the two pump-off thermal signals need rates now; the pressure/current/power derivatives went with the vote tier they fed (#149).
 2. **Push Droplet flow into 30-sample circular buffer** — used by the falling-edge latch.
 3. **Determine pump state** — `motor_speed > 0` preferred; `motor_current ≥ pump_off_current_threshold` fallback.
 4. **Run the appropriate detection branch** (pump-off or pump-on).
@@ -423,23 +423,25 @@ Confidence = highest-weight signal + 0.05 per additional corroborating signal, c
 
 #### Pump-ON branch
 
-When the pump is running the Droplet D1 sees recirculation flow in addition to any demand and cannot be used as a direct indicator. The ordering below is `decide_pump_on()` in `dhw_demand_logic.h`, not inline in `update()` — it is a pure function so the host test can assert tier priority, which it could not while the composition lived in the `.cpp` (issue #144). Two sub-paths are checked in order, with `pump_on_uncertain` (demand false, confidence 0.5) as the fallback when both decline:
+When the pump is running the household flow meter sees recirculation flow in addition to any demand, so it cannot be read directly. The ordering below is `decide_pump_on()` in `dhw_demand_logic.h`, not inline in `update()` — it is a pure function so the host test can assert tier priority, which it could not while the composition lived in the `.cpp` (issue #144).
 
-1. **Continuation detection** — if Droplet flow was above threshold on the last pump-off tick and is still above threshold now, confidence = 0.85. This handles draws that were already in progress when the pump turned on.
+1. **Continuation detection** — if household flow was above threshold on the last pump-off tick and is still above threshold now, confidence = 0.85. This handles draws already in progress when the pump turned on.
 
-2. **Deterministic hydraulic voting** — five signals each contribute one vote. These signals reflect the **open-loop topology change** caused by a fixture being opened and are not produced by normal recirculation:
+2. **Subtraction** — `flow − pump_flow` is household demand directly: the meter reads everything leaving the mains, the pump reports its own loop, and the difference is what the house drew. No RPM term, no fitted curve. Fires above `pump_on_demand_flow_threshold` (0.3 GPM of *computed* demand); confidence is `min(0.90, 0.60 + 0.30 × margin)`, rising with how far the draw clears the threshold. Three guards carry it, all load-bearing:
 
-   | Signal | Condition |
-   |---|---|
-   | Pressure transient | `|Δinlet/Δt| > 0.07 PSI/s` |
-   | Inlet pressure floor | `inlet_psi < 5.0 PSI` |
-   | Pump flow collapse | `pump_flow < 0.2 GPM` |
-   | Current spike | `|Δcurrent/Δt| > 0.001 A/s` |
-   | Power spike | `Δpower/Δt > 5.0 W/s` |
+   | Guard | Value | Why |
+   |---|---|---|
+   | Both channels present | — | A difference needs two terms |
+   | Both readings current | 30 s pump / 60 s meter | The channels do not report alike: the pump every 10 s, the meter on change at a median 28 s. Gaps in the pump channel beyond 20 s are 1 % of gaps but **14 % of pump running time** |
+   | Minimum pump speed | `pump_on_demand_min_speed_rpm`, 1950 | The pump *estimates* loop flow rather than metering it; below ~2000 RPM the estimate reads low and the difference goes spuriously positive with the tap shut (+0.45 GPM measured at 1650) |
 
-   Confidence scales with vote count: 1→0.50, 2→0.65, 3→0.80, 4→0.90, 5→0.95. One vote is sufficient to declare demand.
+3. **Fallback** — `pump_on_uncertain`, `demand=false` at 0.5 confidence. Reached when the subtraction measured no draw *or* any guard declined.
 
-   > **Why thermal/duration paths are disabled during pump-on:** During long recirculation runs the pump returns progressively cooled water to the tank cold inlet, causing the lower tank temperature to drop at rates up to −0.083 °F/s — indistinguishable from a shower draw. Only hydraulic signals (which reflect the open-loop topology change) are reliable discriminators.
+> **This replaced a five-signal hydraulic vote tier (issue #149), and that is not to be undone.** The votes thresholded inlet pressure, pump-side flow collapse, and current/power/head derivatives. Controlled measurement showed they could not be made correct: the two absolute votes were scalars on quantities that move with pump speed, so the quiet case can sit 6 PSI *below* the drawing case; and 73 % of the derivative votes' production firings over 29 days fell within 25 s of a self-initiated pump speed change — they were reading the pump's own modulation. Scored on the same 209 cells: votes precision 0.530 / recall 0.936 with 23 pump-on false positives, subtraction 0.808 / 0.894 with **0**.
+
+> **No pump-on rule may key off raw meter flow, ever.** Pump-on runs with no draw read a median 1.31 GPM (p90 2.22) against 1.74 (p90 2.27) with a draw — the distributions overlap almost entirely, so no threshold exists. The "~2.2 GPM recirculation baseline" quoted for years was the p90 of the no-draw case, not a baseline. This is why tier 2 subtracts, and why tier 1 gates on a draw already *confirmed while the pump was off* rather than on a fresh meter reading.
+
+> **Why thermal/duration paths are disabled during pump-on:** During long recirculation runs the pump returns progressively cooled water to the tank cold inlet, causing the lower tank temperature to drop at rates up to −0.083 °F/s — indistinguishable from a shower draw.
 
 ### 11.5 Outputs
 
@@ -464,11 +466,10 @@ All thresholds are exposed as YAML config keys with defaults matching the Python
 | `flow_threshold` | 0.3 | GPM | Minimum flow to count as demand |
 | `thermal_collapse_rate` | 0.05 | °F/s | Min tank temp drop rate (pump off) |
 | `dhw_charge_drop_rate` | 0.005 | %/s | Min DHW charge drop rate |
-| `inlet_pressure_transient_threshold` | 0.07 | PSI/s | Valve-shock detection |
-| `inlet_pressure_demand_floor` | 5.0 | PSI | Absolute low-pressure threshold |
-| `pump_flow_collapse_threshold` | 0.2 | GPM | Pump-side flow collapse |
-| `motor_current_spike_threshold` | 0.001 | A/s | Current rate of change |
-| `pump_power_spike_threshold` | 5.0 | W/s | Power rate of change |
+| `pump_on_demand_flow_threshold` | 0.3 | GPM | Computed demand (`flow − pump_flow`) above which a pump-on draw is declared |
+| `pump_on_demand_min_speed_rpm` | 1950 | RPM | Below this the pump's own loop-flow estimate reads low, so the difference goes spuriously positive with no draw |
+| `pump_on_demand_max_stale_seconds` | 30 | s | How old the `pump_flow` reading may be and still be differenced |
+| `droplet_max_stale_seconds` | 60 | s | The same bound for `flow`; looser because the meter reports on change |
 | `flow_latch_seconds` | 30 | s | Falling-edge hold-off duration |
 | `session_gap_tolerance_seconds` | 60 | s | Max gap before ending a session |
 
@@ -478,6 +479,7 @@ All thresholds are exposed as YAML config keys with defaults matching the Python
 2. **All inputs optional** — never `assert` or crash on a missing sensor. Missing signals return `NAN`; detection paths that require a `NAN` input are silently skipped.
 3. **Threshold changes are config changes, not code changes** — if a threshold needs tuning, adjust via YAML `substitutions`, not by editing `.cpp`.
 4. **Derivatives use actual elapsed time** — always divide by the real `dt_s` from `millis()` delta, not an assumed 10-second interval.
-5. **Consult reference docs before changing thresholds** — `esp32-detector.md` explains the physical rationale for every default. Changes should be grounded in observed hardware behaviour.
+5. **Consult reference docs before changing thresholds** — `esp32-detector.md` explains the physical rationale for every default. Changes should be grounded in observed hardware behaviour, and the grounding recorded next to the constant. A threshold whose provenance is not written down cannot be defended when it later disagrees with production; that is how the stale `3.0f` head-rate value survived the units audit (#120).
+8. **The pump-on tier ordering lives in `dhw_demand_logic.h`, not `update()`** — `decide_pump_on()` is a pure function so the host test asserts tier priority directly (#144). Adding, removing or reordering a tier means changing that function and its ordering tests, never adding a branch in the `.cpp`.
 6. **Test compilation** — `dhw_demand` has no BLE dependency; verify it compiles by including it in `hwr-pump-example.yaml` or a minimal test YAML.
 7. **Logging discipline** — follow the same `ESP_LOGx` conventions as `alpha_hwr`: `LOGV` for per-tick data, `LOGD` for state transitions, `LOGI` for session start/end.

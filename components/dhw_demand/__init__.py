@@ -22,9 +22,7 @@ DhwDemandComponent = dhw_demand_ns.class_(
 # ── Input sensor keys ────────────────────────────────────────────────────────
 CONF_MOTOR_SPEED = "motor_speed"
 CONF_MOTOR_CURRENT = "motor_current"
-CONF_INLET_PRESSURE = "inlet_pressure"
 CONF_PUMP_FLOW = "pump_flow"
-CONF_PUMP_POWER = "pump_power"
 CONF_FLOW = "flow"
 CONF_TANK_LOWER_TEMP = "tank_lower_temp"
 CONF_DHW_CHARGE = "dhw_charge"
@@ -42,16 +40,79 @@ CONF_PUMP_OFF_CURRENT_THRESHOLD = "pump_off_current_threshold"
 CONF_FLOW_THRESHOLD = "flow_threshold"
 CONF_THERMAL_COLLAPSE_RATE = "thermal_collapse_rate"
 CONF_DHW_CHARGE_DROP_RATE = "dhw_charge_drop_rate"
-CONF_INLET_PRESSURE_TRANSIENT_THRESHOLD = "inlet_pressure_transient_threshold"
-CONF_INLET_PRESSURE_DEMAND_FLOOR = "inlet_pressure_demand_floor"
-CONF_PUMP_FLOW_COLLAPSE_THRESHOLD = "pump_flow_collapse_threshold"
-CONF_MOTOR_CURRENT_SPIKE_THRESHOLD = "motor_current_spike_threshold"
-CONF_PUMP_POWER_SPIKE_THRESHOLD = "pump_power_spike_threshold"
-CONF_PUMP_HEAD_RATE = "pump_head_rate"
-CONF_PUMP_HEAD_RATE_THRESHOLD = "pump_head_rate_threshold"
+CONF_PUMP_ON_DEMAND_FLOW_THRESHOLD = "pump_on_demand_flow_threshold"
+CONF_PUMP_ON_DEMAND_MIN_SPEED_RPM = "pump_on_demand_min_speed_rpm"
+CONF_PUMP_ON_DEMAND_MAX_STALE_SECONDS = "pump_on_demand_max_stale_seconds"
+CONF_DROPLET_MAX_STALE_SECONDS = "droplet_max_stale_seconds"
 CONF_FLOW_LATCH_SECONDS = "flow_latch_seconds"
 CONF_SESSION_GAP_TOLERANCE_SECONDS = "session_gap_tolerance_seconds"
 CONF_DEMAND_RELEASE_SECONDS = "demand_release_seconds"
+
+
+# ── Retired keys ─────────────────────────────────────────────────────────────
+# The pump-on hydraulic vote tier was replaced by a direct measurement in issue
+# #149, and these keys configured it. They are kept in the schema so a config
+# that still sets one fails with an explanation rather than a bare "[key] is an
+# invalid option", which says nothing about what to do instead.
+#
+# Rejecting rather than ignoring is deliberate: config that validates but does
+# nothing is a trap, and this fails while the person who typed it is looking.
+_RETIRED_KEYS = {
+    "inlet_pressure_transient_threshold": (
+        "the pressure-transient vote fired on the pump's own speed changes"
+    ),
+    "inlet_pressure_demand_floor": (
+        "a scalar floor on a quantity that moves with pump speed — no-draw "
+        "inlet pressure runs 3.4 PSI at 1650 RPM to 13.0 at 3600, while a real "
+        "draw reads 5.7 at 2400, so the populations overlap in the wrong "
+        "direction and every candidate value fails somewhere"
+    ),
+    "pump_flow_collapse_threshold": (
+        "another scalar on a speed-dependent quantity; the loop-flow reading "
+        "it thresholded is now one term of the subtraction instead"
+    ),
+    "motor_current_spike_threshold": (
+        "the current-spike vote fired on the pump's own speed changes — 73 % "
+        "of its firings over 29 days fell within 25 s of a self-initiated "
+        "speed change"
+    ),
+    "pump_power_spike_threshold": (
+        "the power-spike vote had the same defect as the current vote it "
+        "corroborated"
+    ),
+    "pump_head_rate": (
+        "the head-rate vote was gated on at least one other vote having "
+        "fired, so it had nothing left to ride on once the others retired"
+    ),
+    "pump_head_rate_threshold": (
+        "the head-rate vote was gated on at least one other vote having "
+        "fired, so it had nothing left to ride on once the others retired"
+    ),
+    "inlet_pressure": (
+        "inlet pressure was read only by the two pressure votes"
+    ),
+    "pump_power": ("pump power was read only by the power-spike vote"),
+}
+
+
+def _retired(key):
+    """Fail validation with what replaced this key and why it went."""
+
+    def validator(value):
+        raise cv.Invalid(
+            f"'{key}' was removed in issue #149: {_RETIRED_KEYS[key]}. "
+            "The pump-on branch no longer votes on hydraulics — it measures "
+            "household demand directly as "
+            "(household flow meter - pump loop flow), which scored precision "
+            "0.808 against the vote tier's 0.530 on a controlled corpus, with "
+            "0 pump-on false positives against 23. Delete this key. See "
+            "pump_on_demand_flow_threshold, pump_on_demand_min_speed_rpm, "
+            "pump_on_demand_max_stale_seconds and droplet_max_stale_seconds "
+            "for what is tunable now, and docs/configuration.md for the "
+            "migration."
+        )
+
+    return validator
 
 CONFIG_SCHEMA = (
     cv.Schema(
@@ -89,14 +150,11 @@ CONFIG_SCHEMA = (
             # ── Input sensor references (all optional) ───────────────────────
             cv.Optional(CONF_MOTOR_SPEED): cv.use_id(sensor.Sensor),
             cv.Optional(CONF_MOTOR_CURRENT): cv.use_id(sensor.Sensor),
-            cv.Optional(CONF_INLET_PRESSURE): cv.use_id(sensor.Sensor),
             cv.Optional(CONF_PUMP_FLOW): cv.use_id(sensor.Sensor),
-            cv.Optional(CONF_PUMP_POWER): cv.use_id(sensor.Sensor),
             cv.Optional(CONF_FLOW): cv.use_id(sensor.Sensor),
             cv.Optional(CONF_TANK_LOWER_TEMP): cv.use_id(sensor.Sensor),
             cv.Optional(CONF_DHW_CHARGE): cv.use_id(sensor.Sensor),
             cv.Optional(CONF_DHW_IN_USE): cv.use_id(sensor.Sensor),
-            cv.Optional(CONF_PUMP_HEAD_RATE): cv.use_id(sensor.Sensor),
 
             # ── Detection thresholds ─────────────────────────────────────────
             cv.Optional(CONF_PUMP_OFF_CURRENT_THRESHOLD, default=0.03):
@@ -107,26 +165,30 @@ CONFIG_SCHEMA = (
                 cv.positive_float,
             cv.Optional(CONF_DHW_CHARGE_DROP_RATE, default=0.005):
                 cv.positive_float,
-            cv.Optional(CONF_INLET_PRESSURE_TRANSIENT_THRESHOLD, default=0.07):
+            cv.Optional(CONF_PUMP_ON_DEMAND_FLOW_THRESHOLD, default=0.3):
                 cv.positive_float,
-            cv.Optional(CONF_INLET_PRESSURE_DEMAND_FLOOR, default=5.0):
+            # Below this speed the pump's own loop-flow estimate reads low and
+            # the difference goes spuriously positive with the tap shut.
+            cv.Optional(CONF_PUMP_ON_DEMAND_MIN_SPEED_RPM, default=1950.0):
                 cv.positive_float,
-            cv.Optional(CONF_PUMP_FLOW_COLLAPSE_THRESHOLD, default=0.2):
-                cv.positive_float,
-            cv.Optional(CONF_MOTOR_CURRENT_SPIKE_THRESHOLD, default=0.001):
-                cv.positive_float,
-            cv.Optional(CONF_PUMP_POWER_SPIKE_THRESHOLD, default=5.0):
-                cv.positive_float,
-            # m/s. Head telemetry is meters of head; 0.31 m/s ≈ the former
-            # 3.0 kPa/s threshold (÷9.80665).
-            cv.Optional(CONF_PUMP_HEAD_RATE_THRESHOLD, default=0.31):
-                cv.positive_float,
+            # Bounded rather than left open: the ms conversion is uint32_t and
+            # wraps past ~49.7 days, and a wrapped bound would treat every
+            # reading as fresh — the opposite of what a large value asks for.
+            # An hour is far beyond any useful staleness bound.
+            cv.Optional(CONF_PUMP_ON_DEMAND_MAX_STALE_SECONDS, default=30):
+                cv.int_range(min=1, max=3600),
+            cv.Optional(CONF_DROPLET_MAX_STALE_SECONDS, default=60):
+                cv.int_range(min=1, max=3600),
             cv.Optional(CONF_FLOW_LATCH_SECONDS, default=30):
                 cv.positive_int,
             cv.Optional(CONF_SESSION_GAP_TOLERANCE_SECONDS, default=60):
                 cv.positive_int,
             cv.Optional(CONF_DEMAND_RELEASE_SECONDS, default=30):
                 cv.positive_int,
+            **{
+                cv.Optional(key): _retired(key)
+                for key in _RETIRED_KEYS
+            },
         }
     )
     .extend(cv.polling_component_schema("10s"))
@@ -162,14 +224,11 @@ async def to_code(config):
     _input_map = {
         CONF_MOTOR_SPEED: "set_motor_speed_sensor",
         CONF_MOTOR_CURRENT: "set_motor_current_sensor",
-        CONF_INLET_PRESSURE: "set_inlet_pressure_sensor",
         CONF_PUMP_FLOW: "set_pump_flow_sensor",
-        CONF_PUMP_POWER: "set_pump_power_sensor",
         CONF_FLOW: "set_flow_sensor",
         CONF_TANK_LOWER_TEMP: "set_tank_lower_temp_sensor",
         CONF_DHW_CHARGE: "set_dhw_charge_sensor",
         CONF_DHW_IN_USE: "set_dhw_in_use_sensor",
-        CONF_PUMP_HEAD_RATE: "set_pump_head_rate_sensor",
     }
     for conf_key, setter in _input_map.items():
         if sens_id := config.get(conf_key):
@@ -185,18 +244,14 @@ async def to_code(config):
         config[CONF_THERMAL_COLLAPSE_RATE]))
     cg.add(var.set_dhw_charge_drop_rate(
         config[CONF_DHW_CHARGE_DROP_RATE]))
-    cg.add(var.set_inlet_pressure_transient_threshold(
-        config[CONF_INLET_PRESSURE_TRANSIENT_THRESHOLD]))
-    cg.add(var.set_inlet_pressure_demand_floor(
-        config[CONF_INLET_PRESSURE_DEMAND_FLOOR]))
-    cg.add(var.set_pump_flow_collapse_threshold(
-        config[CONF_PUMP_FLOW_COLLAPSE_THRESHOLD]))
-    cg.add(var.set_motor_current_spike_threshold(
-        config[CONF_MOTOR_CURRENT_SPIKE_THRESHOLD]))
-    cg.add(var.set_pump_power_spike_threshold(
-        config[CONF_PUMP_POWER_SPIKE_THRESHOLD]))
-    cg.add(var.set_pump_head_rate_threshold(
-        config[CONF_PUMP_HEAD_RATE_THRESHOLD]))
+    cg.add(var.set_pump_on_demand_flow_threshold(
+        config[CONF_PUMP_ON_DEMAND_FLOW_THRESHOLD]))
+    cg.add(var.set_pump_on_demand_min_speed_rpm(
+        config[CONF_PUMP_ON_DEMAND_MIN_SPEED_RPM]))
+    cg.add(var.set_pump_on_demand_max_stale_seconds(
+        config[CONF_PUMP_ON_DEMAND_MAX_STALE_SECONDS]))
+    cg.add(var.set_droplet_max_stale_seconds(
+        config[CONF_DROPLET_MAX_STALE_SECONDS]))
     cg.add(var.set_flow_latch_seconds(
         config[CONF_FLOW_LATCH_SECONDS]))
     cg.add(var.set_session_gap_tolerance_seconds(

@@ -72,16 +72,23 @@ sensor:
 #   dhw_demand:
 #     motor_speed:    <your_motor_speed_sensor_id>
 #     motor_current:  <your_motor_current_sensor_id>
-#     inlet_pressure: <inlet_pressure_psi_sensor_id>   # must be in PSI
 #     pump_flow:      <pump_flow_gpm_sensor_id>         # must be in GPM
-#     pump_power:     <pump_power_sensor_id>
 #     # Optional: if NWP500 or equivalent is present
 #     dhw_in_use:     dhw_in_use_flag
 #
-# NOTE: alpha_hwr reports flow in m³/h and pressure in bar.  Create
-# platform: copy sensors with multiply filters to convert before referencing.
-# Do not reuse already-converted sensors here or the thresholds will be wrong:
-#   1 m³/h = 4.40287 GPM   |   1 bar = 14.5038 PSI
+# `pump_flow` and `motor_speed` are what make pump-on detection work: household
+# demand is measured as (flow - pump_flow), gated on motor_speed. Without both,
+# the detector still runs but reports `pump_on_uncertain` whenever the pump is
+# on.
+#
+# NOTE: alpha_hwr reports flow in m³/h.  Create a platform: copy sensor with a
+# multiply filter to convert before referencing.  Do not reuse an
+# already-converted sensor here or the thresholds will be wrong:
+#   1 m³/h = 4.40287 GPM
+#
+# `inlet_pressure`, `pump_power` and `pump_head_rate` were removed in issue
+# #149 along with the hydraulic vote tier that read them; a config still
+# setting one now fails validation with an explanation.
 # See dhw-demand-example.yaml for a complete working configuration.
 
 dhw_demand:
@@ -127,12 +134,22 @@ dhw_demand:
   flow_threshold: 0.3           # GPM
   thermal_collapse_rate: 0.05           # °F/s
   dhw_charge_drop_rate: 0.005           # %/s
-  inlet_pressure_transient_threshold: 0.07  # PSI/s (only used when pump sensors present)
-  inlet_pressure_demand_floor: 5.0      # PSI   (only used when pump sensors present)
-  pump_flow_collapse_threshold: 0.2     # GPM   (only used when pump sensors present)
-  motor_current_spike_threshold: 0.001  # A/s   (only used when pump sensors present)
-  pump_power_spike_threshold: 5.0       # W/s   (only used when pump sensors present)
-  pump_head_rate_threshold: 0.31        # m/s (corroborating vote; only fires when pump is on)
+  # ── Pump-on demand measurement (only used when pump sensors present) ───────
+  # Household demand while the pump runs is measured, not voted on:
+  # (household flow meter - pump loop flow). Three guards carry it.
+  pump_on_demand_flow_threshold: 0.3    # GPM of *computed* demand. Shares the
+                                        # value of flow_threshold deliberately,
+                                        # so both pump regimes agree on what
+                                        # counts as flow.
+  pump_on_demand_min_speed_rpm: 1950    # RPM. Below this the pump's own loop
+                                        # flow estimate reads low and the
+                                        # difference goes spuriously positive
+                                        # with no draw. Admits the entire
+                                        # production range.
+  pump_on_demand_max_stale_seconds: 30  # The pump reports every 10 s.
+  droplet_max_stale_seconds: 60         # The meter reports on change, median
+                                        # 28 s while flowing — so this bound is
+                                        # deliberately looser than the pump's.
   flow_latch_seconds: 30
   session_gap_tolerance_seconds: 60
   # How long demand stays latched after the last positive tick. Stops an input

@@ -4,6 +4,93 @@
 
 ### Changed
 
+- **BREAKING — `dhw_demand` measures pump-on demand instead of voting on it**
+  (issue #149) — the pump-on branch counted five hydraulic votes: an inlet
+  pressure transient, an absolute inlet-pressure floor, pump-side flow collapse,
+  a motor-current spike and a power spike, plus a firmware-only head-rate vote
+  riding on top. Controlled measurement showed that tier could not be made
+  correct at any threshold. The two absolute votes were scalars on quantities
+  that move with pump speed — no-draw inlet pressure runs 3.4 PSI at 1650 RPM to
+  13.0 at 3600 while a real draw reads 5.7 at 2400, so the quiet case can sit
+  6 PSI *below* the drawing case and every candidate value fails somewhere. The
+  three derivative votes fired on the pump's own modulation: 73 % of their
+  production firings over 29 days landed within 25 s of a self-initiated speed
+  change. Together the tier contributed 33 cells in 30 days, statistically
+  indistinguishable from the cells where nothing fired.
+
+  It is replaced by a measurement. `flow − pump_flow` is household demand
+  directly — the meter reads everything leaving the mains, the pump reports its
+  own recirculation loop, and the difference is what the house drew. No RPM
+  term, no fitted curve. On controlled runs with a human opening one tap, no
+  draw at 2000–3600 RPM measures −0.04 ± 0.06 GPM across seven measurements
+  against +1.24 GPM with the tap open: non-overlapping, roughly 30:1, and the
+  residual bias is *negative*, so a quiet loop clamps to zero and the error
+  pushes toward false negatives rather than false positives. Because the pump
+  reports 0 flow when stopped, the same expression collapses to the pump-off
+  rule — one oracle for both regimes. Scored on the same 209 cells: precision
+  0.530 → **0.808**, F1 0.677 → **0.849**, pump-on false positives 23 → **0**,
+  with recall 0.936 → 0.894. The new tier is 17 TP / 0 FP on its own and
+  recovers three cells the votes missed *mid-draw*, where inlet pressure had
+  recovered above its floor while the tap was still open.
+
+  Three guards carry it and all three are load-bearing.
+  `pump_on_demand_flow_threshold` (0.3 GPM of *computed* demand) shares
+  `flow_threshold`'s value deliberately, so both pump regimes agree on what
+  counts as flow. `pump_on_demand_max_stale_seconds` (30) and
+  `droplet_max_stale_seconds` (60) bound each side of the difference
+  separately — a difference is only meaningful if both readings are current, and
+  the channels do not report alike: the pump every 10 s, the meter on change at
+  a median 28 s. Gaps in the pump channel beyond 20 s are 1.0 % of gaps but
+  **14.1 % of pump running time**, and during one bench run a reading that
+  looked live was 90 s old, from before the tap was opened. ESPHome carries no
+  provenance on a sensor value, so each channel now stamps its own last-update
+  register from a state callback. `pump_on_demand_min_speed_rpm` (1950) exists
+  because the pump *estimates* its loop flow rather than metering it, and near
+  the bottom of its range the estimate reads low, so the difference goes
+  spuriously positive with the tap shut (+0.45 GPM at 1650, +0.27 at 1800,
+  ≈0 from 2001 up). Without it that bias produced 20 false positives of its own.
+  1950 admits the whole production range — the pump's own 29-day minimum was
+  1971 RPM — and excludes only bench-commanded speeds.
+
+  `demand_level` on the pump-on branch now scales off the measurement,
+  `min(1, demand_gpm / 2.5)`, retiring the vote-count formula
+  `0.3 + 0.15 × (votes − 1)`, which has no meaning once there are no votes.
+  Confidence rises with margin over the threshold,
+  `min(0.90, 0.60 + 0.30 × margin)`, rather than with a vote count.
+
+  The head-rate vote went too. It was gated on at least one other vote having
+  fired, so with the shared votes gone it could never be reached; the Python
+  detector had already deprecated its head channel, so "add it there" was
+  closed. The 15 s startup-transient suppression window went with the derivative
+  votes it gated — dead config that looks live is a trap.
+
+  **Migration: delete nine keys.** `inlet_pressure`, `pump_power`,
+  `pump_head_rate`, `inlet_pressure_transient_threshold`,
+  `inlet_pressure_demand_floor`, `pump_flow_collapse_threshold`,
+  `motor_current_spike_threshold`, `pump_power_spike_threshold` and
+  `pump_head_rate_threshold`. A config that still sets one **fails at
+  `esphome config` time** with a message naming what replaced it and why —
+  deliberately, rather than being accepted and ignored, so it breaks while the
+  person who typed it is still looking. Make sure `pump_flow` and `motor_speed`
+  *are* wired: they are what pump-on detection now runs on. Without them the
+  detector still works while the pump is off and reports `pump_on_uncertain`
+  whenever it is running. `detection_method` gains
+  `deterministic_pump_on_subtraction` and loses `deterministic_pump_on`.
+
+  **On the record:** no pump-on rule may key off raw meter flow, and that is
+  settled rather than merely untried (issue #138). Pump-on runs with no draw
+  read a median 1.31 GPM (p90 2.22) against 1.74 (p90 2.27) with a draw — the
+  distributions overlap almost entirely, so no threshold exists. The
+  "~2.2 GPM recirculation baseline" both this repo and the companion detector
+  quoted for years was the p90 of the no-draw case, not a baseline. Separately,
+  the 1950 RPM floor is a property of the ALPHA's own flow estimator rather than
+  of one plumbing installation, so it should transfer to other installs — but it
+  was measured at one, which is worth stating rather than implying.
+
+  This closes #143, #145, #146 and #132 as well: all four are defects in the
+  vote tier, and retuning a design that should not exist is effort spent in the
+  wrong place.
+
 - **The `dhw_demand` pump-on tier ordering is now host-testable** (issue #144) —
   `dhw_demand_logic.h` states its own contract at the top: pure decision logic,
   nothing hand-mirrored into the test. The individual predicates honoured it,

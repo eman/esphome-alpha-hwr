@@ -1,8 +1,9 @@
 #pragma once
 
-// Pure decision logic for the DHW demand detector: pump-on vote counting, the
-// pump-off flow-onset predicate, the confidence boost, demand release-hold, and
-// session accounting. Deliberately free of ESPHome dependencies — no millis(),
+// Pure decision logic for the DHW demand detector: the pump-on tier ordering
+// and its demand measurement, the pump-off flow-onset predicate, the confidence
+// boost, demand release-hold, and session accounting. Deliberately free of
+// ESPHome dependencies — no millis(),
 // no sensor objects; anything time-dependent takes now_ms as a parameter — so
 // the host test suite (tests/test_dhw_demand_logic.cpp) can include this header
 // directly and exercise the exact production logic and threshold defaults.
@@ -16,132 +17,122 @@
 namespace esphome {
 namespace dhw_demand {
 
-struct PumpOnVoteThresholds {
-  float inlet_pressure_transient;
-  float inlet_pressure_demand_floor;
-  float pump_flow_collapse;
-  float motor_current_spike;
-  float pump_power_spike;
-  float pump_head_rate;
+// Configured values the pump-on branch decides against. Single source of truth
+// for both DhwDemandComponent's member initializers and the host test.
+//
+// Defaults match the Python DetectorConfig; see the notes on each for what was
+// measured to place it.
+struct PumpOnThresholds {
+  // Household flow above which a draw was in progress when the pump started.
+  // Gates continuation only — see the warning on the subtraction below for why
+  // raw meter flow may never decide a pump-on detection on its own.
+  float flow;  // GPM
+
+  // Computed demand (droplet − loop) above which the subtraction declares a
+  // draw. Shares the value of `flow` deliberately, so both pump regimes agree
+  // on what counts as flow.
+  float demand_flow;  // GPM
+
+  // Pump speed below which the subtraction is not trustworthy.
+  //
+  // The pump does not meter its loop flow; it estimates it. Near the bottom of
+  // its range the estimate reads low, so `droplet − loop` goes spuriously
+  // positive with the tap shut. Measured with no draw, ground truth by
+  // construction:
+  //
+  //     achieved rpm   droplet   loop   difference
+  //             1650      0.71   0.25       +0.45   <- would fire falsely
+  //             1800      0.83   0.56       +0.27   <- would fire falsely
+  //             2001      0.99   0.99       -0.00
+  //             2398      1.34   1.47       -0.14
+  //             3600      2.22   2.09       +0.12
+  //
+  // Without this floor the bias produced 20 false positives of its own.
+  //
+  // 1950 rather than 2000 because the *pump* never chooses a speed this low:
+  // over 29 days of production the minimum observed was 1971 rpm (p1 1994), so
+  // a 2000 floor would cut through the middle of the mode the pump actually
+  // idles in, while 1950 excludes only bench-commanded speeds.
+  //
+  // Two caveats worth keeping visible. The lowest *measured* clean point is
+  // 1996 rpm, so production's 1971 rpm minimum sits 25 rpm below any
+  // measurement — interpolating 1800→2001 puts the bias there near +0.04
+  // against a 0.3 threshold, roughly 0.25 GPM of headroom, but it is an
+  // extrapolation. And this is a property of the ALPHA's own flow estimator
+  // rather than of one plumbing installation, so it should transfer to other
+  // installs — measured at one, which is worth stating rather than implying.
+  float min_speed_rpm;
+
+  // How stale each side of the subtraction may be. A difference of two
+  // quantities is only meaningful if both are current, and the two channels do
+  // not report alike — which is why these are separate numbers rather than one
+  // shared bound.
+  //
+  // The pump reports every 10 s, but gaps beyond 20 s are 1.0 % of gaps and
+  // 14.1 % of pump *running time*: a last-known-value read is stale about a
+  // seventh of the time the pump runs, and during one bench run a reading that
+  // looked live was 90 s old, from before the tap was opened.
+  //
+  // The meter reports on change, at a median 28 s cadence while flowing (p90
+  // 32 s), so matching the pump's 30 s here would reject half of normal
+  // cadence.
+  uint32_t pump_flow_max_stale_ms;
+  uint32_t droplet_max_stale_ms;
 };
 
-// Defaults match the Python DetectorConfig. Single source of truth for both
-// DhwDemandComponent's member initializers and the host test.
-inline constexpr PumpOnVoteThresholds kDefaultPumpOnVoteThresholds{
-    /*inlet_pressure_transient=*/0.07f,    // PSI/s
-    /*inlet_pressure_demand_floor=*/5.0f,  // PSI
-    /*pump_flow_collapse=*/0.2f,           // GPM
-    /*motor_current_spike=*/0.001f,        // A/s
-    /*pump_power_spike=*/5.0f,             // W/s
-    /*pump_head_rate=*/0.31f,              // m/s
+inline constexpr PumpOnThresholds kDefaultPumpOnThresholds{
+    /*flow=*/0.3f,               // GPM
+    /*demand_flow=*/0.3f,        // GPM of computed demand
+    /*min_speed_rpm=*/1950.0f,   // rpm
+    /*pump_flow_max_stale_ms=*/30000,
+    /*droplet_max_stale_ms=*/60000,
 };
 
-// Vote counts from one pump-on evaluation. The two differ by at most one: the
-// head-rate vote (signal 6) is firmware-only, so it is excluded from `shared`.
+// Has a sensor reported a real value recently enough to be differenced?
 //
-// Which count to use depends on whether the quantity is on the wire. Confidence
-// is a firmware-local judgement of its own evidence, so it uses `total` — the
-// firmware knows more here and should say so. demand_level is part of the
-// RFC-006 detector contract and is published for consumers that must behave the
-// same whichever detector is feeding them, so it uses `shared` (issue #125).
-struct PumpOnVotes {
-  int total{0};   // signals 1–6, including the firmware-only head-rate vote
-  int shared{0};  // signals 1–5 only, the ones the Python detector also has
-};
-
-// Estimated draw intensity for a pump-on hydraulic detection, from the number
-// of signals that voted. Matches the Python detector's
-// `demand_level = 0.3 + 0.15 * (signal_count - 1)` (detection.py:732): a lone
-// vote is weak evidence, corroboration strengthens it.
+// ESPHome has no provenance column, so the component stamps millis() into a
+// per-channel register on each state callback and passes it here. A register of
+// 0 means the channel has never reported.
 //
-// Pass PumpOnVotes::shared, not ::total — see the note there. With five shared
-// signals the range is 0.3–0.9, the same ceiling Python reaches; the 1.0 cap is
-// a guard, not a reachable value.
-//
-// Only meaningful for votes >= 1; the caller never reaches here otherwise.
-inline float pump_on_demand_level(int votes) {
-  return std::min(1.0f, 0.3f + 0.15f * static_cast<float>(votes - 1));
+// Unsigned subtraction is intentional: it wraps correctly across the ~49-day
+// millis() rollover, the same as DemandHold's.
+inline bool reading_is_fresh(uint32_t last_update_ms, uint32_t now_ms,
+                             uint32_t max_stale_ms) {
+  if (last_update_ms == 0)
+    return false;
+  return (now_ms - last_update_ms) <= max_stale_ms;
 }
 
-// Signals 1–6 of the pump-on branch: pressure transient, absolute low
-// pressure, pump-side flow collapse, current spike, power spike, and
-// corroborating head-rate spike. Returns 0.0f when no signal voted.
-// method_out and votes_out are optional — pass nullptr to skip either.
-inline float compute_pump_on_confidence(float inlet_deriv, float inlet_psi,
-                                        float pump_flow, float current_deriv,
-                                        float power_deriv, float head_rate_peak,
-                                        bool suppress_transient_votes,
-                                        const PumpOnVoteThresholds &t,
-                                        const char **method_out,
-                                        PumpOnVotes *votes_out = nullptr) {
-  int votes = 0;
-  bool head_voted = false;
-
-  if (!suppress_transient_votes) {
-    // Pressure/current/power/head-rate spikes also occur when the recirculation
-    // pump itself starts, so ignore them for a short post-start window. During
-    // that window, continuation detection still works and steady-state
-    // open-loop signals below remain active.
-
-    // Signal 1: Pressure transient (valve-open shock)
-    if (!std::isnan(inlet_deriv) &&
-        std::abs(inlet_deriv) > t.inlet_pressure_transient)
-      votes++;
-  }
-
-  // Signal 2: Absolute inlet pressure below demand floor (open circuit)
-  if (!std::isnan(inlet_psi) && inlet_psi < t.inlet_pressure_demand_floor)
-    votes++;
-
-  // Signal 3: Pump-side flow collapse (flow diverted to house)
-  if (!std::isnan(pump_flow) && pump_flow < t.pump_flow_collapse)
-    votes++;
-
-  if (!suppress_transient_votes) {
-    // Signal 4: Current spike (load change at valve opening)
-    if (!std::isnan(current_deriv) &&
-        std::abs(current_deriv) > t.motor_current_spike)
-      votes++;
-
-    // Signal 5: Power spike (corroborates current spike)
-    if (!std::isnan(power_deriv) && power_deriv > t.pump_power_spike)
-      votes++;
-
-    // Signal 6: Head-pressure rate spike — corroborating only.
-    // Captured at ~1–2 Hz via callback so valve-open transients aren't missed.
-    // Only counts when at least one other signal has voted to avoid false triggers.
-    //
-    // Intentionally firmware-only, and permanently so (issue #120 item 1). The
-    // pump publishes head natively over BLE, so this channel is cheap here; the
-    // Python detector in dhw-sensor-apps has no equivalent and deprecated its
-    // head channel outright (7a4c972 dropped the 6-signal entry from its
-    // confidence map; SIGNAL_SCHEMA.md lists pressure_head as deprecated), so
-    // "add it to Python" is closed. The vote is safe to keep divergent because
-    // it moves nothing that a cross-detector consumer can see: the votes >= 1
-    // gate means it can never declare demand on its own, and it is excluded
-    // from PumpOnVotes::shared so it cannot shift the published demand_level
-    // either (issue #125). It only sharpens confidence once a real signal has
-    // already fired.
-    if (!std::isnan(head_rate_peak) && votes >= 1 &&
-        head_rate_peak > t.pump_head_rate) {
-      votes++;
-      head_voted = true;
-    }
-  }
-
-  if (votes == 0)
-    return 0.0f;
-
-  // Confidence scales with vote count; cap at 0.95 (votes not independent).
-  // Index 0 unused; indices 1–6 map 1–5+ votes.
-  static const float conf_map[7] = {0.0f, 0.50f, 0.65f, 0.80f, 0.90f, 0.95f, 0.95f};
-  float confidence = (votes < 7) ? conf_map[votes] : 0.95f;
-
-  if (votes_out != nullptr)
-    *votes_out = PumpOnVotes{votes, votes - (head_voted ? 1 : 0)};
-  if (method_out != nullptr)
-    *method_out = "deterministic_pump_on";
-  return confidence;
+// Household demand while the pump runs, in GPM, or NaN.
+//
+// The meter reads everything leaving the mains; the pump reports its own
+// recirculation loop. The difference is what the house drew — no rpm term, no
+// fitted curve. Measured on controlled runs with a human opening one tap, so
+// ground truth by construction:
+//
+//     no draw, 2000–3600 rpm     −0.04 ± 0.06 GPM   (seven measurements)
+//     draw open, 2402 rpm        +1.24 GPM
+//
+// Non-overlapping, roughly 30:1, and the residual bias is *negative* — a quiet
+// loop computes as slightly negative demand and clamps to zero, so the error
+// pushes toward false negatives, never false positives.
+//
+// Returns NaN when either channel is missing, either reading is too stale to
+// difference, or the pump is turning too slowly for its own flow estimate to be
+// trusted — each the caller's signal to fall through rather than guess.
+//
+// Because the pump reports 0 flow when stopped, this same expression collapses
+// to the pump-off rule when it is off: one oracle for both regimes.
+inline float pump_on_demand_flow(float droplet, float pump_flow,
+                                 float motor_speed, bool droplet_fresh,
+                                 bool pump_flow_fresh, float min_speed_rpm) {
+  if (std::isnan(droplet) || std::isnan(pump_flow))
+    return NAN;
+  if (!pump_flow_fresh || !droplet_fresh)
+    return NAN;
+  if (std::isnan(motor_speed) || motor_speed < min_speed_rpm)
+    return NAN;
+  return droplet - pump_flow;
 }
 
 // Pump-on continuation. Demand was already established just before the pump
@@ -160,31 +151,29 @@ inline bool pump_on_continuation_is_active(float pre_pump_on_flow, float flow,
 
 // Everything the pump-on branch decides on, in one place so the ordering below
 // is a pure function of its inputs. The component fills this in from sensor
-// reads and its own transition tracking; nothing here reads a clock.
+// reads, its own transition tracking and its per-channel update registers;
+// nothing here reads a clock.
 struct PumpOnInputs {
-  // Continuation
   float pre_pump_on_flow{NAN};  // household flow at the last pump-off tick
   float flow{NAN};              // household flow now, GPM
-  float flow_threshold{0.3f};   // GPM
+  float pump_flow{NAN};         // the pump's own loop reading, GPM
+  float motor_speed{NAN};       // rpm
 
-  // Hydraulic votes
-  float inlet_deriv{NAN};      // PSI/s
-  float inlet_psi{NAN};        // PSI
-  float pump_flow{NAN};        // GPM, the pump's own loop reading
-  float current_deriv{NAN};    // A/s
-  float power_deriv{NAN};      // W/s
-  float head_rate_peak{NAN};   // m/s, peak since the last tick
-  bool suppress_transient_votes{false};
+  uint32_t now_ms{0};
+  uint32_t flow_last_update_ms{0};
+  uint32_t pump_flow_last_update_ms{0};
 };
 
-// One pump-on decision. `votes` is only meaningful when the vote tier is what
-// decided; it is left at its default otherwise.
+// One pump-on decision. `demand_gpm` is the computed household draw where the
+// subtraction was available and NaN otherwise; it is reported whichever tier
+// decided, so a caller can log what the measurement said even when something
+// above it fired.
 struct PumpOnResult {
   bool demand{false};
   float confidence{0.0f};
   float demand_level{0.0f};
   const char *method{"pump_on_uncertain"};
-  PumpOnVotes votes{};
+  float demand_gpm{NAN};
 };
 
 // The pump-on branch, in priority order. Extracted from
@@ -196,40 +185,53 @@ struct PumpOnResult {
 //
 // Tiers, strongest first:
 //   1. continuation      — a draw already established before the pump started
-//   2. hydraulic votes   — indirect evidence, scaled by how many agree
-//   3. pump_on_uncertain — the fallback; recirculation and a draw are not
-//                          separable from what is left, so claim nothing at
-//                          0.5 confidence rather than guess either way
+//   2. subtraction       — droplet − loop, the draw measured directly
+//   3. pump_on_uncertain — the fallback; claim nothing at 0.5 confidence rather
+//                          than guess either way
 //
 // Each tier is reached only when everything above it declines.
+//
+// **No rule here may key off raw household flow while the pump runs**, and that
+// is settled rather than merely untried (issue #138). Pump-on runs with no draw
+// read a median 1.31 GPM (p90 2.22) against 1.74 (p90 2.27) with a draw — the
+// distributions overlap almost entirely, so no threshold exists. The "~2.2 GPM
+// recirculation baseline" both repos quoted for years was the p90 of the
+// no-draw case, not a baseline. This is why tier 2 subtracts rather than votes,
+// and why the tier-1 gate above is a *continuation* of a draw already confirmed
+// while the pump was off, not a fresh reading of the meter.
 inline PumpOnResult decide_pump_on(const PumpOnInputs &in,
-                                   const PumpOnVoteThresholds &t) {
+                                   const PumpOnThresholds &t) {
   PumpOnResult r;
 
-  if (pump_on_continuation_is_active(in.pre_pump_on_flow, in.flow,
-                                     in.flow_threshold)) {
+  r.demand_gpm = pump_on_demand_flow(
+      in.flow, in.pump_flow, in.motor_speed,
+      reading_is_fresh(in.flow_last_update_ms, in.now_ms, t.droplet_max_stale_ms),
+      reading_is_fresh(in.pump_flow_last_update_ms, in.now_ms,
+                       t.pump_flow_max_stale_ms),
+      t.min_speed_rpm);
+
+  if (pump_on_continuation_is_active(in.pre_pump_on_flow, in.flow, t.flow)) {
     r.demand = true;
     r.confidence = 0.85f;
-    // Continuation requires flow > threshold, so this is never NaN-scaled.
-    r.demand_level = std::min(1.0f, in.flow / 2.5f);
+    // Intensity from the measurement where it is available; the meter alone is
+    // uninformative in this regime, so fall back to the pre-pump reading that
+    // established the draw rather than to the loop-contaminated current one.
+    r.demand_level = std::min(1.0f, (!std::isnan(r.demand_gpm) && r.demand_gpm > 0.0f)
+                                        ? r.demand_gpm / 2.5f
+                                        : in.pre_pump_on_flow / 2.5f);
     r.method = "deterministic_continuation";
     return r;
   }
 
-  const char *vote_method = nullptr;
-  PumpOnVotes votes;
-  float vote_confidence = compute_pump_on_confidence(
-      in.inlet_deriv, in.inlet_psi, in.pump_flow, in.current_deriv,
-      in.power_deriv, in.head_rate_peak, in.suppress_transient_votes, t,
-      &vote_method, &votes);
-  if (vote_confidence > 0.0f) {
+  if (!std::isnan(r.demand_gpm) && r.demand_gpm > t.demand_flow) {
     r.demand = true;
-    r.confidence = vote_confidence;
-    // Deliberately the shared count, not the total: demand_level is on the
-    // wire, so the firmware-only head-rate vote must not shift it (#125).
-    r.demand_level = pump_on_demand_level(votes.shared);
-    r.method = vote_method;
-    r.votes = votes;
+    // Confidence rises with margin over the threshold rather than with a vote
+    // count: 1.24 GPM was the measured draw against a −0.04 ± 0.06 quiet
+    // baseline, so ~1 GPM of margin is a strong reading.
+    float margin = r.demand_gpm - t.demand_flow;
+    r.confidence = std::min(0.90f, 0.60f + 0.30f * std::min(1.0f, margin));
+    r.demand_level = std::min(1.0f, r.demand_gpm / 2.5f);
+    r.method = "deterministic_pump_on_subtraction";
     return r;
   }
 

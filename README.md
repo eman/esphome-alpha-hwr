@@ -183,16 +183,10 @@ packages:
 alpha_hwr:
   current:
     id: motor_current_sensor
-  power:
-    id: pump_power_sensor
   rpm:
     id: motor_speed_sensor
   flow:
     id: flow_rate_sensor
-  inlet_pressure:
-    id: inlet_pressure_sensor
-  head_rate:
-    id: pump_head_rate_sensor
 
 sensor:
   - platform: copy
@@ -203,22 +197,16 @@ sensor:
     filters:
       - multiply: 4.40287
 
-  - platform: copy
-    source_id: inlet_pressure_sensor
-    id: dhw_inlet_pressure_psi
-    internal: true
-    unit_of_measurement: "PSI"
-    filters:
-      - multiply: 14.5038
-
 dhw_demand:
   motor_speed: motor_speed_sensor
   motor_current: motor_current_sensor
-  inlet_pressure: dhw_inlet_pressure_psi
   pump_flow: dhw_pump_flow_gpm
-  pump_power: pump_power_sensor
-  pump_head_rate: pump_head_rate_sensor
 ```
+
+`motor_speed` and `pump_flow` are what make pump-on detection work: while the
+pump is running, household demand is measured as `flow − pump_flow`, gated on
+`motor_speed`. Without both, the detector still works while the pump is off and
+reports `pump_on_uncertain` whenever it is running.
 
 For a complete working version, see `dhw-demand-example.yaml`.
 

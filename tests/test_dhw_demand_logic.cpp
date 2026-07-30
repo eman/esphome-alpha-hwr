@@ -1,9 +1,9 @@
 /**
- * Unit tests for DHW demand pump-on hydraulic voting.
+ * Unit tests for the DHW demand decision logic.
  *
- * These tests call the production vote logic directly (dhw_demand_logic.h)
- * to verify that recirculation pump startup transients do not falsely
- * declare DHW demand while genuine open-loop signals remain detectable.
+ * These call production code in dhw_demand_logic.h directly — both the
+ * individual predicates and, since issue #144, the pump-on tier *ordering*.
+ * Nothing here may hand-mirror the logic it tests.
  */
 
 #include "../components/dhw_demand/dhw_demand_logic.h"
@@ -12,17 +12,17 @@
 #include <string>
 
 using esphome::dhw_demand::apply_dhw_in_use_boost;
-using esphome::dhw_demand::compute_pump_on_confidence;
 using esphome::dhw_demand::decide_pump_on;
 using esphome::dhw_demand::DemandHold;
-using esphome::dhw_demand::kDefaultPumpOnVoteThresholds;
+using esphome::dhw_demand::kDefaultPumpOnThresholds;
 using esphome::dhw_demand::prev_tick_confirms_flow_onset;
 using esphome::dhw_demand::pump_off_flow_onset_is_confirmed;
 using esphome::dhw_demand::pump_on_continuation_is_active;
-using esphome::dhw_demand::pump_on_demand_level;
+using esphome::dhw_demand::pump_on_demand_flow;
 using esphome::dhw_demand::PumpOnInputs;
 using esphome::dhw_demand::PumpOnResult;
-using esphome::dhw_demand::PumpOnVotes;
+using esphome::dhw_demand::PumpOnThresholds;
+using esphome::dhw_demand::reading_is_fresh;
 using esphome::dhw_demand::SessionTracker;
 
 int tests_passed = 0;
@@ -47,58 +47,6 @@ int tests_failed = 0;
               << " (expected: " << (expected) << ", got: " << (actual)          \
               << ")" << std::endl;                                               \
   }
-
-static float deterministic_pump_on_conf(float inlet_deriv, float inlet_psi,
-                                        float pump_flow, float current_deriv,
-                                        float power_deriv, float head_rate_peak,
-                                        bool suppress_transient_votes) {
-  const char *method = nullptr;
-  return compute_pump_on_confidence(inlet_deriv, inlet_psi, pump_flow,
-                                    current_deriv, power_deriv, head_rate_peak,
-                                    suppress_transient_votes,
-                                    kDefaultPumpOnVoteThresholds, &method);
-}
-
-void test_startup_transients_are_suppressed() {
-  std::cout << "\n=== Testing Startup Transient Suppression ===" << std::endl;
-
-  // Mirrors the false-positive trace from Home Assistant:
-  // inlet pressure jumps from 0 -> ~13 PSI and current from 0 -> ~0.155 A
-  // when the recirculation pump starts, but there is no low-pressure or
-  // flow-collapse evidence of an open-loop DHW draw.
-  float confidence =
-      deterministic_pump_on_conf(1.32f, 13.2f, 9.56f, 0.015f, 1.4f, 2.94f, true);
-
-  TEST_ASSERT_NEAR(confidence, 0.0f, 0.0001f,
-                   "Startup-only transients do not declare demand");
-}
-
-void test_startup_transients_still_trigger_without_guard() {
-  std::cout << "\n=== Testing Unsuppressed Startup Transients ===" << std::endl;
-
-  float confidence = deterministic_pump_on_conf(1.32f, 13.2f, 9.56f, 0.015f,
-                                                1.4f, 2.94f, false);
-
-  // Three votes without the guard: inlet-pressure transient, current spike,
-  // and the head-rate vote that rides along once something else has voted.
-  TEST_ASSERT_NEAR(confidence, 0.80f, 0.0001f,
-                   "Pressure + current startup spikes would have caused a false positive");
-}
-
-void test_startup_guard_keeps_open_loop_signals() {
-  std::cout << "\n=== Testing Open-Loop Signals During Startup Guard ==="
-            << std::endl;
-
-  float low_pressure_conf = deterministic_pump_on_conf(
-      1.32f, 2.5f, 9.56f, 0.015f, 1.4f, 2.94f, true);
-  float flow_collapse_conf = deterministic_pump_on_conf(
-      1.32f, 13.2f, 0.05f, 0.015f, 1.4f, 2.94f, true);
-
-  TEST_ASSERT_NEAR(low_pressure_conf, 0.50f, 0.0001f,
-                   "Low inlet pressure still counts during startup suppression");
-  TEST_ASSERT_NEAR(flow_collapse_conf, 0.50f, 0.0001f,
-                   "Pump-flow collapse still counts during startup suppression");
-}
 
 void test_flow_only_onset_requires_one_full_off_tick() {
   std::cout << "\n=== Testing Flow-Only Onset Confirmation ===" << std::endl;
@@ -212,44 +160,6 @@ void test_ambiguous_flow_onset_does_not_prime_continuation() {
               "Pump-on continuation is not primed by an ambiguous flow-only onset");
 }
 
-void test_nan_inputs_do_not_vote() {
-  std::cout << "\n=== Testing NaN Input Handling (BLE dropouts) ===" << std::endl;
-
-  // Baseline: every input at a value that does NOT vote. Inlet pressure and
-  // pump flow must sit above their floors, since those two vote on absolute
-  // values and fire when low.
-  const float kQuiet[6] = {0.0f, 13.2f, 9.56f, 0.0f, 0.0f, 0.0f};
-
-  TEST_ASSERT_NEAR(
-      deterministic_pump_on_conf(kQuiet[0], kQuiet[1], kQuiet[2], kQuiet[3],
-                                 kQuiet[4], kQuiet[5], false),
-      0.0f, 0.0001f, "Baseline quiet inputs cast no votes");
-
-  // A dropped BLE sensor reads NaN. Each one in turn must neither crash nor
-  // vote — an absent signal is not evidence of demand.
-  const char *names[6] = {"inlet_deriv",   "inlet_psi",   "pump_flow",
-                          "current_deriv", "power_deriv", "head_rate_peak"};
-  for (int i = 0; i < 6; i++) {
-    float a[6] = {kQuiet[0], kQuiet[1], kQuiet[2],
-                  kQuiet[3], kQuiet[4], kQuiet[5]};
-    a[i] = NAN;
-    float conf =
-        deterministic_pump_on_conf(a[0], a[1], a[2], a[3], a[4], a[5], false);
-    TEST_ASSERT_NEAR(conf, 0.0f, 0.0001f,
-                     std::string("NaN ") + names[i] + " does not vote");
-  }
-
-  // Total BLE loss: every input NaN at once.
-  TEST_ASSERT_NEAR(
-      deterministic_pump_on_conf(NAN, NAN, NAN, NAN, NAN, NAN, false), 0.0f,
-      0.0001f, "All-NaN inputs declare no demand");
-
-  // A NaN must not suppress a genuine signal reported by a working sensor.
-  TEST_ASSERT_NEAR(
-      deterministic_pump_on_conf(NAN, 2.5f, NAN, NAN, NAN, NAN, false), 0.50f,
-      0.0001f, "A real low-pressure vote survives NaN on every other input");
-}
-
 void test_sustained_demand_accrues_session() {
   std::cout << "\n=== Testing Sustained Demand Session Accrual ===" << std::endl;
 
@@ -351,123 +261,109 @@ void test_threshold_jitter_does_not_chatter() {
               "With release_ms 0 the raw value passes straight through");
 }
 
-void test_pump_on_demand_level_scales_with_votes() {
-  std::cout << "\n=== Testing Pump-On Demand Level Scaling ===" << std::endl;
-
-  // Mirrors Python's `demand_level = 0.3 + 0.15 * (signal_count - 1)`
-  // (detection.py:732), capped at 1.0. Previously the firmware published a
-  // flat 0.3 regardless of vote count (issue #125 item 1).
-  TEST_ASSERT_NEAR(pump_on_demand_level(1), 0.30f, 0.0001f,
-                   "A lone vote yields the 0.3 floor");
-  TEST_ASSERT_NEAR(pump_on_demand_level(2), 0.45f, 0.0001f,
-                   "Two votes yield 0.45");
-  TEST_ASSERT_NEAR(pump_on_demand_level(3), 0.60f, 0.0001f,
-                   "Three votes yield 0.60");
-  TEST_ASSERT_NEAR(pump_on_demand_level(5), 0.90f, 0.0001f,
-                   "All five shared votes reach 0.90, Python's ceiling");
-
-  // The vote count the level is derived from must be the same one that drove
-  // confidence, so read it back out of the production vote function. Low inlet
-  // pressure plus pump-side flow collapse is the 65-of-73 pair from the July
-  // evaluation window: two votes.
-  const char *method = nullptr;
-  PumpOnVotes votes;
-  float confidence = compute_pump_on_confidence(
-      NAN, 3.0f, 0.05f, NAN, NAN, NAN, /*suppress_transient_votes=*/false,
-      kDefaultPumpOnVoteThresholds, &method, &votes);
-  TEST_ASSERT(votes.total == 2,
-              "Low pressure + flow collapse reports two votes");
-  TEST_ASSERT(votes.shared == 2,
-              "Neither is the head-rate vote, so shared matches total");
-  TEST_ASSERT_NEAR(confidence, 0.65f, 0.0001f,
-                   "Two votes map to 0.65 confidence");
-  TEST_ASSERT_NEAR(pump_on_demand_level(votes.shared), 0.45f, 0.0001f,
-                   "That same vote count yields a 0.45 demand level");
-
-  // votes_out must be left alone when no signal fires, so a caller reusing the
-  // variable across ticks cannot publish a stale level as if it were fresh.
-  PumpOnVotes untouched{-1, -1};
-  confidence = compute_pump_on_confidence(
-      NAN, 13.2f, 9.56f, NAN, NAN, NAN, /*suppress_transient_votes=*/false,
-      kDefaultPumpOnVoteThresholds, &method, &untouched);
-  TEST_ASSERT_NEAR(confidence, 0.0f, 0.0001f, "No signal, no confidence");
-  TEST_ASSERT(untouched.total == -1 && untouched.shared == -1,
-              "votes_out is not written when no signal voted");
+// A pump-on tick where both channels just reported and the pump is turning fast
+// enough for its own flow estimate to be trusted. Individual tests perturb one
+// field at a time from here.
+static PumpOnInputs live_tick() {
+  PumpOnInputs in;
+  in.now_ms = 1000000;
+  in.flow_last_update_ms = 1000000;
+  in.pump_flow_last_update_ms = 1000000;
+  in.motor_speed = 2402.0f;
+  in.flow = 1.34f;
+  in.pump_flow = 1.34f;  // quiet loop: computes to 0 demand
+  return in;
 }
 
-void test_head_rate_vote_moves_confidence_but_not_demand_level() {
-  std::cout << "\n=== Testing Head-Rate Vote Isolation ===" << std::endl;
+void test_reading_freshness() {
+  std::cout << "\n=== Testing Reading Freshness ===" << std::endl;
 
-  // The head-rate vote (signal 6) is firmware-only and permanently so: the
-  // Python detector deprecated its head channel. Publishing demand_level made
-  // that divergence visible on the wire, because the level was derived from the
-  // total vote count (issue #125). It now comes from the shared count.
-  //
-  // Same telemetry twice — low inlet pressure plus pump-side flow collapse,
-  // once with a head-rate spike past the 0.31 m/s threshold and once without.
-  const char *method = nullptr;
-  PumpOnVotes without;
-  float conf_without = compute_pump_on_confidence(
-      NAN, 3.0f, 0.05f, NAN, NAN, NAN, /*suppress_transient_votes=*/false,
-      kDefaultPumpOnVoteThresholds, &method, &without);
+  // Args: (last_update_ms, now_ms, max_stale_ms).
+  TEST_ASSERT(!reading_is_fresh(0, 50000, 30000),
+              "A channel that has never reported is never fresh");
+  TEST_ASSERT(reading_is_fresh(50000, 50000, 30000),
+              "A reading taken this instant is fresh");
+  TEST_ASSERT(reading_is_fresh(20000, 50000, 30000),
+              "A reading exactly at the bound is still fresh");
+  TEST_ASSERT(!reading_is_fresh(19999, 50000, 30000),
+              "One millisecond past the bound is stale");
 
-  PumpOnVotes with;
-  float conf_with = compute_pump_on_confidence(
-      NAN, 3.0f, 0.05f, NAN, NAN, 2.94f, /*suppress_transient_votes=*/false,
-      kDefaultPumpOnVoteThresholds, &method, &with);
+  // The two channels do not report alike, which is why the bounds differ: the
+  // pump every 10 s, the meter on change at a median 28 s while flowing. A
+  // 45 s-old reading is stale for the pump and fresh for the meter.
+  TEST_ASSERT(!reading_is_fresh(5000, 50000,
+                                kDefaultPumpOnThresholds.pump_flow_max_stale_ms),
+              "45 s is stale on the pump channel (30 s bound)");
+  TEST_ASSERT(reading_is_fresh(5000, 50000,
+                               kDefaultPumpOnThresholds.droplet_max_stale_ms),
+              "45 s is fresh on the meter channel (60 s bound)");
 
-  TEST_ASSERT(with.total == without.total + 1,
-              "The head-rate spike casts one extra vote");
-  TEST_ASSERT(with.shared == without.shared,
-              "That vote is excluded from the shared count");
-
-  // Confidence is firmware-local, so it may reflect the extra evidence.
-  TEST_ASSERT_NEAR(conf_without, 0.65f, 0.0001f, "Two votes: 0.65 confidence");
-  TEST_ASSERT_NEAR(conf_with, 0.80f, 0.0001f,
-                   "The head-rate vote still sharpens confidence to 0.80");
-
-  // demand_level is on the wire and must not move.
-  TEST_ASSERT_NEAR(pump_on_demand_level(with.shared),
-                   pump_on_demand_level(without.shared), 0.0001f,
-                   "demand_level is identical with and without the head vote");
-  TEST_ASSERT_NEAR(pump_on_demand_level(with.shared), 0.45f, 0.0001f,
-                   "Both report the two-shared-vote level Python would report");
-
-  // All five shared signals plus the head vote: the case that used to publish
-  // 1.00, a value Python's five-signal ceiling makes unreachable.
-  PumpOnVotes saturated;
-  float conf_saturated = compute_pump_on_confidence(
-      1.32f, 3.0f, 0.05f, 0.015f, 12.0f, 2.94f,
-      /*suppress_transient_votes=*/false, kDefaultPumpOnVoteThresholds, &method,
-      &saturated);
-  TEST_ASSERT(saturated.total == 6, "All six signals vote");
-  TEST_ASSERT(saturated.shared == 5, "Five of them are shared with Python");
-  TEST_ASSERT_NEAR(conf_saturated, 0.95f, 0.0001f, "Confidence caps at 0.95");
-  TEST_ASSERT_NEAR(pump_on_demand_level(saturated.shared), 0.90f, 0.0001f,
-                   "Saturated demand_level is 0.90, not the old 1.00");
+  // Unsigned subtraction wraps correctly across the ~49-day millis() rollover,
+  // the same as DemandHold's. A reading from just before the wrap must not read
+  // as ~49 days old just because the counter reset.
+  const uint32_t before_wrap = 0xFFFFF000u;
+  const uint32_t after_wrap = 0x00001000u;  // 8192 ms later
+  TEST_ASSERT(reading_is_fresh(before_wrap, after_wrap, 30000),
+              "Freshness survives the millis() rollover");
 }
 
-// Vote inputs that make every hydraulic signal fire: pressure transient, low
-// inlet pressure, pump-side flow collapse, current spike, power spike, and the
-// corroborating head-rate spike. Used to prove a stronger tier outranks them.
-static void saturate_votes(PumpOnInputs &in) {
-  in.inlet_deriv = 1.32f;
-  in.inlet_psi = 3.0f;
-  in.pump_flow = 0.05f;
-  in.current_deriv = 0.015f;
-  in.power_deriv = 12.0f;
-  in.head_rate_peak = 2.94f;
-}
+void test_pump_on_demand_flow_guards() {
+  std::cout << "\n=== Testing Pump-On Demand Subtraction Guards ==="
+            << std::endl;
 
-// Vote inputs that make nothing fire. Inlet pressure and pump flow must sit
-// above their floors, since those two vote on absolute values and fire low.
-static void quiet_votes(PumpOnInputs &in) {
-  in.inlet_deriv = 0.0f;
-  in.inlet_psi = 13.2f;
-  in.pump_flow = 9.56f;
-  in.current_deriv = 0.0f;
-  in.power_deriv = 0.0f;
-  in.head_rate_peak = 0.0f;
+  const float kMinRpm = kDefaultPumpOnThresholds.min_speed_rpm;
+
+  // The measured draw: meter 2.58 against a 1.34 loop is 1.24 GPM, the figure
+  // from the controlled run with one tap open at 2402 rpm.
+  TEST_ASSERT_NEAR(
+      pump_on_demand_flow(2.58f, 1.34f, 2402.0f, true, true, kMinRpm), 1.24f,
+      0.0001f, "Meter minus loop is the household draw");
+
+  // A quiet loop computes slightly negative — the residual bias is one-directional
+  // toward false negatives, never false positives.
+  TEST_ASSERT(pump_on_demand_flow(1.34f, 1.47f, 2398.0f, true, true, kMinRpm) <
+                  0.0f,
+              "A quiet loop computes as slightly negative demand");
+
+  // Guard 1: both channels must be present.
+  TEST_ASSERT(std::isnan(pump_on_demand_flow(NAN, 1.34f, 2402.0f, true, true,
+                                             kMinRpm)),
+              "A missing meter reading declines rather than guessing");
+  TEST_ASSERT(std::isnan(pump_on_demand_flow(2.58f, NAN, 2402.0f, true, true,
+                                             kMinRpm)),
+              "A missing loop reading declines rather than guessing");
+
+  // Guard 2: both must be current. A difference of two quantities is only
+  // meaningful if both are — during one bench run a loop reading that looked
+  // live was 90 s old, from before the tap was opened.
+  TEST_ASSERT(std::isnan(pump_on_demand_flow(2.58f, 1.34f, 2402.0f, true, false,
+                                             kMinRpm)),
+              "A stale loop reading declines");
+  TEST_ASSERT(std::isnan(pump_on_demand_flow(2.58f, 1.34f, 2402.0f, false, true,
+                                             kMinRpm)),
+              "A stale meter reading declines");
+
+  // Guard 3: the pump estimates its loop flow rather than metering it, and near
+  // the bottom of its range the estimate reads low — so the difference goes
+  // spuriously positive with the tap shut. These are the measured no-draw rows.
+  TEST_ASSERT(std::isnan(pump_on_demand_flow(0.71f, 0.25f, 1650.0f, true, true,
+                                             kMinRpm)),
+              "1650 rpm is below the floor, so its +0.45 bias cannot fire");
+  TEST_ASSERT(std::isnan(pump_on_demand_flow(0.83f, 0.56f, 1800.0f, true, true,
+                                             kMinRpm)),
+              "1800 rpm is below the floor, so its +0.27 bias cannot fire");
+  TEST_ASSERT(!std::isnan(pump_on_demand_flow(0.99f, 0.99f, 2001.0f, true, true,
+                                              kMinRpm)),
+              "2001 rpm is above the floor, where the bias is measured at ~0");
+  TEST_ASSERT(std::isnan(pump_on_demand_flow(2.58f, 1.34f, NAN, true, true,
+                                             kMinRpm)),
+              "An unknown pump speed declines — the floor cannot be checked");
+
+  // The floor admits the whole production range: over 29 days the pump's own
+  // minimum was 1971 rpm, and it excludes only bench-commanded speeds.
+  TEST_ASSERT(!std::isnan(pump_on_demand_flow(1.00f, 0.99f, 1971.0f, true, true,
+                                              kMinRpm)),
+              "The 29-day production minimum of 1971 rpm is admitted");
 }
 
 void test_pump_on_tier_ordering() {
@@ -478,92 +374,126 @@ void test_pump_on_tier_ordering() {
   // was covered only by reading the .cpp — the failure mode that let the stale
   // 3.0f head-rate threshold survive the units audit (#120) and fed
   // pump_off_flow_onset_is_confirmed the wrong argument for months (#147/#148).
+  const PumpOnThresholds &t = kDefaultPumpOnThresholds;
 
   // ── Tier 1 outranks tier 2 ──────────────────────────────────────────────
-  // Continuation and every hydraulic vote firing at once. Continuation must
-  // win: it is direct evidence that a draw already established has not stopped.
-  PumpOnInputs both;
+  // A draw established before the pump started, and the subtraction measuring
+  // one now. Continuation must win: it is the stronger claim.
+  PumpOnInputs both = live_tick();
   both.pre_pump_on_flow = 1.5f;
-  both.flow = 1.5f;
-  saturate_votes(both);
-  PumpOnResult r = decide_pump_on(both, kDefaultPumpOnVoteThresholds);
+  both.flow = 2.58f;
+  both.pump_flow = 1.34f;  // 1.24 GPM of measured demand
+  PumpOnResult r = decide_pump_on(both, t);
 
   TEST_ASSERT(std::string(r.method) == "deterministic_continuation",
-              "Continuation is tried before the hydraulic votes");
+              "Continuation is tried before the subtraction");
   TEST_ASSERT(r.demand, "Continuation declares demand");
   TEST_ASSERT_NEAR(r.confidence, 0.85f, 0.0001f,
                    "Continuation reports 0.85 confidence");
-  TEST_ASSERT_NEAR(r.demand_level, 0.60f, 0.0001f,
-                   "Continuation scales demand_level off household flow");
-  TEST_ASSERT(r.votes.total == 0 && r.votes.shared == 0,
-              "A continuation result carries no vote count");
+  TEST_ASSERT_NEAR(r.demand_level, 1.24f / 2.5f, 0.0001f,
+                   "Continuation scales intensity off the measurement");
+  TEST_ASSERT_NEAR(r.demand_gpm, 1.24f, 0.0001f,
+                   "The measurement is reported even when a higher tier decided");
 
   // ── Tier 2 is reached only when tier 1 declines ─────────────────────────
-  // Identical telemetry, but nothing was established before the pump started.
-  PumpOnInputs votes_only = both;
-  votes_only.pre_pump_on_flow = NAN;
-  r = decide_pump_on(votes_only, kDefaultPumpOnVoteThresholds);
+  PumpOnInputs measured = both;
+  measured.pre_pump_on_flow = NAN;
+  r = decide_pump_on(measured, t);
 
-  TEST_ASSERT(std::string(r.method) == "deterministic_pump_on",
-              "The votes decide once continuation declines");
-  TEST_ASSERT(r.demand, "A full vote sweep declares demand");
-  TEST_ASSERT_NEAR(r.confidence, 0.95f, 0.0001f, "Vote confidence caps at 0.95");
-  TEST_ASSERT(r.votes.total == 6, "All six signals voted");
-  TEST_ASSERT(r.votes.shared == 5, "Five of them are shared with Python");
-  TEST_ASSERT_NEAR(r.demand_level, 0.90f, 0.0001f,
-                   "demand_level comes from the shared count, not the total");
+  TEST_ASSERT(std::string(r.method) == "deterministic_pump_on_subtraction",
+              "The subtraction decides once continuation declines");
+  TEST_ASSERT(r.demand, "A measured draw declares demand");
+  TEST_ASSERT_NEAR(r.demand_gpm, 1.24f, 0.0001f, "1.24 GPM was drawn");
+  TEST_ASSERT_NEAR(r.demand_level, 1.24f / 2.5f, 0.0001f,
+                   "demand_level scales off measured GPM, not meter flow");
+  // Confidence rises with margin over the threshold rather than with a vote
+  // count: 0.60 + 0.30 * min(1, 1.24 - 0.30).
+  TEST_ASSERT_NEAR(r.confidence, 0.882f, 0.0001f,
+                   "Confidence rises with margin over the threshold");
 
-  // Continuation needs household flow on *both* sides of the pump start. A
-  // pre-pump draw that has since stopped must not keep declaring demand.
-  PumpOnInputs stopped = both;
-  stopped.flow = 0.1f;
-  r = decide_pump_on(stopped, kDefaultPumpOnVoteThresholds);
-  TEST_ASSERT(std::string(r.method) == "deterministic_pump_on",
-              "Continuation declines once household flow stops, and falls through");
+  // A large draw caps at 0.90 rather than running away.
+  PumpOnInputs big = measured;
+  big.flow = 5.0f;
+  r = decide_pump_on(big, t);
+  TEST_ASSERT_NEAR(r.confidence, 0.90f, 0.0001f, "Confidence caps at 0.90");
+  TEST_ASSERT_NEAR(r.demand_level, 1.0f, 0.0001f, "demand_level caps at 1.0");
 
   // ── Tier 3 is the fallback of last resort ───────────────────────────────
-  PumpOnInputs quiet;
-  quiet_votes(quiet);
-  r = decide_pump_on(quiet, kDefaultPumpOnVoteThresholds);
+  // A quiet loop: the meter reads 1.34 GPM, which is the middle of the no-draw
+  // pump-on distribution. Any rule keyed off raw meter flow would fire here.
+  PumpOnInputs quiet = live_tick();
+  r = decide_pump_on(quiet, t);
 
   TEST_ASSERT(std::string(r.method) == "pump_on_uncertain",
-              "Nothing firing falls through to pump_on_uncertain");
+              "A quiet recirculation loop falls through to pump_on_uncertain");
   TEST_ASSERT(!r.demand, "pump_on_uncertain declares no demand");
   TEST_ASSERT_NEAR(r.confidence, 0.5f, 0.0001f,
                    "pump_on_uncertain claims neither way, at 0.5");
   TEST_ASSERT_NEAR(r.demand_level, 0.0f, 0.0001f,
                    "pump_on_uncertain publishes no intensity");
-  TEST_ASSERT(r.votes.total == 0 && r.votes.shared == 0,
-              "No votes are reported when none fired");
+
+  // Either side of the threshold. Not asserted at exactly 0.30: no pair of
+  // floats subtracts to it exactly, so that test would be measuring rounding
+  // rather than the rule.
+  PumpOnInputs below = live_tick();
+  below.pump_flow = 1.09f;  // 1.34 - 1.09 = 0.25 GPM of computed demand
+  TEST_ASSERT(std::string(decide_pump_on(below, t).method) ==
+                  "pump_on_uncertain",
+              "0.25 GPM of computed demand is below threshold and does not fire");
+
+  PumpOnInputs above = live_tick();
+  above.pump_flow = 0.99f;  // 1.34 - 0.99 = 0.35 GPM
+  TEST_ASSERT(std::string(decide_pump_on(above, t).method) ==
+                  "deterministic_pump_on_subtraction",
+              "0.35 GPM of computed demand fires");
+
+  // ── A declining guard reaches the fallback, never a guess ───────────────
+  PumpOnInputs stale = live_tick();
+  stale.flow = 2.58f;  // would be a 1.24 GPM draw if the reading were current
+  stale.pump_flow_last_update_ms = 900000;  // 100 s old, past the 30 s bound
+  r = decide_pump_on(stale, t);
+  TEST_ASSERT(std::string(r.method) == "pump_on_uncertain",
+              "A stale loop reading falls through rather than differencing");
+  TEST_ASSERT(std::isnan(r.demand_gpm),
+              "No measurement is reported when a guard declined");
+
+  PumpOnInputs slow = live_tick();
+  slow.flow = 0.71f;
+  slow.pump_flow = 0.25f;  // +0.45 of low-speed estimator bias, no draw
+  slow.motor_speed = 1650.0f;
+  r = decide_pump_on(slow, t);
+  TEST_ASSERT(std::string(r.method) == "pump_on_uncertain",
+              "Low-speed estimator bias cannot fire a false detection");
 
   // Total BLE loss reaches the same fallback rather than crashing or guessing.
   PumpOnInputs all_nan;
-  r = decide_pump_on(all_nan, kDefaultPumpOnVoteThresholds);
+  all_nan.now_ms = 1000000;
+  r = decide_pump_on(all_nan, t);
   TEST_ASSERT(std::string(r.method) == "pump_on_uncertain",
               "All-NaN inputs fall through to pump_on_uncertain");
   TEST_ASSERT(!r.demand, "All-NaN inputs declare no demand");
 
-  // ── The startup guard applies inside the ordering, not around it ────────
-  // Under suppression the transient votes are withheld, but the steady-state
-  // open-loop signals still reach tier 2.
-  PumpOnInputs startup;
-  startup.inlet_deriv = 1.32f;
-  startup.inlet_psi = 13.2f;
-  startup.pump_flow = 9.56f;
-  startup.current_deriv = 0.015f;
-  startup.power_deriv = 1.4f;
-  startup.head_rate_peak = 2.94f;
-  startup.suppress_transient_votes = true;
-  r = decide_pump_on(startup, kDefaultPumpOnVoteThresholds);
-  TEST_ASSERT(std::string(r.method) == "pump_on_uncertain",
-              "Startup-only transients reach the fallback, not a detection");
+  // ── No rule may key off raw meter flow while the pump runs ──────────────
+  // The whole point of the subtraction. Two ticks with the *same* meter
+  // reading, differing only in what the loop is doing: one is a quiet loop at
+  // 2.22 GPM (the p90 of the no-draw distribution), the other a real draw with
+  // the loop nearly stopped. Any threshold on meter flow alone reads them
+  // identically; the subtraction separates them.
+  PumpOnInputs loud_recirc = live_tick();
+  loud_recirc.flow = 2.22f;
+  loud_recirc.pump_flow = 2.22f;
+  loud_recirc.motor_speed = 3600.0f;
 
-  startup.inlet_psi = 2.5f;  // a genuine open-loop signal on top
-  r = decide_pump_on(startup, kDefaultPumpOnVoteThresholds);
-  TEST_ASSERT(std::string(r.method) == "deterministic_pump_on",
-              "An open-loop signal still decides during startup suppression");
-  TEST_ASSERT_NEAR(r.confidence, 0.50f, 0.0001f,
-                   "Only the un-suppressed vote counts, at 0.50");
+  PumpOnInputs real_draw = live_tick();
+  real_draw.flow = 2.22f;
+  real_draw.pump_flow = 0.50f;
+
+  TEST_ASSERT(std::string(decide_pump_on(loud_recirc, t).method) ==
+                  "pump_on_uncertain",
+              "A loud quiet loop at 2.22 GPM declares nothing");
+  TEST_ASSERT(std::string(decide_pump_on(real_draw, t).method) ==
+                  "deterministic_pump_on_subtraction",
+              "The same meter reading with a stopped loop is a draw");
 }
 
 void test_pump_on_continuation_predicate() {
@@ -591,19 +521,15 @@ int main() {
   std::cout << "==========================================================="
             << std::endl;
 
-  test_startup_transients_are_suppressed();
-  test_startup_transients_still_trigger_without_guard();
-  test_startup_guard_keeps_open_loop_signals();
   test_flow_only_onset_requires_one_full_off_tick();
   test_only_a_pump_off_tick_arms_the_flow_debounce();
   test_dhw_in_use_boost_is_gated_to_pump_off();
   test_ambiguous_flow_onset_does_not_prime_continuation();
-  test_nan_inputs_do_not_vote();
   test_sustained_demand_accrues_session();
   test_threshold_jitter_does_not_chatter();
-  test_pump_on_demand_level_scales_with_votes();
-  test_head_rate_vote_moves_confidence_but_not_demand_level();
   test_pump_on_continuation_predicate();
+  test_reading_freshness();
+  test_pump_on_demand_flow_guards();
   test_pump_on_tier_ordering();
 
   std::cout << "\n==========================================================="
