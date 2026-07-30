@@ -215,34 +215,11 @@ float DhwDemandComponent::detect_pump_off_(float flow, bool prev_flow_present,
 
 // ── Pump-ON detection ─────────────────────────────────────────────────────────
 
-float DhwDemandComponent::detect_pump_on_continuation_(
-    float flow, const char **method_out) {
-  // Continuation: demand was active just before the pump turned on, and
-  // Droplet flow is still above threshold now.
-  if (std::isnan(pre_pump_on_flow_))
-    return 0.0f;
-  if (pre_pump_on_flow_ <= flow_threshold_)
-    return 0.0f;
-  if (std::isnan(flow) || flow <= flow_threshold_)
-    return 0.0f;
-
-  *method_out = "deterministic_continuation";
-  return 0.85f;
-}
-
-float DhwDemandComponent::detect_pump_on_deterministic_(
-    float inlet_deriv, float inlet_psi, float pump_flow,
-    float current_deriv, float power_deriv, float head_rate_peak,
-    bool suppress_transient_votes,
-    const char **method_out, PumpOnVotes *votes_out) {
-  PumpOnVoteThresholds thresholds{
+PumpOnVoteThresholds DhwDemandComponent::pump_on_vote_thresholds_() const {
+  return PumpOnVoteThresholds{
       inlet_pressure_transient_threshold_, inlet_pressure_demand_floor_,
       pump_flow_collapse_threshold_,       motor_current_spike_threshold_,
       pump_power_spike_threshold_,         pump_head_rate_threshold_};
-  return compute_pump_on_confidence(inlet_deriv, inlet_psi, pump_flow,
-                                    current_deriv, power_deriv, head_rate_peak,
-                                    suppress_transient_votes, thresholds,
-                                    method_out, votes_out);
 }
 
 // ── Publish & session helpers ─────────────────────────────────────────────────
@@ -425,36 +402,32 @@ void DhwDemandComponent::update() {
     }
   } else {
     // ── Pump-ON branch ────────────────────────────────────────────────────
-    confidence = detect_pump_on_continuation_(flow, &method);
-    if (confidence > 0.0f) {
-      demand = true;
-      demand_level = std::min(1.0f, flow / 2.5f);
-    } else {
-      bool suppress_transient_votes =
-          pump_on_started_ms_ != 0 &&
-          (now - pump_on_started_ms_) < PUMP_STARTUP_TRANSIENT_SUPPRESSION_MS;
-      if (suppress_transient_votes) {
-        ESP_LOGD(TAG, "Suppressing startup transient votes (pump on for %.1f s)",
-                 (now - pump_on_started_ms_) / 1000.0f);
-      }
-      PumpOnVotes votes;
-      confidence = detect_pump_on_deterministic_(inlet_deriv, inlet_psi,
-                                                   pump_flow, current_deriv,
-                                                   power_deriv, head_rate_peak_,
-                                                   suppress_transient_votes,
-                                                   &method, &votes);
-      if (confidence > 0.0f) {
-        // Hydraulic signals are indirect, so a lone vote stays low; each
-        // corroborating vote raises it. Matches Python's detection.py:732.
-        // Deliberately the shared count, not the total: demand_level is on the
-        // wire, so the firmware-only head-rate vote must not shift it (#125).
-        demand_level = pump_on_demand_level(votes.shared);
-        demand = true;
-      } else {
-        method = "pump_on_uncertain";
-        confidence = 0.5f;  // Cannot distinguish demand from recirculation
-      }
+    // The tier ordering lives in decide_pump_on() (dhw_demand_logic.h) so the
+    // host test can assert it directly (issue #144). This block only gathers
+    // the inputs; everything time-dependent is resolved before the call.
+    PumpOnInputs in;
+    in.pre_pump_on_flow = pre_pump_on_flow_;
+    in.flow = flow;
+    in.flow_threshold = flow_threshold_;
+    in.inlet_deriv = inlet_deriv;
+    in.inlet_psi = inlet_psi;
+    in.pump_flow = pump_flow;
+    in.current_deriv = current_deriv;
+    in.power_deriv = power_deriv;
+    in.head_rate_peak = head_rate_peak_;
+    in.suppress_transient_votes =
+        pump_on_started_ms_ != 0 &&
+        (now - pump_on_started_ms_) < PUMP_STARTUP_TRANSIENT_SUPPRESSION_MS;
+    if (in.suppress_transient_votes) {
+      ESP_LOGD(TAG, "Suppressing startup transient votes (pump on for %.1f s)",
+               (now - pump_on_started_ms_) / 1000.0f);
     }
+
+    PumpOnResult result = decide_pump_on(in, pump_on_vote_thresholds_());
+    demand = result.demand;
+    confidence = result.confidence;
+    demand_level = result.demand_level;
+    method = result.method;
   }
 
   // ── 6. DHW in-use confidence boost ────────────────────────────────────────

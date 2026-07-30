@@ -144,6 +144,102 @@ inline float compute_pump_on_confidence(float inlet_deriv, float inlet_psi,
   return confidence;
 }
 
+// Pump-on continuation. Demand was already established just before the pump
+// turned on, and household flow is still above threshold now — so the draw that
+// was being detected has not stopped, whatever the recirculation loop is doing
+// on top of it. `pre_pump_on_flow` is NaN unless the last confirmed pump-off
+// tick carried unambiguous demand evidence; the caller owns that capture.
+inline bool pump_on_continuation_is_active(float pre_pump_on_flow, float flow,
+                                           float flow_threshold) {
+  if (std::isnan(pre_pump_on_flow) || pre_pump_on_flow <= flow_threshold)
+    return false;
+  if (std::isnan(flow) || flow <= flow_threshold)
+    return false;
+  return true;
+}
+
+// Everything the pump-on branch decides on, in one place so the ordering below
+// is a pure function of its inputs. The component fills this in from sensor
+// reads and its own transition tracking; nothing here reads a clock.
+struct PumpOnInputs {
+  // Continuation
+  float pre_pump_on_flow{NAN};  // household flow at the last pump-off tick
+  float flow{NAN};              // household flow now, GPM
+  float flow_threshold{0.3f};   // GPM
+
+  // Hydraulic votes
+  float inlet_deriv{NAN};      // PSI/s
+  float inlet_psi{NAN};        // PSI
+  float pump_flow{NAN};        // GPM, the pump's own loop reading
+  float current_deriv{NAN};    // A/s
+  float power_deriv{NAN};      // W/s
+  float head_rate_peak{NAN};   // m/s, peak since the last tick
+  bool suppress_transient_votes{false};
+};
+
+// One pump-on decision. `votes` is only meaningful when the vote tier is what
+// decided; it is left at its default otherwise.
+struct PumpOnResult {
+  bool demand{false};
+  float confidence{0.0f};
+  float demand_level{0.0f};
+  const char *method{"pump_on_uncertain"};
+  PumpOnVotes votes{};
+};
+
+// The pump-on branch, in priority order. Extracted from
+// DhwDemandComponent::update() so the *ordering* is under test and not only the
+// individual predicates — issue #144. Reading the tiers off the .cpp is how the
+// stale 3.0f head-rate threshold survived the units audit (#120) and how
+// pump_off_flow_onset_is_confirmed was fed the wrong argument for months
+// (#147/#148).
+//
+// Tiers, strongest first:
+//   1. continuation      — a draw already established before the pump started
+//   2. hydraulic votes   — indirect evidence, scaled by how many agree
+//   3. pump_on_uncertain — the fallback; recirculation and a draw are not
+//                          separable from what is left, so claim nothing at
+//                          0.5 confidence rather than guess either way
+//
+// Each tier is reached only when everything above it declines.
+inline PumpOnResult decide_pump_on(const PumpOnInputs &in,
+                                   const PumpOnVoteThresholds &t) {
+  PumpOnResult r;
+
+  if (pump_on_continuation_is_active(in.pre_pump_on_flow, in.flow,
+                                     in.flow_threshold)) {
+    r.demand = true;
+    r.confidence = 0.85f;
+    // Continuation requires flow > threshold, so this is never NaN-scaled.
+    r.demand_level = std::min(1.0f, in.flow / 2.5f);
+    r.method = "deterministic_continuation";
+    return r;
+  }
+
+  const char *vote_method = nullptr;
+  PumpOnVotes votes;
+  float vote_confidence = compute_pump_on_confidence(
+      in.inlet_deriv, in.inlet_psi, in.pump_flow, in.current_deriv,
+      in.power_deriv, in.head_rate_peak, in.suppress_transient_votes, t,
+      &vote_method, &votes);
+  if (vote_confidence > 0.0f) {
+    r.demand = true;
+    r.confidence = vote_confidence;
+    // Deliberately the shared count, not the total: demand_level is on the
+    // wire, so the firmware-only head-rate vote must not shift it (#125).
+    r.demand_level = pump_on_demand_level(votes.shared);
+    r.method = vote_method;
+    r.votes = votes;
+    return r;
+  }
+
+  r.demand = false;
+  r.confidence = 0.5f;  // Cannot distinguish demand from recirculation
+  r.demand_level = 0.0f;
+  r.method = "pump_on_uncertain";
+  return r;
+}
+
 // DHW in-use confidence boost. Only trustworthy while the pump is off — with
 // the pump running the flag routinely latches high for a fixed ~60 s with no
 // real draw behind it, so boosting a pump-on detection with it just adds

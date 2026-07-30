@@ -2,6 +2,25 @@
 
 ## [Unreleased]
 
+### Changed
+
+- **The `dhw_demand` pump-on tier ordering is now host-testable** (issue #144) —
+  `dhw_demand_logic.h` states its own contract at the top: pure decision logic,
+  nothing hand-mirrored into the test. The individual predicates honoured it,
+  but the *ordering* did not — it lived inline in `DhwDemandComponent::update()`,
+  so nothing under `make test` asserted that continuation is tried before the
+  hydraulic votes, or that `pump_on_uncertain` is the fallback of last resort.
+  Composition covered only by reading the `.cpp` is precisely the failure mode
+  that let a stale `3.0f` head-rate threshold survive the units audit (#120) and
+  fed `pump_off_flow_onset_is_confirmed` an argument that did not mean what its
+  contract said, for months (#147/#148). The branch is now
+  `decide_pump_on(PumpOnInputs, PumpOnVoteThresholds) -> PumpOnResult` in the
+  header, with the continuation predicate extracted alongside it; `update()`
+  reads sensors, resolves the startup-suppression window, and calls it. No
+  behaviour change — the tiers, thresholds, confidences and published
+  `demand_level` are identical, and the pump-off branch is untouched. 28 new
+  assertions pin the ordering.
+
 ### Added
 
 - **Schedule card v6: optional forecast and desired-schedule overlays** — the
