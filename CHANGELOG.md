@@ -17,6 +17,33 @@
 
 ### Fixed
 
+- **The flow-onset debounce is no longer a no-op at the pump-off transition**
+  (issue #147) — `pump_off_flow_onset_is_confirmed` exists to stop
+  recirculation flow carried over from the pump-on state being read as a draw
+  on its first tick, and it was fed a `prev_flow_present` computed with no
+  regard for what the pump was doing on that previous tick. Since
+  `prev_flow_ = flow` is assigned unconditionally every tick, and the meter
+  reads the loop at 1.3–2.3 GPM against a 0.3 GPM threshold while the pump
+  runs, the debounce was already satisfied at the instant the pump stopped —
+  passing exactly where it was meant to bite.
+
+  The previous tick is now qualified with `prev_pump_confirmed_off_`, which
+  already existed for continuation detection and costs no new state.
+  `prev_pump_confirmed_off` rather than a bare `!pump_on`, so a NaN-gap tick
+  whose last-known state was ON cannot qualify. The composition moved into
+  `dhw_demand_logic.h` as `prev_tick_confirms_flow_onset`, because the
+  component is not host-testable (#144) and this logic had already drifted
+  once: the host test asserted the correct behaviour until #120 found the
+  mirror disagreed with production and aligned the test *down*. Production is
+  brought up instead and the original assertion restored.
+
+  Effect: flow present across a pump-off transition is held one tick before it
+  may declare demand on flow alone, so a real draw still running when the pump
+  stops is declared 10 s later than before. Draws beginning while the pump is
+  already off are unaffected. **This does not fix post-shutdown coast-down**,
+  which outlasts two ticks — time-to-quiet is median 2 s, p90 189 s, max
+  299 s — so #147 stays open.
+
 - **Read-all schedule and single-event chains no longer report success when
   reads fail** (issue #136) — `read_entries_async(-1)` walked all five layers,
   logged a warning for any that failed, and then terminated with a hardcoded
