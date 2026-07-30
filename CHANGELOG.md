@@ -2,26 +2,6 @@
 
 ## [Unreleased]
 
-### Removed
-
-- **BREAKING — `packages/alpha_hwr_pairing.yaml` no longer assigns
-  `id: pump_head_rate_sensor`** — the id existed for exactly one consumer,
-  `dhw_demand`'s `pump_head_rate:` key, which wired the head-rate vote. That vote
-  was gated on `votes >= 1` and became unreachable the moment the five shared
-  votes retired, so issue #149 removed it and the config key with it. Nothing has
-  referenced the id since.
-
-  **The `head_rate` entity is unchanged.** The pump publishes head rate natively
-  over BLE, it is useful diagnostic telemetry, and it is still exported as "Head
-  Pressure Rate" with the same `entity_category: diagnostic`. Only the id is
-  gone — "the head-rate *vote* was retired" is not "stop reporting head rate".
-
-  **Migration, one line:** if your own lambda or automation resolves
-  `pump_head_rate_sensor`, re-add `id: pump_head_rate_sensor` under `head_rate:`
-  in your own `alpha_hwr:` block. That is where a config wanting a handle on this
-  sensor should declare it anyway, rather than depending on an id the package
-  happens to assign.
-
 ### Added
 
 - **`dhw_demand`: the heater's DHW in-use flag can declare a pump-on draw, after
@@ -72,6 +52,18 @@
   against physics, 988 of its positive cells had no water behind them, which is
   why it is scored nowhere. Those two roles are easy to conflate and the answers
   are opposite.
+
+- **Schedule card v6: optional forecast and desired-schedule overlays** — the
+  grid showed what the pump is programmed to do but never why, so there was no
+  way to see whether a pre-heat burst actually lands in front of predicted
+  demand. `forecast_entity` paints a weekly forecast's demand windows as a
+  translucent heat strip behind each day row, opacity scaled by peak
+  probability; `desired_entity` outlines intervals the scheduler wants but the
+  device is not holding, putting scheduler-vs-device drift where someone would
+  act on it. Both default to null, so every existing card config renders
+  exactly as before, and both are `pointer-events: none` beneath the
+  interactive blocks — dragging and editing are untouched.
+
 
 ### Changed
 
@@ -179,18 +171,27 @@
   `demand_level` are identical, and the pump-off branch is untouched. 28 new
   assertions pin the ordering.
 
-### Added
 
-- **Schedule card v6: optional forecast and desired-schedule overlays** — the
-  grid showed what the pump is programmed to do but never why, so there was no
-  way to see whether a pre-heat burst actually lands in front of predicted
-  demand. `forecast_entity` paints a weekly forecast's demand windows as a
-  translucent heat strip behind each day row, opacity scaled by peak
-  probability; `desired_entity` outlines intervals the scheduler wants but the
-  device is not holding, putting scheduler-vs-device drift where someone would
-  act on it. Both default to null, so every existing card config renders
-  exactly as before, and both are `pointer-events: none` beneath the
-  interactive blocks — dragging and editing are untouched.
+### Removed
+
+- **BREAKING — `packages/alpha_hwr_pairing.yaml` no longer assigns
+  `id: pump_head_rate_sensor`** — the id existed for exactly one consumer,
+  `dhw_demand`'s `pump_head_rate:` key, which wired the head-rate vote. That vote
+  was gated on `votes >= 1` and became unreachable the moment the five shared
+  votes retired, so issue #149 removed it and the config key with it. Nothing has
+  referenced the id since.
+
+  **The `head_rate` entity is unchanged.** The pump publishes head rate natively
+  over BLE, it is useful diagnostic telemetry, and it is still exported as "Head
+  Pressure Rate" with the same `entity_category: diagnostic`. Only the id is
+  gone — "the head-rate *vote* was retired" is not "stop reporting head rate".
+
+  **Migration, one line:** if your own lambda or automation resolves
+  `pump_head_rate_sensor`, re-add `id: pump_head_rate_sensor` under `head_rate:`
+  in your own `alpha_hwr:` block. That is where a config wanting a handle on this
+  sensor should declare it anyway, rather than depending on an id the package
+  happens to assign.
+
 
 ### Fixed
 
@@ -237,6 +238,7 @@
   untouched. Failure is not inferred from an empty result, since a layer or
   pump with no enabled entries legitimately reads back empty. Every consumer
   branch this makes reachable was already written — the paths were simply dead.
+
 
 ## [0.14.0] - 2026-07-28
 
