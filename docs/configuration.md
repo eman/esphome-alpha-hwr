@@ -212,7 +212,7 @@ the node's own connection state for availability instead.
 | `motor_speed` | sensor id | — | Pump RPM; selects the pump-on/pump-off branch |
 | `motor_current` | sensor id | — | Pump current (A); branch fallback when RPM is absent |
 | `pump_flow` | sensor id | — | Pump's own recirculation-loop flow (GPM). Subtracted from `flow` to measure household demand while the pump runs |
-| `dhw_in_use` | sensor id | — | External in-use flag; applies a +0.05 confidence boost while the pump is off |
+| `dhw_in_use` | sensor id | — | The heater's own DHW in-use flag. Applies a +0.05 confidence boost while the pump is off, and — once continuously high for `dhw_in_use_min_seconds` — can declare a pump-on draw on its own as the last-resort recall tier |
 
 ### Thresholds
 
@@ -226,6 +226,7 @@ the node's own connection state for availability instead.
 | `pump_on_demand_min_speed_rpm` | float | `1950` | RPM below which the subtraction is not trusted. The pump *estimates* its loop flow rather than metering it, and below ~2000 RPM the estimate reads low, so the difference goes spuriously positive with no draw (+0.45 GPM measured at 1650). Admits the whole production range — the pump's own 29-day minimum was 1971 RPM |
 | `pump_on_demand_max_stale_seconds` | int | `30` | s — how old the `pump_flow` reading may be and still be differenced. The pump reports every 10 s |
 | `droplet_max_stale_seconds` | int | `60` | s — the same bound for `flow`. Deliberately looser: the meter reports on change, at a median 28 s while flowing, so matching the pump's 30 s would reject half of normal cadence |
+| `dhw_in_use_min_seconds` | int | `70` | s — how long `dhw_in_use` must stay **continuously** high before it may declare a pump-on draw on its own. The flag fires ~77 times a day with a median duration of 15 s, so it is unusable bare; 70 s clears 89.7 % of its events. `0` accepts the bare flag (bench/debug only). A NaN sample breaks the run exactly as a low one does, so a BLE dropout resets the timer rather than holding the last value |
 | `flow_latch_seconds` | int | `30` | s — how long flow keeps counting after it stops |
 | `session_gap_tolerance_seconds` | int | `60` | s — a lull shorter than this does not end a session |
 | `demand_release_seconds` | int | `30` | s — how long demand stays latched after the last positive tick. Set to `0` to publish the raw per-tick result |
@@ -281,6 +282,7 @@ each tick, and the component logs a per-tick `VERBOSE` line with every input.
 | `deterministic_pump_on_subtraction` | Pump on, and `flow − pump_flow` measured a draw |
 | `flow_onset_pending` | First tick of flow, awaiting confirmation |
 | `demand_release_hold` | No live signal; demand latched by `demand_release_seconds` |
+| `deterministic_dhw_in_use` | Pump on, nothing above it fired, and the heater's flag has been continuously high past `dhw_in_use_min_seconds` |
 | `pump_on_uncertain` | Pump running, and nothing could separate a draw from recirculation — either the subtraction measured no draw, or one of its guards declined (a channel missing, a reading stale, or the pump below `pump_on_demand_min_speed_rpm`) |
 | `deterministic_idle` | No demand, high confidence |
 | `no_flow` | Flow below threshold and the latch has expired |

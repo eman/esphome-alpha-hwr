@@ -150,6 +150,11 @@ dhw_demand:
   droplet_max_stale_seconds: 60         # The meter reports on change, median
                                         # 28 s while flowing — so this bound is
                                         # deliberately looser than the pump's.
+  # How long the heater's DHW in-use flag must stay continuously high before it
+  # may declare a pump-on draw on its own. The flag fires ~77 times a day with a
+  # median duration of 15 s; 70 s clears 89.7 % of those. Only used when
+  # dhw_in_use is wired. Set to 0 to accept the bare flag (bench/debug only).
+  dhw_in_use_min_seconds: 70
   flow_latch_seconds: 30
   session_gap_tolerance_seconds: 60
   # How long demand stays latched after the last positive tick. Stops an input
