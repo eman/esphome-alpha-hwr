@@ -86,7 +86,8 @@ class DhwDemandComponent : public PollingComponent {
   bool detect_pump_on_(float motor_speed, float motor_current);
 
   // Pump-off branch: returns confidence > 0 if demand detected, else 0
-  float detect_pump_off_(float flow, bool prev_flow_present, float temp_deriv,
+  float detect_pump_off_(float flow, bool prev_flow_present_pump_off,
+                         float temp_deriv,
                          float charge_deriv,
                          bool *pre_pump_demand_eligible_out,
                          const char **method_out);

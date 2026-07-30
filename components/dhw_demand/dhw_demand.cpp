@@ -135,7 +135,8 @@ bool DhwDemandComponent::detect_pump_on_(float motor_speed,
 
 // ── Pump-OFF detection ────────────────────────────────────────────────────────
 
-float DhwDemandComponent::detect_pump_off_(float flow, bool prev_flow_present,
+float DhwDemandComponent::detect_pump_off_(float flow,
+                                           bool prev_flow_present_pump_off,
                                            float temp_deriv,
                                            float charge_deriv,
                                            bool *pre_pump_demand_eligible_out,
@@ -175,7 +176,8 @@ float DhwDemandComponent::detect_pump_off_(float flow, bool prev_flow_present,
 
   // Flow onset is ambiguous on its first tick; see the predicate's contract in
   // dhw_demand_logic.h. Shared with the host test so the two cannot drift.
-  if (!pump_off_flow_onset_is_confirmed(flow_present, prev_flow_present,
+  if (!pump_off_flow_onset_is_confirmed(flow_present,
+                                        prev_flow_present_pump_off,
                                         onset_corroborating_signal_present)) {
     *method_out = "flow_onset_pending";
     return 0.0f;
@@ -312,8 +314,12 @@ void DhwDemandComponent::update() {
   float tank_temp = read_sensor_(tank_lower_temp_);
   float dhw_charge = read_sensor_(dhw_charge_);
   float dhw_in_use = read_sensor_(dhw_in_use_);
-  bool prev_flow_present =
-      !std::isnan(prev_flow_) && prev_flow_ > flow_threshold_;
+  // The 2-tick flow-onset debounce; the contract, and why the pump-off
+  // qualifier is load-bearing, are with the predicate in dhw_demand_logic.h.
+  // `prev_pump_confirmed_off_` still holds the previous tick's value here — it
+  // is not updated until the end of this one.
+  bool prev_flow_present_pump_off = prev_tick_confirms_flow_onset(
+      prev_flow_, flow_threshold_, prev_pump_confirmed_off_);
 
   // ── 2. Compute derivatives (per-sensor dt tracks NAN gaps correctly) ──────
   float inlet_deriv = compute_deriv_(inlet_psi, prev_inlet_pressure_, prev_inlet_pressure_ms_, now);
@@ -406,7 +412,7 @@ void DhwDemandComponent::update() {
 
   if (!pump_on) {
     // ── Pump-OFF branch ───────────────────────────────────────────────────
-    confidence = detect_pump_off_(flow, prev_flow_present, temp_deriv,
+    confidence = detect_pump_off_(flow, prev_flow_present_pump_off, temp_deriv,
                                   charge_deriv, &pre_pump_demand_eligible,
                                   &method);
     if (confidence > 0.0f) {

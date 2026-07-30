@@ -15,6 +15,7 @@ using esphome::dhw_demand::apply_dhw_in_use_boost;
 using esphome::dhw_demand::compute_pump_on_confidence;
 using esphome::dhw_demand::DemandHold;
 using esphome::dhw_demand::kDefaultPumpOnVoteThresholds;
+using esphome::dhw_demand::prev_tick_confirms_flow_onset;
 using esphome::dhw_demand::pump_off_flow_onset_is_confirmed;
 using esphome::dhw_demand::pump_on_demand_level;
 using esphome::dhw_demand::PumpOnVotes;
@@ -98,7 +99,7 @@ void test_startup_guard_keeps_open_loop_signals() {
 void test_flow_only_onset_requires_one_full_off_tick() {
   std::cout << "\n=== Testing Flow-Only Onset Confirmation ===" << std::endl;
 
-  // Args: (flow_present, prev_flow_present, onset_corroborating).
+  // Args: (flow_present, prev_flow_present_pump_off, onset_corroborating).
   bool first_tick_confirmed =
       pump_off_flow_onset_is_confirmed(true, false, false);
   bool second_tick_confirmed =
@@ -107,12 +108,17 @@ void test_flow_only_onset_requires_one_full_off_tick() {
       pump_off_flow_onset_is_confirmed(true, false, true);
   bool no_flow_passes_through =
       pump_off_flow_onset_is_confirmed(false, false, false);
-  // Flow already present on the previous tick, whatever the pump was doing then.
-  // Until issue #120 this test hand-mirrored the predicate and asserted the
-  // opposite — the mirror gated on prev_pump_confirmed_off, which production
-  // has never read. prev_flow_present alone is the debounce.
+  // Flow carried across the pump-off transition. The caller qualifies the
+  // second argument with `prev_pump_confirmed_off_`, so flow on the preceding
+  // *pump-on* tick — recirculation, 1.3–2.3 GPM against a 0.3 GPM threshold —
+  // arrives here as false and the onset stays ambiguous.
+  //
+  // This assertion was here before, was inverted by #120 to match what
+  // production did at the time, and is restored by #147, which changed
+  // production instead. Without it the debounce is always already satisfied at
+  // the instant the pump stops, which is the one moment it exists for.
   bool carried_recirc_flow_confirmed =
-      pump_off_flow_onset_is_confirmed(true, true, false);
+      pump_off_flow_onset_is_confirmed(true, false, false);
 
   TEST_ASSERT(!first_tick_confirmed,
               "A brand-new flow-only onset is treated as ambiguous");
@@ -122,8 +128,51 @@ void test_flow_only_onset_requires_one_full_off_tick() {
               "Corroborated first-tick flow is accepted immediately");
   TEST_ASSERT(no_flow_passes_through,
               "The predicate only gates flow onset; no-flow passes through");
-  TEST_ASSERT(carried_recirc_flow_confirmed,
-              "Flow present on the previous tick is confirmed (2-tick debounce)");
+  TEST_ASSERT(!carried_recirc_flow_confirmed,
+              "Flow carried from a pump-on tick stays ambiguous on the first "
+              "off tick");
+}
+
+void test_only_a_pump_off_tick_arms_the_flow_debounce() {
+  std::cout << "\n=== Testing Flow-Onset Debounce Qualifier ===" << std::endl;
+
+  const float kThreshold = 0.3f;
+
+  // The defect (#147): loop flow on a pump-on tick must not arm the debounce.
+  // 1.3–2.3 GPM is the measured range while the pump runs, all of it far above
+  // the 0.3 GPM threshold, so an unqualified check passes every time.
+  bool recirc_arms_it =
+      prev_tick_confirms_flow_onset(2.2f, kThreshold, /*prev_off=*/false);
+  bool low_recirc_arms_it =
+      prev_tick_confirms_flow_onset(1.3f, kThreshold, /*prev_off=*/false);
+
+  // A genuine draw observed while the pump was already off does arm it.
+  bool pump_off_flow_arms_it =
+      prev_tick_confirms_flow_onset(1.5f, kThreshold, /*prev_off=*/true);
+
+  // Sub-threshold and absent readings arm nothing, off or not.
+  bool sub_threshold_arms_it =
+      prev_tick_confirms_flow_onset(0.2f, kThreshold, /*prev_off=*/true);
+  bool nan_arms_it =
+      prev_tick_confirms_flow_onset(NAN, kThreshold, /*prev_off=*/true);
+
+  // A NaN-gap tick whose last-known pump state was ON is not confirmed off, so
+  // it cannot arm the debounce either — same reasoning as pre_pump_on_flow_.
+  bool unconfirmed_gap_arms_it =
+      prev_tick_confirms_flow_onset(1.5f, kThreshold, /*prev_off=*/false);
+
+  TEST_ASSERT(!recirc_arms_it,
+              "Loop flow at 2.2 GPM on a pump-on tick does not arm the "
+              "debounce");
+  TEST_ASSERT(!low_recirc_arms_it,
+              "Loop flow at the low end of its range does not arm it either");
+  TEST_ASSERT(pump_off_flow_arms_it,
+              "Flow observed while the pump was confirmed off does arm it");
+  TEST_ASSERT(!sub_threshold_arms_it,
+              "Sub-threshold flow on a pump-off tick does not arm it");
+  TEST_ASSERT(!nan_arms_it, "A missing reading does not arm it");
+  TEST_ASSERT(!unconfirmed_gap_arms_it,
+              "A tick not confirmed pump-off does not arm it");
 }
 
 void test_dhw_in_use_boost_is_gated_to_pump_off() {
@@ -405,6 +454,7 @@ int main() {
   test_startup_transients_still_trigger_without_guard();
   test_startup_guard_keeps_open_loop_signals();
   test_flow_only_onset_requires_one_full_off_tick();
+  test_only_a_pump_off_tick_arms_the_flow_debounce();
   test_dhw_in_use_boost_is_gated_to_pump_off();
   test_ambiguous_flow_onset_does_not_prime_continuation();
   test_nan_inputs_do_not_vote();

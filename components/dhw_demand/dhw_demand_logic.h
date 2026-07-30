@@ -155,22 +155,52 @@ inline float apply_dhw_in_use_boost(float confidence, bool demand, bool pump_on,
   return confidence;
 }
 
+// Does the previous tick contribute a confirming observation to the flow-onset
+// debounce below? Only a tick where the pump was confirmed off can: while the
+// pump runs the meter reads the recirculation loop, so its flow says nothing
+// about household demand.
+//
+// This composition is the defect issue #147 is about, and it lives here rather
+// than inline in the caller for the reason at the top of this file — the
+// component itself is not host-testable (#144), so logic left in
+// `dhw_demand.cpp` ships unpinned. Feeding the predicate a bare "flow was
+// present last tick" makes the debounce a no-op at the pump-off transition.
+inline bool prev_tick_confirms_flow_onset(float prev_flow, float flow_threshold,
+                                          bool prev_pump_confirmed_off) {
+  return prev_pump_confirmed_off && !std::isnan(prev_flow) &&
+         prev_flow > flow_threshold;
+}
+
 // Pump-off flow onset. A brand-new flow reading is ambiguous on its very first
 // tick — it may be a single noisy sample, or recirculation flow carried over
 // from the pump-on state. It is confirmed either by a corroborating signal
 // (thermal collapse / charge drop), or by having been present on the previous
-// tick too, which is the 2-tick debounce. Per AGENTS.md §10.4 the household
-// flow sensor is the unambiguous ground-truth signal while the pump is off, so
-// sustained flow is accepted without thermal confirmation.
+// tick *while the pump was already confirmed off*, which is the 2-tick
+// debounce. Sustained pump-off flow is accepted without thermal confirmation.
+//
+// The second argument's qualifier is the whole point (issue #147). Fed a bare
+// "flow was present last tick" this degenerates: during pump-on the meter
+// reads the recirculation loop at 1.3–2.3 GPM against a 0.3 GPM threshold, so
+// the debounce is already satisfied on the very first pump-off tick, by the
+// pump-on tick before it. That is the one moment it exists for, and it is
+// where the coast-down false positives come from. The host test asserted this
+// distinction until #120 aligned it *down* to what production did at the time;
+// production has now been brought up instead, so the assertion is back.
+//
+// This narrows AGENTS.md's "when the pump is off the Droplet D1 reads only
+// genuine demand flow". True in steady state; for the first seconds to minutes
+// after a shutdown the meter reads the loop coasting down, and by magnitude
+// that is indistinguishable from a draw — pre-shutdown loop flow runs a median
+// 1.45 GPM, larger than most draws at this house.
 //
 // Returns true for the non-flow case as well: this predicate only gates flow
 // onset, and callers apply their own no-flow handling.
 inline bool pump_off_flow_onset_is_confirmed(bool flow_present,
-                                             bool prev_flow_present,
+                                             bool prev_flow_present_pump_off,
                                              bool onset_corroborating) {
   if (!flow_present)
     return true;
-  return onset_corroborating || prev_flow_present;
+  return onset_corroborating || prev_flow_present_pump_off;
 }
 
 // Release-hold hysteresis for the demand output. Without it, an input dithering
