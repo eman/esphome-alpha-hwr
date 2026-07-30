@@ -13,11 +13,15 @@
 
 using esphome::dhw_demand::apply_dhw_in_use_boost;
 using esphome::dhw_demand::compute_pump_on_confidence;
+using esphome::dhw_demand::decide_pump_on;
 using esphome::dhw_demand::DemandHold;
 using esphome::dhw_demand::kDefaultPumpOnVoteThresholds;
 using esphome::dhw_demand::prev_tick_confirms_flow_onset;
 using esphome::dhw_demand::pump_off_flow_onset_is_confirmed;
+using esphome::dhw_demand::pump_on_continuation_is_active;
 using esphome::dhw_demand::pump_on_demand_level;
+using esphome::dhw_demand::PumpOnInputs;
+using esphome::dhw_demand::PumpOnResult;
 using esphome::dhw_demand::PumpOnVotes;
 using esphome::dhw_demand::SessionTracker;
 
@@ -443,6 +447,143 @@ void test_head_rate_vote_moves_confidence_but_not_demand_level() {
                    "Saturated demand_level is 0.90, not the old 1.00");
 }
 
+// Vote inputs that make every hydraulic signal fire: pressure transient, low
+// inlet pressure, pump-side flow collapse, current spike, power spike, and the
+// corroborating head-rate spike. Used to prove a stronger tier outranks them.
+static void saturate_votes(PumpOnInputs &in) {
+  in.inlet_deriv = 1.32f;
+  in.inlet_psi = 3.0f;
+  in.pump_flow = 0.05f;
+  in.current_deriv = 0.015f;
+  in.power_deriv = 12.0f;
+  in.head_rate_peak = 2.94f;
+}
+
+// Vote inputs that make nothing fire. Inlet pressure and pump flow must sit
+// above their floors, since those two vote on absolute values and fire low.
+static void quiet_votes(PumpOnInputs &in) {
+  in.inlet_deriv = 0.0f;
+  in.inlet_psi = 13.2f;
+  in.pump_flow = 9.56f;
+  in.current_deriv = 0.0f;
+  in.power_deriv = 0.0f;
+  in.head_rate_peak = 0.0f;
+}
+
+void test_pump_on_tier_ordering() {
+  std::cout << "\n=== Testing Pump-On Tier Ordering ===" << std::endl;
+
+  // Until issue #144 this ordering lived inline in update(), where no host test
+  // could reach it. Every individual predicate was covered; their composition
+  // was covered only by reading the .cpp — the failure mode that let the stale
+  // 3.0f head-rate threshold survive the units audit (#120) and fed
+  // pump_off_flow_onset_is_confirmed the wrong argument for months (#147/#148).
+
+  // ── Tier 1 outranks tier 2 ──────────────────────────────────────────────
+  // Continuation and every hydraulic vote firing at once. Continuation must
+  // win: it is direct evidence that a draw already established has not stopped.
+  PumpOnInputs both;
+  both.pre_pump_on_flow = 1.5f;
+  both.flow = 1.5f;
+  saturate_votes(both);
+  PumpOnResult r = decide_pump_on(both, kDefaultPumpOnVoteThresholds);
+
+  TEST_ASSERT(std::string(r.method) == "deterministic_continuation",
+              "Continuation is tried before the hydraulic votes");
+  TEST_ASSERT(r.demand, "Continuation declares demand");
+  TEST_ASSERT_NEAR(r.confidence, 0.85f, 0.0001f,
+                   "Continuation reports 0.85 confidence");
+  TEST_ASSERT_NEAR(r.demand_level, 0.60f, 0.0001f,
+                   "Continuation scales demand_level off household flow");
+  TEST_ASSERT(r.votes.total == 0 && r.votes.shared == 0,
+              "A continuation result carries no vote count");
+
+  // ── Tier 2 is reached only when tier 1 declines ─────────────────────────
+  // Identical telemetry, but nothing was established before the pump started.
+  PumpOnInputs votes_only = both;
+  votes_only.pre_pump_on_flow = NAN;
+  r = decide_pump_on(votes_only, kDefaultPumpOnVoteThresholds);
+
+  TEST_ASSERT(std::string(r.method) == "deterministic_pump_on",
+              "The votes decide once continuation declines");
+  TEST_ASSERT(r.demand, "A full vote sweep declares demand");
+  TEST_ASSERT_NEAR(r.confidence, 0.95f, 0.0001f, "Vote confidence caps at 0.95");
+  TEST_ASSERT(r.votes.total == 6, "All six signals voted");
+  TEST_ASSERT(r.votes.shared == 5, "Five of them are shared with Python");
+  TEST_ASSERT_NEAR(r.demand_level, 0.90f, 0.0001f,
+                   "demand_level comes from the shared count, not the total");
+
+  // Continuation needs household flow on *both* sides of the pump start. A
+  // pre-pump draw that has since stopped must not keep declaring demand.
+  PumpOnInputs stopped = both;
+  stopped.flow = 0.1f;
+  r = decide_pump_on(stopped, kDefaultPumpOnVoteThresholds);
+  TEST_ASSERT(std::string(r.method) == "deterministic_pump_on",
+              "Continuation declines once household flow stops, and falls through");
+
+  // ── Tier 3 is the fallback of last resort ───────────────────────────────
+  PumpOnInputs quiet;
+  quiet_votes(quiet);
+  r = decide_pump_on(quiet, kDefaultPumpOnVoteThresholds);
+
+  TEST_ASSERT(std::string(r.method) == "pump_on_uncertain",
+              "Nothing firing falls through to pump_on_uncertain");
+  TEST_ASSERT(!r.demand, "pump_on_uncertain declares no demand");
+  TEST_ASSERT_NEAR(r.confidence, 0.5f, 0.0001f,
+                   "pump_on_uncertain claims neither way, at 0.5");
+  TEST_ASSERT_NEAR(r.demand_level, 0.0f, 0.0001f,
+                   "pump_on_uncertain publishes no intensity");
+  TEST_ASSERT(r.votes.total == 0 && r.votes.shared == 0,
+              "No votes are reported when none fired");
+
+  // Total BLE loss reaches the same fallback rather than crashing or guessing.
+  PumpOnInputs all_nan;
+  r = decide_pump_on(all_nan, kDefaultPumpOnVoteThresholds);
+  TEST_ASSERT(std::string(r.method) == "pump_on_uncertain",
+              "All-NaN inputs fall through to pump_on_uncertain");
+  TEST_ASSERT(!r.demand, "All-NaN inputs declare no demand");
+
+  // ── The startup guard applies inside the ordering, not around it ────────
+  // Under suppression the transient votes are withheld, but the steady-state
+  // open-loop signals still reach tier 2.
+  PumpOnInputs startup;
+  startup.inlet_deriv = 1.32f;
+  startup.inlet_psi = 13.2f;
+  startup.pump_flow = 9.56f;
+  startup.current_deriv = 0.015f;
+  startup.power_deriv = 1.4f;
+  startup.head_rate_peak = 2.94f;
+  startup.suppress_transient_votes = true;
+  r = decide_pump_on(startup, kDefaultPumpOnVoteThresholds);
+  TEST_ASSERT(std::string(r.method) == "pump_on_uncertain",
+              "Startup-only transients reach the fallback, not a detection");
+
+  startup.inlet_psi = 2.5f;  // a genuine open-loop signal on top
+  r = decide_pump_on(startup, kDefaultPumpOnVoteThresholds);
+  TEST_ASSERT(std::string(r.method) == "deterministic_pump_on",
+              "An open-loop signal still decides during startup suppression");
+  TEST_ASSERT_NEAR(r.confidence, 0.50f, 0.0001f,
+                   "Only the un-suppressed vote counts, at 0.50");
+}
+
+void test_pump_on_continuation_predicate() {
+  std::cout << "\n=== Testing Pump-On Continuation Predicate ===" << std::endl;
+
+  // Args: (pre_pump_on_flow, flow, flow_threshold).
+  TEST_ASSERT(pump_on_continuation_is_active(1.5f, 1.5f, 0.3f),
+              "Flow above threshold on both sides of the pump start continues");
+  TEST_ASSERT(!pump_on_continuation_is_active(NAN, 1.5f, 0.3f),
+              "No captured pre-pump flow means no continuation");
+  TEST_ASSERT(!pump_on_continuation_is_active(0.1f, 1.5f, 0.3f),
+              "Pre-pump flow at or below threshold is not demand evidence");
+  TEST_ASSERT(!pump_on_continuation_is_active(1.5f, NAN, 0.3f),
+              "A NaN current reading does not continue a draw");
+  TEST_ASSERT(!pump_on_continuation_is_active(1.5f, 0.1f, 0.3f),
+              "The draw stopping ends the continuation");
+  TEST_ASSERT(!pump_on_continuation_is_active(0.3f, 0.3f, 0.3f),
+              "The comparison is strictly greater on both sides");
+}
+
 int main() {
   std::cout << "==========================================================="
             << std::endl;
@@ -462,6 +603,8 @@ int main() {
   test_threshold_jitter_does_not_chatter();
   test_pump_on_demand_level_scales_with_votes();
   test_head_rate_vote_moves_confidence_but_not_demand_level();
+  test_pump_on_continuation_predicate();
+  test_pump_on_tier_ordering();
 
   std::cout << "\n==========================================================="
             << std::endl;

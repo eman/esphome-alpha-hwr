@@ -92,15 +92,10 @@ class DhwDemandComponent : public PollingComponent {
                          bool *pre_pump_demand_eligible_out,
                          const char **method_out);
 
-  // Pump-on branch: returns confidence > 0 if demand detected, else 0
-  float detect_pump_on_continuation_(float flow,
-                                     const char **method_out);
-  float detect_pump_on_deterministic_(float inlet_deriv, float inlet_psi,
-                                       float pump_flow, float current_deriv,
-                                       float power_deriv, float head_rate_peak,
-                                       bool suppress_transient_votes,
-                                       const char **method_out,
-                                       PumpOnVotes *votes_out);
+  // Pump-on branch: the tier ordering itself is decide_pump_on() in
+  // dhw_demand_logic.h so the host test can assert it (issue #144). This only
+  // gathers the configured thresholds for it.
+  PumpOnVoteThresholds pump_on_vote_thresholds_() const;
 
   void publish_result_(bool demand, float confidence, float demand_level,
                        const char *method);

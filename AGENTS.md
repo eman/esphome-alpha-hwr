@@ -423,7 +423,7 @@ Confidence = highest-weight signal + 0.05 per additional corroborating signal, c
 
 #### Pump-ON branch
 
-When the pump is running the Droplet D1 sees recirculation flow in addition to any demand and cannot be used as a direct indicator. Two sub-paths are checked in order:
+When the pump is running the Droplet D1 sees recirculation flow in addition to any demand and cannot be used as a direct indicator. The ordering below is `decide_pump_on()` in `dhw_demand_logic.h`, not inline in `update()` — it is a pure function so the host test can assert tier priority, which it could not while the composition lived in the `.cpp` (issue #144). Two sub-paths are checked in order, with `pump_on_uncertain` (demand false, confidence 0.5) as the fallback when both decline:
 
 1. **Continuation detection** — if Droplet flow was above threshold on the last pump-off tick and is still above threshold now, confidence = 0.85. This handles draws that were already in progress when the pump turned on.
 

@@ -101,6 +101,15 @@ two are normally paired, with pump telemetry feeding the detector.
   parameter. `tests/test_dhw_demand_logic.cpp` includes it directly and calls
   production code. Nothing in it may be hand-mirrored into a test; that drift is
   exactly what issue #120 was opened to eliminate.
+- **The pump-on tier *ordering* is in that header too**, as
+  `decide_pump_on(PumpOnInputs, PumpOnVoteThresholds) -> PumpOnResult`. It used
+  to live inline in `update()`, where the individual predicates were all under
+  test but their composition was not — so "continuation outranks the votes" and
+  "`pump_on_uncertain` is the last resort" held only by reading the `.cpp`. That
+  is the same gap that let a stale threshold survive the units audit and fed the
+  onset predicate the wrong argument for months. `update()` now reads sensors,
+  resolves the startup-suppression window, and calls the decision.
+  See [issue #144](https://github.com/eman/esphome-alpha-hwr/issues/144).
 
 Parity with the Python detector is tracked in the companion repo's
 [evaluation report](https://github.com/eman/dhw-sensor-apps/blob/main/docs/dhw-demand-detector-evaluation-2026-07.md),
