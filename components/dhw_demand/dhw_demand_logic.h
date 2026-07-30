@@ -182,10 +182,12 @@ inline bool prev_tick_confirms_flow_onset(float prev_flow, float flow_threshold,
 // "flow was present last tick" this degenerates: during pump-on the meter
 // reads the recirculation loop at 1.3–2.3 GPM against a 0.3 GPM threshold, so
 // the debounce is already satisfied on the very first pump-off tick, by the
-// pump-on tick before it. That is the one moment it exists for, and it is
-// where the coast-down false positives come from. The host test asserted this
-// distinction until #120 aligned it *down* to what production did at the time;
-// production has now been brought up instead, so the assertion is back.
+// pump-on tick before it — the one moment it exists for. Qualifying it buys
+// back exactly that tick and no more: post-shutdown coast-down outlasts two
+// ticks and still arms the debounce legitimately on its second, which is why
+// #147 stays open. The host test asserted this distinction until #120 aligned
+// it *down* to what production did at the time; production has now been
+// brought up instead, so the assertion is back.
 //
 // This narrows AGENTS.md's "when the pump is off the Droplet D1 reads only
 // genuine demand flow". True in steady state; for the first seconds to minutes
