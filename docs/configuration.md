@@ -138,8 +138,25 @@ next reconnect.
 Infers hot-water draws from pump and tank telemetry. Independent of `alpha_hwr`;
 see [Architecture](architecture.md#dhw-demand-detection) for how the detection
 works. Every key is optional — the detector uses whatever sensors it is given and
-degrades gracefully as inputs drop out (an unavailable sensor reads NaN and simply
-casts no vote).
+degrades gracefully as inputs drop out (an unavailable sensor reads NaN and the
+rule that needed it declines rather than guessing).
+
+> **Breaking change in this release (issue #149).** The pump-on hydraulic vote
+> tier was replaced by a direct measurement, and nine keys went with it:
+> `inlet_pressure`, `pump_power`, `pump_head_rate`,
+> `inlet_pressure_transient_threshold`, `inlet_pressure_demand_floor`,
+> `pump_flow_collapse_threshold`, `motor_current_spike_threshold`,
+> `pump_power_spike_threshold` and `pump_head_rate_threshold`.
+>
+> A config that still sets one **fails at `esphome config` time** with a message
+> naming the replacement — deliberately, rather than being accepted and ignored,
+> because config that validates but does nothing is worse than config that
+> breaks. **To migrate: delete them.** Nothing replaces them one-for-one; the
+> new keys are listed under Thresholds below and all four have working defaults.
+>
+> Make sure `pump_flow` and `motor_speed` *are* wired. They are now what pump-on
+> detection runs on. Without them the detector still works while the pump is off
+> and reports `pump_on_uncertain` whenever it is running.
 
 ### Output sensors
 
@@ -153,23 +170,16 @@ casts no vote).
 
 `confidence` and `demand_level` answer different questions: confidence is how sure
 the detector is that a draw is happening, `demand_level` is how large it looks.
-The two move independently — a single hydraulic vote is a confident-enough
-detection at a low intensity. Intensity is derived from flow where flow is
-available (`min(1.0, GPM / 2.5)`), and from the vote count on the pump-on
-hydraulic branch (`0.3 + 0.15 × (votes − 1)`), matching the Python detector. It
-is not a flow rate and should not be read as one. While
-`demand_release_seconds` is latching, the last live value is republished rather
-than 0.0.
+The two move independently — a small draw can be measured with high confidence.
+Intensity is `min(1.0, GPM / 2.5)` in both pump regimes: household flow while the
+pump is off, and *computed* demand (`flow − pump_flow`) while it is on. It is not
+a flow rate and should not be read as one. While `demand_release_seconds` is
+latching, the last live value is republished rather than 0.0.
 
-The two also count votes differently, deliberately (issue #125). This firmware
-has a sixth pump-on signal the Python detector does not — a head-pressure rate
-spike, cheap here because the pump publishes head natively over BLE, and closed
-on the Python side because that detector deprecated its head channel. It feeds
-`confidence`, which is each detector's judgement of its own evidence, but not
-`demand_level`, which is part of the cross-detector contract and must mean the
-same thing whichever detector is publishing it. So on the pump-on branch
-`demand_level` counts only the five shared signals and tops out at **0.90**,
-exactly as Python does; a value of 1.0 arrives only from the flow branch.
+Confidence on the pump-on branch rises with how far the measured draw clears the
+threshold rather than with a count of agreeing signals:
+`min(0.90, 0.60 + 0.30 × margin)`. The 0.90 cap reflects that the measurement is
+a difference of two instruments, not a direct reading of the tap.
 
 All five outputs publish **on change only** (issue #129), not once per
 `update_interval`. They are step-valued — `detection_method` names the rule that
@@ -201,10 +211,7 @@ the node's own connection state for availability instead.
 | `dhw_charge` | sensor id | — | Tank charge (%); drives the charge-drop signal |
 | `motor_speed` | sensor id | — | Pump RPM; selects the pump-on/pump-off branch |
 | `motor_current` | sensor id | — | Pump current (A); branch fallback when RPM is absent |
-| `inlet_pressure` | sensor id | — | Pump inlet pressure (PSI) |
-| `pump_flow` | sensor id | — | Pump-side flow (GPM) |
-| `pump_power` | sensor id | — | Pump power (W) |
-| `pump_head_rate` | sensor id | — | Rate of change of head pressure (m/s) |
+| `pump_flow` | sensor id | — | Pump's own recirculation-loop flow (GPM). Subtracted from `flow` to measure household demand while the pump runs |
 | `dhw_in_use` | sensor id | — | External in-use flag; applies a +0.05 confidence boost while the pump is off |
 
 ### Thresholds
@@ -215,25 +222,29 @@ the node's own connection state for availability instead.
 | `flow_threshold` | float | `0.3` | GPM — flow above this is a draw |
 | `thermal_collapse_rate` | float | `0.05` | °F/s — tank cooling faster than this signals a draw |
 | `dhw_charge_drop_rate` | float | `0.005` | %/s — charge falling faster than this signals a draw |
-| `inlet_pressure_transient_threshold` | float | `0.07` | PSI/s — valve-open pressure shock |
-| `inlet_pressure_demand_floor` | float | `5.0` | PSI — inlet below this suggests an open circuit |
-| `pump_flow_collapse_threshold` | float | `0.2` | GPM — pump-side flow diverted to the house |
-| `motor_current_spike_threshold` | float | `0.001` | A/s — load change at valve opening |
-| `pump_power_spike_threshold` | float | `5.0` | W/s — corroborates the current spike |
-| `pump_head_rate_threshold` | float | `0.31` | m/s — corroborating vote only; never fires alone |
+| `pump_on_demand_flow_threshold` | float | `0.3` | GPM of **computed** demand (`flow − pump_flow`) above which a pump-on draw is declared. Shares `flow_threshold`'s value deliberately, so both pump regimes agree on what counts as flow |
+| `pump_on_demand_min_speed_rpm` | float | `1950` | RPM below which the subtraction is not trusted. The pump *estimates* its loop flow rather than metering it, and below ~2000 RPM the estimate reads low, so the difference goes spuriously positive with no draw (+0.45 GPM measured at 1650). Admits the whole production range — the pump's own 29-day minimum was 1971 RPM |
+| `pump_on_demand_max_stale_seconds` | int | `30` | s — how old the `pump_flow` reading may be and still be differenced. The pump reports every 10 s |
+| `droplet_max_stale_seconds` | int | `60` | s — the same bound for `flow`. Deliberately looser: the meter reports on change, at a median 28 s while flowing, so matching the pump's 30 s would reject half of normal cadence |
 | `flow_latch_seconds` | int | `30` | s — how long flow keeps counting after it stops |
 | `session_gap_tolerance_seconds` | int | `60` | s — a lull shorter than this does not end a session |
 | `demand_release_seconds` | int | `30` | s — how long demand stays latched after the last positive tick. Set to `0` to publish the raw per-tick result |
 | `update_interval` | time | `10s` | Detection tick interval |
 
-> The five pump-on threshold keys only matter when the corresponding pump sensors
-> are wired. Note that `pump_head_rate` (the sensor) and `pump_head_rate_threshold`
-> (its trigger level) are different keys.
+> The four `pump_on_demand_*` / `droplet_max_stale_seconds` keys only matter when
+> `pump_flow` and `motor_speed` are wired.
 
-> Unit trap: `alpha_hwr` publishes flow in m³/h and pressure in bar, while the
-> detector expects GPM and PSI. Convert with a `platform: copy` sensor and a
-> `multiply` filter (1 m³/h = 4.40287 GPM, 1 bar = 14.5038 PSI) — see the header
-> comment in `packages/dhw_demand_detector.yaml`.
+> The two staleness bounds exist because a difference of two quantities is only
+> meaningful if both are current, and ESPHome carries no provenance on a sensor
+> value — `has_state()` says a reading exists, not how old it is. Measured over
+> 30 days, gaps in the pump's flow channel beyond 20 s are 1 % of gaps but **14 %
+> of pump running time**, so a last-known-value read is stale about a seventh of
+> the time the pump runs.
+
+> Unit trap: `alpha_hwr` publishes flow in m³/h while the detector expects GPM.
+> Convert with a `platform: copy` sensor and a `multiply` filter
+> (1 m³/h = 4.40287 GPM) — see the header comment in
+> `packages/dhw_demand_detector.yaml`.
 
 ### Example
 
@@ -267,9 +278,9 @@ each tick, and the component logs a per-tick `VERBOSE` line with every input.
 | `deterministic_thermal` | Tank temperature collapsing |
 | `deterministic_charge` | Tank charge dropping |
 | `deterministic_continuation` | Draw was already active when the pump started |
-| `deterministic_pump_on` | Pump-on hydraulic votes carried the tick |
+| `deterministic_pump_on_subtraction` | Pump on, and `flow − pump_flow` measured a draw |
 | `flow_onset_pending` | First tick of flow, awaiting confirmation |
 | `demand_release_hold` | No live signal; demand latched by `demand_release_seconds` |
-| `pump_on_uncertain` | Pump running, cannot separate a draw from recirculation |
+| `pump_on_uncertain` | Pump running, and nothing could separate a draw from recirculation — either the subtraction measured no draw, or one of its guards declined (a channel missing, a reading stale, or the pump below `pump_on_demand_min_speed_rpm`) |
 | `deterministic_idle` | No demand, high confidence |
 | `no_flow` | Flow below threshold and the latch has expired |

@@ -7,8 +7,6 @@
 namespace esphome {
 namespace dhw_demand {
 
-static const uint32_t PUMP_STARTUP_TRANSIENT_SUPPRESSION_MS = 15000;
-
 void DhwDemandComponent::setup() {
   // Initialise circular buffer to NaN so early ticks don't misread history.
   for (int i = 0; i < DROPLET_BUF_SIZE; i++) {
@@ -20,15 +18,21 @@ void DhwDemandComponent::setup() {
   demand_hold_.release_ms = (uint32_t) demand_release_seconds_ * 1000;
   session_.gap_ms = (uint32_t) session_gap_tolerance_seconds_ * 1000;
 
-  // Register callback so head_rate_peak_ is updated at notification rate (~1–2 Hz).
-  // Using the peak within each 10s window ensures transients aren't missed at tick time.
-  if (pump_head_rate_ != nullptr) {
-    pump_head_rate_->add_on_state_callback([this](float rate) {
-      if (!std::isnan(rate)) {
-        float abs_rate = std::fabs(rate);
-        if (abs_rate > head_rate_peak_)
-          head_rate_peak_ = abs_rate;
-      }
+  // Stamp when each side of the pump-on subtraction last reported. ESPHome has
+  // no provenance on a sensor's state — `has_state()` says a value exists, not
+  // how old it is — so differencing two channels needs its own notion of
+  // reading age (issue #149). Only a real (non-NaN) reading counts: a NaN
+  // publish is the channel going away, not reporting.
+  if (flow_sensor_ != nullptr) {
+    flow_sensor_->add_on_state_callback([this](float v) {
+      if (!std::isnan(v))
+        flow_last_update_ms_ = millis();
+    });
+  }
+  if (pump_flow_ != nullptr) {
+    pump_flow_->add_on_state_callback([this](float v) {
+      if (!std::isnan(v))
+        pump_flow_last_update_ms_ = millis();
     });
   }
 
@@ -46,18 +50,13 @@ void DhwDemandComponent::dump_config() {
                 thermal_collapse_rate_);
   ESP_LOGCONFIG(TAG, "    dhw_charge_drop_rate: %.4f %%/s",
                 dhw_charge_drop_rate_);
-  ESP_LOGCONFIG(TAG, "    inlet_pressure_transient: %.3f PSI/s",
-                inlet_pressure_transient_threshold_);
-  ESP_LOGCONFIG(TAG, "    inlet_pressure_demand_floor: %.1f PSI",
-                inlet_pressure_demand_floor_);
-  ESP_LOGCONFIG(TAG, "    pump_flow_collapse: %.2f GPM",
-                pump_flow_collapse_threshold_);
-  ESP_LOGCONFIG(TAG, "    motor_current_spike: %.4f A/s",
-                motor_current_spike_threshold_);
-  ESP_LOGCONFIG(TAG, "    pump_power_spike: %.1f W/s",
-                pump_power_spike_threshold_);
-  ESP_LOGCONFIG(TAG, "    pump_head_rate: %.3f m/s",
-                pump_head_rate_threshold_);
+  ESP_LOGCONFIG(TAG, "    pump_on_demand_flow: %.2f GPM",
+                pump_on_demand_flow_threshold_);
+  ESP_LOGCONFIG(TAG, "    pump_on_demand_min_speed: %.0f RPM",
+                pump_on_demand_min_speed_rpm_);
+  ESP_LOGCONFIG(TAG, "    pump_on_demand_max_stale: %d s",
+                pump_on_demand_max_stale_seconds_);
+  ESP_LOGCONFIG(TAG, "    droplet_max_stale: %d s", droplet_max_stale_seconds_);
   ESP_LOGCONFIG(TAG, "    flow_latch: %d s", flow_latch_seconds_);
   ESP_LOGCONFIG(TAG, "    session_gap_tolerance: %d s",
                 session_gap_tolerance_seconds_);
@@ -217,11 +216,13 @@ float DhwDemandComponent::detect_pump_off_(float flow,
 
 // ── Pump-ON detection ─────────────────────────────────────────────────────────
 
-PumpOnVoteThresholds DhwDemandComponent::pump_on_vote_thresholds_() const {
-  return PumpOnVoteThresholds{
-      inlet_pressure_transient_threshold_, inlet_pressure_demand_floor_,
-      pump_flow_collapse_threshold_,       motor_current_spike_threshold_,
-      pump_power_spike_threshold_,         pump_head_rate_threshold_};
+PumpOnThresholds DhwDemandComponent::pump_on_thresholds_() const {
+  return PumpOnThresholds{
+      flow_threshold_,
+      pump_on_demand_flow_threshold_,
+      pump_on_demand_min_speed_rpm_,
+      (uint32_t) pump_on_demand_max_stale_seconds_ * 1000,
+      (uint32_t) droplet_max_stale_seconds_ * 1000};
 }
 
 // ── Publish & session helpers ─────────────────────────────────────────────────
@@ -284,9 +285,7 @@ void DhwDemandComponent::update() {
   // ── 1. Read current sensor values ─────────────────────────────────────────
   float motor_speed = read_sensor_(motor_speed_);
   float motor_current = read_sensor_(motor_current_);
-  float inlet_psi = read_sensor_(inlet_pressure_);
   float pump_flow = read_sensor_(pump_flow_);
-  float pump_power = read_sensor_(pump_power_);
   float flow = read_sensor_(flow_sensor_);
   float tank_temp = read_sensor_(tank_lower_temp_);
   float dhw_charge = read_sensor_(dhw_charge_);
@@ -299,12 +298,12 @@ void DhwDemandComponent::update() {
       prev_flow_, flow_threshold_, prev_pump_confirmed_off_);
 
   // ── 2. Compute derivatives (per-sensor dt tracks NAN gaps correctly) ──────
-  float inlet_deriv = compute_deriv_(inlet_psi, prev_inlet_pressure_, prev_inlet_pressure_ms_, now);
-  float current_deriv =
-      compute_deriv_(motor_current, prev_motor_current_, prev_motor_current_ms_, now);
+  // Only the two pump-off thermal signals need rates now. The pressure, current
+  // and power derivatives went with the vote tier they fed (issue #149): 73 % of
+  // their production firings over 29 days fell within 25 s of a self-initiated
+  // pump speed change, so they were reading the pump's own modulation.
   float temp_deriv = compute_deriv_(tank_temp, prev_tank_lower_temp_, prev_tank_lower_temp_ms_, now);
   float charge_deriv = compute_deriv_(dhw_charge, prev_dhw_charge_, prev_dhw_charge_ms_, now);
-  float power_deriv = compute_deriv_(pump_power, prev_pump_power_, prev_pump_power_ms_, now);
 
   // ── 3. Push Droplet flow into circular buffer ─────────────────────────────
   flow_buf_[flow_buf_head_] = flow;
@@ -355,7 +354,6 @@ void DhwDemandComponent::update() {
   if (pump_confirmed_off) {
     observed_pump_off_ = true;
     pre_pump_on_flow_ = NAN;  // Clear stale transition state
-    pump_on_started_ms_ = 0;
   }
 
   // Only capture pre_pump_on_flow_ when the PREVIOUS tick was confirmed off.
@@ -377,7 +375,6 @@ void DhwDemandComponent::update() {
       pre_pump_on_flow_ = NAN;
       ESP_LOGD(TAG, "Pump turned ON without confirmed pre-pump demand evidence");
     }
-    pump_on_started_ms_ = now;
   }
 
   // ── 5. Run detection branch ───────────────────────────────────────────────
@@ -414,26 +411,28 @@ void DhwDemandComponent::update() {
     PumpOnInputs in;
     in.pre_pump_on_flow = pre_pump_on_flow_;
     in.flow = flow;
-    in.flow_threshold = flow_threshold_;
-    in.inlet_deriv = inlet_deriv;
-    in.inlet_psi = inlet_psi;
     in.pump_flow = pump_flow;
-    in.current_deriv = current_deriv;
-    in.power_deriv = power_deriv;
-    in.head_rate_peak = head_rate_peak_;
-    in.suppress_transient_votes =
-        pump_on_started_ms_ != 0 &&
-        (now - pump_on_started_ms_) < PUMP_STARTUP_TRANSIENT_SUPPRESSION_MS;
-    if (in.suppress_transient_votes) {
-      ESP_LOGD(TAG, "Suppressing startup transient votes (pump on for %.1f s)",
-               (now - pump_on_started_ms_) / 1000.0f);
-    }
+    in.motor_speed = motor_speed;
+    in.now_ms = now;
+    in.flow_last_update_ms = flow_last_update_ms_;
+    in.pump_flow_last_update_ms = pump_flow_last_update_ms_;
 
-    PumpOnResult result = decide_pump_on(in, pump_on_vote_thresholds_());
+    PumpOnResult result = decide_pump_on(in, pump_on_thresholds_());
     demand = result.demand;
     confidence = result.confidence;
     demand_level = result.demand_level;
     method = result.method;
+
+    if (std::isnan(result.demand_gpm)) {
+      ESP_LOGD(TAG, "Pump-on subtraction unavailable (missing, stale or "
+                    "below %.0f RPM)",
+               pump_on_demand_min_speed_rpm_);
+    } else {
+      ESP_LOGD(TAG, "Pump-on demand: meter %.2f - loop %.2f = %.2f GPM "
+                    "(threshold %.2f)",
+               flow, pump_flow, result.demand_gpm,
+               pump_on_demand_flow_threshold_);
+    }
   }
 
   // ── 6. DHW in-use confidence boost ────────────────────────────────────────
@@ -467,17 +466,14 @@ void DhwDemandComponent::update() {
   publish_result_(demand, confidence, demand_level, method);
   update_session_(demand, now);
 
-  // Reset peak tracker for next window (callback will repopulate it between ticks)
-  head_rate_peak_ = 0.0f;
-
   ESP_LOGV(TAG,
            "tick: pump=%s demand=%s conf=%.2f level=%.2f method=%s "
-           "droplet_flow=%.2f inlet_psi=%.2f pump_flow=%.2f motor_current=%.3f",
+           "meter_flow=%.2f loop_flow=%.2f motor_speed=%.0f motor_current=%.3f",
            pump_on ? "ON" : "OFF", demand ? "ON" : "OFF", confidence,
            demand_level, method,
            std::isnan(flow) ? -1.0f : flow,
-            std::isnan(inlet_psi) ? -1.0f : inlet_psi,
            std::isnan(pump_flow) ? -1.0f : pump_flow,
+           std::isnan(motor_speed) ? -1.0f : motor_speed,
            std::isnan(motor_current) ? -1.0f : motor_current);
 }
 

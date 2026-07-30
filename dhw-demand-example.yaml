@@ -65,21 +65,16 @@ ota:
 alpha_hwr:
   current:
     id: motor_current_sensor
-  power:
-    id: pump_power_sensor
   rpm:
     id: motor_speed_sensor
   flow:
     id: flow_rate_sensor
-  inlet_pressure:
-    id: inlet_pressure_sensor
-  head_rate:
-    id: pump_head_rate_sensor
 
 # ── Unit-converted pump sensor intermediates ──────────────────────────────────
 #
-# alpha_hwr reports flow in m³/h and pressure in bar.
-# The detector thresholds use GPM and PSI, so we create converted copies.
+# alpha_hwr reports flow in m³/h; the detector expects GPM, so we create a
+# converted copy. Do not reference flow_rate_sensor directly or the thresholds
+# will be wrong by a factor of 4.4.
 
 sensor:
   # Pump flow: m³/h → GPM  (1 m³/h = 4.40287 GPM)
@@ -91,16 +86,6 @@ sensor:
     unit_of_measurement: "GPM"
     filters:
       - multiply: 4.40287
-
-  # Inlet pressure: bar → PSI  (1 bar = 14.5038 PSI)
-  - platform: copy
-    source_id: inlet_pressure_sensor
-    id: dhw_inlet_pressure_psi
-    name: ""
-    internal: true
-    unit_of_measurement: "PSI"
-    filters:
-      - multiply: 14.5038
 
   # Optional: NWP500 DHW in-use flag — provides a small confidence boost.
   # Remove if no NWP500 or equivalent is present.
@@ -115,9 +100,10 @@ sensor:
 dhw_demand:
   motor_speed:    motor_speed_sensor
   motor_current:  motor_current_sensor
-  inlet_pressure: dhw_inlet_pressure_psi
+  # motor_speed and pump_flow are what pump-on detection runs on: household
+  # demand while the pump is running is measured as (flow - pump_flow), gated
+  # on motor_speed. Without both, the detector still works while the pump is
+  # off and reports pump_on_uncertain whenever it is running.
   pump_flow:      dhw_pump_flow_gpm
-  pump_power:     pump_power_sensor
-  pump_head_rate: pump_head_rate_sensor
   # Optional: comment out if no NWP500
   dhw_in_use:     dhw_in_use_flag

@@ -39,14 +39,11 @@ class DhwDemandComponent : public PollingComponent {
   // ── Input sensor setters ───────────────────────────────────────────────────
   void set_motor_speed_sensor(sensor::Sensor *s) { motor_speed_ = s; }
   void set_motor_current_sensor(sensor::Sensor *s) { motor_current_ = s; }
-  void set_inlet_pressure_sensor(sensor::Sensor *s) { inlet_pressure_ = s; }
   void set_pump_flow_sensor(sensor::Sensor *s) { pump_flow_ = s; }
-  void set_pump_power_sensor(sensor::Sensor *s) { pump_power_ = s; }
   void set_flow_sensor(sensor::Sensor *s) { flow_sensor_ = s; }
   void set_tank_lower_temp_sensor(sensor::Sensor *s) { tank_lower_temp_ = s; }
   void set_dhw_charge_sensor(sensor::Sensor *s) { dhw_charge_ = s; }
   void set_dhw_in_use_sensor(sensor::Sensor *s) { dhw_in_use_ = s; }
-  void set_pump_head_rate_sensor(sensor::Sensor *s) { pump_head_rate_ = s; }
 
   // ── Threshold setters ──────────────────────────────────────────────────────
   void set_pump_off_current_threshold(float v) {
@@ -55,27 +52,21 @@ class DhwDemandComponent : public PollingComponent {
   void set_flow_threshold(float v) { flow_threshold_ = v; }
   void set_thermal_collapse_rate(float v) { thermal_collapse_rate_ = v; }
   void set_dhw_charge_drop_rate(float v) { dhw_charge_drop_rate_ = v; }
-  void set_inlet_pressure_transient_threshold(float v) {
-    inlet_pressure_transient_threshold_ = v;
+  void set_pump_on_demand_flow_threshold(float v) {
+    pump_on_demand_flow_threshold_ = v;
   }
-  void set_inlet_pressure_demand_floor(float v) {
-    inlet_pressure_demand_floor_ = v;
+  void set_pump_on_demand_min_speed_rpm(float v) {
+    pump_on_demand_min_speed_rpm_ = v;
   }
-  void set_pump_flow_collapse_threshold(float v) {
-    pump_flow_collapse_threshold_ = v;
+  void set_pump_on_demand_max_stale_seconds(int v) {
+    pump_on_demand_max_stale_seconds_ = v;
   }
-  void set_motor_current_spike_threshold(float v) {
-    motor_current_spike_threshold_ = v;
-  }
-  void set_pump_power_spike_threshold(float v) {
-    pump_power_spike_threshold_ = v;
-  }
+  void set_droplet_max_stale_seconds(int v) { droplet_max_stale_seconds_ = v; }
   void set_flow_latch_seconds(int v) { flow_latch_seconds_ = v; }
   void set_demand_release_seconds(int v) { demand_release_seconds_ = v; }
   void set_session_gap_tolerance_seconds(int v) {
     session_gap_tolerance_seconds_ = v;
   }
-  void set_pump_head_rate_threshold(float v) { pump_head_rate_threshold_ = v; }
 
  protected:
   // ── Detection helpers ──────────────────────────────────────────────────────
@@ -95,7 +86,7 @@ class DhwDemandComponent : public PollingComponent {
   // Pump-on branch: the tier ordering itself is decide_pump_on() in
   // dhw_demand_logic.h so the host test can assert it (issue #144). This only
   // gathers the configured thresholds for it.
-  PumpOnVoteThresholds pump_on_vote_thresholds_() const;
+  PumpOnThresholds pump_on_thresholds_() const;
 
   void publish_result_(bool demand, float confidence, float demand_level,
                        const char *method);
@@ -111,58 +102,48 @@ class DhwDemandComponent : public PollingComponent {
   // ── Input sensors ──────────────────────────────────────────────────────────
   sensor::Sensor *motor_speed_{nullptr};
   sensor::Sensor *motor_current_{nullptr};
-  sensor::Sensor *inlet_pressure_{nullptr};
   sensor::Sensor *pump_flow_{nullptr};
-  sensor::Sensor *pump_power_{nullptr};
   sensor::Sensor *flow_sensor_{nullptr};
   sensor::Sensor *tank_lower_temp_{nullptr};
   sensor::Sensor *dhw_charge_{nullptr};
   sensor::Sensor *dhw_in_use_{nullptr};
-  sensor::Sensor *pump_head_rate_{nullptr};
 
   // ── Thresholds (defaults match Python DetectorConfig) ─────────────────────
   float pump_off_current_threshold_{0.03f};    // A
   float flow_threshold_{0.3f};         // GPM
   float thermal_collapse_rate_{0.05f};         // °F/s
   float dhw_charge_drop_rate_{0.005f};         // %/s
-  // Pump-on vote thresholds default from kDefaultPumpOnVoteThresholds — the
+  // Pump-on subtraction thresholds default from kDefaultPumpOnThresholds — the
   // single source of truth also used by the host test (dhw_demand_logic.h).
-  float inlet_pressure_transient_threshold_{
-      kDefaultPumpOnVoteThresholds.inlet_pressure_transient};  // PSI/s
-  float inlet_pressure_demand_floor_{
-      kDefaultPumpOnVoteThresholds.inlet_pressure_demand_floor};  // PSI
-  float pump_flow_collapse_threshold_{
-      kDefaultPumpOnVoteThresholds.pump_flow_collapse};  // GPM
-  float motor_current_spike_threshold_{
-      kDefaultPumpOnVoteThresholds.motor_current_spike};  // A/s
-  float pump_power_spike_threshold_{
-      kDefaultPumpOnVoteThresholds.pump_power_spike};  // W/s
-  float pump_head_rate_threshold_{
-      kDefaultPumpOnVoteThresholds.pump_head_rate};  // m/s
+  float pump_on_demand_flow_threshold_{
+      kDefaultPumpOnThresholds.demand_flow};  // GPM of computed demand
+  float pump_on_demand_min_speed_rpm_{
+      kDefaultPumpOnThresholds.min_speed_rpm};  // RPM
+  int pump_on_demand_max_stale_seconds_{30};    // s, pump loop-flow channel
+  int droplet_max_stale_seconds_{60};           // s, household meter channel
   int flow_latch_seconds_{30};                 // s
   int session_gap_tolerance_seconds_{60};      // s
   int demand_release_seconds_{30};             // s
-
-  // ── Head-rate peak tracker (updated by callback at ~1–2 Hz; reset per tick) ─
-  float head_rate_peak_{0.0f};  // Maximum |m/s| seen since last update()
 
   // ── Circular buffer — Droplet flow (30 samples × 10 s = 5 min) ───────────
   float flow_buf_[DROPLET_BUF_SIZE];
   int flow_buf_head_{0};
 
   // ── Previous-value registers (for derivative computation) ─────────────────
-  float prev_inlet_pressure_{NAN};
-  float prev_motor_current_{NAN};
   float prev_tank_lower_temp_{NAN};
   float prev_dhw_charge_{NAN};
-  float prev_pump_power_{NAN};
 
   // Per-sensor timestamps for accurate derivative dt across NAN gaps
-  uint32_t prev_inlet_pressure_ms_{0};
-  uint32_t prev_motor_current_ms_{0};
   uint32_t prev_tank_lower_temp_ms_{0};
   uint32_t prev_dhw_charge_ms_{0};
-  uint32_t prev_pump_power_ms_{0};
+
+  // ── Reading-age registers for the pump-on subtraction ─────────────────────
+  // Stamped from each channel's state callback (see setup()). ESPHome exposes
+  // no provenance on a sensor value, and differencing two channels is only
+  // meaningful if both are current — see PumpOnThresholds for the measured
+  // cadences that set the two bounds. 0 means "never reported".
+  uint32_t flow_last_update_ms_{0};
+  uint32_t pump_flow_last_update_ms_{0};
 
   // ── Pump state tracking ───────────────────────────────────────────────────
   // When both motor sensors are NaN (BLE disconnect), forward-fill the last
@@ -180,7 +161,6 @@ class DhwDemandComponent : public PollingComponent {
   bool prev_pre_pump_demand_eligible_{false};
   float prev_flow_{NAN};           // Flow from the *previous* tick
   float pre_pump_on_flow_{NAN};    // Flow captured from the last confirmed pump-off tick
-  uint32_t pump_on_started_ms_{0}; // Start time for startup-transient suppression
 
   // ── Tick timing ───────────────────────────────────────────────────────────
   // (per-sensor timestamps are used for derivative dt; see prev_*_ms_ above)

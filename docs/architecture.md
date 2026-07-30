@@ -80,46 +80,61 @@ two are normally paired, with pump telemetry feeding the detector.
   a corroborating signal, or by the flow having been present on the previous tick.
   See `pump_off_flow_onset_is_confirmed()`.
 - **Pump-on branch**: continuation first (demand was already active when the pump
-  started and flow persists → 0.85), otherwise six hydraulic votes mapped to
-  confidence by vote count, capped at 0.95 because the votes are not independent.
-- **Startup-transient suppression**: a recirculation pump start produces the same
-  pressure, current, power and head spikes as a valve opening, so for 15 s after
-  the pump starts the four derivative votes are ignored. The two *absolute* votes
-  (inlet pressure below floor, pump-side flow collapse) stay live — they are the
-  open-circuit evidence a pump start does not fake.
-- **Head-rate vote is deliberately firmware-only**: signal 6 has no counterpart in
-  the companion Python detector, which deprecated its head channel. It is safe to
-  diverge because it is gated on at least one other signal already having voted, so
-  it can only sharpen an existing detection, never create one. See
-  [issue #120](https://github.com/eman/esphome-alpha-hwr/issues/120).
+  started and flow persists → 0.85), then the *subtraction* — `flow − pump_flow`
+  is household demand directly, because the meter reads everything leaving the
+  mains and the pump reports its own loop. Confidence rises with how far the
+  measured draw clears the threshold, capped at 0.90. Otherwise
+  `pump_on_uncertain`.
+- **The subtraction's three guards are all load-bearing**: both channels present;
+  both readings current (30 s for the pump, 60 s for the meter — they do not
+  report alike); and the pump turning above `pump_on_demand_min_speed_rpm`,
+  because it *estimates* its loop flow rather than metering it and reads low near
+  the bottom of its range. Each declines to NaN rather than guessing, and the
+  branch falls through to `pump_on_uncertain`.
+- **This replaced a five-signal hydraulic vote tier**, and the replacement is not
+  to be undone. The two absolute votes were scalars on quantities that move with
+  pump speed, so a quiet loop can sit 6 PSI below a drawing one; 73 % of the
+  derivative votes' firings over 29 days landed within 25 s of a self-initiated
+  pump speed change. Scored on the same cells: votes 0.530 precision with 23
+  pump-on false positives, subtraction 0.808 with 0. See
+  [issue #149](https://github.com/eman/esphome-alpha-hwr/issues/149).
+- **No pump-on rule may key off raw meter flow.** Pump-on runs with no draw read
+  a median 1.31 GPM against 1.74 with a draw — near-total overlap, so no
+  threshold exists. The "~2.2 GPM recirculation baseline" quoted for years was
+  the p90 of the no-draw case. This is settled, not merely untried; see
+  [issue #138](https://github.com/eman/esphome-alpha-hwr/issues/138).
 - **Release-hold on the output**: demand is recomputed from scratch each tick, so an
   input dithering around its threshold would chatter the binary sensor. Rising edges
   pass through immediately; falling edges are held for `demand_release_seconds`.
-- **Pure logic lives in one header**: `dhw_demand_logic.h` holds the votes, the
-  onset predicate, the release hold and session accounting, with no ESPHome
+- **Pure logic lives in one header**: `dhw_demand_logic.h` holds the pump-on
+  measurement and tier ordering, the pump-off signal predicates, the release hold
+  and session accounting, with no ESPHome
   dependency and no `millis()` — anything time-dependent takes `now_ms` as a
   parameter. `tests/test_dhw_demand_logic.cpp` includes it directly and calls
   production code. Nothing in it may be hand-mirrored into a test; that drift is
   exactly what issue #120 was opened to eliminate.
 - **The pump-on tier *ordering* is in that header too**, as
-  `decide_pump_on(PumpOnInputs, PumpOnVoteThresholds) -> PumpOnResult`. It used
-  to live inline in `update()`, where the individual predicates were all under
-  test but their composition was not — so "continuation outranks the votes" and
+  `decide_pump_on(PumpOnInputs, PumpOnThresholds) -> PumpOnResult`. It used to
+  live inline in `update()`, where the individual predicates were all under test
+  but their composition was not — so "continuation outranks the subtraction" and
   "`pump_on_uncertain` is the last resort" held only by reading the `.cpp`. That
   is the same gap that let a stale threshold survive the units audit and fed the
   onset predicate the wrong argument for months. `update()` now reads sensors,
-  resolves the startup-suppression window, and calls the decision.
+  stamps each channel's reading age, and calls the decision.
   See [issue #144](https://github.com/eman/esphome-alpha-hwr/issues/144).
 
 Parity with the Python detector is tracked in the companion repo's
 [evaluation report](https://github.com/eman/dhw-sensor-apps/blob/main/docs/dhw-demand-detector-evaluation-2026-07.md),
 [firmware change spec](https://github.com/eman/dhw-sensor-apps/blob/main/docs/esphome-alpha-hwr-parity.md)
 and [ESP32 detector notes](https://github.com/eman/dhw-sensor-apps/blob/main/docs/esp32-detector.md).
-Two questions there remain open and deliberately un-actioned here, because the
-Python side has not moved either and acting alone would create fresh divergence:
-whether the `inlet_pressure_low` + `pump_flow_collapse` pair (65 of 73 pump-on
-detections in the evaluation window) fires during pump ramp-up, and whether the
-5.0 PSI inlet floor is correctly placed. Both need bench data first.
+Two questions used to be recorded here as open and deliberately un-actioned:
+whether the `inlet_pressure_low` + `pump_flow_collapse` pair fires during pump
+ramp-up, and whether the 5.0 PSI inlet floor was correctly placed. Both are
+**closed by retirement** (issue #132, superseded by #149). The bench data they
+waited on arrived and answered a prior question instead: no-draw inlet pressure
+runs 3.4 PSI at 1650 RPM to 13.0 at 3600, while a real draw reads 5.7 at 2400 —
+the populations overlap in the wrong direction, so no value of that floor works
+anywhere. The votes were replaced rather than retuned.
 
 ## Adding New Features
 
