@@ -43,7 +43,7 @@ CONF_DHW_CHARGE_DROP_RATE = "dhw_charge_drop_rate"
 CONF_PUMP_ON_DEMAND_FLOW_THRESHOLD = "pump_on_demand_flow_threshold"
 CONF_PUMP_ON_DEMAND_MIN_SPEED_RPM = "pump_on_demand_min_speed_rpm"
 CONF_PUMP_ON_DEMAND_MAX_STALE_SECONDS = "pump_on_demand_max_stale_seconds"
-CONF_DROPLET_MAX_STALE_SECONDS = "droplet_max_stale_seconds"
+CONF_FLOW_MAX_STALE_SECONDS = "flow_max_stale_seconds"
 CONF_DHW_IN_USE_MIN_SECONDS = "dhw_in_use_min_seconds"
 CONF_FLOW_LATCH_SECONDS = "flow_latch_seconds"
 CONF_SESSION_GAP_TOLERANCE_SECONDS = "session_gap_tolerance_seconds"
@@ -108,12 +108,37 @@ def _retired(key):
             "0.808 against the vote tier's 0.530 on a controlled corpus, with "
             "0 pump-on false positives against 23. Delete this key. See "
             "pump_on_demand_flow_threshold, pump_on_demand_min_speed_rpm, "
-            "pump_on_demand_max_stale_seconds and droplet_max_stale_seconds "
+            "pump_on_demand_max_stale_seconds and flow_max_stale_seconds "
             "for what is tunable now, and docs/configuration.md for the "
             "migration."
         )
 
     return validator
+
+
+# ── Renamed keys ─────────────────────────────────────────────────────────────
+# The staleness bound on the household flow channel was named after the meter
+# one installation happened to use. The detector is sensor-agnostic, so the key
+# now names the channel instead. Same rejection rule as the retired keys above:
+# a config setting the old name fails rather than being silently ignored.
+_RENAMED_KEYS = {
+    "droplet_max_stale_seconds": "flow_max_stale_seconds",
+}
+
+
+def _renamed(old):
+    """Fail validation naming the replacement key."""
+
+    def validator(value):
+        raise cv.Invalid(
+            f"'{old}' was renamed to '{_RENAMED_KEYS[old]}'. The bound applies "
+            "to the household flow channel regardless of which meter feeds it. "
+            f"Behavior and default are unchanged — rename the key to "
+            f"'{_RENAMED_KEYS[old]}'."
+        )
+
+    return validator
+
 
 CONFIG_SCHEMA = (
     cv.Schema(
@@ -178,7 +203,7 @@ CONFIG_SCHEMA = (
             # An hour is far beyond any useful staleness bound.
             cv.Optional(CONF_PUMP_ON_DEMAND_MAX_STALE_SECONDS, default=30):
                 cv.int_range(min=1, max=3600),
-            cv.Optional(CONF_DROPLET_MAX_STALE_SECONDS, default=60):
+            cv.Optional(CONF_FLOW_MAX_STALE_SECONDS, default=60):
                 cv.int_range(min=1, max=3600),
             # Bounded for the same uint32_t wrap reason as the staleness keys,
             # and 0 is legal and meaningful: "high right now is enough".
@@ -193,6 +218,10 @@ CONFIG_SCHEMA = (
             **{
                 cv.Optional(key): _retired(key)
                 for key in _RETIRED_KEYS
+            },
+            **{
+                cv.Optional(old): _renamed(old)
+                for old in _RENAMED_KEYS
             },
         }
     )
@@ -255,8 +284,8 @@ async def to_code(config):
         config[CONF_PUMP_ON_DEMAND_MIN_SPEED_RPM]))
     cg.add(var.set_pump_on_demand_max_stale_seconds(
         config[CONF_PUMP_ON_DEMAND_MAX_STALE_SECONDS]))
-    cg.add(var.set_droplet_max_stale_seconds(
-        config[CONF_DROPLET_MAX_STALE_SECONDS]))
+    cg.add(var.set_flow_max_stale_seconds(
+        config[CONF_FLOW_MAX_STALE_SECONDS]))
     cg.add(var.set_dhw_in_use_min_seconds(
         config[CONF_DHW_IN_USE_MIN_SECONDS]))
     cg.add(var.set_flow_latch_seconds(

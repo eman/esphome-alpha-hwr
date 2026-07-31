@@ -9,7 +9,7 @@ namespace dhw_demand {
 
 void DhwDemandComponent::setup() {
   // Initialise circular buffer to NaN so early ticks don't misread history.
-  for (int i = 0; i < DROPLET_BUF_SIZE; i++) {
+  for (int i = 0; i < FLOW_BUF_SIZE; i++) {
     flow_buf_[i] = NAN;
   }
   // Per-sensor derivative timestamps are initialized to 0 (first-call sentinel).
@@ -57,7 +57,7 @@ void DhwDemandComponent::dump_config() {
                 pump_on_demand_min_speed_rpm_);
   ESP_LOGCONFIG(TAG, "    pump_on_demand_max_stale: %d s",
                 pump_on_demand_max_stale_seconds_);
-  ESP_LOGCONFIG(TAG, "    droplet_max_stale: %d s", droplet_max_stale_seconds_);
+  ESP_LOGCONFIG(TAG, "    flow_max_stale: %d s", flow_max_stale_seconds_);
   ESP_LOGCONFIG(TAG, "    dhw_in_use_min: %d s", dhw_in_use_min_seconds_);
   ESP_LOGCONFIG(TAG, "    flow_latch: %d s", flow_latch_seconds_);
   ESP_LOGCONFIG(TAG, "    session_gap_tolerance: %d s",
@@ -111,11 +111,11 @@ bool DhwDemandComponent::flow_latch_active_() {
   int samples = (flow_latch_seconds_ + interval_s - 1) / interval_s;
   if (samples < 1)
     samples = 1;
-  if (samples > DROPLET_BUF_SIZE)
-    samples = DROPLET_BUF_SIZE;
+  if (samples > FLOW_BUF_SIZE)
+    samples = FLOW_BUF_SIZE;
 
   for (int i = 0; i < samples; i++) {
-    int idx = (flow_buf_head_ - 1 - i + DROPLET_BUF_SIZE) % DROPLET_BUF_SIZE;
+    int idx = (flow_buf_head_ - 1 - i + FLOW_BUF_SIZE) % FLOW_BUF_SIZE;
     if (!std::isnan(flow_buf_[idx]) &&
         flow_buf_[idx] > flow_threshold_) {
       return true;
@@ -224,7 +224,7 @@ PumpOnThresholds DhwDemandComponent::pump_on_thresholds_() const {
       pump_on_demand_flow_threshold_,
       pump_on_demand_min_speed_rpm_,
       (uint32_t) pump_on_demand_max_stale_seconds_ * 1000,
-      (uint32_t) droplet_max_stale_seconds_ * 1000};
+      (uint32_t) flow_max_stale_seconds_ * 1000};
 }
 
 // ── Publish & session helpers ─────────────────────────────────────────────────
@@ -310,16 +310,16 @@ void DhwDemandComponent::update() {
   float temp_deriv = compute_deriv_(tank_temp, prev_tank_lower_temp_, prev_tank_lower_temp_ms_, now);
   float charge_deriv = compute_deriv_(dhw_charge, prev_dhw_charge_, prev_dhw_charge_ms_, now);
 
-  // ── 3. Push Droplet flow into circular buffer ─────────────────────────────
+  // ── 3. Push household flow into circular buffer ───────────────────────────
   flow_buf_[flow_buf_head_] = flow;
-  flow_buf_head_ = (flow_buf_head_ + 1) % DROPLET_BUF_SIZE;
+  flow_buf_head_ = (flow_buf_head_ + 1) % FLOW_BUF_SIZE;
 
   // ── 4. Determine pump state ───────────────────────────────────────────────
   // When both motor sensors are NaN (BLE disconnected), forward-fill the last
   // known pump state.  This mirrors Python DemandDetector._last_row() which
   // forward-fills all columns from the most recent non-null row in the window.
   // Default is "on" (conservative): avoids entering the pump-OFF branch when
-  // the pump may already be running and the Droplet is showing recirculation
+  // the pump may already be running and the meter is showing recirculation
   // flow (~2.2 GPM), which would cause a false "deterministic_flow" detection.
   bool pump_state_known =
       !std::isnan(motor_speed) || !std::isnan(motor_current);
@@ -342,7 +342,7 @@ void DhwDemandComponent::update() {
   //   - True when forward-filling from a last-known-OFF state
   //     (Python would fill speed = 0 RPM → pump_off = True for those rows).
   //   - False when defaulting to ON at boot or when last-known was ON.
-  //     (Conservative: prevents the Droplet's recirculation flow from
+  //     (Conservative: prevents the meter's recirculation flow from
   //      triggering a pump-off false positive through the NaN gap.)
   //
   // observed_pump_off_ guards against a false trigger at boot when prev_pump_on_
@@ -370,7 +370,7 @@ void DhwDemandComponent::update() {
   if (!prev_pump_on_ && pump_on) {
     if (observed_pump_off_ && prev_pump_confirmed_off_ &&
         prev_pre_pump_demand_eligible_) {
-      // Pump just turned ON — record the previous tick's Droplet flow only if
+      // Pump just turned ON — record the previous tick's meter flow only if
       // the previous pump-off tick had non-ambiguous demand evidence.
       pre_pump_on_flow_ = prev_flow_;
       ESP_LOGD(TAG, "Pump turned ON; pre-pump flow: %.2f GPM",

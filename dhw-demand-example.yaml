@@ -87,8 +87,12 @@ sensor:
     filters:
       - multiply: 4.40287
 
-  # Optional: NWP500 DHW in-use flag — provides a small confidence boost.
-  # Remove if no NWP500 or equivalent is present.
+  # Optional: water-heater DHW in-use flag — provides a small confidence
+  # boost. Remove if your water heater does not expose one.
+  #
+  # Read as a float, so the HA entity must report numeric 0/1. A binary_sensor
+  # (state "on"/"off") parses as NaN and the tier silently never fires; map it
+  # to a numeric template sensor in HA first.
   - platform: homeassistant
     id: dhw_in_use_flag
     entity_id: sensor.your_dhw_in_use  # ← CHANGE to your DHW in-use entity
@@ -105,5 +109,5 @@ dhw_demand:
   # on motor_speed. Without both, the detector still works while the pump is
   # off and reports pump_on_uncertain whenever it is running.
   pump_flow:      dhw_pump_flow_gpm
-  # Optional: comment out if no NWP500
+  # Optional: comment out if your water heater exposes no in-use flag
   dhw_in_use:     dhw_in_use_flag

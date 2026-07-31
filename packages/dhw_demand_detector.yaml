@@ -17,9 +17,9 @@
 # Usage (standalone, no pump):
 #
 #   substitutions:
-#     flow_entity:            sensor.droplet_f5bc_flow_rate
-#     tank_lower_temp_entity: sensor.nwp500_tank_lower_temperature
-#     dhw_charge_entity:      sensor.nwp500_dhw_charge
+#     flow_entity:            sensor.dhw_flow_rate
+#     tank_lower_temp_entity: sensor.water_heater_tank_lower_temperature
+#     dhw_charge_entity:      sensor.water_heater_dhw_charge
 #
 #   external_components:
 #     - source: github://eman/esphome-alpha-hwr@v0.15.0
@@ -40,7 +40,7 @@
 # ==============================================================================
 
 sensor:
-  # ── Droplet flow meter — GPM (primary demand ground truth) ─────────────────
+  # ── Household flow meter — GPM (primary demand ground truth) ───────────────
   - platform: homeassistant
     id: dhw_flow
     entity_id: ${flow_entity}
@@ -73,7 +73,7 @@ sensor:
 #     motor_speed:    <your_motor_speed_sensor_id>
 #     motor_current:  <your_motor_current_sensor_id>
 #     pump_flow:      <pump_flow_gpm_sensor_id>         # must be in GPM
-#     # Optional: if NWP500 or equivalent is present
+#     # Optional: if your water heater exposes a DHW in-use flag
 #     dhw_in_use:     dhw_in_use_flag
 #
 # `pump_flow` and `motor_speed` are what make pump-on detection work: household
@@ -147,7 +147,7 @@ dhw_demand:
                                         # with no draw. Admits the entire
                                         # production range.
   pump_on_demand_max_stale_seconds: 30  # The pump reports every 10 s.
-  droplet_max_stale_seconds: 60         # The meter reports on change, median
+  flow_max_stale_seconds: 60         # The meter reports on change, median
                                         # 28 s while flowing — so this bound is
                                         # deliberately looser than the pump's.
   # How long the heater's DHW in-use flag must stay continuously high before it

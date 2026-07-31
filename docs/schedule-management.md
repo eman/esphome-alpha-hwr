@@ -250,10 +250,10 @@ curl -X POST \
 
 | Entity | Description |
 | --- | --- |
-| `text_sensor.<node_name>_schedule_layer_0..4` | Per-layer schedule read-back JSON (compact, one sensor per layer) |
-| `text_sensor.<node_name>_schedule_hash` | Canonical hash of the cached grid, for sync verification |
-| `text_sensor.<node_name>_single_events` | Human-readable active single events |
-| `text_sensor.<node_name>_vacation` | Active vacation range, or "No vacation" |
+| `sensor.<node_name>_schedule_layer_0..4` | Per-layer schedule read-back JSON (compact, one sensor per layer) |
+| `sensor.<node_name>_schedule_hash` | Canonical hash of the cached grid, for sync verification |
+| `sensor.<node_name>_single_events` | Human-readable active single events |
+| `sensor.<node_name>_vacation` | Active vacation range, or "No vacation" |
 
 ## Notes
 

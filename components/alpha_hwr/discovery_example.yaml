@@ -7,7 +7,7 @@
 # scan for and identify ALPHA HWR devices on your network.
 #
 # Once you have the MAC address, you can use it in your main configuration
-# (see hwr-pump.yaml for the full example with sensors).
+# (see hwr-pump-example.yaml for the full example with sensors).
 #
 # ============================================================================
 
@@ -80,7 +80,7 @@ esp32_ble_tracker:
 # 2. Open the logs (esphome logs alpha-hwr-discovery.yaml)
 # 3. Wait for the discovery logs - they will show any ALPHA HWR pumps found
 # 4. Note the MAC address from the logs
-# 5. Update your main configuration (hwr-pump.yaml) with the discovered MAC
+# 5. Update your main configuration with the discovered MAC
 # 6. Flash your main configuration to connect and read sensor data
 #
 # The discovery method (Grundfos service data UUID FE5D + product bytes) is

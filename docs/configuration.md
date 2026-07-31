@@ -225,15 +225,20 @@ the node's own connection state for availability instead.
 | `pump_on_demand_flow_threshold` | float | `0.3` | GPM of **computed** demand (`flow − pump_flow`) above which a pump-on draw is declared. Shares `flow_threshold`'s value deliberately, so both pump regimes agree on what counts as flow |
 | `pump_on_demand_min_speed_rpm` | float | `1950` | RPM below which the subtraction is not trusted. The pump *estimates* its loop flow rather than metering it, and below ~2000 RPM the estimate reads low, so the difference goes spuriously positive with no draw (+0.45 GPM measured at 1650). Admits the whole production range — the pump's own 29-day minimum was 1971 RPM |
 | `pump_on_demand_max_stale_seconds` | int | `30` | s — how old the `pump_flow` reading may be and still be differenced. The pump reports every 10 s |
-| `droplet_max_stale_seconds` | int | `60` | s — the same bound for `flow`. Deliberately looser: the meter reports on change, at a median 28 s while flowing, so matching the pump's 30 s would reject half of normal cadence |
+| `flow_max_stale_seconds` | int | `60` | s — the same bound for `flow`. Deliberately looser: the meter reports on change, at a median 28 s while flowing, so matching the pump's 30 s would reject half of normal cadence |
 | `dhw_in_use_min_seconds` | int | `70` | s — how long `dhw_in_use` must stay **continuously** high before it may declare a pump-on draw on its own. The flag fires ~77 times a day with a median duration of 15 s, so it is unusable bare; 70 s clears 89.7 % of its events. `0` accepts the bare flag (bench/debug only). A NaN sample breaks the run exactly as a low one does, so a BLE dropout resets the timer rather than holding the last value |
 | `flow_latch_seconds` | int | `30` | s — how long flow keeps counting after it stops |
 | `session_gap_tolerance_seconds` | int | `60` | s — a lull shorter than this does not end a session |
 | `demand_release_seconds` | int | `30` | s — how long demand stays latched after the last positive tick. Set to `0` to publish the raw per-tick result |
 | `update_interval` | time | `10s` | Detection tick interval |
 
-> The four `pump_on_demand_*` / `droplet_max_stale_seconds` keys only matter when
+> The four `pump_on_demand_*` / `flow_max_stale_seconds` keys only matter when
 > `pump_flow` and `motor_speed` are wired.
+
+> Migration: `flow_max_stale_seconds` was previously spelled
+> `droplet_max_stale_seconds`, after the meter one installation happened to
+> use. Behavior and default are unchanged; a config still setting the old name
+> fails validation naming the replacement.
 
 > The two staleness bounds exist because a difference of two quantities is only
 > meaningful if both are current, and ESPHome carries no provenance on a sensor

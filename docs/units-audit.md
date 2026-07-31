@@ -57,8 +57,10 @@ end-to-end in `tests/test_write_operations.cpp` against the pump simulator.
   (Grundfos GO app, datasheet pump curves, GENI Head/Distance) and matches the
   pressure setpoints. Because `m` is not a valid Home Assistant `pressure`
   device_class unit, the Head sensor carries no device_class (plain
-  `measurement`). Head Rate follows as m/s, and the DHW `pump_head_rate_threshold`
-  default is `0.31` m/s (≈ the former `3.0` kPa/s ÷ 9.80665).
+  `measurement`). Head Rate follows as m/s. The DHW detector used to threshold
+  it via `pump_head_rate_threshold` (`0.31` m/s, ≈ the former `3.0` kPa/s ÷
+  9.80665); that key and the head-rate vote it fed were retired in issue #149,
+  so the unit choice now only affects the published Head Rate sensor.
 - **Two flow conventions are both correct.** Telemetry flow is extended-float
   m³/h; the Object-86 flow *setpoint* register is SI m³/s (×3600). They are
   different GENI encodings, not a mismatch — this is the axis of the #88 bug.

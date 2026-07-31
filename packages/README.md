@@ -29,12 +29,16 @@ packages:
 Provides complete pump diagnostics with BLE pairing/bonding enabled.
 
 **Additional Sensors (vs. base):**
-- Grid Voltage (V) - Requires pairing
+- AC Voltage (V) - Requires pairing
+- DC Voltage (V) - Requires pairing
 - Motor Current (A) - Requires pairing
-- Converter Temperature (°C)
+- Inlet Pressure (bar)
 - PCB Temperature (°C)
 - Control Box Temperature (°C)
 - Pairing Status (binary sensor)
+
+Also adds device info, history, event log and statistics sensors, the control
+mode text sensor, and the schedule/single-event/vacation read-back sensors.
 
 **Usage:**
 ```yaml
@@ -53,6 +57,33 @@ esphome:
 
 ---
 
+### `alpha_hwr_controls.yaml` - Control UI
+Recommended control surface. Adds pump enable, remote mode, schedule toggle,
+mode select and setpoint controls. Requires `alpha_hwr_pairing.yaml`.
+
+---
+
+### `alpha_hwr_schedule.yaml` - Lighter Schedule/Mode UI
+Simpler alternative to `alpha_hwr_controls.yaml`. Avoid combining both unless
+you want duplicate controls. Requires `alpha_hwr_pairing.yaml`.
+
+---
+
+### `alpha_hwr_schedule_editor.yaml` - Schedule Editor Helpers
+Helper entities for weekly and single-event editing, used by the Lovelace
+schedule card. The schedule services themselves are registered by the component,
+not by this package. Requires `alpha_hwr_pairing.yaml`.
+
+---
+
+### `dhw_demand_detector.yaml` - DHW Demand Detection
+Declares the `dhw_demand` component wired to Home Assistant supplementary
+sensors (household flow in GPM, lower tank temperature, DHW charge). Works
+standalone without a pump; wire `motor_speed` and `pump_flow` from `alpha_hwr`
+to enable pump-on detection. See `docs/configuration.md` for the full key list.
+
+---
+
 ## Quick Start
 
 1. **Find your pump's MAC address:**
@@ -66,7 +97,7 @@ esphome:
 3. **Create your device config:**
    ```yaml
    substitutions:
-     mac_address: "3C:E0:02:50:98:BF"  # Your pump's MAC
+     mac_address: "AA:BB:CC:DD:EE:FF"  # Your pump's MAC
    
    packages:
      alpha_hwr: github://eman/esphome-alpha-hwr/packages/alpha_hwr_pairing.yaml@main
@@ -120,15 +151,23 @@ sensor:
   - platform: wifi_signal
     name: "WiFi Signal"
   
-  - platform: template
+```
+
+To convert flow from m³/h to GPM, give the flow sensor an `id` and copy it —
+the packages do not assign one by default:
+
+```yaml
+alpha_hwr:
+  flow:
+    id: flow_rate_sensor
+
+sensor:
+  - platform: copy
+    source_id: flow_rate_sensor
     name: "Flow (GPM)"
-    lambda: |-
-      // Convert m³/h to gallons per minute
-      if (id(hwr_pump_client).is_connected()) {
-        return id(flow_rate).state * 4.4029;
-      }
-      return 0.0;
     unit_of_measurement: "GPM"
+    filters:
+      - multiply: 4.40287  # 1 m³/h = 4.40287 GPM
 ```
 
 ---
@@ -138,6 +177,8 @@ sensor:
 See the root directory for complete example configurations:
 - `hwr-pump-example.yaml` - Uses `alpha_hwr_base.yaml`
 - `hwr-pairing-example.yaml` - Uses `alpha_hwr_pairing.yaml`
+- `hwr-pump-schedule-example.yaml` - Paired pump with schedule UI and services
+- `dhw-demand-example.yaml` - Combined `alpha_hwr` + `dhw_demand`
 
 ---
 
