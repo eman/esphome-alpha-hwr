@@ -138,7 +138,8 @@ packages:
 ### 4. Standalone `dhw_demand`
 
 When you use `dhw_demand` without `alpha_hwr`, declare the component explicitly
-with `external_components`:
+with `external_components`. `flow_entity` is a Home Assistant sensor reporting
+household flow in GPM:
 
 ```yaml
 esphome:
@@ -146,7 +147,7 @@ esphome:
   friendly_name: DHW Detector
 
 substitutions:
-  flow_entity: sensor.droplet_flow_rate
+  flow_entity: sensor.dhw_flow_rate
   tank_lower_temp_entity: sensor.tank_lower_temperature
   dhw_charge_entity: sensor.dhw_charge
 
@@ -208,6 +209,24 @@ pump is running, household demand is measured as `flow − pump_flow`, gated on
 `motor_speed`. Without both, the detector still works while the pump is off and
 reports `pump_on_uncertain` whenever it is running.
 
+If your water heater exposes a DHW in-use flag, wire it as `dhw_in_use` for a
+third detection tier:
+
+```yaml
+sensor:
+  - platform: homeassistant
+    id: dhw_in_use_flag
+    entity_id: sensor.your_dhw_in_use
+
+dhw_demand:
+  dhw_in_use: dhw_in_use_flag
+```
+
+The flag is unusable bare — it fires often and briefly — so it only declares a
+pump-on draw after holding continuously for `dhw_in_use_min_seconds` (70 s by
+default). It never displaces a stronger tier and only ever adds demand. It is
+entirely optional; leave it out and the other two tiers are unaffected.
+
 For a complete working version, see `dhw-demand-example.yaml`.
 
 ## Local development override
@@ -228,9 +247,9 @@ That is the pattern used in `dhw-demand-example.yaml`.
 ## Programmatic control (services + `write_settled` event)
 
 For automations, scripts, or any program driving the pump, the component
-registers write services (`pump_set_enabled`, `pump_set_mode`,
-`pump_set_setpoint`, `pump_set_temperature_range`, `pump_set_cycle_times`,
-plus the schedule services below). Every write — service- or
+registers write services (`pump_set_enabled`, `pump_set_state`,
+`pump_set_mode`, `pump_set_setpoint`, `pump_set_temperature_range`,
+`pump_set_cycle_times`, plus the schedule services below). Every write — service- or
 entity-originated — is serialized, verified against a pump readback, and
 settles with exactly one `esphome.alpha_hwr_write_settled` event reporting
 whether it was `accepted`, `clamped`, `rejected`, `timeout`, or `superseded`,
@@ -255,6 +274,9 @@ entities). Home Assistant sees them as:
 - `esphome.<node_name>_set_single_event`
 - `esphome.<node_name>_clear_single_event`
 - `esphome.<node_name>_refresh_single_events`
+- `esphome.<node_name>_upload_schedule`
+- `esphome.<node_name>_set_vacation`
+- `esphome.<node_name>_clear_vacation`
 
 `<node_name>` comes from `esphome.name` with `-` converted to `_`. Example:
 
@@ -262,8 +284,10 @@ entities). Home Assistant sees them as:
 - Home Assistant service: `esphome.hwr_pump_set_schedule_entry`
 
 The paired package also publishes schedule read-back text sensors using the same
-node-name prefix, for example `text_sensor.hwr_pump_schedule_layer_0` and
-`text_sensor.hwr_pump_schedule_hash`.
+node-name prefix. ESPHome text sensors surface in Home Assistant under the
+`sensor` domain, so these are `sensor.hwr_pump_schedule_layer_0` and
+`sensor.hwr_pump_schedule_hash` — there is no `text_sensor.` domain in Home
+Assistant.
 
 More detail and automation examples are in
 [`docs/schedule-management.md`](docs/schedule-management.md).
@@ -286,7 +310,6 @@ After that, reconnects reuse the stored bond.
 - `hwr-pump-schedule-example.yaml` — paired pump with schedule UI/services
 - `dhw-demand-example.yaml` — combined `alpha_hwr` + `dhw_demand` with local
   component override
-- `hwr-pump.yaml` — real hardware config used for local verification
 
 ## Optional Lovelace schedule card
 
@@ -323,9 +346,9 @@ device: hwr_pump
 ```
 
 `device` is the only required option. From it the card derives the per-layer
-read-back sensors (`text_sensor.<device>_schedule_layer_0..4`), the
+read-back sensors (`sensor.<device>_schedule_layer_0..4`), the
 `Schedule Enabled` switch (`switch.<device>_schedule_enabled`), and the
-single-event sensor (`text_sensor.<device>_single_events`). Override any of them
+single-event sensor (`sensor.<device>_single_events`). Override any of them
 only if your entity IDs differ from the defaults:
 
 ```yaml
@@ -333,14 +356,38 @@ type: custom:alpha-hwr-schedule-card
 title: Pump Schedule
 device: hwr_pump
 enabled_entity: switch.hwr_pump_schedule_enabled
-single_events_entity: text_sensor.hwr_pump_single_events
+single_events_entity: sensor.hwr_pump_single_events
 layer_entities:
-  - text_sensor.hwr_pump_schedule_layer_0
-  - text_sensor.hwr_pump_schedule_layer_1
-  - text_sensor.hwr_pump_schedule_layer_2
-  - text_sensor.hwr_pump_schedule_layer_3
-  - text_sensor.hwr_pump_schedule_layer_4
+  - sensor.hwr_pump_schedule_layer_0
+  - sensor.hwr_pump_schedule_layer_1
+  - sensor.hwr_pump_schedule_layer_2
+  - sensor.hwr_pump_schedule_layer_3
+  - sensor.hwr_pump_schedule_layer_4
 ```
+
+### Optional forecast and desired-schedule overlays
+
+The card grid shows what the pump is programmed to do but not why. Two optional
+entities add that context, both unset by default — omit them and the card
+renders exactly as it did before:
+
+```yaml
+type: custom:alpha-hwr-schedule-card
+title: Pump Schedule
+device: hwr_pump
+forecast_entity: sensor.dhw_forecast_weekly_series
+desired_entity: sensor.dhw_pump_schedule_series
+```
+
+- `forecast_entity` paints a weekly forecast's demand windows as a translucent
+  heat strip behind each day row, opacity scaled by peak probability, so you can
+  see whether a pre-heat burst lands in front of predicted demand.
+- `desired_entity` outlines intervals the scheduler wants but the device is not
+  holding, surfacing scheduler-vs-device drift. Intervals that already match are
+  drawn as normal blocks rather than ghosted.
+
+Both overlays sit beneath the interactive blocks and are `pointer-events: none`,
+so dragging and editing are unaffected.
 
 ### Choosing the right names
 

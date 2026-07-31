@@ -2,6 +2,69 @@
 
 ## [Unreleased]
 
+### Changed
+
+- **BREAKING — `droplet_max_stale_seconds` is now `flow_max_stale_seconds`** —
+  the staleness bound on the household flow channel was named after the meter
+  one installation happened to use. `dhw_demand` reads whatever GPM sensor you
+  wire to `flow`, so the key now names the channel rather than a product.
+  Behavior, default (60 s) and semantics are unchanged; only the spelling
+  moves. A config still setting the old name **fails at `esphome config` time**
+  naming the replacement, following the same rule as the keys retired in #149:
+  config that validates but does nothing is a trap.
+
+- **Docs and comments no longer name a specific flow meter or water heater** —
+  README, `AGENTS.md`, `docs/configuration.md`, the packages and the component
+  comments now say "household flow meter" and "water heater". The detector was
+  always sensor-agnostic; the prose implied otherwise. Example entity IDs in
+  the packages changed to neutral placeholders (`sensor.dhw_flow_rate`,
+  `sensor.water_heater_*`) — these are illustrative substitution values, so
+  they change nothing at build time.
+
+### Fixed
+
+- README dropped a stale reference to a local, gitignored hardware config that
+  is not part of the repo.
+
+- **`packages/README.md` contained a real pump's BLE MAC address** — the Quick
+  Start block used an actual device MAC rather than the `AA:BB:CC:DD:EE:FF`
+  placeholder every other example uses. Replaced.
+
+- **`packages/README.md` documented sensors that do not exist and a lambda that
+  would not compile** — it listed "Grid Voltage" and "Converter Temperature"
+  (the real sensors are `AC Voltage`, `DC Voltage`, `PCB Temperature` and
+  `Control Box Temperature`), and its m³/h→GPM example called
+  `id(flow_rate)`, an ID no package assigns. Replaced with a `platform: copy`
+  conversion that declares the `id` it uses. It also covered only 2 of the 6
+  packages; the other four and two of the four root examples are now listed.
+
+- **README and `docs/schedule-management.md` used a `text_sensor.` entity-domain
+  prefix that does not exist in Home Assistant** — the schedule-card examples
+  and the related-entities table showed
+  `text_sensor.hwr_pump_schedule_layer_0` and
+  `text_sensor.hwr_pump_single_events`. ESPHome text sensors surface under the
+  `sensor` domain, which is what the card actually derives, so anyone copying
+  those overrides pointed the card at entity IDs that match nothing. Corrected
+  to `sensor.`.
+
+- **Corrected the subtraction's quiet-baseline figures**, which did not match
+  the bench source they were drawn from. The 0.15.0 entry and the
+  `dhw_demand_logic.h` comments claimed the no-draw offset was
+  `−0.04 ± 0.06 GPM across seven measurements` at `2000–3600 rpm`, with a
+  `30:1` margin. The bench report gives `−0.10 ± 0.06 GPM` across **four**
+  measurements (2400, 2400, 3000, 3600 rpm) and a signal-to-noise ratio of
+  **25:1**; the "seven" appears to have been borrowed from the unrelated
+  seven-run no-draw control group used for the `dhw_in_use` tier. The argument
+  is unaffected and slightly strengthened — a more negative quiet baseline
+  pushes error further toward false negatives — but the numbers were wrong.
+  Comments only; no behavior change.
+
+- **README brought current with v0.15.0** — documents the card's optional
+  `forecast_entity` / `desired_entity` overlays, the `dhw_in_use` detector input
+  and its `dhw_in_use_min_seconds` guard, the `upload_schedule` / `set_vacation`
+  / `clear_vacation` services, and `pump_set_state`. All were already
+  implemented and covered in `docs/`; only the README summary lagged.
+
 ## [0.15.0] - 2026-07-30
 
 ### Added
@@ -87,8 +150,8 @@
   directly — the meter reads everything leaving the mains, the pump reports its
   own recirculation loop, and the difference is what the house drew. No RPM
   term, no fitted curve. On controlled runs with a human opening one tap, no
-  draw at 2000–3600 RPM measures −0.04 ± 0.06 GPM across seven measurements
-  against +1.24 GPM with the tap open: non-overlapping, roughly 30:1, and the
+  draw at 2400–3600 RPM measures −0.10 ± 0.06 GPM across four measurements
+  against +1.24 GPM with the tap open: non-overlapping, roughly 25:1, and the
   residual bias is *negative*, so a quiet loop clamps to zero and the error
   pushes toward false negatives rather than false positives. Because the pump
   reports 0 flow when stopped, the same expression collapses to the pump-off
@@ -102,7 +165,7 @@
   `pump_on_demand_flow_threshold` (0.3 GPM of *computed* demand) shares
   `flow_threshold`'s value deliberately, so both pump regimes agree on what
   counts as flow. `pump_on_demand_max_stale_seconds` (30) and
-  `droplet_max_stale_seconds` (60) bound each side of the difference
+  `flow_max_stale_seconds` (60) bound each side of the difference
   separately — a difference is only meaningful if both readings are current, and
   the channels do not report alike: the pump every 10 s, the meter on change at
   a median 28 s. Gaps in the pump channel beyond 20 s are 1.0 % of gaps but
@@ -1257,8 +1320,8 @@
 
 - **DHW Demand Detector** (`dhw_demand` component) — standalone ESPHome
   component that detects genuine domestic-hot-water demand events by fusing
-  pump telemetry with supplementary sensors (Droplet D1 flow meter, tank
-  temperature, NWP500 charge/in-use flag). Uses heuristic, threshold-based
+  pump telemetry with supplementary sensors (household flow meter, tank
+  temperature, water-heater charge/in-use flag). Uses heuristic, threshold-based
   voting with no ML or external dependencies. Fully tunable via YAML
   `substitutions` without reflashing.
 - **Derived pressure sensors** — inlet pressure and head-rate (kPa/s) computed
@@ -1276,7 +1339,6 @@
 - Unit reporting corrections across multiple sensors.
 - `esp32_ble_tracker` key restored in `alpha_hwr_base.yaml` (broken package
   after package restructure).
-- `motor_speed` sensor ID corrected in `hwr-pump.yaml`.
 - `cppcheck` static analysis findings resolved across the component.
 
 ---

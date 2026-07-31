@@ -28,7 +28,7 @@ struct PumpOnThresholds {
   // raw meter flow may never decide a pump-on detection on its own.
   float flow;  // GPM
 
-  // Computed demand (droplet − loop) above which the subtraction declares a
+  // Computed demand (meter − loop) above which the subtraction declares a
   // draw. Shares the value of `flow` deliberately, so both pump regimes agree
   // on what counts as flow.
   float demand_flow;  // GPM
@@ -36,11 +36,11 @@ struct PumpOnThresholds {
   // Pump speed below which the subtraction is not trustworthy.
   //
   // The pump does not meter its loop flow; it estimates it. Near the bottom of
-  // its range the estimate reads low, so `droplet − loop` goes spuriously
+  // its range the estimate reads low, so `meter − loop` goes spuriously
   // positive with the tap shut. Measured with no draw, ground truth by
   // construction:
   //
-  //     achieved rpm   droplet   loop   difference
+  //     achieved rpm   meter     loop   difference
   //             1650      0.71   0.25       +0.45   <- would fire falsely
   //             1800      0.83   0.56       +0.27   <- would fire falsely
   //             2001      0.99   0.99       -0.00
@@ -77,7 +77,7 @@ struct PumpOnThresholds {
   // 32 s), so matching the pump's 30 s here would reject half of normal
   // cadence.
   uint32_t pump_flow_max_stale_ms;
-  uint32_t droplet_max_stale_ms;
+  uint32_t flow_max_stale_ms;
 };
 
 inline constexpr PumpOnThresholds kDefaultPumpOnThresholds{
@@ -85,7 +85,7 @@ inline constexpr PumpOnThresholds kDefaultPumpOnThresholds{
     /*demand_flow=*/0.3f,        // GPM of computed demand
     /*min_speed_rpm=*/1950.0f,   // rpm
     /*pump_flow_max_stale_ms=*/30000,
-    /*droplet_max_stale_ms=*/60000,
+    /*flow_max_stale_ms=*/60000,
 };
 
 // The intensity a tier publishes when it is confident a draw is happening but
@@ -116,10 +116,10 @@ inline bool reading_is_fresh(uint32_t last_update_ms, uint32_t now_ms,
 // fitted curve. Measured on controlled runs with a human opening one tap, so
 // ground truth by construction:
 //
-//     no draw, 2000–3600 rpm     −0.04 ± 0.06 GPM   (seven measurements)
+//     no draw, 2400–3600 rpm     −0.10 ± 0.06 GPM   (four measurements)
 //     draw open, 2402 rpm        +1.24 GPM
 //
-// Non-overlapping, roughly 30:1, and the residual bias is *negative* — a quiet
+// Non-overlapping, roughly 25:1, and the residual bias is *negative* — a quiet
 // loop computes as slightly negative demand and clamps to zero, so the error
 // pushes toward false negatives, never false positives.
 //
@@ -129,16 +129,16 @@ inline bool reading_is_fresh(uint32_t last_update_ms, uint32_t now_ms,
 //
 // Because the pump reports 0 flow when stopped, this same expression collapses
 // to the pump-off rule when it is off: one oracle for both regimes.
-inline float pump_on_demand_flow(float droplet, float pump_flow,
-                                 float motor_speed, bool droplet_fresh,
+inline float pump_on_demand_flow(float meter_flow, float pump_flow,
+                                 float motor_speed, bool meter_fresh,
                                  bool pump_flow_fresh, float min_speed_rpm) {
-  if (std::isnan(droplet) || std::isnan(pump_flow))
+  if (std::isnan(meter_flow) || std::isnan(pump_flow))
     return NAN;
-  if (!pump_flow_fresh || !droplet_fresh)
+  if (!pump_flow_fresh || !meter_fresh)
     return NAN;
   if (std::isnan(motor_speed) || motor_speed < min_speed_rpm)
     return NAN;
-  return droplet - pump_flow;
+  return meter_flow - pump_flow;
 }
 
 // Continuous-high tracker for the heater's DHW in-use flag. The flag is a weak
@@ -240,7 +240,7 @@ struct PumpOnResult {
 //
 // Tiers, strongest first:
 //   1. continuation      — a draw already established before the pump started
-//   2. subtraction       — droplet − loop, the draw measured directly
+//   2. subtraction       — meter − loop, the draw measured directly
 //   3. dhw_in_use        — the heater's own flag, once it has held long enough
 //                          to be worth believing; a last-resort recall path for
 //                          low-signal draws the subtraction could not measure
@@ -263,7 +263,7 @@ inline PumpOnResult decide_pump_on(const PumpOnInputs &in,
 
   r.demand_gpm = pump_on_demand_flow(
       in.flow, in.pump_flow, in.motor_speed,
-      reading_is_fresh(in.flow_last_update_ms, in.now_ms, t.droplet_max_stale_ms),
+      reading_is_fresh(in.flow_last_update_ms, in.now_ms, t.flow_max_stale_ms),
       reading_is_fresh(in.pump_flow_last_update_ms, in.now_ms,
                        t.pump_flow_max_stale_ms),
       t.min_speed_rpm);
@@ -284,7 +284,7 @@ inline PumpOnResult decide_pump_on(const PumpOnInputs &in,
   if (!std::isnan(r.demand_gpm) && r.demand_gpm > t.demand_flow) {
     r.demand = true;
     // Confidence rises with margin over the threshold rather than with a vote
-    // count: 1.24 GPM was the measured draw against a −0.04 ± 0.06 quiet
+    // count: 1.24 GPM was the measured draw against a −0.10 ± 0.06 quiet
     // baseline, so ~1 GPM of margin is a strong reading.
     float margin = r.demand_gpm - t.demand_flow;
     r.confidence = std::min(0.90f, 0.60f + 0.30f * std::min(1.0f, margin));
@@ -370,7 +370,7 @@ inline bool prev_tick_confirms_flow_onset(float prev_flow, float flow_threshold,
 // it *down* to what production did at the time; production has now been
 // brought up instead, so the assertion is back.
 //
-// This narrows AGENTS.md's "when the pump is off the Droplet D1 reads only
+// This narrows AGENTS.md's "when the pump is off the flow meter reads only
 // genuine demand flow". True in steady state; for the first seconds to minutes
 // after a shutdown the meter reads the loop coasting down, and by magnitude
 // that is indistinguishable from a draw — pre-shutdown loop flow runs a median

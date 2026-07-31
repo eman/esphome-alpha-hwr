@@ -68,14 +68,14 @@ Two established styles in `tests/`:
 
 ### Hardware Verification
 
-Before marking a task as complete, verify on actual hardware using `hwr-pump.yaml`:
+Before marking a task as complete, verify on actual hardware using your private, gitignored hardware config:
 
 1. **Compile & Flash**: Ensure no compilation errors.
 2. **Discovery**: Does the device show up? (Check logs for "Found ALPHA HWR").
 3. **Connection**: Does it connect *and stay connected*?
 4. **Telemetry**: Do values update? (Wave hand over pump or start water flow to verify changes).
 
-Note: `hwr-pump-example.yaml` is for documentation and compilation testing only (contains placeholder values). Use `hwr-pump.yaml` with real device configuration for actual hardware testing.
+Note: `hwr-pump-example.yaml` is for documentation and compilation testing only (contains placeholder values). Use the private, gitignored config with real device values for actual hardware testing. Never name that file in repo-facing prose — changelog, docs, issues, or PRs.
 
 #### Bench session hygiene (issue #127)
 
@@ -178,7 +178,7 @@ components/alpha_hwr/
 
 1. **Maintain Layering**: New features should be added to the appropriate layer/namespace.
 2. **Document Protocol References**: Every packet builder/parser must cite the protocol doc section.
-3. **Test After Changes**: Verify `hwr-pump-example.yaml` compiles and `hwr-pump.yaml` works on hardware.
+3. **Test After Changes**: Verify `hwr-pump-example.yaml` compiles and the private hardware config works on hardware.
 4. **Keep Services Focused**: Each service should own a single domain (telemetry, control, schedules, etc.).
 5. **No New Standalone Write Paths**: Anything that writes to the pump must be a `WriteCommand` in the operation layer (see §9), so it inherits serialization, confirm readbacks, and the one-terminal-event contract.
 
@@ -283,7 +283,7 @@ The layered architecture is now in place. When adding new features:
 5. **Unit Test**: Verify the packet builder produces the correct hex against captured byte sequences.
 6. **Implement Service**: Add business logic to the appropriate service in the `services` namespace or create a new service.
 7. **Integration**: Hook the service into the main `AlphaHwrComponent` class (add accessors as needed).
-8. **Verify**: Compile `hwr-pump-example.yaml`, flash `hwr-pump.yaml`, and test on hardware.
+8. **Verify**: Compile `hwr-pump-example.yaml`, flash the private hardware config, and test on hardware.
 
 ### Adding a New Write Operation (issue #92 contract)
 
@@ -351,7 +351,7 @@ Do **not** update files under `.esphome/` — that directory is a local build ca
 
 ### 11.1 Background & Motivation
 
-The `components/dhw_demand` component addresses a fundamental ambiguity in hot-water recirculation systems: **a flow sensor in the DHW circuit cannot distinguish closed-loop recirculation from an occupant actually opening a fixture**. The Droplet D1 sensor sits inline in the DHW circuit and reports flow regardless of source — when the ALPHA HWR pump is running a nonzero reading may be recirculation only, demand only, or both simultaneously. The ALPHA HWR's internal flow sensor (0–0.53 GPM) is blind to demand when the pump is idle.
+The `components/dhw_demand` component addresses a fundamental ambiguity in hot-water recirculation systems: **a flow sensor in the DHW circuit cannot distinguish closed-loop recirculation from an occupant actually opening a fixture**. The household flow sensor sits inline in the DHW circuit and reports flow regardless of source — when the ALPHA HWR pump is running a nonzero reading may be recirculation only, demand only, or both simultaneously. The ALPHA HWR's internal flow sensor (0–0.53 GPM) is blind to demand when the pump is idle.
 
 The theoretical foundation is fully documented in the companion research project:
 
@@ -399,27 +399,27 @@ All inputs are optional — missing sensors produce `NAN` and the affected detec
 The tick runs in `update()` every 10 seconds. Steps:
 
 1. **Read sensors & compute derivatives** — `Δx/Δt` using actual elapsed ms so jitter in the update interval doesn't bias rates. Only the two pump-off thermal signals need rates now; the pressure/current/power derivatives went with the vote tier they fed (#149).
-2. **Push Droplet flow into 30-sample circular buffer** — used by the falling-edge latch.
+2. **Push household flow into 30-sample circular buffer** — used by the falling-edge latch.
 3. **Determine pump state** — `motor_speed > 0` preferred; `motor_current ≥ pump_off_current_threshold` fallback.
 4. **Run the appropriate detection branch** (pump-off or pump-on).
-5. **DHW-in-use confidence boost** — +0.05 if `nwp500_dhw_in_use` corroborates demand.
+5. **DHW-in-use confidence boost** — +0.05 if the heater's `dhw_in_use` flag corroborates demand.
 6. **Publish results** and **update session tracking**.
 
 #### Pump-OFF branch
 
-When the pump is off the Droplet D1 reads only genuine demand flow, making it the unambiguous ground-truth signal. Three signals vote independently:
+When the pump is off the household flow sensor reads only genuine demand flow, making it the unambiguous ground-truth signal. Three signals vote independently:
 
 | Signal | Condition | Weight |
 |---|---|---|
-| Droplet flow | `flow > flow_threshold` (0.3 GPM) | 1.0 |
+| Household flow | `flow > flow_threshold` (0.3 GPM) | 1.0 |
 | Thermal collapse | `Δtemp/Δt < −thermal_collapse_rate` (0.05 °F/s) | 0.9 |
 | Charge drop | `Δcharge/Δt < −dhw_charge_drop_rate` (0.005 %/s) AND tank not warming | 0.7 |
 
 Confidence = highest-weight signal + 0.05 per additional corroborating signal, capped at 1.0.
 
-**No-flow guard:** if current Droplet flow is below threshold *and* the 30-second falling-edge latch has expired, demand is suppressed regardless of other signals. This is the primary false-positive filter.
+**No-flow guard:** if current household flow is below threshold *and* the 30-second falling-edge latch has expired, demand is suppressed regardless of other signals. This is the primary false-positive filter.
 
-**Falling-edge latch:** if Droplet flow was above threshold within the last `flow_latch_seconds` (30 s) but has since dropped (burst-cadence gap), demand is held alive to prevent a single missed Droplet reading from causing a false termination.
+**Falling-edge latch:** if household flow was above threshold within the last `flow_latch_seconds` (30 s) but has since dropped (burst-cadence gap), demand is held alive to prevent a single missed reading from causing a false termination.
 
 #### Pump-ON branch
 
@@ -471,7 +471,7 @@ All thresholds are exposed as YAML config keys with defaults matching the Python
 | `pump_on_demand_flow_threshold` | 0.3 | GPM | Computed demand (`flow − pump_flow`) above which a pump-on draw is declared |
 | `pump_on_demand_min_speed_rpm` | 1950 | RPM | Below this the pump's own loop-flow estimate reads low, so the difference goes spuriously positive with no draw |
 | `pump_on_demand_max_stale_seconds` | 30 | s | How old the `pump_flow` reading may be and still be differenced |
-| `droplet_max_stale_seconds` | 60 | s | The same bound for `flow`; looser because the meter reports on change |
+| `flow_max_stale_seconds` | 60 | s | The same bound for `flow`; looser because the meter reports on change |
 | `dhw_in_use_min_seconds` | 70 | s | How long the heater's DHW flag must hold continuously before it may declare a pump-on draw alone |
 | `flow_latch_seconds` | 30 | s | Falling-edge hold-off duration |
 | `session_gap_tolerance_seconds` | 60 | s | Max gap before ending a session |

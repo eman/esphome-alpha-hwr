@@ -296,7 +296,7 @@ void test_reading_freshness() {
                                 kDefaultPumpOnThresholds.pump_flow_max_stale_ms),
               "45 s is stale on the pump channel (30 s bound)");
   TEST_ASSERT(reading_is_fresh(5000, 50000,
-                               kDefaultPumpOnThresholds.droplet_max_stale_ms),
+                               kDefaultPumpOnThresholds.flow_max_stale_ms),
               "45 s is fresh on the meter channel (60 s bound)");
 
   // Unsigned subtraction wraps correctly across the ~49-day millis() rollover,

@@ -14,8 +14,8 @@ namespace dhw_demand {
 
 static const char *const TAG = "dhw_demand";
 
-// 30 samples × 10 s = 5-minute Droplet flow history
-static const int DROPLET_BUF_SIZE = 30;
+// 30 samples × 10 s = 5-minute household flow history
+static const int FLOW_BUF_SIZE = 30;
 
 class DhwDemandComponent : public PollingComponent {
  public:
@@ -61,7 +61,7 @@ class DhwDemandComponent : public PollingComponent {
   void set_pump_on_demand_max_stale_seconds(int v) {
     pump_on_demand_max_stale_seconds_ = v;
   }
-  void set_droplet_max_stale_seconds(int v) { droplet_max_stale_seconds_ = v; }
+  void set_flow_max_stale_seconds(int v) { flow_max_stale_seconds_ = v; }
   void set_dhw_in_use_min_seconds(int v) { dhw_in_use_min_seconds_ = v; }
   void set_flow_latch_seconds(int v) { flow_latch_seconds_ = v; }
   void set_demand_release_seconds(int v) { demand_release_seconds_ = v; }
@@ -127,8 +127,8 @@ class DhwDemandComponent : public PollingComponent {
   int pump_on_demand_max_stale_seconds_{
       static_cast<int>(kDefaultPumpOnThresholds.pump_flow_max_stale_ms /
                        1000)};  // s, pump loop-flow channel
-  int droplet_max_stale_seconds_{static_cast<int>(
-      kDefaultPumpOnThresholds.droplet_max_stale_ms / 1000)};  // s, meter
+  int flow_max_stale_seconds_{static_cast<int>(
+      kDefaultPumpOnThresholds.flow_max_stale_ms / 1000)};  // s, meter
   // How long the heater's DHW in-use flag must stay continuously high before it
   // may declare a pump-on draw on its own. 0 means "high right now is enough".
   int dhw_in_use_min_seconds_{70};              // s
@@ -136,8 +136,8 @@ class DhwDemandComponent : public PollingComponent {
   int session_gap_tolerance_seconds_{60};      // s
   int demand_release_seconds_{30};             // s
 
-  // ── Circular buffer — Droplet flow (30 samples × 10 s = 5 min) ───────────
-  float flow_buf_[DROPLET_BUF_SIZE];
+  // ── Circular buffer — household flow (30 samples × 10 s = 5 min) ─────────
+  float flow_buf_[FLOW_BUF_SIZE];
   int flow_buf_head_{0};
 
   // ── Previous-value registers (for derivative computation) ─────────────────
