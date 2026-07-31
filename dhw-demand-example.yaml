@@ -89,6 +89,10 @@ sensor:
 
   # Optional: water-heater DHW in-use flag — provides a small confidence
   # boost. Remove if your water heater does not expose one.
+  #
+  # Read as a float, so the HA entity must report numeric 0/1. A binary_sensor
+  # (state "on"/"off") parses as NaN and the tier silently never fires; map it
+  # to a numeric template sensor in HA first.
   - platform: homeassistant
     id: dhw_in_use_flag
     entity_id: sensor.your_dhw_in_use  # ← CHANGE to your DHW in-use entity

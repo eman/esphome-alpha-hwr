@@ -216,11 +216,18 @@ third detection tier:
 sensor:
   - platform: homeassistant
     id: dhw_in_use_flag
-    entity_id: sensor.your_dhw_in_use
+    entity_id: sensor.your_dhw_in_use  # must report numeric 0/1
 
 dhw_demand:
   dhw_in_use: dhw_in_use_flag
 ```
+
+`dhw_in_use` is an ESPHome **sensor**, not a binary sensor, and is read as a
+float. The Home Assistant entity must therefore report a number — `0`/`1` or
+`0.0`/`1.0`. Pointing it at a `binary_sensor`, whose state is the string
+`on`/`off`, yields `NaN` at runtime and the tier silently never fires. If your
+flag is a `binary_sensor`, map it to a numeric template sensor in Home
+Assistant first.
 
 The flag is unusable bare — it fires often and briefly — so it only declares a
 pump-on draw after holding continuously for `dhw_in_use_min_seconds` (70 s by
