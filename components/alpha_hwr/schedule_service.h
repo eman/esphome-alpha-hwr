@@ -599,7 +599,7 @@ public:
 
   /**
    * Write a full 42-byte layer image (7 days x 6 bytes) in one whole-layer
-   * write + configuration commit (RFC-005 bulk upload). Requires the layer
+   * write + configuration commit (bulk upload). Requires the layer
    * to be cached (call read_entries_async first); patches the cache and
    * reuses the same write path as set_entry_async.
    */
@@ -626,7 +626,7 @@ public:
 
   /**
    * Canonical schedule hash over the cached 7x5 grid + enabled flag
-   * (RFC-005 §5.2; algorithm in schedule_codec.h). Returns "unknown"
+   * (algorithm in schedule_codec.h). Returns "unknown"
    * until all 5 layers and the schedule state are cached, so the HA
    * sensor never reports a hash computed from partial data. 19 chars —
    * well under HA's 255-char state cap.
@@ -636,7 +636,7 @@ public:
   /**
    * Compact JSON of one cached layer (7 cells, [start_min,end_min] or 0).
    * "unknown" while the layer is not cached. Read-back path for external
-   * schedulers (dhw-sensor-apps issue #7).
+   * schedulers.
    */
   std::string layer_json(uint8_t layer) const;
 

@@ -1512,7 +1512,7 @@ static void test_mode_strings() {
 }
 
 // ---------------------------------------------------------------------------
-// upload_schedule (RFC-005 / dhw-sensor-apps issue #5)
+// upload_schedule (bulk full-state grid upload)
 // ---------------------------------------------------------------------------
 
 namespace upcodec = esphome::alpha_hwr::codec;

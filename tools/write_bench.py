@@ -268,11 +268,11 @@ async def cmd_burst(host: str, key: str, service_name: str, common: list[str],
 
 
 # ---------------------------------------------------------------------------
-# upload subcommand (RFC-005 bulk schedule upload)
+# upload subcommand (bulk schedule upload)
 # ---------------------------------------------------------------------------
 
 def _canonical_hash(entries: list[tuple[int, ...]], enabled: bool) -> str:
-    """Python mirror of schedule_codec's canonical hash (RFC-005 §5.2)."""
+    """Python mirror of schedule_codec's canonical hash."""
     grid = {}
     for layer, day, sh, sm, eh, em in entries:
         grid[(layer, day)] = (sh, sm, eh, em)

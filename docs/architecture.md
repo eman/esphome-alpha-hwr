@@ -134,10 +134,6 @@ two are normally paired, with pump telemetry feeding the detector.
   stamps each channel's reading age, and calls the decision.
   See [issue #144](https://github.com/eman/esphome-alpha-hwr/issues/144).
 
-Parity with the Python detector is tracked in the companion repo's
-[evaluation report](https://github.com/eman/dhw-sensor-apps/blob/main/docs/dhw-demand-detector-evaluation-2026-07.md),
-[firmware change spec](https://github.com/eman/dhw-sensor-apps/blob/main/docs/esphome-alpha-hwr-parity.md)
-and [ESP32 detector notes](https://github.com/eman/dhw-sensor-apps/blob/main/docs/esp32-detector.md).
 Two questions used to be recorded here as open and deliberately un-actioned:
 whether the `inlet_pressure_low` + `pump_flow_collapse` pair fires during pump
 ramp-up, and whether the 5.0 PSI inlet floor was correctly placed. Both are

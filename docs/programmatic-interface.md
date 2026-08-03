@@ -134,7 +134,7 @@ working); `op_id` is a new optional argument.
 | `set_single_event` | `begin_ts,end_ts` (epoch seconds) | One-time run; a free slot is chosen and echoed in the event |
 | `clear_single_event` | `slot` | Clear one single-event slot |
 | `refresh_single_events` | *(no data)* | Re-read all single-event slots |
-| `upload_schedule` | RFC-005 v1 payload (below) | **Bulk full-state upload** of the entire 7×5 grid in one call |
+| `upload_schedule` | v1 payload (below) | **Bulk full-state upload** of the entire 7×5 grid in one call |
 
 Schedule writes are **verified**: after the write and commit, the component
 reads the schedule back from the pump and compares before reporting. (They
@@ -175,8 +175,10 @@ The `schedule_hash` text sensor publishes a canonical FNV-1a-64 hash
 (`v1:<16hex>`) of the full cached grid + enabled flag, recomputed after every
 settled schedule operation ("unknown" until all five layers and the schedule
 state are cached). External schedulers compare it against the hash of their
-desired schedule to decide whether reprogramming is needed — see RFC-005 in
-the dhw-sensor-apps repo for the algorithm and cross-language golden vectors.
+desired schedule to decide whether reprogramming is needed. The algorithm is
+documented in `components/alpha_hwr/schedule_codec.h`, and the golden vectors
+in `tests/test_schedule_codec.cpp` are the cross-language contract — an
+external scheduler reimplementing the hash must reproduce them exactly.
 
 ### Full-grid read-back (`schedule_layer_0..4` sensors)
 
@@ -185,7 +187,7 @@ end_min]` per enabled day, `0` otherwise — each always under HA's 255-char
 state cap).  Together with
 `schedule_hash` they give an external scheduler a race-free cold-start
 recovery path: reconstruct the grid from the five sensors, verify against
-the hash, then upload safely (dhw-sensor-apps issue #7).  Sensors report
+the hash, then upload safely.  Sensors report
 `unknown` until their layer is cached and are republished after every
 settled schedule operation.
 

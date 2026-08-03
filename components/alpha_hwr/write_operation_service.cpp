@@ -1429,7 +1429,7 @@ void WriteOperationService::run_refresh_single_events_(uint32_t seq) {
 }
 
 // ---------------------------------------------------------------------------
-// UPLOAD_SCHEDULE (RFC-005 / dhw-sensor-apps issue #5)
+// UPLOAD_SCHEDULE (bulk full-state grid upload)
 //
 // Full-state bulk upload: overview precondition, then per layer 0..4 a
 // mandatory fresh read, a memcmp against the desired 42-byte image (layers

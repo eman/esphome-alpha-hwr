@@ -291,7 +291,7 @@ void AlphaHwrComponent::setup() {
     // write_operation_service.h so the host test exercises the production
     // predicate; UPLOAD_SCHEDULE was missing from it entirely (issue #133),
     // which left sensor.<device>_schedule_hash on its old value after every
-    // bulk upload. RFC-005's sync model is "poll that sensor until it
+    // bulk upload. The sync model is "poll that sensor until it
     // matches", so a correctly-programmed pump read as a permanent sync
     // failure and the scheduler re-uploaded the same grid indefinitely.
     if (services::result_republishes_schedule(result))

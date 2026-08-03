@@ -467,8 +467,8 @@
   switch, so a bulk grid upload recomputed the canonical hash for the
   `write_settled` event but left `sensor.<device>_schedule_hash` — and the five
   per-layer read-back sensors — on their old values until something else forced
-  a read-back. RFC-005 §3.1 specifies that the upload recomputes the hash
-  sensor, and its sync model is "poll that sensor until it matches", so every
+  a read-back. The upload is specified to recompute the hash sensor, and the
+  sync model is "poll that sensor until it matches", so every
   grid change looked like a permanent sync failure: the scheduler timed out,
   retried three times per reconcile, and re-uploaded the same grid to an
   already-correctly-programmed pump. `in_sync` stuck false and `sync_failures`
@@ -606,7 +606,7 @@
   pump is off — with the pump running it routinely latches high for a fixed
   ~60 s with no real draw behind it, so boosting a pump-on detection with it
   just added confidence to a phantom. The boost is now gated to pump-off,
-  matching the corrected Python detector in `dhw-sensor-apps`.
+  matching the corrected reference implementation.
 - **`tests/test_dhw_demand_logic.cpp` had drifted from the component.** Its
   hand-mirrored `pump_head_rate_threshold` was still the pre-units-audit
   `3.0f` (kPa/s) while `dhw_demand.h` now uses `0.31f` (m/s), so the head-rate
@@ -722,8 +722,7 @@
   still echoed to the pump byte-for-byte. The settle event gains `flow` and
   `requested_flow` fields.
 
-- **Bulk schedule upload + sync hash** (RFC-005,
-  [dhw-sensor-apps#5](https://github.com/eman/dhw-sensor-apps/issues/5)) —
+- **Bulk schedule upload + sync hash** —
   New `upload_schedule` service uploads the entire 7×5 weekly grid in one
   call with full-state clear-and-set semantics; layers whose fresh readback
   already matches the desired image are skipped (a no-change re-upload costs
@@ -731,11 +730,12 @@
   `layers_skipped` / `schedule_hash` event fields. New `schedule_hash` text
   sensor publishes a canonical FNV-1a-64 hash of the cached grid so external
   schedulers can verify sync without a full read-back; the pure payload/hash
-  codec (`schedule_codec`) ships with host tests whose golden vectors are
-  shared with the dhw-sensor-apps scheduler suite. Bench client gains an
+  codec (`schedule_codec`) ships with host tests whose golden vectors are the
+  cross-language contract for any scheduler mirroring the hash. Bench client
+  gains an
   `upload` subcommand with local expected-hash computation. Five
   `schedule_layer_0..4` text sensors publish each layer's compact JSON for
-  full-grid cold-start recovery (dhw-sensor-apps#7), and auto-slot
+  full-grid cold-start recovery, and auto-slot
   resolution reuses expired single-event slots so the 35-slot pool cannot
   exhaust.
 
