@@ -30,6 +30,38 @@ Agents should consult these resources before making architectural decisions:
 * **ESPHome BLE Client**: [https://esphome.io/components/ble_client/](https://esphome.io/components/ble_client/)
 * **ESPHome Bluetooth Proxy**: [https://esphome.io/components/bluetooth_proxy/](https://esphome.io/components/bluetooth_proxy/)
 
+### 2.1 The fleet this firmware belongs to
+
+This repo is one of three implementing one system, and the contracts between them
+live in a fourth place — the `dhw-sensor-apps` repo at `../dhw-sensor-apps`.
+
+* **`../dhw-sensor-apps/docs/rfc-005-scheduler-esphome-interface.md` (Accepted)** is
+  the contract of record for `hwr_pump_upload_schedule`, the 19-character schedule
+  hash, the `alpha_hwr_write_settled` event and watchdog budgets, the single-events
+  SubID range, and the MQTT topic taxonomy this firmware serves. Changing a service
+  signature, an argument name, or what feeds the hash **is** changing RFC-005: the
+  Python side is `dhw-sensor-apps/scheduler` and it must move in the same change.
+  Its schedule-hash implementation is a deliberate bit-for-bit mirror of
+  `schedule_codec` here — the two are the only sync-verification channel, because
+  ESPHome services cannot return values and the read-back JSON exceeds HA's
+  255-character state cap.
+* **`components/dhw_demand` is an independent second implementation** of
+  `../dhw-sensor-apps/detector`, running on-device so demand detection survives the
+  Docker/InfluxDB stack being down. The two are meant to agree. The ledger of where
+  they do not is `../dhw-sensor-apps/docs/esphome-alpha-hwr-parity.md` — its rows
+  are **dated assertions about this repo's HEAD at a point in time**, not current
+  state. Commit `5324ef3` over there exists precisely because a row recorded an
+  unmerged, conflicting PR as shipped fact. Verify against this tree before acting
+  on a row.
+* `../dhw-sensor-apps` also consumes this firmware's `hwr_pump_*` telemetry from
+  InfluxDB `homedb`, so renaming or re-unitting an entity is a downstream break.
+
+**Do not open files under `../dhw-sensor-apps` other than the two documents named
+above, unless the task is explicitly about the Python side.** Its detector, its
+forecasters and its schedulers are separate deployables with their own contracts;
+reading them will not tell you anything about this firmware that RFC-005 and the
+parity ledger do not.
+
 ## 3. Development Standards
 
 ### C++ (ESPHome Component)
