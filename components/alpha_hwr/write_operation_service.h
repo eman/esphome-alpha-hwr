@@ -31,7 +31,7 @@ enum class WriteCommand : uint8_t {
   CLEAR_SINGLE_EVENT,
   REFRESH_SCHEDULE,
   REFRESH_SINGLE_EVENTS,
-  UPLOAD_SCHEDULE,  // bulk full-state grid upload (RFC-005 / issue #5)
+  UPLOAD_SCHEDULE,  // bulk full-state grid upload
   SET_PUMP_STATE,   // coupled run-state+schedule selector; composed at the api
                     // bridge from SET_PUMP_ENABLED + SET_SCHEDULE_ENABLED, so it
                     // is never enqueued as an Operation — only used to label its
@@ -292,7 +292,7 @@ class WriteOperationService {
                                     std::function<void(bool)> done = nullptr,
                                     WriteOrigin origin = WriteOrigin::SERVICE);
   /**
-   * Bulk full-state schedule upload (RFC-005). The request expresses the
+   * Bulk full-state schedule upload. The request expresses the
    * entire 7x5 grid; layers whose fresh readback already matches the
    * desired image are skipped (no BLE write). Terminates ACCEPTED (all
    * layers confirmed, possibly all skipped), PARTIAL (mixed), REJECTED,
@@ -469,7 +469,7 @@ class WriteOperationService {
   static constexpr uint32_t WATCHDOG_REFRESH_SCHEDULE_MS = 30000;
   static constexpr uint32_t WATCHDOG_REFRESH_EVENTS_MS = 120000;
   // Upload: overview + up to 5 x (read + write + commit) + settle +
-  // readbacks + margin (RFC-005 §3.4).
+  // readbacks + margin.
   static constexpr uint32_t WATCHDOG_UPLOAD_MS = 150000;
 };
 

@@ -1,9 +1,9 @@
-// Host tests for the bulk-upload payload codec + canonical schedule hash
-// (RFC-005 / dhw-sensor-apps issue #5).
+// Host tests for the bulk-upload payload codec + canonical schedule hash.
 //
-// The golden hash vectors MUST stay identical to the Python suite in
-// dhw-sensor-apps scheduler/tests/test_schedule_hash.py — they are the
-// cross-language contract.
+// The golden hash vectors below are the cross-language contract: any
+// external scheduler that verifies sync by mirroring the hash must produce
+// these exact values. Changing one is a breaking interface change, not a
+// test fixup.
 
 #include <cstdint>
 #include <cstdio>

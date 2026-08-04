@@ -200,8 +200,8 @@ alpha_hwr:
    warnings:
      name: "Active Warnings"
    
-   # Canonical schedule hash (RFC-005) — sync-verification sensor for the
-   # dhw-sensor-apps recirculation scheduler ("unknown" until fully cached)
+   # Canonical schedule hash — sync-verification sensor for an external
+   # scheduler driving upload_schedule ("unknown" until fully cached)
    schedule_hash:
       name: "Schedule Hash"
 

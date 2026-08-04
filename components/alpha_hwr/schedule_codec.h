@@ -1,6 +1,5 @@
 /**
- * Bulk schedule payload codec + canonical schedule hash (RFC-005, issue #5
- * in dhw-sensor-apps).
+ * Bulk schedule payload codec + canonical schedule hash.
  *
  * Pure functions with no ESPHome dependencies so they compile in the host
  * test suite unchanged.
@@ -19,8 +18,10 @@
  *   then 1 byte schedule_enabled (0x00|0x01)
  * rendered as "v1:" + 16 lowercase hex chars.
  *
- * The Python scheduler (dhw-sensor-apps scheduler/schedule_hash.py) mirrors
- * this algorithm; golden vectors live in both test suites.
+ * An external scheduler driving upload_schedule mirrors this algorithm to
+ * confirm the pump accepted the grid without reading it back. Treat the
+ * hash as a published interface: any change to the byte layout above is a
+ * breaking change for such a scheduler.
  */
 
 #pragma once
@@ -82,7 +83,7 @@ std::string schedule_hash(const uint8_t images[UPLOAD_LAYERS][LAYER_IMAGE_BYTES]
  * Render a 42-byte layer image as compact JSON: an array of 7 cells,
  * each `[start_min,end_min]` (enabled) or `0` (disabled). Emitted per
  * layer so it always fits HA's 255-char state cap (~86 chars worst
- * case). Read-back path for external schedulers (dhw-sensor-apps issue #7).
+ * case). Read-back path for external schedulers.
  */
 std::string layer_image_to_json(const uint8_t image[LAYER_IMAGE_BYTES]);
 

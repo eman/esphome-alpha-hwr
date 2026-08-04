@@ -1151,13 +1151,14 @@ public:
   void perform_clock_sync();
 
   /**
-   * Publish the canonical schedule hash (RFC-005 §5.2) — the scheduler's
-   * sync-verification sensor — plus the per-layer read-back sensors.
+   * Publish the canonical schedule hash (algorithm in schedule_codec.h) —
+   * the sync-verification sensor an external scheduler polls — plus the
+   * per-layer read-back sensors.
    * "unknown" until the full grid is cached.
    */
   void publish_schedule_hash() {
 #ifdef USE_TEXT_SENSOR
-    // Per-layer read-back sensors (dhw-sensor-apps issue #7): each layer's
+    // Per-layer read-back sensors: each layer's
     // compact JSON always fits HA's 255-char state cap.
     for (uint8_t layer = 0; layer < 5; layer++) {
       if (this->schedule_layer_sensors_[layer] != nullptr) {
