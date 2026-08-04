@@ -78,6 +78,10 @@ struct PumpOnThresholds {
   // cadence.
   uint32_t pump_flow_max_stale_ms;
   uint32_t flow_max_stale_ms;
+
+  // How long after a pump start the loop-flow estimate is still ramping and
+  // must not be differenced. See pump_flow_estimate_is_settled.
+  uint32_t pump_on_settle_ms;
 };
 
 inline constexpr PumpOnThresholds kDefaultPumpOnThresholds{
@@ -86,6 +90,7 @@ inline constexpr PumpOnThresholds kDefaultPumpOnThresholds{
     /*min_speed_rpm=*/1950.0f,   // rpm
     /*pump_flow_max_stale_ms=*/30000,
     /*flow_max_stale_ms=*/60000,
+    /*pump_on_settle_ms=*/10000,
 };
 
 // The intensity a tier publishes when it is confident a draw is happening but
@@ -151,6 +156,53 @@ inline bool reading_predates_pump_start(uint32_t last_update_ms,
     return false;
   return (uint32_t) (now_ms - last_update_ms) >
          (uint32_t) (now_ms - pump_on_since_ms);
+}
+
+// Has the pump's own loop-flow estimate settled after the motor started?
+//
+// The sibling of reading_predates_pump_start, for the failure that one does
+// *not* catch — and the one that dominates in production. There the pump
+// channel is silent across the start and the difference is taken against a
+// pre-start zero. Here the pump reports promptly, so the reading is fresh and
+// postdates the start, but the impeller is still accelerating and the estimate
+// reads low against a loop the meter already sees moving:
+//
+//     16:16:57  pump_flow 0.713  speed 3172   <- estimate still ramping
+//     16:16:59  meter     1.712               <- loop already at speed
+//               1.712 - 0.713 = 1.00 GPM published at confidence 0.81
+//
+// pump_on_demand_min_speed_rpm does not cover it: that floor is for a low
+// *steady* speed, and this fires at 3172 rpm during the overshoot.
+//
+// Measured on the Python side across 296 pump starts in 30 days,
+// meter - pump_flow by age of the run:
+//
+//     0-10 s    p90 0.820 GPM   26.6 % above the 0.3 threshold
+//     10-20 s   p90 0.171        6.2 %
+//     20-30 s   p90 0.145        5.6 %
+//     30-60 s   p90 0.191        6.5 %
+//     60-120 s  p90 0.132        7.3 %
+//
+// The artifact is confined to the first band and the distribution is flat from
+// 10 s on. The residual 6-9 % later is real draws during recirculation, which
+// this tier exists to catch.
+//
+// This *is* a fixed window, as the retired PUMP_STARTUP_TRANSIENT_SUPPRESSION_MS
+// was, so the difference matters: that one gated derivative votes and failed by
+// not covering a speed change while already running. This gates one tier's
+// input over the only interval where that input is measurably invalid, at a
+// boundary measured across 296 starts rather than chosen. It costs up to 10 s
+// of latency on a draw beginning within 10 s of a pump start; a draw already in
+// progress is carried by the continuation tier instead.
+//
+// pump_on_since_ms == 0 means no start has been observed, so there is nothing
+// to wait for and this reports settled.
+inline bool pump_flow_estimate_is_settled(uint32_t pump_on_since_ms,
+                                          uint32_t now_ms,
+                                          uint32_t settle_ms) {
+  if (settle_ms == 0 || pump_on_since_ms == 0)
+    return true;
+  return (uint32_t) (now_ms - pump_on_since_ms) >= settle_ms;
 }
 
 // Is the falling-edge flow latch disarmed because the pump just stopped?
@@ -351,7 +403,12 @@ inline PumpOnResult decide_pump_on(const PumpOnInputs &in,
       reading_is_fresh(in.pump_flow_last_update_ms, in.now_ms,
                        t.pump_flow_max_stale_ms) &&
       !reading_predates_pump_start(in.pump_flow_last_update_ms,
-                                   in.pump_on_since_ms, in.now_ms);
+                                   in.pump_on_since_ms, in.now_ms) &&
+      // Reported since the start, but the impeller may still be accelerating.
+      // The two compose: this covers the first seconds, the one above covers a
+      // channel still silent past them.
+      pump_flow_estimate_is_settled(in.pump_on_since_ms, in.now_ms,
+                                    t.pump_on_settle_ms);
 
   r.demand_gpm = pump_on_demand_flow(
       in.flow, in.pump_flow, in.motor_speed,

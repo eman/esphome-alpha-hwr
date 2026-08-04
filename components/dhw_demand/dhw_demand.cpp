@@ -232,7 +232,8 @@ PumpOnThresholds DhwDemandComponent::pump_on_thresholds_() const {
       pump_on_demand_flow_threshold_,
       pump_on_demand_min_speed_rpm_,
       (uint32_t) pump_on_demand_max_stale_seconds_ * 1000,
-      (uint32_t) flow_max_stale_seconds_ * 1000};
+      (uint32_t) flow_max_stale_seconds_ * 1000,
+      (uint32_t) pump_on_demand_settle_seconds_ * 1000};
 }
 
 // ── Publish & session helpers ─────────────────────────────────────────────────

@@ -18,6 +18,21 @@
   nothing is blocked for a fixed time and the tier resumes on the pump's very
   next reading.
 
+- **The pump-on subtraction declines while the pump's flow estimate is still
+  spinning up** (`pump_on_demand_settle_seconds`, new, default 10 s). The
+  sibling of the fix below it, and the one that dominates in production: there
+  the pump channel is silent across the start, here it reports *promptly* while
+  the impeller is still accelerating, so the estimate reads low against a loop
+  the meter already sees moving — `pump_flow 0.713` at 3172 rpm against a meter
+  reading 1.712, published as 1.00 GPM at confidence 0.81.
+  `pump_on_demand_min_speed_rpm` does not cover it: that floor is for a low
+  *steady* speed. Measured on the Python detector across 296 pump starts in 30
+  days, `meter - pump_flow` by age of the run: 0–10 s is p90 0.820 GPM with
+  26.6 % above the 0.3 threshold, against p90 0.13–0.19 and a flat 6–9 % for
+  every band out to 180 s. Over three production days the subtraction's startup
+  firings fell 13 → 1 with no session lost. Set to `0` for the previous
+  behaviour.
+
 - **The falling-edge flow latch is disarmed for 30 s after a pump-off edge**
   (`latch_pump_off_suppression_seconds`, new, matched to `flow_latch_seconds`).
   The latch exists for gaps between meter reports during a draw; a shutdown

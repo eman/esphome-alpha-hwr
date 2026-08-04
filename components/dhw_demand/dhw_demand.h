@@ -67,6 +67,9 @@ class DhwDemandComponent : public PollingComponent {
   void set_latch_pump_off_suppression_seconds(int v) {
     latch_pump_off_suppression_seconds_ = v;
   }
+  void set_pump_on_demand_settle_seconds(int v) {
+    pump_on_demand_settle_seconds_ = v;
+  }
   void set_demand_release_seconds(int v) { demand_release_seconds_ = v; }
   void set_session_gap_tolerance_seconds(int v) {
     session_gap_tolerance_seconds_ = v;
@@ -141,6 +144,11 @@ class DhwDemandComponent : public PollingComponent {
   // window into a shutdown reading; 0 disables. Mirrors Python's
   // latch_pump_off_suppression_seconds.
   int latch_pump_off_suppression_seconds_{30};  // s
+  // Seconds after a pump start during which the subtraction declines while the
+  // pump's loop-flow estimate is still ramping. Mirrors Python's
+  // pump_on_demand_settle_seconds.
+  int pump_on_demand_settle_seconds_{
+      static_cast<int>(kDefaultPumpOnThresholds.pump_on_settle_ms / 1000)};
   int session_gap_tolerance_seconds_{60};      // s
   int demand_release_seconds_{30};             // s
 

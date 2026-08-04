@@ -47,6 +47,7 @@ CONF_FLOW_MAX_STALE_SECONDS = "flow_max_stale_seconds"
 CONF_DHW_IN_USE_MIN_SECONDS = "dhw_in_use_min_seconds"
 CONF_FLOW_LATCH_SECONDS = "flow_latch_seconds"
 CONF_LATCH_PUMP_OFF_SUPPRESSION_SECONDS = "latch_pump_off_suppression_seconds"
+CONF_PUMP_ON_SETTLE_SECONDS = "pump_on_demand_settle_seconds"
 CONF_SESSION_GAP_TOLERANCE_SECONDS = "session_gap_tolerance_seconds"
 CONF_DEMAND_RELEASE_SECONDS = "demand_release_seconds"
 
@@ -225,6 +226,14 @@ CONFIG_SCHEMA = (
             # 0 is legal and meaningful: it restores the previous behaviour.
             cv.Optional(CONF_LATCH_PUMP_OFF_SUPPRESSION_SECONDS, default=30):
                 cv.int_range(min=0, max=3600),
+            # Seconds after a pump start during which the subtraction declines,
+            # because the pump's own loop-flow estimate is still spinning up and
+            # reads low against a loop the meter already sees moving. Measured
+            # across 296 starts: 0-10 s is p90 0.820 GPM with 26.6 % above the
+            # 0.3 threshold, against a flat 6-9 % from 10 s out to 180 s.
+            # Bounded for the uint32_t wrap reason; 0 disables.
+            cv.Optional(CONF_PUMP_ON_SETTLE_SECONDS, default=10):
+                cv.int_range(min=0, max=3600),
             cv.Optional(CONF_SESSION_GAP_TOLERANCE_SECONDS, default=60):
                 cv.positive_int,
             cv.Optional(CONF_DEMAND_RELEASE_SECONDS, default=30):
@@ -306,6 +315,8 @@ async def to_code(config):
         config[CONF_FLOW_LATCH_SECONDS]))
     cg.add(var.set_latch_pump_off_suppression_seconds(
         config[CONF_LATCH_PUMP_OFF_SUPPRESSION_SECONDS]))
+    cg.add(var.set_pump_on_demand_settle_seconds(
+        config[CONF_PUMP_ON_SETTLE_SECONDS]))
     cg.add(var.set_session_gap_tolerance_seconds(
         config[CONF_SESSION_GAP_TOLERANCE_SECONDS]))
     cg.add(var.set_demand_release_seconds(

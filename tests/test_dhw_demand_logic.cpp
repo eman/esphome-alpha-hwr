@@ -18,6 +18,7 @@ using esphome::dhw_demand::kDefaultPumpOnThresholds;
 using esphome::dhw_demand::prev_tick_confirms_flow_onset;
 using esphome::dhw_demand::pump_off_flow_onset_is_confirmed;
 using esphome::dhw_demand::pump_on_continuation_is_active;
+using esphome::dhw_demand::pump_flow_estimate_is_settled;
 using esphome::dhw_demand::pump_on_demand_flow;
 using esphome::dhw_demand::PumpOnInputs;
 using esphome::dhw_demand::PumpOnResult;
@@ -767,6 +768,59 @@ void test_flow_latch_is_disarmed_after_a_shutdown() {
               "The window survives the millis() rollover");
 }
 
+void test_the_loop_estimate_must_settle_before_it_is_differenced() {
+  std::cout << "\n=== Testing Pump Spin-Up Settle ===" << std::endl;
+
+  const uint32_t kSettle = kDefaultPumpOnThresholds.pump_on_settle_ms;
+  const uint32_t kStart = 100000;
+
+  TEST_ASSERT(!pump_flow_estimate_is_settled(kStart, kStart, kSettle),
+              "At the pump start the estimate is not settled");
+  TEST_ASSERT(!pump_flow_estimate_is_settled(kStart, kStart + 9999, kSettle),
+              "...nor 1 ms short of the window");
+  TEST_ASSERT(pump_flow_estimate_is_settled(kStart, kStart + 10000, kSettle),
+              "...and settled once the window elapses, inclusive");
+  TEST_ASSERT(pump_flow_estimate_is_settled(0, kStart, kSettle),
+              "With no observed start there is nothing to wait for");
+  TEST_ASSERT(pump_flow_estimate_is_settled(kStart, kStart, 0),
+              "A zero window disables the guard");
+
+  // Rollover: the pump started 3 s before the wrap, now is 8 s after it, so
+  // 11 s have elapsed and the estimate is settled.
+  const uint32_t kBeforeWrap = 0xFFFFFFFFu - 2999;
+  TEST_ASSERT(pump_flow_estimate_is_settled(kBeforeWrap, 8000, kSettle),
+              "The settle window survives the millis() rollover");
+
+  // The whole tier: the ramp must not reach the wire. Live trace 2026-08-01,
+  // recirculation with no tap open — the pump reports 0.713 while the meter
+  // already reads 1.712, and the difference published at confidence 0.81.
+  PumpOnInputs in;
+  in.flow = 1.712f;
+  in.pump_flow = 0.713f;
+  in.motor_speed = 3172.0f;   // well above the 1950 floor
+  in.now_ms = kStart + 5000;
+  in.flow_last_update_ms = kStart + 4900;
+  in.pump_flow_last_update_ms = kStart + 4800;
+  in.pump_on_since_ms = kStart;
+
+  PumpOnResult r = decide_pump_on(in, kDefaultPumpOnThresholds);
+  TEST_ASSERT(std::isnan(r.demand_gpm),
+              "The subtraction declines while the estimate is ramping");
+  TEST_ASSERT(std::string(r.method) != "deterministic_pump_on_subtraction",
+              "...so the spin-up is not published as a draw");
+
+  // Past the window the tier decides again, and a real draw is measured.
+  in.now_ms = kStart + 30000;
+  in.flow_last_update_ms = kStart + 29900;
+  in.pump_flow_last_update_ms = kStart + 29800;
+  in.flow = 3.0f;
+  in.pump_flow = 1.30f;
+  r = decide_pump_on(in, kDefaultPumpOnThresholds);
+  TEST_ASSERT(r.demand && std::string(r.method) ==
+                              "deterministic_pump_on_subtraction",
+              "A real draw after the settle window is still detected");
+}
+
 int main() {
   std::cout << "==========================================================="
             << std::endl;
@@ -789,6 +843,7 @@ int main() {
   test_pump_on_tier_ordering();
   test_loop_flow_from_before_the_pump_start_is_not_subtracted();
   test_flow_latch_is_disarmed_after_a_shutdown();
+  test_the_loop_estimate_must_settle_before_it_is_differenced();
 
   std::cout << "\n==========================================================="
             << std::endl;

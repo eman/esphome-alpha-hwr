@@ -437,6 +437,7 @@ When the pump is running the household flow meter sees recirculation flow in add
    | Both readings current | 30 s pump / 60 s meter | The channels do not report alike: the pump every 10 s, the meter on change at a median 28 s. Gaps in the pump channel beyond 20 s are 1 % of gaps but **14 % of pump running time** |
    | Minimum pump speed | `pump_on_demand_min_speed_rpm`, 1950 | The pump *estimates* loop flow rather than metering it; below ~2000 RPM the estimate reads low and the difference goes spuriously positive with the tap shut (+0.45 GPM measured at 1650) |
    | Loop reading postdates the pump start | — | Fresh-by-age is not enough at a startup: the two channels do not begin reporting together |
+   | Loop estimate has settled | `pump_on_demand_settle_seconds`, 10 | The pump can report *promptly* and still be wrong: the impeller is accelerating and the estimate reads low |
 
    That fourth guard is the newest and the least obvious. At a pump start the meter reports the loop **before** the pump reports its own flow — measured at 13 s on the Python side — so for those seconds the difference is taken against a **stale zero from before the motor started**, comfortably inside the 30 s staleness bound and past the speed floor. `1.43 − 0.00` published as `demand_level` 0.57 at confidence **0.90**, the top of this tier's range. Over 30 days of Python's live output, 42 % of all subtraction firings fell within 10 s of a pump-on edge, against 8.8 % of pump-on cells overall. `reading_predates_pump_start` compares *ages* rather than absolute stamps so it wraps correctly at the `millis()` rollover, and it abstains when no pump start has been observed. It is a regime test, **not** a suppression window: nothing is blocked for a fixed time and the tier resumes on the pump's very next reading. The fixed window that used to sit here (`PUMP_STARTUP_TRANSIENT_SUPPRESSION_MS` with `pump_on_started_ms_`) was retired with the vote tier it gated and is deliberately not reinstated in that shape.
 
@@ -480,6 +481,7 @@ All thresholds are exposed as YAML config keys with defaults matching the Python
 | `dhw_in_use_min_seconds` | 70 | s | How long the heater's DHW flag must hold continuously before it may declare a pump-on draw alone |
 | `flow_latch_seconds` | 30 | s | Falling-edge hold-off duration |
 | `latch_pump_off_suppression_seconds` | 30 | s | Disarms the latch for this long after a pump-off edge, so it cannot be armed by the pump's own collapsing loop flow |
+| `pump_on_demand_settle_seconds` | 10 | s | The subtraction declines this long after a pump start, while the pump's own loop-flow estimate is still ramping |
 | `session_gap_tolerance_seconds` | 60 | s | Max gap before ending a session |
 
 ### 11.8 Development Rules for `dhw_demand`
