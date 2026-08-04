@@ -109,6 +109,84 @@ inline bool reading_is_fresh(uint32_t last_update_ms, uint32_t now_ms,
   return (now_ms - last_update_ms) <= max_stale_ms;
 }
 
+// Was this reading taken before the pump run it is being used to describe?
+//
+// reading_is_fresh bounds a reading's *age*, and age is the wrong question at a
+// pump start, because the two flow channels do not begin reporting together.
+// Measured on the Python side at a real start, with no tap open for another
+// 2 m 16 s:
+//
+//     16:07:24  meter 0.000  pump_flow 0.000  speed 0     pump off
+//     16:07:31  meter 1.429                   speed 2397  meter sees the loop
+//     16:07:44                pump_flow 1.397 speed 2404  pump reports, 13 s on
+//
+// For those 13 s the difference is taken against a stale zero from *before the
+// motor started* — well inside the 30 s staleness bound, and past the speed
+// floor. 1.43 − 0.00 publishes as demand_level 0.57 at confidence 0.90, the top
+// of this tier's range, which is the worst place to put a false positive. Over
+// 30 days of Python's live output, 42 % of all pump-on subtraction firings fell
+// within 10 s of a pump-on edge, against 8.8 % of pump-on cells overall.
+//
+// This is a regime test, not a suppression window: nothing is blocked for a
+// fixed time and the tier resumes on the pump's very next reading. The fixed
+// window that used to live here (PUMP_STARTUP_TRANSIENT_SUPPRESSION_MS, with
+// pump_on_started_ms_) was retired with the vote tier it gated, and it is
+// deliberately not reinstated in that shape.
+//
+// Ages are compared rather than absolute stamps so this wraps correctly across
+// the ~49-day millis() rollover, the same as reading_is_fresh: the older
+// reading has the larger age.
+//
+// pump_on_since_ms == 0 means no pump start has been observed — booted with the
+// pump already running, say — so there is no boundary to test and this abstains,
+// leaving the staleness bound in charge. Mirrors Python's
+// _pump_flow_predates_startup returning False when the window holds no
+// transition.
+inline bool reading_predates_pump_start(uint32_t last_update_ms,
+                                        uint32_t pump_on_since_ms,
+                                        uint32_t now_ms) {
+  if (last_update_ms == 0)
+    return true;  // never reported: it cannot postdate anything
+  if (pump_on_since_ms == 0)
+    return false;
+  return (uint32_t) (now_ms - last_update_ms) >
+         (uint32_t) (now_ms - pump_on_since_ms);
+}
+
+// Is the falling-edge flow latch disarmed because the pump just stopped?
+//
+// The latch exists for the gaps between meter reports *during a draw*. A pump
+// shutdown presents the same shape for a different reason: loop flow runs a
+// median 1.45 GPM and collapses through the flow threshold within seconds of
+// the motor parking, so for flow_latch_seconds afterwards the latch finds the
+// pump's own flow and holds demand alive on it — while the thermal vote fires
+// because the pump has been returning cooled loop water to the tank bottom.
+// Both votes are pump artifacts, and one rescues the other.
+//
+// Because the flow vote outranks thermal and charge on confidence, a *published*
+// thermal or charge verdict means flow was below threshold at that instant and
+// above it within the latch window. Measured on the Python side over 30 days,
+// 71 % of thermal and 62 % of charge firings fell within 30 s of a pump-off
+// edge, against 0.38 % of pump-off cells overall. Suppressing the latch for
+// 30 s removed 93 false positives at a cost of 1 true positive (precision
+// 0.768 → 0.810, recall flat at 0.993).
+//
+// The window is matched to flow_latch_seconds so the latch cannot reach past it
+// into a shutdown reading. A real draw puts the meter above threshold on its own
+// and never consults the latch, which is why this costs almost no recall:
+// controlled runs of a draw spanning a shutdown, and of a draw starting 41 s
+// after one, are detected identically with it on and off.
+//
+// window_ms == 0 disables it; pump_off_since_ms == 0 means no shutdown has been
+// observed yet.
+inline bool latch_suppressed_after_shutdown(uint32_t pump_off_since_ms,
+                                            uint32_t now_ms,
+                                            uint32_t window_ms) {
+  if (window_ms == 0 || pump_off_since_ms == 0)
+    return false;
+  return (uint32_t) (now_ms - pump_off_since_ms) <= window_ms;
+}
+
 // Household demand while the pump runs, in GPM, or NaN.
 //
 // The meter reads everything leaving the mains; the pump reports its own
@@ -217,6 +295,10 @@ struct PumpOnInputs {
   uint32_t now_ms{0};
   uint32_t flow_last_update_ms{0};
   uint32_t pump_flow_last_update_ms{0};
+
+  // When the current pump run started, for reading_predates_pump_start. 0 means
+  // no start has been observed, which makes that test abstain.
+  uint32_t pump_on_since_ms{0};
 };
 
 // One pump-on decision. `demand_gpm` is the computed household draw where the
@@ -261,12 +343,20 @@ inline PumpOnResult decide_pump_on(const PumpOnInputs &in,
                                    const PumpOnThresholds &t) {
   PumpOnResult r;
 
+  // The loop-flow reading must be both recent enough *and* from this pump run.
+  // Fresh-by-age is not sufficient at a startup: the meter reports the loop
+  // seconds before the pump does, so the difference would be taken against a
+  // pre-startup zero. See reading_predates_pump_start.
+  bool pump_flow_usable =
+      reading_is_fresh(in.pump_flow_last_update_ms, in.now_ms,
+                       t.pump_flow_max_stale_ms) &&
+      !reading_predates_pump_start(in.pump_flow_last_update_ms,
+                                   in.pump_on_since_ms, in.now_ms);
+
   r.demand_gpm = pump_on_demand_flow(
       in.flow, in.pump_flow, in.motor_speed,
       reading_is_fresh(in.flow_last_update_ms, in.now_ms, t.flow_max_stale_ms),
-      reading_is_fresh(in.pump_flow_last_update_ms, in.now_ms,
-                       t.pump_flow_max_stale_ms),
-      t.min_speed_rpm);
+      pump_flow_usable, t.min_speed_rpm);
 
   if (pump_on_continuation_is_active(in.pre_pump_on_flow, in.flow, t.flow)) {
     r.demand = true;

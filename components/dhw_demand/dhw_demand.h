@@ -64,6 +64,9 @@ class DhwDemandComponent : public PollingComponent {
   void set_flow_max_stale_seconds(int v) { flow_max_stale_seconds_ = v; }
   void set_dhw_in_use_min_seconds(int v) { dhw_in_use_min_seconds_ = v; }
   void set_flow_latch_seconds(int v) { flow_latch_seconds_ = v; }
+  void set_latch_pump_off_suppression_seconds(int v) {
+    latch_pump_off_suppression_seconds_ = v;
+  }
   void set_demand_release_seconds(int v) { demand_release_seconds_ = v; }
   void set_session_gap_tolerance_seconds(int v) {
     session_gap_tolerance_seconds_ = v;
@@ -133,6 +136,11 @@ class DhwDemandComponent : public PollingComponent {
   // may declare a pump-on draw on its own. 0 means "high right now is enough".
   int dhw_in_use_min_seconds_{70};              // s
   int flow_latch_seconds_{30};                 // s
+  // Seconds after a confirmed on→off edge during which the flow latch above is
+  // disarmed. Matched to flow_latch_seconds_ so the latch cannot reach past the
+  // window into a shutdown reading; 0 disables. Mirrors Python's
+  // latch_pump_off_suppression_seconds.
+  int latch_pump_off_suppression_seconds_{30};  // s
   int session_gap_tolerance_seconds_{60};      // s
   int demand_release_seconds_{30};             // s
 
@@ -178,6 +186,19 @@ class DhwDemandComponent : public PollingComponent {
   bool prev_pre_pump_demand_eligible_{false};
   float prev_flow_{NAN};           // Flow from the *previous* tick
   float pre_pump_on_flow_{NAN};    // Flow captured from the last confirmed pump-off tick
+
+  // ── Transition timestamps ─────────────────────────────────────────────────
+  // Both edges matter, and for symmetric reasons: a reading taken on one side
+  // of a transition does not describe the regime on the other side, whichever
+  // way the pump went. 0 means "that edge has not been observed yet", which
+  // both consumers treat as "abstain".
+  //
+  // These replace the `pump_on_started_ms_` that was deleted with the vote
+  // tier. Deliberately not the same thing: that stamp fed a fixed suppression
+  // window, these two mark regime boundaries. See reading_predates_pump_start
+  // and latch_suppressed_after_shutdown in dhw_demand_logic.h.
+  uint32_t pump_on_since_ms_{0};   // Last confirmed off→on edge
+  uint32_t pump_off_since_ms_{0};  // Last confirmed on→off edge
 
   // ── Tick timing ───────────────────────────────────────────────────────────
   // (per-sensor timestamps are used for derivative dt; see prev_*_ms_ above)

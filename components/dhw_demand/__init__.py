@@ -46,6 +46,7 @@ CONF_PUMP_ON_DEMAND_MAX_STALE_SECONDS = "pump_on_demand_max_stale_seconds"
 CONF_FLOW_MAX_STALE_SECONDS = "flow_max_stale_seconds"
 CONF_DHW_IN_USE_MIN_SECONDS = "dhw_in_use_min_seconds"
 CONF_FLOW_LATCH_SECONDS = "flow_latch_seconds"
+CONF_LATCH_PUMP_OFF_SUPPRESSION_SECONDS = "latch_pump_off_suppression_seconds"
 CONF_SESSION_GAP_TOLERANCE_SECONDS = "session_gap_tolerance_seconds"
 CONF_DEMAND_RELEASE_SECONDS = "demand_release_seconds"
 
@@ -211,6 +212,13 @@ CONFIG_SCHEMA = (
                 cv.int_range(min=0, max=3600),
             cv.Optional(CONF_FLOW_LATCH_SECONDS, default=30):
                 cv.positive_int,
+            # Disarms the latch above for this long after a pump-off edge, so
+            # the latch cannot be armed by the pump's own collapsing loop flow.
+            # Defaults to the latch's own reach: a shorter window would leave
+            # readings the latch can still see, a longer one buys nothing.
+            # 0 disables.
+            cv.Optional(CONF_LATCH_PUMP_OFF_SUPPRESSION_SECONDS, default=30):
+                cv.positive_int,
             cv.Optional(CONF_SESSION_GAP_TOLERANCE_SECONDS, default=60):
                 cv.positive_int,
             cv.Optional(CONF_DEMAND_RELEASE_SECONDS, default=30):
@@ -290,6 +298,8 @@ async def to_code(config):
         config[CONF_DHW_IN_USE_MIN_SECONDS]))
     cg.add(var.set_flow_latch_seconds(
         config[CONF_FLOW_LATCH_SECONDS]))
+    cg.add(var.set_latch_pump_off_suppression_seconds(
+        config[CONF_LATCH_PUMP_OFF_SUPPRESSION_SECONDS]))
     cg.add(var.set_session_gap_tolerance_seconds(
         config[CONF_SESSION_GAP_TOLERANCE_SECONDS]))
     cg.add(var.set_demand_release_seconds(

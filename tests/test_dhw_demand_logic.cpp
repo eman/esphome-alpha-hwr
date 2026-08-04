@@ -22,7 +22,9 @@ using esphome::dhw_demand::pump_on_demand_flow;
 using esphome::dhw_demand::PumpOnInputs;
 using esphome::dhw_demand::PumpOnResult;
 using esphome::dhw_demand::PumpOnThresholds;
+using esphome::dhw_demand::latch_suppressed_after_shutdown;
 using esphome::dhw_demand::reading_is_fresh;
+using esphome::dhw_demand::reading_predates_pump_start;
 using esphome::dhw_demand::SustainedHigh;
 using esphome::dhw_demand::SessionTracker;
 
@@ -651,6 +653,120 @@ void test_pump_on_continuation_predicate() {
               "The comparison is strictly greater on both sides");
 }
 
+void test_loop_flow_from_before_the_pump_start_is_not_subtracted() {
+  std::cout << "\n=== Testing Subtraction Across A Pump Start ==="
+            << std::endl;
+
+  // The trace this exists for, from the Python side's X-AFTER bench run. No
+  // tap was opened for another 2 m 16 s:
+  //
+  //   t=0 ms       pump off, both channels report 0.000
+  //   t=7000 ms    meter reports 1.429 (loop flow), motor already at 2397 rpm
+  //   t=20000 ms   the pump finally reports its own 1.397
+  //
+  // Between 7 s and 20 s the loop reading is a pre-startup zero that is still
+  // "fresh" by age, and 1.429 - 0.000 published as demand_level 0.57 at
+  // confidence 0.90.
+  const uint32_t kPumpOnSince = 5000;
+  const uint32_t kStaleZero = 0 + 1;  // stamped while the pump was still off
+  const uint32_t kRealReading = 20000;
+
+  TEST_ASSERT(reading_predates_pump_start(kStaleZero, kPumpOnSince, 12000),
+              "A loop reading stamped before the pump start predates it");
+  TEST_ASSERT(!reading_predates_pump_start(kRealReading, kPumpOnSince, 21000),
+              "A loop reading stamped after the pump start does not");
+
+  // Age, which is what the staleness bound tests, cannot tell these apart:
+  // both are well inside the 30 s window.
+  TEST_ASSERT(reading_is_fresh(kStaleZero, 12000,
+                               kDefaultPumpOnThresholds.pump_flow_max_stale_ms),
+              "...and the staleness bound alone would accept the stale zero");
+
+  // Never reported at all cannot postdate anything.
+  TEST_ASSERT(reading_predates_pump_start(0, kPumpOnSince, 12000),
+              "A channel that has never reported predates the pump start");
+
+  // No observed start — booted with the pump already running — means there is
+  // no boundary to test, so this abstains and the staleness bound decides.
+  TEST_ASSERT(!reading_predates_pump_start(kStaleZero, 0, 12000),
+              "With no observed pump start the test abstains");
+
+  // Rollover: the stamps straddle the uint32_t wrap. The reading is 1 s before
+  // `now`, the pump start 3 s before it, so the reading postdates the start
+  // even though its absolute stamp is numerically larger.
+  const uint32_t kNow = 2000;                  // 2 s past the wrap
+  const uint32_t kBeforeWrap = 0xFFFFFFFFu - 999;   // 3 s before `now`
+  const uint32_t kAfterWrap = 1000;                 // 1 s before `now`
+  TEST_ASSERT(!reading_predates_pump_start(kAfterWrap, kBeforeWrap, kNow),
+              "Across the millis() rollover a later reading still wins");
+  TEST_ASSERT(reading_predates_pump_start(kBeforeWrap, kAfterWrap, kNow),
+              "Across the millis() rollover an earlier reading still loses");
+
+  // And the whole tier, through decide_pump_on: the startup transient must not
+  // reach the wire.
+  PumpOnInputs in;
+  in.flow = 1.429f;
+  in.pump_flow = 0.0f;
+  in.motor_speed = 2397.0f;
+  in.now_ms = 12000;
+  in.flow_last_update_ms = 11000;
+  in.pump_flow_last_update_ms = kStaleZero;
+  in.pump_on_since_ms = kPumpOnSince;
+
+  PumpOnResult r = decide_pump_on(in, kDefaultPumpOnThresholds);
+  TEST_ASSERT(std::isnan(r.demand_gpm),
+              "The subtraction declines across its own pump start");
+  TEST_ASSERT(std::string(r.method) != "deterministic_pump_on_subtraction",
+              "...so no startup transient is published as a draw");
+
+  // The instant the pump reports, the tier is deciding again — this is a
+  // regime test, not a fixed window.
+  in.now_ms = 21000;
+  in.flow_last_update_ms = 20500;
+  in.pump_flow_last_update_ms = kRealReading;
+  in.pump_flow = 1.397f;
+  r = decide_pump_on(in, kDefaultPumpOnThresholds);
+  TEST_ASSERT(!std::isnan(r.demand_gpm),
+              "One real loop reading re-enables the subtraction immediately");
+
+  // Recall guard: a genuine draw on top of the loop is still measured.
+  in.flow = 3.0f;
+  r = decide_pump_on(in, kDefaultPumpOnThresholds);
+  TEST_ASSERT(r.demand && std::string(r.method) ==
+                              "deterministic_pump_on_subtraction",
+              "A real draw during the pump run is still detected");
+}
+
+void test_flow_latch_is_disarmed_after_a_shutdown() {
+  std::cout << "\n=== Testing Latch Suppression After A Shutdown ==="
+            << std::endl;
+
+  const uint32_t kWindow = 30000;  // matches flow_latch_seconds default
+  const uint32_t kPumpOff = 100000;
+
+  TEST_ASSERT(latch_suppressed_after_shutdown(kPumpOff, kPumpOff + 1, kWindow),
+              "The latch is disarmed immediately after the pump stops");
+  TEST_ASSERT(latch_suppressed_after_shutdown(kPumpOff, kPumpOff + 30000,
+                                              kWindow),
+              "...through the whole window, inclusive");
+  TEST_ASSERT(!latch_suppressed_after_shutdown(kPumpOff, kPumpOff + 30001,
+                                               kWindow),
+              "...and armed again once the window passes");
+
+  // Off by configuration.
+  TEST_ASSERT(!latch_suppressed_after_shutdown(kPumpOff, kPumpOff + 1, 0),
+              "A zero window disables the suppression");
+
+  // No shutdown observed yet.
+  TEST_ASSERT(!latch_suppressed_after_shutdown(0, 50000, kWindow),
+              "With no observed shutdown the latch is left alone");
+
+  // Rollover: the pump stopped 1 s before the wrap, `now` is 2 s after it.
+  const uint32_t kOffBeforeWrap = 0xFFFFFFFFu - 999;
+  TEST_ASSERT(latch_suppressed_after_shutdown(kOffBeforeWrap, 2000, kWindow),
+              "The window survives the millis() rollover");
+}
+
 int main() {
   std::cout << "==========================================================="
             << std::endl;
@@ -671,6 +787,8 @@ int main() {
   test_dhw_in_use_sustain_resets_on_break();
   test_dhw_in_use_sustain_never_arms_without_the_sensor();
   test_pump_on_tier_ordering();
+  test_loop_flow_from_before_the_pump_start_is_not_subtracted();
+  test_flow_latch_is_disarmed_after_a_shutdown();
 
   std::cout << "\n==========================================================="
             << std::endl;

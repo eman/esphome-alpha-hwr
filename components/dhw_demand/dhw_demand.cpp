@@ -105,6 +105,14 @@ float DhwDemandComponent::compute_deriv_(float current, float &prev,
 }
 
 bool DhwDemandComponent::flow_latch_active_() {
+  // Disarmed for a window after a shutdown: inside it, any reading the scan
+  // below could find is the pump's own collapsing loop flow. See
+  // latch_suppressed_after_shutdown in dhw_demand_logic.h for the measurement.
+  if (latch_suppressed_after_shutdown(
+          pump_off_since_ms_, millis(),
+          (uint32_t) latch_pump_off_suppression_seconds_ * 1000))
+    return false;
+
   // Derive sample count from the actual update interval rather than
   // hardcoding a 10s assumption.
   int interval_s = std::max(1, static_cast<int>(get_update_interval() / 1000));
@@ -361,6 +369,24 @@ void DhwDemandComponent::update() {
     pre_pump_on_flow_ = NAN;  // Clear stale transition state
   }
 
+  // Stamp both regime boundaries. Only ever from a *known* pump state: a
+  // boot default or a BLE-gap forward-fill is a guess, and a guessed edge
+  // would hand reading_predates_pump_start and latch_suppressed_after_shutdown
+  // a boundary that never happened. Leaving the stamp at 0 makes both abstain,
+  // which is the safe direction — the staleness bound and the latch keep
+  // behaving exactly as they did before.
+  if (prev_pump_on_ && pump_confirmed_off) {
+    pump_off_since_ms_ = now;
+    ESP_LOGD(TAG, "Pump off edge at %u ms; flow latch disarmed for %d s", now,
+             latch_pump_off_suppression_seconds_);
+  }
+  if (!prev_pump_on_ && pump_on && pump_state_known) {
+    pump_on_since_ms_ = now;
+    ESP_LOGD(TAG, "Pump on edge at %u ms; loop-flow readings before it are "
+                  "not subtractable",
+             now);
+  }
+
   // Only capture pre_pump_on_flow_ when the PREVIOUS tick was confirmed off.
   // This mirrors Python's "not np.isnan(spd) and spd < 10" check which
   // requires a pump-off reading (real or forward-filled from known-OFF) to
@@ -421,6 +447,7 @@ void DhwDemandComponent::update() {
     in.now_ms = now;
     in.flow_last_update_ms = flow_last_update_ms_;
     in.pump_flow_last_update_ms = pump_flow_last_update_ms_;
+    in.pump_on_since_ms = pump_on_since_ms_;
     in.dhw_in_use_sustained = dhw_in_use_sustained;
 
     PumpOnResult result = decide_pump_on(in, pump_on_thresholds_());

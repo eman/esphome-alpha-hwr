@@ -2,6 +2,44 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- **The pump-on subtraction no longer differences across its own pump start.**
+  The two flow channels do not begin reporting together: at a start the meter
+  publishes loop flow before the pump publishes its own, measured at 13 s. For
+  those seconds `flow − pump_flow` was taken against a **stale zero from before
+  the motor started** — inside the 30 s staleness bound and past the speed
+  floor — and published `demand_level` 0.57 at confidence **0.90**, the top of
+  the tier's range. Measured on the Python detector over 30 days, 42 % of all
+  subtraction firings fell within 10 s of a pump-on edge, against 8.8 % of
+  pump-on cells overall; scored against its bench corpus the fix removed 3 of 6
+  false positives with **no true positive lost** (precision 0.903 → 0.949).
+  `reading_predates_pump_start` is a regime test, not a suppression window:
+  nothing is blocked for a fixed time and the tier resumes on the pump's very
+  next reading.
+
+- **The falling-edge flow latch is disarmed for 30 s after a pump-off edge**
+  (`latch_pump_off_suppression_seconds`, new, matched to `flow_latch_seconds`).
+  The latch exists for gaps between meter reports during a draw; a shutdown
+  presents the same shape because loop flow runs a median 1.45 GPM and
+  collapses through the threshold within seconds of the motor parking. Since
+  the flow signal outranks thermal and charge on confidence, a *published*
+  thermal or charge verdict means flow was below threshold now and above it
+  within the latch window — exactly what a shutdown supplies, while the thermal
+  signal fires because the pump has been returning cooled loop water to the
+  tank. Measured on the Python detector over 30 days, 71 % of thermal and 62 %
+  of charge firings fell within 30 s of a pump-off edge against 0.38 % of
+  pump-off cells; over a production week the fix removed **93 false positives
+  for 1 true positive** (precision 0.768 → 0.810, recall flat at 0.993). A real
+  draw puts the meter above threshold on its own and never consults the latch,
+  which is why it costs almost no recall — controlled runs of a draw spanning a
+  shutdown, and of a draw starting 41 s after one, are detected identically
+  with it on and off. Set to `0` for the previous behaviour.
+
+  Both defects were found and fixed on the Python detector first
+  (`dhw-sensor-apps`) and are ported here to keep the two implementations in
+  parity; neither had an equivalent guard on this side.
+
 ### Changed
 
 - **BREAKING — `droplet_max_stale_seconds` is now `flow_max_stale_seconds`** —
