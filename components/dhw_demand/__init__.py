@@ -216,9 +216,15 @@ CONFIG_SCHEMA = (
             # the latch cannot be armed by the pump's own collapsing loop flow.
             # Defaults to the latch's own reach: a shorter window would leave
             # readings the latch can still see, a longer one buys nothing.
-            # 0 disables.
+            #
+            # Bounded for the same uint32_t wrap reason as the staleness keys.
+            # This one is multiplied by 1000 into a uint32_t millisecond window
+            # at the call site, so an unbounded value wraps and yields a
+            # nonsense window rather than a long one — `cv.positive_int` would
+            # accept 999999999 and hand the component 3 567 586 328 ms.
+            # 0 is legal and meaningful: it restores the previous behaviour.
             cv.Optional(CONF_LATCH_PUMP_OFF_SUPPRESSION_SECONDS, default=30):
-                cv.positive_int,
+                cv.int_range(min=0, max=3600),
             cv.Optional(CONF_SESSION_GAP_TOLERANCE_SECONDS, default=60):
                 cv.positive_int,
             cv.Optional(CONF_DEMAND_RELEASE_SECONDS, default=30):
