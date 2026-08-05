@@ -156,6 +156,18 @@ dhw_demand:
   # dhw_in_use is wired. Set to 0 to accept the bare flag (bench/debug only).
   dhw_in_use_min_seconds: 70
   flow_latch_seconds: 30
+  # Disarms the latch above for this long after the pump stops. Loop flow
+  # collapses through the flow threshold within seconds of the motor parking,
+  # so without this the latch is armed by the pump's own flow and holds a
+  # thermal/charge verdict alive on it. Matched to flow_latch_seconds so no
+  # shutdown reading can arm it; 0 disables.
+  latch_pump_off_suppression_seconds: 30
+  # How long after a pump start the subtraction declines. The pump's own
+  # loop-flow estimate is still spinning up and reads low against a loop the
+  # meter already sees moving, so the difference goes spuriously positive.
+  # Measured across 296 starts: 0-10 s is p90 0.820 GPM with 26.6 % above
+  # threshold, against a flat 6-9 % from 10 s out. 0 disables.
+  pump_on_demand_settle_seconds: 10
   session_gap_tolerance_seconds: 60
   # How long demand stays latched after the last positive tick. Stops an input
   # dithering around its threshold from chattering the demand binary sensor.
