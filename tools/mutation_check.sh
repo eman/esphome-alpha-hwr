@@ -39,6 +39,7 @@ MUTATIONS=(
 "frame-length-guard|components/alpha_hwr/frame_parser.cpp|if (len < expected_total) {|if (false) {"
 "schedule-day-bound|components/alpha_hwr/schedule_codec.cpp|if (v[1] > 6) return fail|if (v[1] > 99) return fail"
 "ignore-unrelated-gate|components/alpha_hwr/response_match.h|return is_class3_or_7(queued_class) && !is_class3_or_7(incoming_class);|return false;"
+"control-enabled-from-opmode|components/alpha_hwr/control_service.cpp|  // AUTO (0) or USER_DEFINED (4) = enabled, STOP (1) = disabled\n  pump_enabled_ = (operation_mode != static_cast<uint8_t>(OperationMode::STOP));|  // AUTO (0) or USER_DEFINED (4) = enabled, STOP (1) = disabled\n  pump_enabled_ = true;"
 )
 
 if [[ "${1:-}" == "--list" ]]; then
@@ -53,13 +54,46 @@ echo "=========================================="
 echo "Asserting the suite FAILS when production code is broken."
 echo ""
 
+# Restore every file any mutation touches. Derived from MUTATIONS rather than
+# listed separately: a hardcoded list silently goes stale the moment a mutation
+# is added for a new file, which leaves that file mutated in the working tree
+# after the run. (That happened -- control_service.cpp stayed broken and the
+# next `make test` failed for no visible reason.)
+mutated_files() {
+  local e
+  for e in "${MUTATIONS[@]}"; do
+    echo "${e#*|}" | cut -d'|' -f1
+  done | sort -u
+}
+
+# Returns non-zero if any file could not be restored. A silently-swallowed
+# failure here (a locked index, say) would let the run continue -- and even exit
+# 0 -- with a production source still mutated, which is the exact state this
+# script exists to avoid leaving behind.
+RESTORE_FAILED=0
 restore_all() {
-  cd "$PROJECT_DIR" && git checkout -- \
-    components/alpha_hwr/codec.cpp \
-    components/alpha_hwr/frame_builder.cpp \
-    components/alpha_hwr/response_match.h \
-    components/alpha_hwr/frame_parser.cpp \
-    components/alpha_hwr/schedule_codec.cpp 2>/dev/null || true
+  local f rc=0
+  cd "$PROJECT_DIR" || return 1
+  for f in $(mutated_files); do
+    # From HEAD, not the index: a mutation that got staged (git add -A while
+    # debugging, say) would otherwise be "restored" to the mutated version.
+    if ! git checkout HEAD -- "$f" 2>/dev/null; then
+      echo -e "${RED}✗ FAILED TO RESTORE $f -- it is still mutated.${NC}" >&2
+      echo "  Restore it by hand: git checkout HEAD -- $f" >&2
+      rc=1
+    fi
+  done
+  [ "$rc" -eq 0 ] || RESTORE_FAILED=1
+  return $rc
+}
+
+# Abort the run the moment a restore fails, rather than mutating further on top
+# of a source we could not put back.
+restore_or_die() {
+  if ! restore_all; then
+    echo -e "${RED}✗ Aborting: the working tree is left modified.${NC}" >&2
+    exit 3
+  fi
 }
 
 # Refuse to run against a dirty tree: this script edits tracked sources and
@@ -70,8 +104,10 @@ restore_all() {
 # `git checkout --` would destroy precisely the uncommitted edits the guard
 # exists to protect.
 cd "$PROJECT_DIR"
-if ! git diff --quiet -- components/alpha_hwr/; then
-  echo -e "${RED}✗ components/alpha_hwr has uncommitted changes.${NC}"
+# Compare against HEAD so a *staged* edit counts as dirty too -- restore_all
+# resets to HEAD and would discard it.
+if ! git diff HEAD --quiet -- $(mutated_files); then
+  echo -e "${RED}✗ A file this script mutates has uncommitted changes.${NC}"
   echo "  This script mutates tracked sources and reverts them with git checkout,"
   echo "  which would discard those changes. Commit or stash first."
   exit 2
@@ -113,7 +149,8 @@ for entry in "${MUTATIONS[@]}"; do
   APPLIED=$(SEARCH="$search" REPLACE="$replace" python3 - "$PROJECT_DIR/$file" <<'PY'
 import os, sys
 path = sys.argv[1]
-search, replace = os.environ["SEARCH"], os.environ["REPLACE"]
+search = os.environ["SEARCH"].replace("\\n", "\n")
+replace = os.environ["REPLACE"].replace("\\n", "\n")
 s = open(path).read()
 n = s.count(search)
 if n != 1:
@@ -128,7 +165,7 @@ PY
     echo "    The code this mutation targets moved or changed. Update the"
     echo "    mutation rather than deleting it -- the coverage it proves is real."
     SURVIVORS+=("$name (not applied)")
-    restore_all
+    restore_or_die
     continue
   fi
 
@@ -139,7 +176,7 @@ PY
     echo -e "${GREEN}✓ caught${NC}"
     CAUGHT=$((CAUGHT + 1))
   fi
-  restore_all
+  restore_or_die
 done
 
 cd "$TESTS_DIR" && make clean >/dev/null 2>&1 || true
@@ -159,4 +196,8 @@ if [[ ${#SURVIVORS[@]} -gt 0 ]]; then
   exit 1
 fi
 echo ""
+if [ "$RESTORE_FAILED" -ne 0 ]; then
+  echo -e "${RED}✗ A restore failed during the run; the tree may be modified.${NC}"
+  exit 3
+fi
 echo -e "${GREEN}✓ Every mutation was caught${NC}"

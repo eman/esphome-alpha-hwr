@@ -15,7 +15,7 @@ MOCK_HDRS = $(shell find mocks -name '*.h' 2>/dev/null)
 DEPS = $(COMPONENT_HDRS) $(MOCK_HDRS)
 
 # Test executables
-TESTS = test_protocol test_frame_parser test_read_chain_lifetime test_control_state test_dhw_demand_logic test_transport_matching test_transport_fsm test_schedule_service test_write_operations test_schedule_codec test_telemetry_units test_pump_schedule_ux test_publish_gate test_dhw_publish_gate
+TESTS = test_protocol test_frame_parser test_read_chain_lifetime test_control_service test_control_state test_dhw_demand_logic test_transport_matching test_transport_fsm test_schedule_service test_write_operations test_schedule_codec test_telemetry_units test_pump_schedule_ux test_publish_gate test_dhw_publish_gate
 
 # Default target
 all: $(TESTS)
@@ -28,6 +28,11 @@ test_protocol: test_protocol.cpp protocol.h $(PROTOCOL_SRCS) $(DEPS)
 
 test_frame_parser: test_frame_parser.cpp ../components/alpha_hwr/frame_parser.cpp ../components/alpha_hwr/frame_builder.cpp ../components/alpha_hwr/codec.cpp $(DEPS)
 	$(CXX) $(CXXFLAGS) test_frame_parser.cpp ../components/alpha_hwr/frame_parser.cpp ../components/alpha_hwr/frame_builder.cpp ../components/alpha_hwr/codec.cpp -o test_frame_parser $(LDFLAGS)
+
+CONTROL_SRCS = ../components/alpha_hwr/control_service.cpp ../components/alpha_hwr/transport.cpp ../components/alpha_hwr/session.cpp ../components/alpha_hwr/schedule_service.cpp ../components/alpha_hwr/schedule_codec.cpp ../components/alpha_hwr/frame_builder.cpp ../components/alpha_hwr/frame_parser.cpp ../components/alpha_hwr/codec.cpp
+
+test_control_service: test_control_service.cpp $(CONTROL_SRCS) $(DEPS)
+	$(CXX) $(CXXFLAGS) test_control_service.cpp $(CONTROL_SRCS) -o test_control_service $(LDFLAGS)
 
 test_control_state: test_control_state.cpp $(DEPS)
 	$(CXX) $(CXXFLAGS) test_control_state.cpp -o test_control_state $(LDFLAGS)
@@ -91,6 +96,11 @@ test: $(TESTS)
 	@echo "Running Control State Tests..."
 	@echo "=========================================="
 	@./test_control_state
+	@echo ""
+	@echo "=========================================="
+	@echo "Running ControlService State Tests..."
+	@echo "=========================================="
+	@./test_control_service
 	@echo ""
 	@echo "=========================================="
 	@echo "Running Pump/Schedule Reconciliation Tests..."
