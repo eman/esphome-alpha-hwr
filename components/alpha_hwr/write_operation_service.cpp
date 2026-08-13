@@ -248,6 +248,24 @@ void WriteOperationService::finish_(uint32_t seq, WriteStatus status, const std:
   bool was_front_running = (index == 0 && op.phase != Phase::QUEUED);
   op.phase = Phase::DONE;
 
+  // Roll back the optimistic run-state cache when the write never got a
+  // readback. note_enabled_commanded() sets pump_enabled_valid_ = true with no
+  // pending marker (unlike note_mode_commanded), so a TIMEOUT leaves the
+  // *commanded* state cached as authoritative. with_resolved_enabled_state()
+  // then short-circuits on it and the next unrelated setpoint write folds that
+  // unverified run flag into the fused 0x0601 frame -- stopping (or starting)
+  // the pump. Clearing it here restores the issue-#45 behaviour: read the pump
+  // back, and abort rather than guess.
+  //
+  // This belongs in finish_(), not confirm_enabled_'s failure branch: the
+  // dominant path is the watchdog (arm_watchdog_ -> finish_), which never runs
+  // the confirm handler at all. REJECTED is deliberately excluded -- it can only
+  // be reached via a successful readback, which already corrected the cache.
+  if (op.command == WriteCommand::SET_PUMP_ENABLED &&
+      (status == WriteStatus::TIMEOUT || status == WriteStatus::SUPERSEDED)) {
+    control_.pump_enabled_valid_ = false;
+  }
+
   WriteResult result;
   result.op_id = op.op_id;
   result.command = op.command;
@@ -1286,6 +1304,19 @@ void WriteOperationService::run_single_event_(uint32_t seq) {
     if (op == nullptr || op->phase == Phase::DONE) return;
 
     if (op->slot >= 0) {
+      // Bound the caller-supplied slot against what this pump actually has.
+      // ensure_overview_() just ran, so get_max_single_events() is the device's
+      // own count rather than the 35 fallback. Without this an out-of-range
+      // slot reaches the wire as SubID 900+idx and settles TIMEOUT instead of
+      // being rejected up front.
+      uint8_t max_events = schedule_service_.get_max_single_events();
+      if (op->slot >= static_cast<int16_t>(max_events)) {
+        finish_(seq, WriteStatus::REJECTED,
+                "single event slot " + std::to_string(op->slot) +
+                    " out of range (pump has " + std::to_string(max_events) +
+                    ")");
+        return;
+      }
       write_single_event_(seq);
       return;
     }
@@ -1415,17 +1446,25 @@ void WriteOperationService::run_refresh_single_events_(uint32_t seq) {
   if (op == nullptr || op->phase == Phase::DONE) return;
   op->phase = Phase::WRITING;
 
-  schedule_service_.read_single_events_async(
-    [this, seq](bool ok, const std::vector<SingleEvent> &events) {
-      Operation *op = find_(seq);
-      if (op == nullptr || op->phase == Phase::DONE) return;
-      if (!ok) {
-        finish_(seq, WriteStatus::TIMEOUT, "single event read failed");
-        return;
-      }
-      op->event_count = static_cast<int16_t>(events.size());
-      finish_(seq, WriteStatus::ACCEPTED, "");
-    });
+  // Warm the overview first, like every sibling operation. Without it
+  // get_max_single_events() falls back to 35, so on a pump with fewer slots the
+  // scan spends a 3 s timeout on each slot that does not exist -- ~90 s of
+  // monopolised BLE, and the all-or-nothing read then fails and caches nothing.
+  ensure_overview_(seq, [this, seq]() {
+    Operation *op = find_(seq);
+    if (op == nullptr || op->phase == Phase::DONE) return;
+    schedule_service_.read_single_events_async(
+      [this, seq](bool ok, const std::vector<SingleEvent> &events) {
+        Operation *op = find_(seq);
+        if (op == nullptr || op->phase == Phase::DONE) return;
+        if (!ok) {
+          finish_(seq, WriteStatus::TIMEOUT, "single event read failed");
+          return;
+        }
+        op->event_count = static_cast<int16_t>(events.size());
+        finish_(seq, WriteStatus::ACCEPTED, "");
+      });
+  });
 }
 
 // ---------------------------------------------------------------------------
