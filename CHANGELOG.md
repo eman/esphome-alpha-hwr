@@ -4,6 +4,109 @@
 
 ### Fixed
 
+- **Three sequential-read chains no longer leak their whole closure graph.**
+  `HistoryService::read_trends_async`, `EventLogService::read_entries_async` and
+  `ScheduleService::read_single_events_async` each drove their read through a
+  `shared_ptr<std::function>` that captured *itself*, so the refcount never
+  reached zero and the closure, its captured result vector and the caller's
+  completion callback were stranded on every invocation. The chains re-run on
+  every authenticated reconnect, and the single-event one also on every
+  `refresh_single_events` service call, so the loss was unbounded: roughly
+  1.25–1.45 KB per reconnect cycle on the ESP32-C3, or 150–260 KB/hour under a
+  flapping link, against ~150–250 KB of usable heap. Nulling the pointer in the
+  terminal branch is *not* sufficient — `Transport::reset()` clears the command
+  queue without invoking callbacks, so a chain abandoned by a disconnect never
+  reaches that branch. The fix holds a `weak_ptr` in the outer closure and lets
+  the transport command queue own the only strong reference. Bench-verified:
+  40 consecutive `refresh_single_events` calls move Min Free Heap 0 bytes.
+
+- **The Lovelace schedule card could not write to the device at all.** Every
+  service registered by `api_bridge` declares an `op_id` argument, and Home
+  Assistant registers ESPHome user-defined service arguments as required, so all
+  seven of the card's calls were rejected before reaching the pump — silently,
+  since nothing caught the rejected promise. The card also cleared its pending
+  edits before any confirmation, so the grid painted an edit as applied and then
+  reverted on the next sensor update. Separately, its single-event parser was
+  anchored in a way that could not match the ` (run)`/` (off)` suffix the
+  firmware appends, leaving the Quick Run list and today's overlay permanently
+  empty — which also made single-event deletion unreachable, since that action
+  is only offered on a rendered row. And a block dragged to the right edge
+  serialised as hour 24, which the API rejects, so "run until midnight" could
+  never be saved.
+
+- **A timed-out `pump_set_enabled` could stop a running pump on the next
+  unrelated setpoint write.** The commanded run state was cached as
+  authoritative with no pending marker, and nothing rolled it back on timeout,
+  so `with_resolved_enabled_state()` short-circuited on an unverified value and
+  the next setpoint write folded it into the fused control frame. Only one byte
+  of that frame differs, and no extra frame is sent, so nothing downstream
+  noticed. The cache is now invalidated when a run-state write settles TIMEOUT
+  or SUPERSEDED, restoring the issue-#45 behaviour of reading the pump back
+  rather than guessing.
+
+- **`upload_schedule` no longer reports success for an enable write the pump
+  never took.** The schedule-enabled flag lives in a part of the overview that
+  no layer readback carries, so the confirm step could not see it and the settle
+  event echoed the *request*. An upload whose enable leg was dropped settled
+  `accepted` with the weekly program still off. The flag is now read back and
+  the verdict accounts for it: a mismatch settles rejected (or partial when the
+  layers did land), and an unreadable state settles timeout. Relatedly,
+  `set_state_async` no longer writes the requested value into the cached
+  schedule state — it ran whether or not the write was acknowledged, so a retry
+  of a failed enable saw "already in the requested state", skipped the write and
+  still settled accepted, and the reported `schedule_hash` agreed with it.
+
+- **The demand detector no longer reads a frozen pump reading as a stopped
+  pump.** `alpha_hwr` keeps the last published value when the BLE link drops
+  rather than publishing NaN, so a motor speed of 0 RPM stayed a perfectly valid
+  reading indefinitely and the detector kept selecting its pump-off branch —
+  scoring the pump's own recirculation as household demand at full confidence.
+  Each motor channel is now bounded by its own reporting age (separately, since
+  speed outranks current in the pump-state decision), and a frozen channel
+  selects the pump-on branch instead of asserting a confirmed stop. The pump-on
+  branch has its own staleness bound, so it declines and reports
+  `pump_on_uncertain`, which is the safe answer.
+
+- **A continuation fragment beginning `0x24` or `0x27` no longer destroys the
+  frame being reassembled.** Those bytes are ordinary payload mid-frame, but the
+  transport treated any fragment starting with one as a new packet, discarding
+  the frame in flight and dispatching a runt. Measured against the reference
+  captures: 8 occurrences in 17,545 dispatches, roughly 0.02% frame loss, masked
+  because the runt then failed CRC. Reassembly now only restarts when not
+  mid-frame, with a one-second staleness guard so a truncated frame cannot wedge
+  it.
+
+- **`parse_frame` no longer underflows `payload_len`.** A Class 2/3 frame
+  clamped to seven bytes computed `len - 8` and wrapped it to `SIZE_MAX` while
+  still reporting the frame valid, and a frame declaring a total below the
+  protocol's eight-byte minimum was reported valid with no class byte. Both are
+  rejected now, and `tests/test_frame_parser.cpp` covers malformed input, which
+  nothing did before.
+
+- **The single-event slot search no longer guesses.** With a cold cache
+  `find_free_single_event_slot()` answered slot 0 — a real slot — rather than
+  its own "none available" result, so a caller that wrote to it could overwrite
+  a live event or an active vacation. It now returns -1 and the caller warms the
+  cache first. `refresh_single_events` also gained the overview precondition its
+  sibling operations already had; without it the scan assumed 35 slots and spent
+  a three-second timeout on each one a smaller pump does not have.
+
+- **Schedule read-back sensors are change-gated.** The five layer sensors and
+  the schedule hash were republished on every write settle and every reconnect,
+  costing six API frames per subscriber each time for values that rarely move
+  (issue #127). Bench-verified: three consecutive `refresh_schedule` calls now
+  produce zero republishes.
+
+### Changed
+
+- **`ScheduleService::read_entries()` and `clear_entry()` are removed.** The
+  synchronous read wrote through a caller-owned pointer from a callback that
+  fires seconds later, which is a use-after-scope for the stack vector the
+  documented recipe told users to pass. Its own default argument masked the
+  hazard by failing before any wire traffic, so only the explicit-layer form —
+  the one the recipe used — reached it. Use `read_schedule_entries_async()`,
+  which owns its vector, and route writes through the write-operation services.
+
 - **The pump-on subtraction no longer differences across its own pump start.**
   The two flow channels do not begin reporting together: at a start the meter
   publishes loop flow before the pump publishes its own, measured at 13 s. For
