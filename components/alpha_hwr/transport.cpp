@@ -365,8 +365,6 @@ bool Transport::try_dispatch_response(const uint8_t* data, size_t len) {
     // notification could be mistaken for the response to a queued Class 3
     // command (or vice versa).
     uint8_t queued_class = (cmd.packet.size() > 4) ? cmd.packet[4] : 0x00;
-    bool is_class3 = (data[4] == 0x03);
-    bool is_class7 = (data[4] == 0x07);
 
     // Class 3: command ACK ([03 00] = success/clean, [03 01 xx] = rejected/
     // descriptor-only -- see ControlService::enable_remote_mode()).
@@ -377,7 +375,8 @@ bool Transport::try_dispatch_response(const uint8_t* data, size_t len) {
     if (protocol::class3_or_7_wildcard_matches(
             queued_class, data[4],
             cmd.expect_obj_id == 0x0000 && cmd.expect_sub_id == 0x0000)) {
-      ESP_LOGV(TAG, "Class %d response matched (wildcard match by class byte)", is_class3 ? 3 : 7);
+      ESP_LOGV(TAG, "Class %d response matched (wildcard match by class byte)",
+               data[4] == protocol::CLASS_3_COMMAND_ACK ? 3 : 7);
       if (cmd.callback) {
         cmd.callback(true, data, len);
       }
