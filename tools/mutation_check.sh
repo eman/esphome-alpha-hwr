@@ -37,7 +37,7 @@ MUTATIONS=(
 "crc-byte-order|components/alpha_hwr/frame_builder.cpp|packet_out[9] = (crc >> 8) & 0xFF;|packet_out[9] = crc & 0xFF;"
 "class-match-equality|components/alpha_hwr/response_match.h|incoming_class == queued_class &&|true &&"
 "frame-length-guard|components/alpha_hwr/frame_parser.cpp|if (len < expected_total) {|if (false) {"
-"schedule-day-bound|components/alpha_hwr/schedule_codec.cpp|day < 0 \|\| day > 6|day < 0 || day > 99"
+"schedule-day-bound|components/alpha_hwr/schedule_codec.cpp|if (v[1] > 6) return fail|if (v[1] > 99) return fail"
 )
 
 if [[ "${1:-}" == "--list" ]]; then
