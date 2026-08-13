@@ -203,13 +203,32 @@ void Transport::on_notification(const uint8_t* data, size_t len) {
 
   // Check if this is the start of a new packet
   // Frame start bytes: 0x24 (response) or 0x27 (request/echo)
-  if (is_frame_start(data[0])) {
+  // A continuation fragment may legitimately begin with 0x24/0x27 -- those are
+  // ordinary payload bytes mid-frame. Treating such a fragment as a new packet
+  // discards the frame being reassembled and dispatches the fragment as a runt
+  // (observed 8 times in the reference captures: ~0.02% frame loss, masked only
+  // because the runt then fails CRC). So a frame start only begins a new packet
+  // when we are not mid-frame -- with a staleness guard so a truncated frame
+  // cannot wedge reassembly forever.
+  bool stale = reassembling_ &&
+               (millis() - reassembly_started_ms_) > REASSEMBLY_TIMEOUT_MS;
+  if (stale) {
+    ESP_LOGW(TAG, "Abandoning stale partial frame (%d/%d bytes after %" PRIu32 " ms)",
+             (int) reassembly_buffer_.size(), expected_packet_length_,
+             millis() - reassembly_started_ms_);
+    reassembling_ = false;
+    reassembly_buffer_.clear();
+    expected_packet_length_ = 0;
+  }
+
+  if (is_frame_start(data[0]) && !reassembling_) {
     // New packet starting
     ESP_LOGV(TAG, "New packet detected (frame start: 0x%02X)", data[0]);
-    
+
     reassembly_buffer_.clear();
     reassembly_buffer_.insert(reassembly_buffer_.end(), data, data + len);
     reassembling_ = true;
+    reassembly_started_ms_ = millis();
 
     // Calculate expected length
     if (reassembly_buffer_.size() >= 2) {
