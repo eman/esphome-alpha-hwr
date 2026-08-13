@@ -11,7 +11,9 @@ esphome:
 # Setup Instructions:
 # 1. Replace the MAC address below with your pump's BLE MAC address
 # 2. Update WiFi credentials (or copy secrets-example.yaml to secrets.yaml)
-# 3. Flash to your ESP32
+# 3. Replace the api encryption key and the ota password below — the values
+#    here are placeholders and are published in this repository
+# 4. Flash to your ESP32
 # ==============================================================================
 
 substitutions:
@@ -48,11 +50,15 @@ api:
   custom_services: true
   homeassistant_services: true
   encryption:
+    # ← CHANGE THIS. Generate your own with `esphome wizard` or
+    # https://esphome.io/components/api.html#configuration-variables — this
+    # placeholder is public, so leaving it exposes every pump write service
+    # to anything on your LAN.
     key: "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA="
 
 ota:
   - platform: esphome
-    password: "test-ota"
+    password: "test-ota"  # ← CHANGE THIS (guards OTA firmware upload)
 
 # Additional Sensors (optional)
 sensor:  

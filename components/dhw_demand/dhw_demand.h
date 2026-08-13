@@ -153,7 +153,9 @@ class DhwDemandComponent : public PollingComponent {
   int demand_release_seconds_{30};             // s
 
   // ── Circular buffer — household flow (30 samples × 10 s = 5 min) ─────────
-  float flow_buf_[FLOW_BUF_SIZE];
+  // Seeded to NAN in setup(); the in-class initialiser only guarantees a
+  // defined value if a future path reads before setup() runs.
+  float flow_buf_[FLOW_BUF_SIZE]{};
   int flow_buf_head_{0};
 
   // ── Previous-value registers (for derivative computation) ─────────────────
@@ -171,6 +173,17 @@ class DhwDemandComponent : public PollingComponent {
   // cadences that set the two bounds. 0 means "never reported".
   uint32_t flow_last_update_ms_{0};
   uint32_t pump_flow_last_update_ms_{0};
+  // Same provenance problem for the motor channel, which selects the whole
+  // pump-on/pump-off branch. alpha_hwr does not publish NaN when the BLE link
+  // drops, so the last value simply stops changing -- a frozen 0 RPM would read
+  // as a confirmed-off pump forever, and the pump's own recirculation flow then
+  // gets scored as household demand.
+  //
+  // Tracked per sensor rather than as one shared stamp: detect_pump_on_ prefers
+  // speed whenever it is non-NaN, so a shared stamp kept alive by a still-
+  // updating current reading would let a frozen 0 RPM outvote it.
+  uint32_t motor_speed_last_update_ms_{0};
+  uint32_t motor_current_last_update_ms_{0};
 
   // ── DHW in-use sustain guard ──────────────────────────────────────────────
   // Ticked in *both* pump branches: the run has to be free to start while the

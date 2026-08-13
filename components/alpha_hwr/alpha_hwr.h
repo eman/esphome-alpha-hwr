@@ -816,10 +816,6 @@ public:
                                    : ux::schedule_off_target());
   }
 
-  bool read_schedule_entries(std::vector<ScheduleEntry> *entries,
-                             int layer = -1) {
-    return schedule_service_.read_entries(entries, layer);
-  }
   bool read_schedule_entries_async(
       int layer, std::function<void(bool, const std::vector<ScheduleEntry> &)>
                      on_complete) {
@@ -1160,17 +1156,22 @@ public:
 #ifdef USE_TEXT_SENSOR
     // Per-layer read-back sensors: each layer's
     // compact JSON always fits HA's 255-char state cap.
+    // Gate every one of these: this runs on each write settle and again on each
+    // reconnect, and the card issues one write per edited entry, so an ungated
+    // republish costs 6 API frames per subscriber per settle for values that
+    // almost never move (issue #127 / AGENTS §4).
     for (uint8_t layer = 0; layer < 5; layer++) {
       if (this->schedule_layer_sensors_[layer] != nullptr) {
-        this->schedule_layer_sensors_[layer]->publish_state(
-            schedule_service_.layer_json(layer));
+        publish_text_sensor_if_changed(this->schedule_layer_sensors_[layer],
+                                       schedule_service_.layer_json(layer));
       }
     }
     if (!this->schedule_hash_text_sensor_)
       return;
     std::string hash = schedule_service_.current_hash();
-    this->schedule_hash_text_sensor_->publish_state(hash);
-    ESP_LOGD(TAG, "Published schedule hash %s", hash.c_str());
+    if (publish_text_sensor_if_changed(this->schedule_hash_text_sensor_, hash)) {
+      ESP_LOGD(TAG, "Published schedule hash %s", hash.c_str());
+    }
 #endif
   }
 

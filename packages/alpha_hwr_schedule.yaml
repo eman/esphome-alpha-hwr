@@ -130,11 +130,8 @@ select:
 # For advanced users who want to programmatically manage schedules,
 # you can use the following APIs:
 #
-# 1. Read schedule entries (sync):
-#    std::vector<esphome::alpha_hwr::ScheduleEntry> entries;
-#    bool result = id(pump).read_schedule_entries(&entries, 0);
-#
-# 2. Read schedule entries (async - recommended for Home Assistant UI):
+# 1. Read schedule entries (always async — the pump answers seconds later, so
+#    there is no safe synchronous form that fills a caller-owned vector):
 #    id(pump).read_schedule_entries_async(0, 
 #      [](bool success, const std::vector<esphome::alpha_hwr::ScheduleEntry>& entries) {
 #        // Handle response

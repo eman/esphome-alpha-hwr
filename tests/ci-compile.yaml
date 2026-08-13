@@ -1,0 +1,60 @@
+# Firmware compile check for CI.
+#
+# The example configs in the repo root pin `github://...@vX.Y.Z`, so compiling
+# them validates the last *release*, not the branch under test. This config
+# instead points `external_components` at the working tree and includes the
+# packages from disk, so a push that breaks codegen, a YAML lambda, or the C++
+# fails here rather than on someone's pump.
+#
+# Nothing device-specific: placeholder MAC and credentials, never flashed.
+
+esphome:
+  name: ci-compile
+  friendly_name: "CI Compile Check"
+  project:
+    name: "grundfos.alpha_hwr"
+    version: "ci"
+
+substitutions:
+  mac_address: "00:00:00:00:00:00"
+  # dhw_demand_detector.yaml expects these Home Assistant entity ids.
+  flow_entity: sensor.ci_flow_rate
+  tank_lower_temp_entity: sensor.ci_tank_lower_temperature
+  dhw_charge_entity: sensor.ci_dhw_charge
+
+# The working tree, not a published tag.
+external_components:
+  - source:
+      type: local
+      path: ../components
+    components: [alpha_hwr, dhw_demand]
+
+packages:
+  alpha_hwr: !include ../packages/alpha_hwr_pairing.yaml
+  alpha_hwr_controls: !include ../packages/alpha_hwr_controls.yaml
+  alpha_hwr_schedule_editor: !include ../packages/alpha_hwr_schedule_editor.yaml
+  dhw_demand: !include ../packages/dhw_demand_detector.yaml
+
+esp32:
+  board: esp32-c3-devkitm-1
+  variant: esp32c3
+  framework:
+    type: esp-idf
+
+wifi:
+  ssid: "ci-ssid"
+  password: "ci-password"
+
+# Required by the alpha_hwr write services + write_settled event (issue #92).
+api:
+  custom_services: true
+  homeassistant_services: true
+  encryption:
+    key: "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA="
+
+ota:
+  - platform: esphome
+    password: "ci-ota"
+
+logger:
+  level: INFO

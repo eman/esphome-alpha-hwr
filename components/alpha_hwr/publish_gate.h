@@ -63,5 +63,20 @@ optional<std::string> publish_option_if_changed(SelectT *entity, const std::stri
   return option;
 }
 
+/// Publish `value` to a `text_sensor` only when it would change the entity.
+/// Returns true when the publish happened.
+///
+/// text_sensor::publish_state() does not dedup either, so a component that
+/// republishes the same string on every reconnect or every write settle costs
+/// one API frame per subscriber for nothing. Same contract as the dhw_demand
+/// gate of the same name; no force_update equivalent exists on text_sensor.
+template<typename TextSensorT>
+bool publish_text_sensor_if_changed(TextSensorT *entity, const std::string &value) {
+  if (entity->has_state() && entity->get_raw_state() == value)
+    return false;
+  entity->publish_state(value);
+  return true;
+}
+
 }  // namespace alpha_hwr
 }  // namespace esphome

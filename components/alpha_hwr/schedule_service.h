@@ -126,17 +126,21 @@ struct SingleEvent {
  * // Enable schedule
  * id(pump).enable_schedule();
  *
- * // Read current schedule
- * std::vector<ScheduleEntry> entries = id(pump).read_schedule_entries();
- * for (const auto &entry : entries) {
- *   ESP_LOGI("schedule", "%s", entry.to_string().c_str());
- * }
+ * // Read current schedule. Always async: the response arrives from the BLE
+ * // transport seconds later, so a synchronous variant taking a caller-owned
+ * // vector would write into a stack frame that is already gone.
+ * id(pump).read_schedule_entries_async(0,
+ *   [](bool ok, const std::vector<ScheduleEntry> &entries) {
+ *     if (!ok) return;
+ *     for (const auto &entry : entries) {
+ *       ESP_LOGI("schedule", "%s", entry.to_string().c_str());
+ *     }
+ *   });
  *
- * // Write new schedule
- * std::vector<ScheduleEntry> new_schedule;
- * new_schedule.push_back(ScheduleEntry("Monday", 6, 0, 8, 0));
- * new_schedule.push_back(ScheduleEntry("Tuesday", 6, 0, 8, 0));
- * id(pump).write_schedule_entries(new_schedule, 0);  // Write to layer 0
+ * // Write new schedule. Writes go through the write-operation layer so they
+ * // serialize, confirm against a readback, and settle exactly one
+ * // alpha_hwr_write_settled event (issue #92).
+ * id(pump).submit_set_schedule_entry("Monday", 0, 6, 0, 8, 0, "my-op-id");
  * ```
  */
 class ScheduleService {
@@ -299,25 +303,6 @@ public:
   // Schedule Entry Operations
   // -------------------------------------------------------------------------
 
-  /**
-   * Read schedule entries from the pump.
-   *
-   * Retrieves the current weekly schedule from one or all layers.
-   * Each layer can contain up to 7 entries (one per day of the week).
-   *
-   * @param entries Output vector - populated with schedule entries
-   * @param layer Optional specific layer (0-4) to read. If -1, reads all
-   * layers.
-   * @return True if read succeeded, false on failure
-   *
-   * Protocol: Class 10, Object 84
-   * - SubID: 1000 + layer (1000-1004 for layers 0-4)
-   * - Response format: [Header 3 bytes] + [7 days × 6 bytes] = 45 bytes
-   * - Each 6-byte entry: [Enabled][Action][StartH][StartM][EndH][EndM]
-   * - Days in order: Mon, Tue, Wed, Thu, Fri, Sat, Sun
-   * - Only enabled entries are included in output
-   */
-  bool read_entries(std::vector<ScheduleEntry> *entries, int layer = -1);
 
   /**
    * Read schedule entries from the pump (async with callback).
@@ -385,23 +370,6 @@ public:
                            uint8_t layer,
                            std::function<void(bool success)> on_complete);
 
-  /**
-   * Clear (disable) a schedule entry for a specific day (async).
-   *
-   * This disables the schedule for a specific day on the specified layer,
-   * but does not affect other days or layers.
-   *
-   * Implementation: Reads current schedule for layer, removes entry for
-   * specified day, and writes back the filtered schedule asynchronously.
-   *
-   * @param day Day name (Monday-Sunday)
-   * @param layer Schedule layer (0-4)
-   * @param on_complete Optional callback invoked with success/failure when
-   *                    the full read-filter-write sequence completes.
-   *                    If nullptr, failures are logged but not propagated.
-   */
-  void clear_entry(const std::string &day, uint8_t layer = 0,
-                   std::function<void(bool)> on_complete = nullptr);
 
   // -------------------------------------------------------------------------
   // Single Event Operations (One-Time Schedules)
@@ -477,8 +445,8 @@ public:
 
   /**
    * Whether the single-event slots have been read since connect. While false,
-   * find_free_single_event_slot() blindly answers 0 — callers that would
-   * write to the returned slot must read first (issue #92).
+   * find_free_single_event_slot() returns -1 rather than guessing — callers
+   * that would write to the returned slot must read first (issue #92).
    */
   bool is_single_events_cached() const { return single_events_cached_; }
 
@@ -680,17 +648,17 @@ protected:
   std::function<void(std::function<void()>, uint32_t)> set_timeout_callback_;
 
   // Cached state
-  bool schedule_state_cached_;
-  bool schedule_enabled_;
-  uint32_t last_state_poll_ms_;
+  bool schedule_state_cached_{false};
+  bool schedule_enabled_{false};
+  uint32_t last_state_poll_ms_{0};
 
   // Cached ClockProgramOverview (10 bytes)
-  bool overview_cached_;
-  uint8_t overview_structure_[10];
+  bool overview_cached_{false};
+  uint8_t overview_structure_[10]{};
 
   // Cached layer data: raw 42 bytes per layer (7 days × 6 bytes)
-  bool layer_cached_[5];
-  uint8_t cached_layer_data_[5][42];
+  bool layer_cached_[5]{};
+  uint8_t cached_layer_data_[5][42]{};
 
   // Cached single events
   std::vector<SingleEvent> cached_single_events_;

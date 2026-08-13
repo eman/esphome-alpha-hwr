@@ -343,16 +343,28 @@ void ScheduleService::set_state_async(bool enable, std::function<void(bool)> on_
 
   this->transport_.send_apdu_command(
       apdu, sizeof(apdu), 0xDA01, 0,
-      [this, enable, on_sent](bool acked, const uint8_t * /*data*/, size_t /*len*/) {
+      [enable, on_sent](bool acked, const uint8_t * /*data*/, size_t /*len*/) {
         // The pump's two-phase commit often closes the window without a
         // matchable ACK even on success; the authoritative confirm is the
         // caller's poll_state_async() readback. Report "sent" either way.
         ESP_LOGD(TAG, "Schedule %s write %s", enable ? "enable" : "disable",
                  acked ? "ACKed" : "window closed (verify via readback)");
-        // Update cached copy so a subsequent commit doesn't revert the flag.
-        this->overview_structure_[4] = enable ? 0x01 : 0x00;
-        this->schedule_enabled_ = enable;
-        this->schedule_state_cached_ = true;
+        // Deliberately do not touch overview_structure_[4] either. Operations
+        // are serialized, so no commit can run between this write and the
+        // caller's confirm poll -- but if every confirm poll times out, the
+        // cached overview would keep an unverified byte and the next unrelated
+        // schedule commit would silently re-apply the timed-out enable/disable.
+        // poll_state_async() copies the whole overview back authoritatively.
+        // Deliberately do NOT assert schedule_enabled_/schedule_state_cached_
+        // from the *request*. This callback runs whether or not the write was
+        // ACKed, so recording the requested value as cached truth made the
+        // cache claim a state the pump may never have taken -- and callers gate
+        // on that cache. Concretely: a retry of a failed enable then saw
+        // "already in the requested state", skipped the write entirely, and
+        // still settled ACCEPTED, so the documented idempotent recovery path
+        // was a no-op exactly when it was needed. current_hash() folds the same
+        // flag in, so the settle event's hash agreed with the lie. The
+        // authoritative update is the caller's poll_state_async() readback.
         if (on_sent)
           on_sent(true);
       },
@@ -451,69 +463,6 @@ bool ScheduleService::send_configuration_commit() {
 // Schedule Entry Operations
 // -------------------------------------------------------------------------
 
-bool ScheduleService::read_entries(std::vector<ScheduleEntry> *entries,
-                                   int layer) {
-  if (!this->session_.is_ready()) {
-    ESP_LOGE(TAG, "Cannot read schedule entries: session not ready");
-    return false;
-  }
-
-  if (layer < 0 || layer > 4) {
-    ESP_LOGE(TAG, "Invalid layer %d (must be 0-4)", layer);
-    return false;
-  }
-
-  ESP_LOGD(TAG, "Reading schedule entries for layer %d...", layer);
-
-  uint16_t sub_id = 1000 + layer;
-
-  uint8_t apdu[5];
-  apdu[0] = 0x0A;
-  apdu[1] = 0x03;
-  apdu[2] = 84;
-  apdu[3] = (sub_id >> 8) & 0xFF;
-  apdu[4] = sub_id & 0xFF;
-
-  this->transport_.send_apdu_command(
-      apdu, 5, 0xDE01, 0,
-      [entries, layer](bool success, const uint8_t *payload,
-                       size_t payload_len) {
-        if (!success) {
-          ESP_LOGW(TAG,
-                   "Failed to read schedule entries for layer %d (timeout)",
-                   layer);
-          return;
-        }
-
-        if (payload_len < 45) {
-          ESP_LOGW(TAG, "Schedule entries response too short (%zu bytes)",
-                   payload_len);
-          entries->clear();
-          return;
-        }
-
-        const uint8_t *entry_data = payload + 3;
-        entries->clear();
-        int enabled_count = 0;
-
-        for (int day_idx = 0; day_idx < 7; day_idx++) {
-          size_t offset = day_idx * 6;
-          const uint8_t *entry_bytes = entry_data + offset;
-
-          if (entry_bytes[0] != 0) {
-            ScheduleEntry entry = ScheduleEntry::from_bytes(
-                entry_bytes, DAY_NAMES[day_idx], layer);
-            entries->push_back(entry);
-            enabled_count++;
-          }
-        }
-
-        ESP_LOGD(TAG, "Read %d enabled entries from layer %d", enabled_count,
-                 layer);
-      });
-
-  return true;
-}
 
 bool ScheduleService::read_entries_async(
     int layer,
@@ -785,67 +734,6 @@ bool ScheduleService::write_entries_async(
   return true;
 }
 
-void ScheduleService::clear_entry(const std::string &day, uint8_t layer,
-                                   std::function<void(bool)> on_complete) {
-  if (!this->session_.is_ready()) {
-    ESP_LOGE(TAG, "Cannot clear schedule entry: session not ready");
-    if (on_complete) on_complete(false);
-    return;
-  }
-
-  // Validate day
-  bool valid_day = false;
-  for (const char *valid : DAY_NAMES) {
-    if (day == valid) {
-      valid_day = true;
-      break;
-    }
-  }
-  if (!valid_day) {
-    ESP_LOGE(TAG, "Invalid day name: %s", day.c_str());
-    if (on_complete) on_complete(false);
-    return;
-  }
-
-  // Validate layer
-  if (layer > 4) {
-    ESP_LOGE(TAG, "Invalid layer: %d. Must be 0-4.", layer);
-    if (on_complete) on_complete(false);
-    return;
-  }
-
-  ESP_LOGI(TAG, "Clearing schedule entry for %s on layer %d...", day.c_str(),
-           layer);
-
-  // Fully async: read → filter → write, with completion propagation.
-  this->read_entries_async(layer,
-    [this, day, layer, on_complete](bool success, const std::vector<ScheduleEntry> &entries) {
-      if (!success) {
-        ESP_LOGE(TAG, "Failed to read current schedule for layer %d", layer);
-        if (on_complete) on_complete(false);
-        return;
-      }
-
-      // Filter out the entry for the specified day
-      std::vector<ScheduleEntry> filtered_entries;
-      for (const auto &entry : entries) {
-        if (entry.get_day() != day) {
-          filtered_entries.push_back(entry);
-        }
-      }
-
-      // Write back the filtered entries asynchronously
-      this->write_entries_async(filtered_entries, layer,
-        [on_complete, day, layer](bool write_success) {
-          if (write_success) {
-            ESP_LOGI(TAG, "Cleared schedule entry for %s on layer %d", day.c_str(), layer);
-          } else {
-            ESP_LOGE(TAG, "Failed to write filtered schedule for layer %d", layer);
-          }
-          if (on_complete) on_complete(write_success);
-        });
-    });
-}
 
 // -------------------------------------------------------------------------
 // Validation Methods
@@ -1120,8 +1008,17 @@ void ScheduleService::read_single_events_async(
   auto slots_failed = std::make_shared<uint8_t>(0);
   auto read_next = std::make_shared<std::function<void(uint8_t)>>();
 
+  // See the note in HistoryService::read_trends_async(): capturing `read_next`
+  // inside the closure it owns is a self-reference cycle that leaks the chain
+  // once per invocation. This is the one of the three that also repeats without
+  // a reconnect -- refresh_single_events is a public HA service.
+  std::weak_ptr<std::function<void(uint8_t)>> read_next_weak = read_next;
+
   *read_next = [this, events, slots_failed, on_complete, max_events,
-                read_next](uint8_t idx) {
+                read_next_weak](uint8_t idx) {
+    auto self = read_next_weak.lock();
+    if (!self)
+      return;  // chain abandoned (disconnect)
     if (idx >= max_events) {
       // All-or-nothing. single_events_cached_ is what
       // find_free_single_event_slot() gates on, and an unread slot looks
@@ -1157,7 +1054,7 @@ void ScheduleService::read_single_events_async(
     this->transport_.send_apdu_command(
       apdu, 5, 0xDC01, 0,
         [idx, events, slots_failed, on_complete,
-         read_next](bool success, const uint8_t *payload, size_t payload_len) {
+         self](bool success, const uint8_t *payload, size_t payload_len) {
           if (!success || payload_len < 13) {
             (*slots_failed)++;
             ESP_LOGW(TAG, "Failed to read single event slot %d "
@@ -1177,7 +1074,7 @@ void ScheduleService::read_single_events_async(
             }
           }
           // Read next slot
-          (*read_next)(idx + 1);
+          (*self)(idx + 1);
         },
         3000);
   };
@@ -1261,8 +1158,12 @@ void ScheduleService::clear_single_event_async(
 int ScheduleService::find_free_single_event_slot(
     uint32_t reusable_before_ts) const {
   uint8_t max_events = overview_cached_ ? overview_structure_[1] : 35;
+  // A cold cache means every slot "looks free", so answering 0 here hands the
+  // caller a live slot to overwrite -- the clobber class issue #92 exists to
+  // prevent. -1 is this function's own "none available" answer; use it, and let
+  // the caller warm the cache first.
   if (!single_events_cached_)
-    return 0;
+    return -1;
 
   std::set<uint8_t> used;
   for (const auto &ev : cached_single_events_) {

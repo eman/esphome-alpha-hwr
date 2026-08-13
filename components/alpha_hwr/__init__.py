@@ -4,11 +4,11 @@ import subprocess
 import esphome.codegen as cg
 import esphome.config_validation as cv
 from esphome.components import (
-    ble_client,
-    sensor,
     binary_sensor,
-    text_sensor,
+    ble_client,
     esp32_ble_tracker,
+    sensor,
+    text_sensor,
     time,
 )
 from esphome.const import (

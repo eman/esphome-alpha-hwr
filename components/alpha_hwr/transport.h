@@ -378,9 +378,15 @@ class Transport {
   uint32_t send_pacing_ms_{50}; // Delay between fragments or commands
 
   // Reassembly state
-  bool reassembling_;                         ///< True if currently accumulating packet fragments
+  bool reassembling_{false};                  ///< True if currently accumulating packet fragments
   std::vector<uint8_t> reassembly_buffer_;    ///< Buffer for accumulating packet fragments
-  uint16_t expected_packet_length_;           ///< Expected total packet length
+  uint16_t expected_packet_length_{0};        ///< Expected total packet length
+  uint32_t reassembly_started_ms_{0};         ///< When the current reassembly began (staleness guard)
+
+  /// A partial frame older than this is abandoned rather than absorbing the
+  /// next frame's bytes. The pump paces fragments ~50 ms apart, so any real
+  /// frame completes far inside this window.
+  static constexpr uint32_t REASSEMBLY_TIMEOUT_MS = 1000;
 
   // Callback for complete packets
   PacketCallback packet_callback_;            ///< Called when packet is complete

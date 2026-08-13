@@ -176,6 +176,14 @@ If you want pump telemetry plus DHW demand detection, combine the packages and
 wire the pump sensors into the detector:
 
 ```yaml
+# Required: the packages below track @main, so the component source must too.
+# Without this, alpha_hwr_pairing.yaml's own pin supplies the components while
+# the packages supply @main config keys, and validation fails on keys the
+# pinned release does not know.
+external_components:
+  - source: github://eman/esphome-alpha-hwr@main
+    components: [alpha_hwr, dhw_demand]
+
 packages:
   alpha_hwr: github://eman/esphome-alpha-hwr/packages/alpha_hwr_pairing.yaml@main
   alpha_hwr_controls: github://eman/esphome-alpha-hwr/packages/alpha_hwr_controls.yaml@main
@@ -184,8 +192,8 @@ packages:
 alpha_hwr:
   current:
     id: motor_current_sensor
-  rpm:
-    id: motor_speed_sensor
+  # Do not rename the rpm sensor: alpha_hwr_controls.yaml refers to it as
+  # `id(motor_speed)`, which is the id alpha_hwr_pairing.yaml already assigns.
   flow:
     id: flow_rate_sensor
 
@@ -199,7 +207,7 @@ sensor:
       - multiply: 4.40287
 
 dhw_demand:
-  motor_speed: motor_speed_sensor
+  motor_speed: motor_speed
   motor_current: motor_current_sensor
   pump_flow: dhw_pump_flow_gpm
 ```

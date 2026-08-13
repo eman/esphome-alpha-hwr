@@ -77,3 +77,4 @@ Thumbs.db
 reference
 hwr-pump.yaml
 resources
+components/alpha_hwr/secrets.yaml
