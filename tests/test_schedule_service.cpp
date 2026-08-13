@@ -2,6 +2,7 @@
 #include <vector>
 #include <cstdint>
 #include <cstdio>
+#include "fixture_crc.h"
 #include "../components/alpha_hwr/schedule_service.h"
 #include "../components/alpha_hwr/transport.h"
 #include "../components/alpha_hwr/session.h"
@@ -134,6 +135,7 @@ void test_state_change_callback_fires_only_on_change() {
                                   0x01, 0x00, 0x00, 0x00, 0x00,
                                   0xAA, 0xBB};
     frame[1] = static_cast<uint8_t>(frame.size() - 4);
+    frame = with_crc(std::move(frame));
     transport.on_notification(frame.data(), frame.size());
     mock_millis += 51;
     transport.loop();

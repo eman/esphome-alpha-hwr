@@ -29,6 +29,7 @@
 #include <memory>
 #include <vector>
 
+#include "fixture_crc.h"
 #include "../components/alpha_hwr/event_log_service.h"
 #include "../components/alpha_hwr/history_service.h"
 #include "../components/alpha_hwr/schedule_service.h"
@@ -164,6 +165,7 @@ static void test_event_log_abandoned() {
                                 0x00, 0x14,         // max entries
                                 0x00});             // pad: the handler
                                                     // requires payload_len >= 10
+  meta = with_crc(std::move(meta));
   rig.transport.on_notification(meta.data(), meta.size());
 
   // An entry read is now queued and the chain's closure exists.

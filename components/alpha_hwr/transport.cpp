@@ -8,6 +8,7 @@
 #include "esphome/core/log.h"
 #include "esphome/core/hal.h"
 #include "frame_builder.h"
+#include "frame_parser.h"
 #include "response_match.h"
 #include <algorithm>
 #include <cinttypes>
@@ -268,12 +269,37 @@ void Transport::on_notification(const uint8_t* data, size_t len) {
                 reassembly_buffer_[8], reassembly_buffer_[9], reassembly_buffer_[10], reassembly_buffer_[11]);
      }
 
+     // Trim to the declared frame length before anything looks at the bytes.
+     // The completion test above is `>=`, so a notification carrying trailing
+     // bytes leaves them in the buffer; they are outside what the CRC covers,
+     // and parse_frame() clamps the same way for the same reason.
+     size_t frame_len = reassembly_buffer_.size();
+     if (expected_packet_length_ >= 4 && frame_len > expected_packet_length_) {
+       frame_len = expected_packet_length_;
+     }
+
+     // Reject a corrupt frame before it can answer a command.
+     //
+     // Only telemetry checked the CRC (via parse_frame); the command-response
+     // path did not, so every control, schedule, single-event, event-log and
+     // device-info payload -- including the readbacks that decide write
+     // verdicts -- was parsed from unverified bytes. A runt produced by a
+     // mid-frame fragment, or any radio corruption, could satisfy the
+     // class/object match and be taken for the answer to a queued command.
+     if (!protocol::frame_crc_valid(reassembly_buffer_.data(), frame_len)) {
+       ESP_LOGW(TAG, "Dropping %u-byte frame with a bad CRC", (unsigned) frame_len);
+       reassembling_ = false;
+       reassembly_buffer_.clear();
+       expected_packet_length_ = 0;
+       return;
+     }
+
      // Try to dispatch to registered response handler first
-     bool dispatched = try_dispatch_response(reassembly_buffer_.data(), reassembly_buffer_.size());
+     bool dispatched = try_dispatch_response(reassembly_buffer_.data(), frame_len);
 
      // If not dispatched to a handler, invoke general packet callback
      if (!dispatched && packet_callback_) {
-       packet_callback_(reassembly_buffer_.data(), reassembly_buffer_.size());
+       packet_callback_(reassembly_buffer_.data(), frame_len);
      } else if (!dispatched) {
        ESP_LOGW(TAG, "Complete packet received but no handler or callback registered");
      }

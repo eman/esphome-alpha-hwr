@@ -23,6 +23,7 @@
 #include <string>
 #include <vector>
 
+#include "fixture_crc.h"
 #include "../components/alpha_hwr/control_service.h"
 #include "../components/alpha_hwr/schedule_service.h"
 #include "../components/alpha_hwr/session.h"
@@ -323,9 +324,12 @@ struct Harness {
     }
   }
 
-  // -- Response builders (CRC bytes are not checked by the transport)
+  // -- Response builders. Every fixture below writes a placeholder in its last
+  // two bytes; inject() stamps the real CRC over it, so the fixtures do not
+  // each have to carry a hand-computed checksum. Transport drops a bad-CRC
+  // frame, so without this every response here would simply vanish.
   void inject(std::vector<uint8_t> frame, uint32_t delay = 20) {
-    injections.push_back({mock_millis + delay, std::move(frame)});
+    injections.push_back({mock_millis + delay, with_crc(std::move(frame))});
   }
 
   void inject_mode_notification() {

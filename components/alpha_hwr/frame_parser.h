@@ -153,6 +153,22 @@ bool validate_frame_integrity(const ParsedFrame& frame);
  */
 bool is_telemetry_frame(const ParsedFrame& frame);
 
+/**
+ * Does a complete GENI frame's trailing CRC-16 match its contents?
+ *
+ * `[Start][Length][...Length_field bytes...][CRC-H][CRC-L]`, with the CRC
+ * covering offset 1 through the last APDU byte -- Start and the CRC itself are
+ * excluded. Callers must pass a frame already trimmed to its declared length;
+ * trailing bytes beyond it are not part of what the CRC covers.
+ *
+ * Split out of parse_frame() so the command-response path can reject a
+ * corrupt frame without paying for a full parse, and so both paths compute the
+ * same thing. Everything a pump write is confirmed against arrives this way,
+ * so accepting an unverified frame means deciding write verdicts from bytes
+ * the radio may have mangled.
+ */
+bool frame_crc_valid(const uint8_t* data, size_t len);
+
 }  // namespace protocol
 }  // namespace alpha_hwr
 }  // namespace esphome

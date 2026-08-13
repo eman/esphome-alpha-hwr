@@ -74,14 +74,11 @@ ParsedFrame parse_frame(const uint8_t* data, size_t len) {
     len = expected_total;
   }
 
-  // Validate CRC
-  // CRC covers from Length byte (offset 1) to end of APDU (len - 3), excluding Start and CRC itself
-  uint16_t calculated_crc = calc_crc16_read(data + 1, len - 3);
-  uint16_t actual_crc = (data[len - 2] << 8) | data[len - 1];
-  result.crc_valid = (calculated_crc == actual_crc);
+  // Validate CRC (shared with Transport's command-response path)
+  result.crc_valid = frame_crc_valid(data, len);
 
   if (!result.crc_valid) {
-    ESP_LOGV(TAG, "CRC mismatch: calculated=0x%04X, actual=0x%04X", calculated_crc, actual_crc);
+    ESP_LOGV(TAG, "CRC mismatch on a %u-byte frame", (unsigned) len);
   }
 
   // Extract class byte (offset 4 in frame). `len` is the clamped frame window,
@@ -171,6 +168,16 @@ bool validate_frame_integrity(const ParsedFrame& frame) {
   }
 
   return true;
+}
+
+bool frame_crc_valid(const uint8_t* data, size_t len) {
+  // Needs Start + Length + at least one covered byte + the two CRC bytes.
+  if (data == nullptr || len < 4) return false;
+  // CRC covers offset 1 through the last APDU byte (len - 3), excluding the
+  // Start byte and the CRC itself.
+  uint16_t calculated = calc_crc16_read(data + 1, len - 3);
+  uint16_t actual = (static_cast<uint16_t>(data[len - 2]) << 8) | data[len - 1];
+  return calculated == actual;
 }
 
 bool is_telemetry_frame(const ParsedFrame& frame) {
