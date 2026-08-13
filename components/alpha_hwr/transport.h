@@ -139,6 +139,9 @@ class Transport {
   struct Command {
     std::vector<uint8_t> packet;
     size_t bytes_sent{0};
+    // Expected reply identity. NOT an Object/Sub ID -- see send_command().
+    // expect_type_low_ver = (TypeL << 8) | Version (reply bytes 8-9)
+    // expect_type_high    = TypeH                  (reply bytes 6-7)
     uint16_t expect_type_low_ver{0};
     uint16_t expect_type_high{0};
     CommandCallback callback{nullptr};
@@ -163,10 +166,29 @@ class Transport {
 
   /**
    * Queue a command for transmission.
-   * 
+   *
+   * The two `expect_*` values identify the RESPONSE, and they are not an
+   * Object ID and a Sub-ID however much they look like one. A GENI reply
+   * carries neither; bytes 6-9 are `[00][TypeH][TypeL][Version]`, the object
+   * type and version. This pair splits that at the wrong boundary, for
+   * historical reasons preserved in try_dispatch_response():
+   *
+   *   expect_type_high    = TypeH                   (response bytes 6-7)
+   *   expect_type_low_ver = (TypeL << 8) | Version  (response bytes 8-9)
+   *
+   * so e.g. Type 303 v1 (the mode/control object) is passed as
+   * `(0x2F01, 0x0001)`, NOT `(0x0001, 0x2F01)`. Getting that backwards used to
+   * be survivable because a fallback branch absorbed it; it no longer is, and
+   * a swap now makes the read time out. Both zero means "match any Class 10
+   * response" (see the wildcard path in try_dispatch_response).
+   *
+   * Two call sites use these fields differently, to carry the REQUEST's object
+   * and sub-id (91/430, 91/421) for a workaround branch that matches on what
+   * was asked for. Those are the exception, and they are commented at the site.
+   *
    * @param packet The complete GENI packet to send
-   * @param expect_type_low_ver If non-zero, wait for response with this Object ID
-   * @param expect_type_high If non-zero, wait for response with this Sub-ID
+   * @param expect_type_low_ver (TypeL << 8) | Version of the expected reply; 0 for any
+   * @param expect_type_high TypeH of the expected reply; 0 for any
    * @param callback Called when command completes or times out
    * @param timeout_ms How long to wait for response
    */
@@ -179,6 +201,10 @@ class Transport {
    * Helper to build and queue a command directly from an APDU.
    * This abstracts away the GENI addressing (Service ID, Source ID)
    * from the service layer.
+   *
+   * `expect_type_low_ver` / `expect_type_high` mean exactly what they mean in
+   * send_command() above -- read that note before passing them, including why
+   * their order is not interchangeable.
    */
   void send_apdu_command(const uint8_t* apdu, size_t apdu_len,
                          uint16_t expect_type_low_ver = 0, uint16_t expect_type_high = 0,
