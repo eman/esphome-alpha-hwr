@@ -1,6 +1,7 @@
 #include <iostream>
 #include <vector>
 #include <cstdint>
+#include "fixture_crc.h"
 #include "../components/alpha_hwr/transport.h"
 
 uint32_t mock_millis = 0;
@@ -82,9 +83,14 @@ static std::vector<uint8_t> frame_with_lead_byte(uint8_t lead) {
   while (f.size() < 25)
     f.push_back(0x22);
   f.push_back(0xAA);
-  f.push_back(0xBB);            // CRC placeholder
+  f.push_back(0xBB);            // placeholder, overwritten below
   f[1] = static_cast<uint8_t>(f.size() - 4);
-  return f;
+  // A real CRC, stamped after the length byte is final: Transport now drops a
+  // bad-CRC frame, and these tests are about reassembly, not corruption. The
+  // assertions stay sharp -- if a continuation fragment DID restart
+  // reassembly, the resulting runt would fail CRC and be dropped, so the
+  // packet count goes to 0 and the test still fails.
+  return with_crc(std::move(f));
 }
 
 static void test_continuation_fragment_leading_frame_start(uint8_t lead,
@@ -132,6 +138,7 @@ static void test_reassembly_stale_partial_recovers() {
   std::vector<uint8_t> whole{0x24, 0x00, 0x00, 0x07, 0x0A, 0x03,
                              0x00, 0x00, 0xDE, 0x01, 0x01, 0xAA, 0xBB};
   whole[1] = static_cast<uint8_t>(whole.size() - 4);
+  whole = with_crc(std::move(whole));
   transport.on_notification(whole.data(), whole.size());
 
   TEST_ASSERT(packets.size() == 1,
@@ -142,10 +149,114 @@ static void test_reassembly_stale_partial_recovers() {
   }
 }
 
+// ---------------------------------------------------------------------------
+// CRC enforcement on the command-response path.
+//
+// Only telemetry checked the CRC (through parse_frame). The command-response
+// path did not, so every control, schedule, single-event, event-log and
+// device-info payload -- including the readbacks that decide write verdicts --
+// was parsed from bytes nothing had verified.
+// ---------------------------------------------------------------------------
+static void test_bad_crc_frame_is_dropped() {
+  esphome::alpha_hwr::core::Transport transport;
+  std::vector<std::vector<uint8_t>> packets;
+  transport.set_packet_callback([&packets](const uint8_t *d, size_t n) {
+    packets.push_back(std::vector<uint8_t>(d, d + n));
+  });
+
+  auto good = frame_with_lead_byte(0x11);
+  transport.on_notification(good.data(), good.size());
+  TEST_ASSERT(packets.size() == 1, "a frame with a valid CRC is delivered");
+
+  // Same frame, one payload byte flipped, CRC left describing the original.
+  auto corrupt = good;
+  corrupt[10] ^= 0xFF;
+  transport.on_notification(corrupt.data(), corrupt.size());
+  TEST_ASSERT(packets.size() == 1, "a frame whose CRC does not match is dropped");
+
+  // And a frame whose CRC bytes themselves are garbage -- the shape every
+  // fixture in this suite used to have.
+  auto garbage = good;
+  garbage[garbage.size() - 2] = 0xAA;
+  garbage[garbage.size() - 1] = 0xBB;
+  transport.on_notification(garbage.data(), garbage.size());
+  TEST_ASSERT(packets.size() == 1, "a frame with a garbage CRC is dropped");
+}
+
+// A notification carrying more than one frame's worth of bytes must dispatch
+// the first frame at its DECLARED length, not the whole buffer. The completion
+// test is `>=`, so the surplus sits in the reassembly buffer; it is outside
+// what the CRC covers, so without the trim a perfectly good frame is dropped.
+//
+// This also fixes a real misdispatch: before the trim, two frames arriving in
+// one notification were handed to the callback fused into a single oversized
+// packet, with a payload length that described neither.
+static void test_trailing_bytes_are_trimmed() {
+  esphome::alpha_hwr::core::Transport transport;
+  std::vector<std::vector<uint8_t>> packets;
+  transport.set_packet_callback([&packets](const uint8_t *d, size_t n) {
+    packets.push_back(std::vector<uint8_t>(d, d + n));
+  });
+
+  auto first = frame_with_lead_byte(0x11);
+  std::vector<uint8_t> two = first;
+  two.insert(two.end(), first.begin(), first.end());  // a second whole frame
+  transport.on_notification(two.data(), two.size());
+
+  TEST_ASSERT(packets.size() == 1, "a doubled notification yields one packet");
+  if (packets.size() == 1) {
+    TEST_ASSERT(packets[0].size() == first.size(),
+                "  ...trimmed to the declared frame length, not the whole buffer");
+  }
+}
+
+static void test_bad_crc_cannot_answer_a_command() {
+  // The consequence that matters: a corrupt frame must not be taken for the
+  // response to a queued command. Asserted in both directions, because a
+  // negative-only test here passes for the wrong reason -- a fixture that
+  // never matched the queued command in the first place would "prove" the
+  // rejection while proving nothing.
+  auto run = [](bool corrupt) {
+    esphome::alpha_hwr::core::Transport transport;
+    transport.set_write_callback([](const uint8_t *, size_t) { return true; });
+
+    int callbacks = 0;
+    bool success_reported = false;
+    const uint8_t apdu[5] = {0x0A, 0x03, 0x00, 0xDA, 0x01};
+    // (expect_obj_id, expect_sub_id) -- in that order.
+    transport.send_apdu_command(apdu, 5, 0xDA01, 0x0000,
+      [&](bool success, const uint8_t *, size_t) {
+        callbacks++;
+        success_reported = success;
+      });
+    // Chunk pacing: one loop() is not enough to get the command on the wire.
+    for (int i = 0; i < 4; i++) { mock_millis += 51; transport.loop(); }
+
+    // A Class 10 read response for Sub 0x0000 / Obj 0xDA01 -- the shape the
+    // queued command is waiting for.
+    std::vector<uint8_t> reply{0x24, 0x00, 0xF8, 0xE7, 0x0A, 0x13,
+                               0x00, 0x00, 0xDA, 0x01,
+                               0x00, 0x00, 0x0A, 0x01, 0xAA, 0xBB};
+    reply[1] = static_cast<uint8_t>(reply.size() - 4);
+    reply = with_crc(std::move(reply));
+    if (corrupt) reply[reply.size() - 1] ^= 0x01;  // one bit off in the CRC
+    transport.on_notification(reply.data(), reply.size());
+    return callbacks > 0 && success_reported;
+  };
+
+  TEST_ASSERT(run(/*corrupt=*/false),
+              "a matching response with a valid CRC completes the command");
+  TEST_ASSERT(!run(/*corrupt=*/true),
+              "the same response with a bad CRC does not");
+}
+
 int main() {
   test_reassembly_continuation_0x24();
   test_reassembly_continuation_0x27();
   test_reassembly_stale_partial_recovers();
+  test_trailing_bytes_are_trimmed();
+  test_bad_crc_frame_is_dropped();
+  test_bad_crc_cannot_answer_a_command();
 
   std::cout << "===========================================================" << std::endl;
   std::cout << "  Transport FSM Test Suite" << std::endl;
