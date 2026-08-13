@@ -119,6 +119,16 @@ The raw `pump_set_enabled` / `set_schedule_enabled` services **stay** as escape
 hatches for when you deliberately want to write a single flag without the
 coupling.
 
+### Remote Mode has no service, but does emit the event
+
+The Remote Mode switch (Remote/Digital vs Local/Panel control source) is an
+entity-only write — there is no `pump_set_remote_mode` service yet. It still
+runs through the same operation layer as everything else, so toggling it emits
+a `set_remote_mode` settle event with `op_id: ""` and `origin: "entity"`, and
+it is confirmed from a readback of the pump's `control_source` rather than
+from the command ACK: a pump that acks the command and then stays on Local
+settles `rejected`, not `accepted`.
+
 ### Schedules
 
 These keep the names and single `data`-string formats of the original
@@ -260,7 +270,9 @@ commands; `temp_min`/`temp_max`/`autoadapt`; `on_minutes`/`off_minutes`/`flow`
 including fields the request kept — a keep-everything-but-one write doubles
 as a read of the others); `layer`/`day`/`day_name`/`begin`/`end`/`enabled`
 for schedule entries; `slot`/`begin_ts`/`end_ts`/`enabled` for single events;
-`event_count` for the refreshes. For `accepted`/`clamped`/`rejected` these
+`event_count` for the refreshes; `remote_enabled` for `set_remote_mode`
+(a separate key from `enabled`, which on every other command is the pump's
+run state). For `accepted`/`clamped`/`rejected` these
 carry what the pump **actually holds** (from the readback), not what was
 requested. The original request is echoed alongside in `requested_*` fields
 (`requested_mode`, `requested_value`, `requested_temp_min`/`_max`,

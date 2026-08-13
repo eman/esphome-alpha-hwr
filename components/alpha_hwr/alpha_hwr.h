@@ -655,13 +655,15 @@ public:
     write_op_service_.submit_set_mode(mode, "", nullptr, services::WriteOrigin::ENTITY);
     return true;
   }
-  bool enable_remote() { 
+  bool enable_remote() {
     if (!check_ready("enable_remote")) return false;
-    return control_service_.enable_remote_mode(); 
+    write_op_service_.submit_set_remote_mode(true, "", nullptr, services::WriteOrigin::ENTITY);
+    return true;
   }
-  bool disable_remote() { 
+  bool disable_remote() {
     if (!check_ready("disable_remote")) return false;
-    return control_service_.disable_remote_mode(); 
+    write_op_service_.submit_set_remote_mode(false, "", nullptr, services::WriteOrigin::ENTITY);
+    return true;
   }
 
   // Setpoint configuration methods (for ESPHome number entities). The bool
@@ -716,6 +718,18 @@ public:
   bool is_mode_valid() const { return control_service_.is_mode_valid(); }
   bool get_remote_enabled() const {
     return control_service_.get_remote_enabled();
+  }
+  /**
+   * Remote-mode state with a "not read yet" signal, matching
+   * get_schedule_state(). The bare getter above returns false both for an
+   * observed Local/Panel and for a cache nothing has been read into, so an
+   * entity using it shows OFF on a fresh connect -- and a scene reasserting
+   * "off" against that then issues a write that settles TIMEOUT.
+   */
+  bool get_remote_state(bool *result) {
+    if (!control_service_.is_remote_state_valid()) return false;
+    if (result) *result = control_service_.get_remote_enabled();
+    return true;
   }
   bool is_pump_enabled_valid() const {
     return control_service_.is_pump_enabled_valid();

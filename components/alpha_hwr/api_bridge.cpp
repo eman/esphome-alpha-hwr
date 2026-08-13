@@ -142,6 +142,12 @@ void AlphaHwrApiBridge::fire_write_settled(const WriteResult &result) {
       if (result.off_minutes >= 0) data["off_minutes"] = std::to_string(result.off_minutes);
       put_float("flow", result.flow, "%.3f");
       break;
+    case WriteCommand::SET_REMOTE_MODE:
+      // `remote_enabled`, not `enabled`: on every other command that key is
+      // the pump's run state, and reusing it here would make one event key
+      // mean two unrelated things to anything parsing write_settled.
+      put_bool("remote_enabled", result.enabled);
+      break;
     case WriteCommand::SET_PUMP_STATE:
       // Coupled selector: report both underlying flags plus the derived state
       // name, so the settled state is self-contained.

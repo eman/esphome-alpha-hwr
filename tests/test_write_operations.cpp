@@ -109,6 +109,13 @@ struct PumpSim {
   bool respond_single_event_reads{true};
   bool honor_layer_writes{true};
   bool honor_overview_writes{true};
+  // Control source as the pump reports it in Object 86 Sub 7: 2 =
+  // Remote/Digital, 1 = Local/Panel, 0 = the unrecognized byte that must not
+  // move the cached state.
+  uint8_t control_source{2};
+  bool ack_class3_remote{true};       // reply to Class 3 remote enable/disable
+  bool reject_class3_remote{false};   // reply with the [03 01 xx] descriptor nack
+  bool apply_class3_remote{true};     // actually change control_source
   bool ack_class3{true};              // reply to Class 3 START/STOP at all
   bool reject_class3{false};          // reply with the [03 01 xx] descriptor nack
   bool apply_class3{true};            // actually change run state on START/STOP
@@ -145,6 +152,7 @@ struct Harness {
   int frames_0a01{0};       // unfused mode changes
   int frames_register{0};   // 0x84 setpoint register writes
   int frames_class3_run{0}; // Class 3 START/STOP commands
+  int frames_class3_remote{0}; // Class 3 remote enable/disable commands
   int frames_dhw_read{0};   // Obj 91 Sub 421 reads
   int frames_dhw_write{0};  // Obj 91 Sub 421 writes
   std::vector<uint8_t> last_0601_setpoint_bytes;
@@ -203,6 +211,21 @@ struct Harness {
       }
       if (sim.apply_class3) sim.enabled = (apdu[2] == 0x06);
       if (sim.ack_class3) {
+        inject({0x24, 0x04, 0xF8, 0xE7, 0x03, 0x00, 0xAA, 0xBB});
+      }
+      return;
+    }
+
+    // Class 3 remote-mode commands: [0x03, 0x81, 0x07 enable | 0x08 disable].
+    if (apdu_len >= 3 && apdu[0] == 0x03 && apdu[1] == 0x81 &&
+        (apdu[2] == 0x07 || apdu[2] == 0x08)) {
+      frames_class3_remote++;
+      if (sim.reject_class3_remote) {
+        inject({0x24, 0x05, 0xF8, 0xE7, 0x03, 0x01, 0xAC, 0xAA, 0xBB});
+        return;
+      }
+      if (sim.apply_class3_remote) sim.control_source = (apdu[2] == 0x07) ? 2 : 1;
+      if (sim.ack_class3_remote) {
         inject({0x24, 0x04, 0xF8, 0xE7, 0x03, 0x00, 0xAA, 0xBB});
       }
       return;
@@ -309,7 +332,8 @@ struct Harness {
     // OpSpec 0x0E notification: Sub 0x0001 (bytes 6-7), Obj 0x2F01 (bytes 8-9)
     // payload [00 00 07][control_source][operation_mode][control_mode][setpoint f32be]
     std::vector<uint8_t> f = {0x24, 18, 0xF8, 0xE7, 0x0A, 0x0E, 0x00, 0x01, 0x2F, 0x01,
-                              0x00, 0x00, 0x07, 0x02, static_cast<uint8_t>(sim.enabled ? 0x00 : 0x01),
+                              0x00, 0x00, 0x07, sim.control_source,
+                              static_cast<uint8_t>(sim.enabled ? 0x00 : 0x01),
                               sim.mode_byte, 0, 0, 0, 0, 0xAA, 0xBB};
     int sub = sim.sub_for_mode();
     float sp = (sub >= 0) ? sim.setpoints[sub] : NAN;
@@ -618,6 +642,180 @@ static void test_set_enabled_rejected_reports_readback() {
   TEST_ASSERT(r && r->status == WriteStatus::REJECTED, "status is rejected");
   TEST_ASSERT(r && r->detail.find("running") != std::string::npos, "detail reports the pump's state");
   TEST_ASSERT(r && r->enabled == 1, "settled enabled reflects the readback, not the request");
+}
+
+// ---------------------------------------------------------------------------
+// SET_REMOTE_MODE (issue #46 / write-path audit).
+//
+// Before this command existed, remote mode was written by two standalone
+// ControlService entry points that talked to the transport directly and
+// confirmed themselves from the command ACK. None of that was reachable from
+// a host test, so ControlService::handle_remote_mode_ack() -- the function
+// that decided whether remote mode had taken effect -- had no coverage
+// linked to production anywhere. These drive the shipped operation.
+// ---------------------------------------------------------------------------
+static void test_remote_mode_accepted() {
+  std::cout << "\n=== set_remote_mode: accepted via control_source readback ===" << std::endl;
+  Harness h;
+  h.sim.control_source = 1;  // Local/Panel
+  h.prime_cache();
+
+  h.write_op.submit_set_remote_mode(true, "rm1");
+  h.advance(12000);
+
+  TEST_ASSERT(h.events_for("rm1") == 1, "exactly one terminal event");
+  const WriteResult *r = h.result_for("rm1");
+  TEST_ASSERT(r && r->status == WriteStatus::ACCEPTED, "status is accepted");
+  TEST_ASSERT(r && r->enabled == 1, "settled remote state is on");
+  TEST_ASSERT(h.frames_class3_remote == 1, "one Class 3 remote-mode command was sent");
+  TEST_ASSERT(h.frames_0601 == 0, "no fused control write was sent");
+  TEST_ASSERT(h.control.get_remote_enabled(), "the service cache reports remote enabled");
+}
+
+static void test_remote_mode_nack() {
+  std::cout << "\n=== set_remote_mode: descriptor nack -> rejected ===" << std::endl;
+  Harness h;
+  h.sim.control_source = 1;
+  h.prime_cache();
+  h.sim.reject_class3_remote = true;
+
+  h.write_op.submit_set_remote_mode(true, "rm2");
+  h.advance(12000);
+
+  TEST_ASSERT(h.events_for("rm2") == 1, "exactly one terminal event");
+  const WriteResult *r = h.result_for("rm2");
+  TEST_ASSERT(r && r->status == WriteStatus::REJECTED, "status is rejected");
+  TEST_ASSERT(r && r->detail.find("rejected") != std::string::npos, "detail reports the nack");
+  TEST_ASSERT(h.sim.control_source == 1, "the pump's control source did not change");
+  TEST_ASSERT(!h.control.get_remote_enabled(), "cache was not optimistically set");
+}
+
+static void test_remote_mode_ack_window_closes() {
+  // The ACK is not the verdict. The old code took a missing ACK as "state
+  // left unchanged" and never looked; here the pump applies the command and
+  // stays silent, and the readback still confirms it.
+  std::cout << "\n=== set_remote_mode: ACK window closes -> readback decides ===" << std::endl;
+  Harness h;
+  h.sim.control_source = 1;
+  h.prime_cache();
+  h.sim.ack_class3_remote = false;
+
+  h.write_op.submit_set_remote_mode(true, "rm3");
+  h.advance(15000);
+
+  TEST_ASSERT(h.events_for("rm3") == 1, "exactly one terminal event");
+  const WriteResult *r = h.result_for("rm3");
+  TEST_ASSERT(r && r->status == WriteStatus::ACCEPTED, "readback confirmed despite missing ACK");
+  TEST_ASSERT(h.sim.control_source == 2, "pump is in Remote/Digital");
+}
+
+static void test_remote_mode_acked_but_not_applied() {
+  // The inverse, and the case the ACK-only design got wrong in the other
+  // direction: a clean [03 00] ACK that the pump did not act on.
+  std::cout << "\n=== set_remote_mode: acked but not applied -> rejected ===" << std::endl;
+  Harness h;
+  h.sim.control_source = 1;
+  h.prime_cache();
+  h.sim.apply_class3_remote = false;
+
+  h.write_op.submit_set_remote_mode(true, "rm4");
+  h.advance(30000);
+
+  TEST_ASSERT(h.events_for("rm4") == 1, "exactly one terminal event");
+  const WriteResult *r = h.result_for("rm4");
+  TEST_ASSERT(r && r->status == WriteStatus::REJECTED, "status is rejected despite the clean ACK");
+  TEST_ASSERT(r && r->detail.find("Local/Panel") != std::string::npos,
+              "detail reports the pump's actual control source");
+  TEST_ASSERT(r && r->enabled == 0, "settled value reflects the readback, not the request");
+}
+
+static void test_remote_mode_unusable_control_source() {
+  // control_source 0 is neither Remote nor Local, so it carries no
+  // information and must not confirm anything. Without remote_state_valid_
+  // the {false} default reads as an observed Local/Panel and a *disable*
+  // settles ACCEPTED having read nothing -- so this asks for a disable.
+  std::cout << "\n=== set_remote_mode: unusable control_source cannot confirm ===" << std::endl;
+  Harness h;
+  h.sim.control_source = 0;
+  h.sim.apply_class3_remote = false;  // keep the 0; a disable would write 1
+  h.prime_cache();
+
+  h.write_op.submit_set_remote_mode(false, "rm5");
+  h.advance(30000);
+
+  TEST_ASSERT(h.events_for("rm5") == 1, "exactly one terminal event");
+  const WriteResult *r = h.result_for("rm5");
+  TEST_ASSERT(r && r->status == WriteStatus::TIMEOUT, "an unreadable control source is not a confirmation");
+  TEST_ASSERT(r && r->detail.find("control_source") != std::string::npos,
+              "detail says why it could not confirm");
+}
+
+static void test_remote_mode_warm_cache_needs_fresh_observation() {
+  // The sticky-validity hole: rm5 above covers a COLD cache, where
+  // remote_state_valid_ is false and an uninterpretable control_source
+  // cannot confirm anything. Warm the cache first and the same pump reply
+  // used to settle ACCEPTED -- confirming a disable against a Local/Panel
+  // reading taken before the command was ever sent.
+  std::cout << "\n=== set_remote_mode: warm cache still needs a post-command reading ===" << std::endl;
+  Harness h;
+  h.sim.control_source = 1;           // Local/Panel...
+  h.prime_cache();                    // ...observed, so the cache is warm and valid
+  h.sim.control_source = 0;           // pump now reports a source we cannot read
+  h.sim.apply_class3_remote = false;
+
+  h.write_op.submit_set_remote_mode(false, "rm9");
+  h.advance(30000);
+
+  TEST_ASSERT(h.events_for("rm9") == 1, "exactly one terminal event");
+  const WriteResult *r = h.result_for("rm9");
+  TEST_ASSERT(r && r->status == WriteStatus::TIMEOUT,
+              "a warm cache does not stand in for a post-command reading");
+  TEST_ASSERT(r && r->detail.find("control_source") != std::string::npos,
+              "detail says why it could not confirm");
+}
+
+static void test_remote_mode_unreadable_source_is_not_rejection() {
+  // The mirror case, and the one that would regress against the deleted
+  // ACK path: the pump DID switch to Remote, but Sub 7 is the prioritized
+  // source and reports some third value (scheduler, alarm, standby). The
+  // cache still holds Local/Panel from before. Settling REJECTED here would
+  // call a write that took effect a failure; the honest answer is that the
+  // outcome is unknown.
+  std::cout << "\n=== set_remote_mode: unreadable source is a timeout, not a rejection ===" << std::endl;
+  Harness h;
+  h.sim.control_source = 1;
+  h.prime_cache();
+  h.sim.control_source = 101;  // ClockScheduler: neither Remote nor Local
+  h.sim.apply_class3_remote = false;
+
+  h.write_op.submit_set_remote_mode(true, "rm10");
+  h.advance(30000);
+
+  const WriteResult *r = h.result_for("rm10");
+  TEST_ASSERT(h.events_for("rm10") == 1, "exactly one terminal event");
+  TEST_ASSERT(r && r->status == WriteStatus::TIMEOUT, "status is timeout, not rejected");
+  TEST_ASSERT(r && r->detail.find("Local/Panel") == std::string::npos,
+              "does not claim the pump reports Local/Panel off a stale cache");
+}
+
+static void test_remote_mode_own_resource_key() {
+  // Remote mode is orthogonal to run state: neither may supersede the other.
+  std::cout << "\n=== set_remote_mode: own resource key ===" << std::endl;
+  Harness h;
+  h.sim.control_source = 1;
+  h.sim.mode_byte = 0x02;
+  h.prime_cache();
+
+  h.write_op.submit_set_remote_mode(true, "rm6");   // starts immediately
+  h.write_op.submit_set_enabled(false, "rm7");      // queues behind it
+  h.write_op.submit_set_remote_mode(true, "rm8");   // supersedes rm7? must not
+  h.advance(40000);
+
+  TEST_ASSERT(h.events_for("rm7") == 1, "the queued run-state write settled");
+  const WriteResult *r7 = h.result_for("rm7");
+  TEST_ASSERT(r7 && r7->status != WriteStatus::SUPERSEDED,
+              "a remote-mode write did not supersede the run-state write");
+  TEST_ASSERT(h.frames_class3_run == 1, "the run-state command reached the wire");
 }
 
 static void test_supersede_detail_uses_origin() {
@@ -1819,6 +2017,14 @@ int main() {
   test_set_enabled_class3_nack();
   test_set_enabled_class3_ack_timeout();
   test_set_enabled_rejected_reports_readback();
+  test_remote_mode_accepted();
+  test_remote_mode_nack();
+  test_remote_mode_ack_window_closes();
+  test_remote_mode_acked_but_not_applied();
+  test_remote_mode_unusable_control_source();
+  test_remote_mode_warm_cache_needs_fresh_observation();
+  test_remote_mode_unreadable_source_is_not_rejection();
+  test_remote_mode_own_resource_key();
   test_supersede_detail_uses_origin();
   test_supersede_queued();
   test_watchdog_timeout();

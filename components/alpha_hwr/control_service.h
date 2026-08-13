@@ -151,46 +151,14 @@ class ControlService {
   // pump-state cache, the readback/coordination guards, and the wire
   // primitives.
 
-  /**
-   * Enable remote control mode.
-   * 
-   * Enables remote control (Class 3 command ID 7), allowing external
-   * control of the pump via BLE/API. When enabled, pump ignores local controls.
-   * 
-   * @return True once the command has been queued (the actual enabled
-   *   state is confirmed asynchronously by handle_remote_mode_ack() once
-   *   the pump's ACK arrives -- see get_remote_enabled())
-   * 
-   * Protocol Notes:
-   * - Uses Class 3 command: [0x03, 0x81, 0x07] (OpSpec 0x81 = SET). Fixed
-   *   from 0xC1 (INFO) in issue #46 -- bench-verified against a real pump
-   *   that 0xC1 always produces a "rejected" ACK ([03 01 xx]), while 0x81
-   *   produces the clean success ACK ([03 00]).
-   * - is_remote_mode_enabled_ is only updated once the pump's ACK confirms
-   *   success (ack byte 0x00); a rejected or missing ACK leaves the
-   *   previous state unchanged.
-   * 
-   * Reference: control.py::enable_remote_mode() lines 305-333 (note: the
-   * Python reference has the same 0xC1 bug, not yet fixed there)
-   */
-  bool enable_remote_mode();
-  
-  /**
-   * Disable remote control mode.
-   * 
-   * Returns pump to automatic operation based on internal logic.
-   * 
-   * @return True once the command has been queued (see enable_remote_mode()
-   *   for how the confirmed state is determined)
-   * 
-   * Protocol Notes:
-   * - Uses Class 3 command: [0x03, 0x81, 0x06] (OpSpec 0x81 = SET). Fixed
-   *   from 0xC1 (INFO) -- see enable_remote_mode().
-   * 
-   * Reference: control.py::disable_remote_mode() lines 335-362 (note: the
-   * Python reference has the same 0xC1 bug, not yet fixed there)
-   */
-  bool disable_remote_mode();
+  // Remote-mode enable/disable used to live here as two standalone
+  // enable_remote_mode()/disable_remote_mode() entry points that talked to the
+  // transport directly. That was the last write in the component that bypassed
+  // the operation layer, against AGENTS §6's "one write path" and §8.4: it
+  // emitted no settle event, had no watchdog, could not be superseded, and
+  // confirmed itself from the command ACK alone rather than from a readback.
+  // It now goes through WriteOperationService::submit_set_remote_mode(); the
+  // wire primitive is send_remote_mode_command() below.
    
    /**
     * Get current control mode name as string.
@@ -259,12 +227,20 @@ class ControlService {
     *      control-state poll (issue #54).
     * When control_source == 2 (Remote/Digital) the flag is set true; when
     * control_source == 1 (Local/Panel) it is set false. Unknown values leave
-    * the current state unchanged. Falls back to command-ACK tracking
-    * (handle_remote_mode_ack) when control_source is unrecognized.
+    * the current state unchanged -- there is no ACK-derived fallback, because
+    * a Class 3 ACK only says the pump accepted the command, not what state it
+    * ended up in. SET_REMOTE_MODE confirms from this readback instead.
     * 
     * @return True if remote control is enabled, false if in auto/local mode
     */
    bool get_remote_enabled() const { return is_remote_mode_enabled_; }
+
+   /**
+    * Has a recognized control_source (Remote/Digital or Local/Panel) ever been
+    * observed? False means get_remote_enabled()'s `false` is a default, not a
+    * reading -- entity lambdas should report unknown rather than "off".
+    */
+   bool is_remote_state_valid() const { return remote_state_valid_; }
    
    /**
     * Check if pump enabled state has been determined.
@@ -349,6 +325,7 @@ class ControlService {
    void invalidate_cache() {
      mode_valid_ = false;
      pump_enabled_valid_ = false;
+     remote_state_valid_ = false;
      cached_autoadapt_ = -1;
      cached_temp_min_ = NAN;
      cached_temp_max_ = NAN;
@@ -394,6 +371,24 @@ class ControlService {
     static constexpr uint8_t MAX_MODE_CONFIRM_ATTEMPTS = 4;
 
     bool is_remote_mode_enabled_{false};  // Track remote mode state
+    // Has a recognized control_source (1 or 2) ever been seen? Mirrors
+    // pump_enabled_valid_. Without it the {false} default above is
+    // indistinguishable from an observed Local/Panel, and SET_REMOTE_MODE's
+    // confirm would settle a disable ACCEPTED on a cold cache having read
+    // nothing -- the same false-confirm the SET_PUMP_ENABLED rollback fixed.
+    bool remote_state_valid_{false};
+    // Bumped alongside remote_state_valid_, i.e. only when a control_source
+    // byte the profile defines as Remote(2) or Local(1) is actually seen.
+    // remote_state_valid_ alone is not enough to confirm a write against:
+    // it is sticky, so once ANY recognized source has been observed it stays
+    // true through readbacks that carry a source we cannot interpret, and
+    // SET_REMOTE_MODE's confirm would then settle against the value the
+    // PREVIOUS observation left behind. Object 86 Sub 7 is the prioritized
+    // status after remote/local/alarm arbitration and the profile defines
+    // ~40 sources for it, so a reply that is neither 1 nor 2 is a shape the
+    // pump can really produce. The confirm snapshots this counter before the
+    // command and requires it to move.
+    uint32_t remote_source_observations_{0};
     bool pump_enabled_{false};       // Pump enabled (AUTO/USER_DEFINED) vs stopped (STOP)
     bool pump_enabled_valid_{false}; // Whether pump_enabled_ has been determined
     std::function<void(std::function<void()>, uint32_t)> schedule_callback_;
@@ -447,17 +442,21 @@ class ControlService {
    float get_setpoint_for_mode(ControlMode mode) const;
 
   /**
-   * Handle the ACK response for enable_remote_mode()/disable_remote_mode()
-   * (fixes #46). Only updates is_remote_mode_enabled_ when the pump's Class 3
-   * ACK confirms success (ack byte 0x00); leaves the state unchanged on a
-   * rejected ACK (0x01) or a timeout, rather than assuming success.
+   * Send the Class 3 remote-mode command: enable (0x07) or disable/Auto
+   * (0x08) as a SET (`[0x03, 0x81, <id>]`). Same ACK shapes as
+   * send_run_command(): a clean `[03 00]` is an ack, the `[03 01 xx]`
+   * descriptor reply is a rejection, and a closed window is neither.
    *
-   * @param enabling True if this was an enable_remote_mode() call, false for disable
-   * @param got_response True if the transport got a matching response before timeout
-   * @param data Raw response bytes (only valid when got_response is true)
-   * @param len Length of data
+   * Opcode 0x81 (SET) rather than 0xC1 (INFO) is issue #46, bench-verified:
+   * 0xC1 always produced the rejection shape and remote mode never took
+   * effect. The Python reference (control.py::enable_remote_mode) still has
+   * the 0xC1 bug.
+   *
+   * Like the run-state commands this produces no unsolicited notification,
+   * so the ack is not the verdict -- the caller reads control_source back
+   * (Object 86 Sub 7) and that readback decides.
    */
-  void handle_remote_mode_ack(bool enabling, bool got_response, const uint8_t* data, size_t len);
+  void send_remote_mode_command(bool enable, std::function<void(bool acked, bool rejected)> on_result);
 
   /**
    * Send the pump's unfused Class 3 run-state command: START (0x06) or STOP

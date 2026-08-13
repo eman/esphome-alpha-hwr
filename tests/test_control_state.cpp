@@ -26,13 +26,12 @@
 //   - send_control_request() / note_mode_commanded() are reached through the
 //     operation layer, and test_write_operations.cpp already drives them
 //     end-to-end against a pump simulator. The replicas here duplicate that.
-//   - handle_remote_mode_ack() is not. There is no remote-mode WriteCommand --
-//     ControlService::enable_remote_mode()/disable_remote_mode() call it
-//     directly, one of the standalone write paths the audit flagged -- so the
-//     remote-mode replicas below are the ONLY thing asserting it anywhere.
-//     That is a real coverage gap, not a duplication: routing remote mode
-//     through WriteOperationService would close both it and the architecture
-//     violation.
+//   - handle_remote_mode_ack() was not, and the remote-mode replicas here were
+//     the only thing asserting it anywhere. That gap is now closed the way the
+//     audit proposed: remote mode is a SET_REMOTE_MODE WriteCommand, the ACK
+//     handler is gone (a Class 3 ACK is no longer treated as a confirmation at
+//     all), and test_write_operations.cpp drives the shipped operation against
+//     the pump simulator. The replicas were deleted with it.
 
 int tests_passed = 0;
 int tests_failed = 0;
@@ -326,40 +325,6 @@ struct PumpEnabledState {
 };
 
 /**
- * Minimal state tracker mirroring ControlService::handle_remote_mode_ack()
- * (fix #46): is_remote_mode_enabled_ is only updated when the pump's Class 3
- * ACK confirms success (ack byte 0x00); a rejected ACK (0x01) or a timeout
- * leaves the previous state unchanged instead of blindly assuming success.
- */
-struct RemoteModeState {
-  bool is_remote_mode_enabled{false};
-
-  // Mirrors ControlService::handle_remote_mode_ack()
-  void handle_ack(bool enabling, bool got_response, uint8_t ack_byte) {
-    if (!got_response) {
-      return;  // Timeout: leave state unchanged
-    }
-    if (ack_byte == 0x00) {
-      is_remote_mode_enabled = enabling;
-    }
-    // ack_byte != 0x00 (e.g. 0x01 "rejected"): leave state unchanged
-  }
-
-  // Mirrors the control_source → is_remote_mode_enabled_ logic added in
-  // ControlService::update_mode_from_notification() and the get_mode_async
-  // callback (fix #53). Only updates on known values (2=Remote, 1=Local);
-  // unknown values leave the current state unchanged.
-  void update_remote_from_notification(uint8_t control_source) {
-    if (control_source == 2) {
-      is_remote_mode_enabled = true;   // Remote/Digital
-    } else if (control_source == 1) {
-      is_remote_mode_enabled = false;  // Local/Panel
-    }
-    // 0 or any other byte: leave state unchanged (conservative guard)
-  }
-};
-
-/**
  * Mirrors the setpoint-caching branch of
  * ControlService::update_mode_from_notification() / get_mode_async() after
  * the #88 fix: CONSTANT_FLOW natively uses m³/s, so we must multiply by 3600.
@@ -579,74 +544,6 @@ void test_mode_read_updates_enabled() {
   // Simulate get_mode_async callback with STOP
   state.update_from_mode_read(static_cast<uint8_t>(OperationMode::STOP));
   TEST_ASSERT_EQ(state.pump_enabled, false, "Mode read STOP: pump disabled");
-}
-
-// ============================================================================
-// Test: Remote mode ACK handling -- clean ACK (0x00) confirms the requested
-// state (fixes #46, bench-verified: opcode 0x81 produces this ACK)
-// ============================================================================
-void test_remote_mode_clean_ack_confirms_state() {
-  std::cout << "\n=== Testing Remote Mode: Clean ACK (0x00) Confirms State (#46) ===" << std::endl;
-
-  RemoteModeState state;
-
-  state.handle_ack(/*enabling=*/true, /*got_response=*/true, /*ack_byte=*/0x00);
-  TEST_ASSERT_EQ(state.is_remote_mode_enabled, true,
-                 "#46: clean ACK (0x00) confirms remote mode enabled");
-
-  state.handle_ack(/*enabling=*/false, /*got_response=*/true, /*ack_byte=*/0x00);
-  TEST_ASSERT_EQ(state.is_remote_mode_enabled, false,
-                 "#46: clean ACK (0x00) confirms remote mode disabled");
-}
-
-// ============================================================================
-// Test: Remote mode ACK handling -- rejected ACK (0x01) leaves state unchanged
-// (bench-verified: the old opcode 0xC1 always produced this rejected ACK)
-// ============================================================================
-void test_remote_mode_rejected_ack_leaves_state_unchanged() {
-  std::cout << "\n=== Testing Remote Mode: Rejected ACK (0x01) Leaves State Unchanged (#46) ===" << std::endl;
-
-  RemoteModeState state;
-  // Starts false; a rejected enable attempt must NOT flip it to true --
-  // this is the exact bug #46 reports (old code assumed success unconditionally).
-  state.handle_ack(/*enabling=*/true, /*got_response=*/true, /*ack_byte=*/0x01);
-  TEST_ASSERT_EQ(state.is_remote_mode_enabled, false,
-                 "#46: rejected ACK (0x01) does not falsely report remote mode as enabled");
-}
-
-// ============================================================================
-// Test: Remote mode ACK handling -- timeout (no response) leaves state unchanged
-// ============================================================================
-void test_remote_mode_timeout_leaves_state_unchanged() {
-  std::cout << "\n=== Testing Remote Mode: Timeout Leaves State Unchanged (#46) ===" << std::endl;
-
-  RemoteModeState state;
-  state.handle_ack(/*enabling=*/true, /*got_response=*/false, /*ack_byte=*/0x00);
-  TEST_ASSERT_EQ(state.is_remote_mode_enabled, false,
-                 "#46: no response (timeout) does not falsely report remote mode as enabled");
-}
-
-
-
-
-// ============================================================================
-// Test: notification control_source supersedes previous ACK-based state (#53)
-// A confirmed-remote state (via ACK) must be overwritten when the pump later
-// reports control_source=1 (e.g. user presses local panel button).
-// ============================================================================
-void test_notification_control_source_overrides_ack_state() {
-  std::cout << "\n=== Testing Notification control_source Supersedes ACK State (#53) ===" << std::endl;
-
-  RemoteModeState state;
-  // Simulate a successful enable-remote ACK.
-  state.handle_ack(/*enabling=*/true, /*got_response=*/true, /*ack_byte=*/0x00);
-  TEST_ASSERT_EQ(state.is_remote_mode_enabled, true,
-                 "Precondition: ACK confirmed remote mode enabled");
-
-  // Pump then sends a notification with control_source=1 (user pressed panel).
-  state.update_remote_from_notification(/*control_source=*/1);
-  TEST_ASSERT_EQ(state.is_remote_mode_enabled, false,
-                 "#53: panel button press (control_source=1) correctly clears remote state");
 }
 
 // ============================================================================
@@ -1251,11 +1148,8 @@ int main() {
   test_all_modes_auto_enabled();
   test_all_modes_stop_disabled();
   test_mode_read_updates_enabled();
-  test_remote_mode_clean_ack_confirms_state();
-  test_remote_mode_rejected_ack_leaves_state_unchanged();
-  test_remote_mode_timeout_leaves_state_unchanged();
-  // Issue #53: control_source-based remote state tracking
-  test_notification_control_source_overrides_ack_state();
+  // Issue #53's control_source tracking is asserted against the real service
+  // in test_control_service.cpp (test_control_source_drives_remote_state).
   test_set_mode_does_not_force_enable_when_off();
   test_set_mode_preserves_enabled_when_on();
   test_resolve_enabled_state_aborts_when_unknown();

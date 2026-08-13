@@ -22,6 +22,7 @@ const char *write_command_to_string(WriteCommand cmd) {
     case WriteCommand::SET_SCHEDULE_ENTRY:    return "set_schedule_entry";
     case WriteCommand::CLEAR_SCHEDULE_ENTRY:  return "clear_schedule_entry";
     case WriteCommand::SET_SCHEDULE_ENABLED:  return "set_schedule_enabled";
+    case WriteCommand::SET_REMOTE_MODE:       return "set_remote_mode";
     case WriteCommand::SET_SINGLE_EVENT:      return "set_single_event";
     case WriteCommand::CLEAR_SINGLE_EVENT:    return "clear_single_event";
     case WriteCommand::REFRESH_SCHEDULE:      return "refresh_schedule";
@@ -109,6 +110,11 @@ std::vector<std::string> WriteOperationService::resource_keys_(const Operation &
       return {format_detail("sched_entry:%u:%u", op.layer, op.day_index)};
     case WriteCommand::SET_SCHEDULE_ENABLED:
       return {"sched_enabled"};
+    case WriteCommand::SET_REMOTE_MODE:
+      // Its own resource: the control source is orthogonal to run state, mode
+      // and the schedule, so a queued remote-mode write must not supersede --
+      // or be superseded by -- any of them.
+      return {"remote_mode"};
     case WriteCommand::SET_SINGLE_EVENT:
     case WriteCommand::CLEAR_SINGLE_EVENT:
       // One shared key: a set's slot is resolved only when the op runs, so
@@ -189,6 +195,7 @@ void WriteOperationService::start_front_() {
     case WriteCommand::SET_SCHEDULE_ENTRY:
     case WriteCommand::CLEAR_SCHEDULE_ENTRY:  budget = WATCHDOG_SCHED_ENTRY_MS; break;
     case WriteCommand::SET_SCHEDULE_ENABLED:  budget = WATCHDOG_SCHED_ENABLED_MS; break;
+    case WriteCommand::SET_REMOTE_MODE:       budget = WATCHDOG_REMOTE_MODE_MS; break;
     case WriteCommand::SET_SINGLE_EVENT:
     case WriteCommand::CLEAR_SINGLE_EVENT:    budget = WATCHDOG_SINGLE_EVENT_MS; break;
     case WriteCommand::REFRESH_SCHEDULE:      budget = WATCHDOG_REFRESH_SCHEDULE_MS; break;
@@ -207,6 +214,7 @@ void WriteOperationService::start_front_() {
     case WriteCommand::SET_SCHEDULE_ENTRY:
     case WriteCommand::CLEAR_SCHEDULE_ENTRY:  run_schedule_entry_(seq); break;
     case WriteCommand::SET_SCHEDULE_ENABLED:  run_schedule_enabled_(seq); break;
+    case WriteCommand::SET_REMOTE_MODE:       run_remote_mode_(seq); break;
     case WriteCommand::SET_SINGLE_EVENT:
     case WriteCommand::CLEAR_SINGLE_EVENT:    run_single_event_(seq); break;
     case WriteCommand::REFRESH_SCHEDULE:      run_refresh_schedule_(seq); break;
@@ -329,6 +337,11 @@ void WriteOperationService::finish_(uint32_t seq, WriteStatus status, const std:
       break;
     case WriteCommand::SET_SCHEDULE_ENABLED:
       result.sched_enabled = op.enabled ? 1 : 0;
+      break;
+    case WriteCommand::SET_REMOTE_MODE:
+      // `enabled` (not sched_enabled): this is a pump control-source state,
+      // not a schedule one. Carries the SETTLED value from the readback.
+      result.enabled = op.enabled ? 1 : 0;
       break;
     case WriteCommand::SET_SINGLE_EVENT:
     case WriteCommand::CLEAR_SINGLE_EVENT:
@@ -589,6 +602,91 @@ void WriteOperationService::confirm_enabled_(uint32_t seq) {
 // ---------------------------------------------------------------------------
 // SET_MODE
 // ---------------------------------------------------------------------------
+
+// ---------------------------------------------------------------------------
+// SET_REMOTE_MODE: Class 3 command -> control_source readback (issue #46).
+//
+// Structurally identical to SET_PUMP_ENABLED: an unfused Class 3 SET that
+// asserts nothing but its own command id, produces no unsolicited
+// notification, and is therefore confirmed by a readback rather than by its
+// ACK. Object 86 Sub 7 carries control_source in the same payload as the mode
+// and run state, so get_mode_async() is the readback for all three.
+// ---------------------------------------------------------------------------
+void WriteOperationService::run_remote_mode_(uint32_t seq) {
+  Operation *op = find_(seq);
+  if (op == nullptr || op->phase == Phase::DONE) return;
+  op->phase = Phase::WRITING;
+
+  control_.send_remote_mode_command(op->enabled, [this, seq](bool /*acked*/, bool rejected) {
+    Operation *op = find_(seq);
+    if (op == nullptr || op->phase == Phase::DONE) return;
+    if (rejected) {
+      finish_(seq, WriteStatus::REJECTED,
+              format_detail("pump rejected remote-mode %s command",
+                            op->enabled ? "ENABLE" : "DISABLE"));
+      return;
+    }
+    // Acked, or the ACK window closed without a match: either way the
+    // control_source readback is the authoritative verdict. Snapshot the
+    // observation counter HERE rather than before the send: both branches
+    // that reach this point do so after the pump has had the command, so any
+    // observation counted from now on describes the post-command pump.
+    op->pre_remote_observations = control_.remote_source_observations_;
+    op->phase = Phase::CONFIRMING;
+    schedule_([this, seq]() { confirm_remote_mode_(seq); }, ENABLED_CONFIRM_DELAY_MS);
+  });
+}
+
+void WriteOperationService::confirm_remote_mode_(uint32_t seq) {
+  Operation *op = find_(seq);
+  if (op == nullptr || op->phase == Phase::DONE) return;
+
+  control_.get_mode_async([this, seq](bool success, ControlMode /*mode*/) {
+    Operation *op = find_(seq);
+    if (op == nullptr || op->phase == Phase::DONE) return;
+
+    // A recognized control_source must have been observed SINCE the command,
+    // not merely at some point in the past. remote_state_valid_ is sticky, so
+    // requiring only that would let a readback carrying an uninterpretable
+    // source confirm against whatever the previous observation left behind --
+    // e.g. a cache holding Local/Panel settles a *disable* ACCEPTED having
+    // read no post-command evidence at all. The counter moves only on a
+    // control_source of 1 or 2, from either the read or a passive
+    // notification, so "moved" means "the pump told us where it stands".
+    bool fresh = control_.remote_source_observations_ != op->pre_remote_observations;
+    bool confirmed = success && fresh && control_.remote_state_valid_ &&
+                     control_.get_remote_enabled() == op->enabled;
+    if (confirmed) {
+      finish_(seq, WriteStatus::ACCEPTED, "");
+      return;
+    }
+    if (op->attempts < ENABLED_MAX_ATTEMPTS) {
+      op->attempts++;
+      schedule_([this, seq]() { confirm_remote_mode_(seq); }, ENABLED_RETRY_DELAY_MS);
+      return;
+    }
+    if (!success) {
+      finish_(seq, WriteStatus::TIMEOUT, "control-source readback failed");
+      return;
+    }
+    if (!fresh || !control_.remote_state_valid_) {
+      // The reads landed but never carried a control_source we can read as
+      // Remote or Local. Object 86 Sub 7 is the PRIORITIZED source, and the
+      // profile defines many others (scheduler, alarm, standby...), so this
+      // is a real reply shape and not just a cold cache. Nothing is known
+      // about where the pump now stands, which is a TIMEOUT and emphatically
+      // not a REJECTED: reporting "pump still reports Local/Panel" off a
+      // stale cache would call a write that took effect a failure.
+      finish_(seq, WriteStatus::TIMEOUT, "pump reported no usable control_source");
+      return;
+    }
+    // Settled value from the readback, same as the accepted path.
+    op->enabled = control_.get_remote_enabled();
+    finish_(seq, WriteStatus::REJECTED,
+            format_detail("pump still reports %s control",
+                          control_.get_remote_enabled() ? "Remote/Digital" : "Local/Panel"));
+  });
+}
 
 void WriteOperationService::run_set_mode_(uint32_t seq) {
   Operation *op = find_(seq);
@@ -1013,6 +1111,17 @@ void WriteOperationService::submit_clear_schedule_entry(uint8_t layer, uint8_t d
   op.layer = layer;
   op.day_index = day_index;
   op.enabled = false;
+  op.done = std::move(done);
+  submit_(std::move(op));
+}
+
+void WriteOperationService::submit_set_remote_mode(bool enabled, const std::string &op_id,
+                                                  std::function<void(bool)> done, WriteOrigin origin) {
+  Operation op;
+  op.command = WriteCommand::SET_REMOTE_MODE;
+  op.op_id = op_id;
+  op.origin = origin;
+  op.enabled = enabled;
   op.done = std::move(done);
   submit_(std::move(op));
 }

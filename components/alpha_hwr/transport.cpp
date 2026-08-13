@@ -367,7 +367,7 @@ bool Transport::try_dispatch_response(const uint8_t* data, size_t len) {
     uint8_t queued_class = (cmd.packet.size() > 4) ? cmd.packet[4] : 0x00;
 
     // Class 3: command ACK ([03 00] = success/clean, [03 01 xx] = rejected/
-    // descriptor-only -- see ControlService::enable_remote_mode()).
+    // descriptor-only -- see ControlService::send_remote_mode_command()).
     // Class 7: device info strings, etc.
     // Both use a different packet structure than Class 10 DataObjects, so
     // when expect_obj_id == 0 && expect_sub_id == 0 we match by class byte
