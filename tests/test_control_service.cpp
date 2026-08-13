@@ -18,15 +18,11 @@
  *   - send_control_request() and note_mode_commanded() are reached through the
  *     operation layer, and test_write_operations.cpp drives them end-to-end
  *     against a pump simulator.
- *   - handle_remote_mode_ack() is NOT. There is no remote-mode WriteCommand;
- *     ControlService::enable_remote_mode()/disable_remote_mode() call it
- *     directly, which is one of the standalone write paths the audit flagged as
- *     bypassing the operation layer. So it has no production-linked coverage
- *     anywhere, and the replica in test_control_state.cpp is still the only
- *     thing asserting it. Routing remote mode through WriteOperationService
- *     would fix both the architecture violation and the coverage gap; until
- *     then this file cannot reach it without a test-only friend declaration,
- *     which would assert a path the firmware does not use.
+ *   - send_remote_mode_command() likewise, since remote mode became a
+ *     SET_REMOTE_MODE WriteCommand. It used to be the exception: two standalone
+ *     enable_remote_mode()/disable_remote_mode() entry points talking to the
+ *     transport directly, confirming from the command ACK, with no
+ *     production-linked coverage anywhere.
  */
 
 #include <cmath>

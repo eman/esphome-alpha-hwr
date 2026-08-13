@@ -27,6 +27,7 @@ enum class WriteCommand : uint8_t {
   SET_SCHEDULE_ENTRY,
   CLEAR_SCHEDULE_ENTRY,
   SET_SCHEDULE_ENABLED,
+  SET_REMOTE_MODE,
   SET_SINGLE_EVENT,
   CLEAR_SINGLE_EVENT,
   REFRESH_SCHEDULE,
@@ -234,6 +235,14 @@ class WriteOperationService {
                           std::function<void(bool)> done = nullptr,
                           WriteOrigin origin = WriteOrigin::SERVICE,
                           std::function<void(WriteStatus)> on_status = nullptr);
+  /**
+   * Remote/Digital vs Local/Panel control source (issue #46). Confirmed from
+   * the control_source byte of an Object 86 Sub 7 readback, not from the
+   * command ACK -- see ControlService::send_remote_mode_command().
+   */
+  void submit_set_remote_mode(bool enabled, const std::string &op_id,
+                              std::function<void(bool)> done = nullptr,
+                              WriteOrigin origin = WriteOrigin::SERVICE);
   void submit_set_mode(ControlMode mode, const std::string &op_id,
                        std::function<void(bool)> done = nullptr,
                        WriteOrigin origin = WriteOrigin::SERVICE);
@@ -350,6 +359,15 @@ class WriteOperationService {
     // distinction for SET_CYCLE_TIMES.
     int8_t pre_on_minutes{-1}, pre_off_minutes{-1};
     float pre_flow{NAN};
+    // SET_REMOTE_MODE: ControlService::remote_source_observations_ as it stood
+    // once the Class 3 command had been answered -- NOT when it was sent. The
+    // send callback runs either on the ACK or on the ACK window closing, and
+    // both are after the pump has had the command, so snapshotting there is
+    // what makes a later observation evidence about the post-command pump
+    // rather than about the moment before it. The confirm requires this to
+    // have MOVED, not merely for the cached state to be valid -- see the
+    // counter's declaration for why sticky validity is not enough.
+    uint32_t pre_remote_observations{0};
 
     // Schedule fields
     uint8_t layer{0};
@@ -414,6 +432,8 @@ class WriteOperationService {
   void confirm_cycle_times_(uint32_t seq);
   void run_schedule_entry_(uint32_t seq);
   void confirm_schedule_entry_(uint32_t seq);
+  void run_remote_mode_(uint32_t seq);
+  void confirm_remote_mode_(uint32_t seq);
   void run_schedule_enabled_(uint32_t seq);
   void confirm_schedule_enabled_(uint32_t seq);
   void run_single_event_(uint32_t seq);
@@ -474,6 +494,10 @@ class WriteOperationService {
   static constexpr uint8_t SCHED_MAX_ATTEMPTS = 1;
   static constexpr uint32_t WATCHDOG_SCHED_ENTRY_MS = 20000;
   static constexpr uint32_t WATCHDOG_SCHED_ENABLED_MS = 12000;
+  // Same shape as SET_PUMP_ENABLED (Class 3 send + delayed readback with up
+  // to ENABLED_MAX_ATTEMPTS retries), so it gets the same budget: the retry
+  // ladder is 800 + 2x1000 ms of delay on top of the APDU timeouts.
+  static constexpr uint32_t WATCHDOG_REMOTE_MODE_MS = 12000;
   static constexpr uint32_t WATCHDOG_SINGLE_EVENT_MS = 60000;
   static constexpr uint32_t WATCHDOG_REFRESH_SCHEDULE_MS = 30000;
   static constexpr uint32_t WATCHDOG_REFRESH_EVENTS_MS = 120000;

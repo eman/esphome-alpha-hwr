@@ -34,7 +34,7 @@ int tests_failed = 0;
  * The rule: a Class 3/7 wildcard match (expect_obj_id == 0 && expect_sub_id
  * == 0) must only be satisfied by a response of the *same class* the queued
  * command was actually sent as. Without that, an unrelated Class 10 telemetry
- * notification arriving while a Class 3 command (e.g. enable_remote_mode()) is
+ * notification arriving while a Class 3 command (e.g. send_remote_mode_command()) is
  * in flight could be mistaken for that command's ACK (PR #50 review).
  */
 using esphome::alpha_hwr::protocol::class3_or_7_wildcard_matches;

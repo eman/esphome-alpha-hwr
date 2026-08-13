@@ -73,7 +73,11 @@ switch:
     icon: "mdi:remote"
     optimistic: false  # Read actual state from pump state tracking
     lambda: |-
-      return id(pump).get_remote_enabled();
+      bool enabled = false;
+      if (id(pump).get_remote_state(&enabled)) {
+        return enabled;
+      }
+      return {};  // Return unknown until a control_source has been read
     turn_on_action:
       - lambda: |-
           ESP_LOGI("switch", "Enabling remote mode...");

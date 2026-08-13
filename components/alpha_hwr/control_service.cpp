@@ -108,9 +108,13 @@ void ControlService::update_mode_from_notification(uint8_t mode, uint8_t operati
   // the pump cannot incorrectly clear a state that was confirmed via ACK.
   if (control_source == 2) {
     is_remote_mode_enabled_ = true;
+    remote_state_valid_ = true;
+    remote_source_observations_++;
     ESP_LOGD(TAG, "Remote mode: pump reports control_source=2 (Remote/Digital) → enabled");
   } else if (control_source == 1) {
     is_remote_mode_enabled_ = false;
+    remote_state_valid_ = true;
+    remote_source_observations_++;
     ESP_LOGD(TAG, "Remote mode: pump reports control_source=1 (Local/Panel) → disabled");
   } else if (control_source != 0xFF) {
     // 0xFF is our own sentinel meaning "caller didn't pass control_source".
@@ -365,9 +369,13 @@ bool ControlService::get_mode_async(std::function<void(bool, ControlMode)> on_co
               // Reference: GENI profile - control_source: 2 = Remote/Digital, 1 = Local/Panel.
               if (control_source == 2) {
                 is_remote_mode_enabled_ = true;
+                remote_state_valid_ = true;
+                remote_source_observations_++;
                 ESP_LOGD(TAG, "Remote mode: Sub 7 prioritized read control_source=2 (Remote/Digital) → enabled");
               } else if (control_source == 1) {
                 is_remote_mode_enabled_ = false;
+                remote_state_valid_ = true;
+                remote_source_observations_++;
                 ESP_LOGD(TAG, "Remote mode: Sub 7 prioritized read control_source=1 (Local/Panel) → disabled");
               } else {
                 ESP_LOGD(TAG, "Remote mode: Sub 7 prioritized read control_source=0x%02X unrecognized — state unchanged",
@@ -442,77 +450,25 @@ bool ControlService::get_mode_async(std::function<void(bool, ControlMode)> on_co
   return true;
 }
 
-void ControlService::handle_remote_mode_ack(bool enabling, bool got_response, const uint8_t* data, size_t len) {
-  // Class 3 command ACK format: [Start][Len][Dest][SvcH][Class=0x03][Ack]...[CRC]
-  // Ack byte 0x00 = clean/success ACK; 0x01 (with a trailing descriptor byte)
-  // = rejected/no-op. Bench-verified against a real pump (2026-07-08, #46):
-  // opcode 0x81 (SET) reliably produces the 0x00 ack; the previous 0xC1
-  // (INFO) opcode always produced the 0x01 "rejected" ack, which is why
-  // remote mode never actually took effect before this fix.
-  if (!got_response || len < 6) {
-    ESP_LOGW(TAG, "Remote mode %s: no ACK received (timeout) -- state left unchanged",
-             enabling ? "enable" : "disable");
-    return;
-  }
-  uint8_t ack_byte = data[5];
-  if (ack_byte == 0x00) {
-    this->is_remote_mode_enabled_ = enabling;
-    ESP_LOGI(TAG, "Remote mode %s (confirmed: clean ACK from pump)", enabling ? "enabled" : "disabled (Auto)");
-  } else {
-    ESP_LOGW(TAG, "Remote mode %s command was rejected by pump (ack=0x%02X, expected 0x00) -- state left unchanged",
-             enabling ? "enable" : "disable", ack_byte);
-  }
+void ControlService::send_remote_mode_command(bool enable,
+                                             std::function<void(bool acked, bool rejected)> on_result) {
+  // Class 3 SET: [0x03, 0x81, 0x07 enable | 0x08 disable/Auto]. See the header
+  // note for why this is 0x81 and not 0xC1 (issue #46).
+  const uint8_t apdu[3] = {0x03, 0x81, static_cast<uint8_t>(enable ? 0x07 : 0x08)};
+
+  ESP_LOGI(TAG, "Sending Class 3 remote-mode %s command...", enable ? "ENABLE" : "DISABLE");
+  this->transport_.send_apdu_command(apdu, 3, 0, 0,
+    [on_result](bool got_response, const uint8_t *data, size_t len) {
+      if (!got_response || len < 6) {
+        // Window closed without a matchable ACK; the pump may still have
+        // applied the command -- the caller's readback decides.
+        if (on_result) on_result(false, false);
+        return;
+      }
+      uint8_t ack_byte = data[5];
+      if (on_result) on_result(ack_byte == 0x00, ack_byte != 0x00);
+    });
 }
-
-bool ControlService::enable_remote_mode() {
-   // Verify session is authenticated
-   if (session_.get_state() != core::SessionState::READY) {
-     ESP_LOGW(TAG, "Cannot enable remote mode: session not ready");
-     return false;
-   }
-
-   ESP_LOGI(TAG, "Enabling remote mode...");
-
-   // Class 3: 03 81 07 (OpSpec 0x81 = SET; command ID 7 = enable remote).
-   // Fix #46: was 0xC1 (INFO), which the pump always rejected with a
-   // "descriptor-only" ACK ([03 01 xx]) rather than the clean [03 00]
-   // success ACK -- bench-verified against a real pump.
-   const uint8_t apdu[3] = {0x03, 0x81, 0x07};
-   
-   // Send command and wait for the ACK (wildcard match: any Class 3 response)
-   // so we only update is_remote_mode_enabled_ once the pump actually
-   // confirms the command, instead of assuming success.
-   this->transport_.send_apdu_command(apdu, 3, 0, 0,
-     [this](bool success, const uint8_t* data, size_t len) {
-       this->handle_remote_mode_ack(true, success, data, len);
-     });
-   
-   ESP_LOGI(TAG, "Enable remote mode command sent, awaiting ACK...");
-   return true;
- }
- 
- bool ControlService::disable_remote_mode() {
-   // Verify session is authenticated
-   if (session_.get_state() != core::SessionState::READY) {
-     ESP_LOGW(TAG, "Cannot disable remote mode: session not ready");
-     return false;
-   }
-
-   ESP_LOGI(TAG, "Disabling remote mode (Auto)...");
-
-   // Class 3: 03 81 08 (OpSpec 0x81 = SET; command ID 8 = disable remote / Auto).
-   // Fix #46: was 0xC1 (INFO) -- see enable_remote_mode() for details.
-   const uint8_t apdu[3] = {0x03, 0x81, 0x08};
-   
-   // Send command and wait for the ACK -- see enable_remote_mode().
-   this->transport_.send_apdu_command(apdu, 3, 0, 0,
-     [this](bool success, const uint8_t* data, size_t len) {
-       this->handle_remote_mode_ack(false, success, data, len);
-     });
-   
-   ESP_LOGI(TAG, "Disable remote mode command sent, awaiting ACK...");
-   return true;
- }
 
 void ControlService::send_run_command(bool start_pump,
                                       std::function<void(bool acked, bool rejected)> on_result) {

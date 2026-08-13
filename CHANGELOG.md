@@ -4,6 +4,34 @@
 
 ### Fixed
 
+- **Remote mode goes through the write-operation layer, and is confirmed by a
+  readback instead of by the command ACK.** It was the last write in the
+  component that reached the transport on its own: two standalone
+  `enable_remote_mode()`/`disable_remote_mode()` entry points with no settle
+  event, no watchdog, no supersede handling, and a verdict taken from the Class
+  3 ACK byte. That verdict was wrong in both directions — a pump that acks the
+  command cleanly and then stays on Local/Panel was reported as remote-enabled,
+  and a pump that applied the command but whose ACK window closed was reported
+  as unchanged. `set_remote_mode` now settles on the pump's own `control_source`
+  byte (Object 86 Sub 7), so the first case settles `rejected` and the second
+  `accepted`. Toggling the Remote Mode switch emits a `set_remote_mode`
+  `write_settled` event carrying `remote_enabled`; there is still no
+  `pump_set_remote_mode` service. The confirm requires a recognized
+  `control_source` to have been observed *since* the command, not merely at
+  some point: Sub 7 reports the prioritized source after remote/local/alarm
+  arbitration and the profile defines many values that are neither
+  Remote(2) nor Local(1), so a reply carrying one of those leaves the cache
+  untouched. Confirming against the cache alone would settle a *disable*
+  `accepted` off a Local reading taken before the command, and report a write
+  that did take effect as `rejected` off the same stale reading; an
+  uninterpretable source now settles `timeout` in both directions.
+
+- **The Remote Mode switch shows "unknown" until a control source has been
+  read**, matching Schedule Enabled and Temperature AutoAdapt. It previously
+  reported OFF on a fresh connect whether the pump was on Local/Panel or
+  simply had not been read yet, so a scene reasserting "Remote Mode off"
+  against a cold cache issued a write with nothing to confirm against.
+
 - **The single-event, vacation, event-log, history and cycle-timestamp text
   sensors are change-gated.** All five republished a byte-identical string on
   every refresh service call and every reconnect, costing an API frame per
