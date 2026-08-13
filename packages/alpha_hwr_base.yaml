@@ -67,6 +67,7 @@ sensor:
       name: "Free Heap"
     block:
       name: "Largest Free Block"
+      id: largest_free_block
     min_free:
       name: "Min Free Heap"
     fragmentation:
@@ -138,3 +139,33 @@ alpha_hwr:
   # release, so it cannot tell two builds apart (issue #124).
   component_build:
     name: "Component Build"
+
+# ---------------------------------------------------------------------------
+# Heap headroom warning.
+#
+# The node has repeatedly rebooted with an allocation failure whose backtrace
+# contains no alpha_hwr frames -- most recently inside
+# api::UserServiceDynamic::encode_list_service_response(), which every API
+# client runs on connect (issue #127). Those look like a regression in whatever
+# was last flashed and are not; the only way to tell has been to decode the
+# backtrace after the fact.
+#
+# This gives the pressure a name BEFORE the allocation fails.
+#
+# Why Largest Free Block and not Free Heap: the heap fragments. Measured
+# 2026-08-13 on a healthy node, Free Heap sat at ~72 KB while the largest
+# contiguous block was 40,960 B -- so an allocation can fail with free heap
+# still looking comfortable. Free Heap is the misleading metric here.
+#
+# Threshold: 16 KB, about 40% of that observed steady-state block. Low enough
+# not to chatter on the normal startup dip, high enough to fire well before an
+# allocation of any ordinary size fails. Adjust if your node runs tighter.
+binary_sensor:
+  - platform: template
+    name: "Heap Pressure"
+    id: heap_pressure
+    device_class: problem
+    entity_category: diagnostic
+    lambda: |-
+      if (!id(largest_free_block).has_state()) return {};
+      return id(largest_free_block).state < 16384.0f;

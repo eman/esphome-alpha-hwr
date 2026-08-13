@@ -12,12 +12,23 @@ Usage:
   write_bench.py services
   write_bench.py states
   write_bench.py call <service> [k=v ...] [--timeout N] [--linger N]
+  write_bench.py chain <service> [k=v ...] -- <service> [k=v ...] -- ...
   write_bench.py burst <service> <common k=v ...> --each k=v[,k=v] [--each ...]
   write_bench.py upload <enabled 0|1|-> [layer,day,sh,sm,eh,em ...]
 
 `call` auto-generates an op_id if none is passed. `burst` fires one call per
 --each group (merged over the common args) back to back on a single
 connection, which is how to exercise the queued-write supersede path.
+
+`chain` runs several DIFFERENT services over one connection. Prefer it to
+invoking `call` repeatedly: every connect makes the node encode its whole
+service list, and stacking those encodes is enough to exhaust its heap
+(issue #127) -- a bench that opens a connection per call is itself the load
+that reboots the node, and the resulting crash looks like a regression in
+whatever was last flashed. Measured 2026-08-13: ~72 KB free but only a 40 KB
+largest free block, and an observed OOM inside
+encode_list_service_response() with four clients stacked on top of Home
+Assistant.
 
 Connection settings (flag overrides environment):
   --host / ALPHA_HWR_HOST          node address (e.g. hwr-pump.local)
@@ -219,19 +230,29 @@ async def cmd_states(host: str, key: str) -> int:
     return 0
 
 
-async def cmd_call(host: str, key: str, service_name: str, kvs: list[str],
+async def run_call(client: APIClient, collector: EventCollector,
+                   service_name: str, kvs: list[str],
                    timeout: float, linger: float) -> int:
-    client = await connect(host, key)
+    """One service call on an ALREADY-CONNECTED client. Returns 0 on success.
+
+    Split out of cmd_call so `chain` can run several calls over a single
+    connection. That is not a tidiness point: each connect triggers
+    list_entities_services, which encodes every registered service and its
+    arguments, and stacking those encodes on a node whose largest free block is
+    ~40 KB is enough to exhaust the heap (issue #127). A bench that opens four
+    connections to make four calls is itself the load that breaks the node.
+    """
     service = await find_service(client, service_name)
 
     data = kv_dict(kvs)
     op_id = data.setdefault("op_id", f"bench-{int(time.time())}")
     payload = coerce(service, data)
 
-    collector = EventCollector()
+    # The collector is owned by the caller and subscribed ONCE per connection.
+    # Subscribing per call looked harmless but is not: on a shared connection
+    # every earlier collector stays attached, so each of them also receives and
+    # prints later events. A two-call chain printed its second settle twice.
     matched = collector.expect(op_id)
-    await maybe_await(client.subscribe_service_calls(collector.on_service_call))
-    await asyncio.sleep(0.3)
 
     t0 = time.monotonic()
     print(f"-> {service_name}({json.dumps(payload, sort_keys=True)})")
@@ -242,13 +263,46 @@ async def cmd_call(host: str, key: str, service_name: str, kvs: list[str],
         print(f"settled in {time.monotonic() - t0:.1f}s")
     except asyncio.TimeoutError:
         print(f"NO TERMINAL EVENT for op_id={op_id} within {timeout}s <-- CONTRACT VIOLATION")
-        await maybe_await(client.disconnect())
         return 1
 
     await asyncio.sleep(linger)  # catch duplicate terminal events
     bad = collector.report([op_id])
-    await maybe_await(client.disconnect())
     return 1 if bad else 0
+
+
+async def cmd_call(host: str, key: str, service_name: str, kvs: list[str],
+                   timeout: float, linger: float) -> int:
+    client = await connect(host, key)
+    try:
+        collector = EventCollector()
+        await maybe_await(client.subscribe_service_calls(collector.on_service_call))
+        await asyncio.sleep(0.3)
+        return await run_call(client, collector, service_name, kvs, timeout, linger)
+    finally:
+        await maybe_await(client.disconnect())
+
+
+async def cmd_chain(host: str, key: str, calls: list[list[str]],
+                    timeout: float, linger: float) -> int:
+    """Several service calls over ONE connection.
+
+    Use this instead of invoking `call` N times: N invocations means N
+    connects, and every connect re-encodes the whole service list. See
+    run_call() for why that matters on this node.
+    """
+    client = await connect(host, key)
+    worst = 0
+    try:
+        collector = EventCollector()
+        await maybe_await(client.subscribe_service_calls(collector.on_service_call))
+        await asyncio.sleep(0.3)
+        for i, call in enumerate(calls, 1):
+            print(f"\n[{i}/{len(calls)}] {call[0]}")
+            rc = await run_call(client, collector, call[0], call[1:], timeout, linger)
+            worst = max(worst, rc)
+    finally:
+        await maybe_await(client.disconnect())
+    return worst
 
 
 async def cmd_burst(host: str, key: str, service_name: str, common: list[str],
@@ -390,6 +444,22 @@ def main() -> int:
         print(f"expected hash: {expected}")
         return asyncio.run(cmd_call(host, key, "upload_schedule",
                                     [f"data={payload}"], max(timeout, 160.0), linger))
+    if cmd == "chain":
+        # chain <service> [k=v ...] -- <service> [k=v ...] -- ...
+        calls: list[list[str]] = []
+        cur: list[str] = []
+        for a in rest:
+            if a == "--":
+                if cur:
+                    calls.append(cur)
+                cur = []
+            else:
+                cur.append(a)
+        if cur:
+            calls.append(cur)
+        if not calls:
+            die("chain requires at least one service name")
+        return asyncio.run(cmd_chain(host, key, calls, timeout, linger))
     if cmd == "burst":
         if not rest or not groups:
             die("burst requires a service name and at least one --each group")
