@@ -29,7 +29,7 @@ inline bool is_class3_or_7(uint8_t class_byte) {
 /**
  * Does an incoming Class 3/7 packet answer the queued command?
  *
- * A wildcard expectation (`expect_obj_id == 0 && expect_sub_id == 0`) carries no
+ * A wildcard expectation (`expect_type_low_ver == 0 && expect_type_high == 0`) carries no
  * Object/Sub ID to match on, so these classes are matched by class byte alone --
  * but only against a command that was actually *sent* as that class. Without the
  * `incoming_class == queued_class` term, an unrelated Class 10 telemetry
@@ -38,7 +38,7 @@ inline bool is_class3_or_7(uint8_t class_byte) {
  *
  * @param queued_class   Class byte of the command awaiting a response
  * @param incoming_class Class byte of the packet that just arrived
- * @param wildcard_expect expect_obj_id == 0 && expect_sub_id == 0
+ * @param wildcard_expect expect_type_low_ver == 0 && expect_type_high == 0
  */
 inline bool class3_or_7_wildcard_matches(uint8_t queued_class,
                                          uint8_t incoming_class,

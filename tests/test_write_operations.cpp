@@ -464,6 +464,27 @@ struct Harness {
 // Tests
 // ---------------------------------------------------------------------------
 
+// The Object 86 Sub 7 read is ControlService's, so its response-matching
+// arguments are pinned here, where the real call site runs -- not only at the
+// transport. They were passed in the wrong order for a long time and the read
+// matched anyway, through a fallback branch in Transport that has since been
+// removed; with the fallback gone a swap turns every mode-dependent write into
+// a timeout. Those failures are diffuse (36 assertions across this file), so
+// this states the cause directly.
+static void test_mode_read_arguments_are_not_swapped() {
+  std::cout << "\n=== Obj 86 Sub 7: matching arguments in the right order ===" << std::endl;
+  Harness h;
+  h.sim.mode_byte = 0x02;
+  h.prime_cache();
+
+  // prime_cache() drives a mode read to completion. If the call site's two
+  // arguments were swapped, no reply would match and the cache would stay cold.
+  TEST_ASSERT(h.control.is_mode_valid(),
+              "the mode read matched its reply (arguments not swapped)");
+  TEST_ASSERT(h.control.is_pump_enabled_valid(),
+              "  ...and populated the run-state cache it feeds");
+}
+
 static void test_set_mode_accepted() {
   std::cout << "\n=== set_mode: accepted, unfused ===" << std::endl;
   Harness h;
@@ -2011,6 +2032,7 @@ int main() {
   std::cout << "  Write Operation Service Test Suite (issue #92)" << std::endl;
   std::cout << "===========================================================" << std::endl;
 
+  test_mode_read_arguments_are_not_swapped();
   test_set_mode_accepted();
   test_set_mode_rejected();
   test_set_setpoint_accepted();

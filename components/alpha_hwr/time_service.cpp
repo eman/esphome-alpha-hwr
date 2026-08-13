@@ -41,7 +41,7 @@ void TimeService::get_clock_async(std::function<void(ESPTime)> callback) {
   apdu[4] = SUB_ID_DATETIME_ACTUAL & 0xFF;  // Sub-ID low (0x65 = 101)
   
   // Send Class 10 GET: Object 94, SubID 101 (DateTimeActual)
-  // send_apdu_command signature: (apdu, len, expect_obj_id, expect_sub_id, callback, timeout_ms)
+  // send_apdu_command signature: (apdu, len, expect_type_low_ver, expect_type_high, callback, timeout_ms)
   // Use wildcard matching (0, 0) to accept any Class 10 response, matching Python's behavior
   // Reference: base.py::match_class10_response only checks p[4] == 0x0A
   transport_->send_apdu_command(

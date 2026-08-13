@@ -223,7 +223,7 @@ static void test_bad_crc_cannot_answer_a_command() {
     int callbacks = 0;
     bool success_reported = false;
     const uint8_t apdu[5] = {0x0A, 0x03, 0x00, 0xDA, 0x01};
-    // (expect_obj_id, expect_sub_id) -- in that order.
+    // (expect_type_low_ver, expect_type_high) -- in that order.
     transport.send_apdu_command(apdu, 5, 0xDA01, 0x0000,
       [&](bool success, const uint8_t *, size_t) {
         callbacks++;
@@ -250,11 +250,52 @@ static void test_bad_crc_cannot_answer_a_command() {
               "the same response with a bad CRC does not");
 }
 
+// The Object 86 Sub 7 mode read -- the most consequential read in the
+// component, since it drives control mode, run state, control source and the
+// per-mode setpoint cache -- used to pass its two matching arguments in the
+// wrong order. The primary comparison therefore never succeeded, and the read
+// only ever matched through a "BACKUP MATCH" fallback that existed to absorb
+// exactly that mistake. Removing the fallback without fixing the call site
+// broke 40 assertions across the write-operation suite.
+//
+// This pins the ordering directly at the transport, so a future edit that
+// swaps them back fails here rather than silently falling into a fallback.
+static void test_mode_read_matches_without_fallback() {
+  auto run = [](uint16_t low_ver, uint16_t high) {
+    esphome::alpha_hwr::core::Transport transport;
+    transport.set_write_callback([](const uint8_t *, size_t) { return true; });
+
+    int callbacks = 0;
+    bool ok = false;
+    const uint8_t apdu[5] = {0x0A, 0x03, 0x56, 0x00, 0x07};
+    transport.send_apdu_command(apdu, 5, low_ver, high,
+      [&](bool success, const uint8_t *, size_t) { callbacks++; ok = success; });
+    for (int i = 0; i < 4; i++) { mock_millis += 51; transport.loop(); }
+
+    // The pump's Sub 7 reply: [00][TypeH=01][TypeL=2F][Ver=01] at bytes 6-9,
+    // i.e. Type 303 v1. Transport reads that as 0x0001 / 0x2F01.
+    std::vector<uint8_t> reply{0x24, 0x00, 0xF8, 0xE7, 0x0A, 0x0E,
+                               0x00, 0x01, 0x2F, 0x01,
+                               0x00, 0x00, 0x07, 0x02, 0x00, 0x02,
+                               0x00, 0x00, 0x00, 0x00, 0xAA, 0xBB};
+    reply[1] = static_cast<uint8_t>(reply.size() - 4);
+    reply = with_crc(std::move(reply));
+    transport.on_notification(reply.data(), reply.size());
+    return callbacks > 0 && ok;
+  };
+
+  TEST_ASSERT(run(0x2F01, 0x0001),
+              "mode read matches with (type_low_ver, type_high) in that order");
+  TEST_ASSERT(!run(0x0001, 0x2F01),
+              "  ...and does NOT match when the two are swapped");
+}
+
 int main() {
   test_reassembly_continuation_0x24();
   test_reassembly_continuation_0x27();
   test_reassembly_stale_partial_recovers();
   test_trailing_bytes_are_trimmed();
+  test_mode_read_matches_without_fallback();
   test_bad_crc_frame_is_dropped();
   test_bad_crc_cannot_answer_a_command();
 

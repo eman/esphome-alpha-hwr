@@ -320,12 +320,21 @@ bool ControlService::get_mode_async(std::function<void(bool, ControlMode)> on_co
    apdu[3] = 0x00;  // SubID 7 high byte
    apdu[4] = 0x07;  // SubID 7 low byte
    
-  // Send with response matching for Object 86 Sub 7 response
-  // The pump responds with OpSpec 0x0E notification: bytes 6-7 = Sub 0x0001, bytes 8-9 = Obj 0x2F01
+  // Response matching for the Object 86 Sub 7 read.
+  //
+  // These two arguments used to be passed the other way round, and the whole
+  // read only ever matched through Transport's "BACKUP MATCH" fallback as a
+  // result -- the primary comparison never succeeded. The fallback has been
+  // removed, so the order matters now.
+  //
+  // The pump's reply carries [00][TypeH][TypeL][Version] at bytes 6-9: Type 303
+  // version 1, the mode/control object. Transport splits that at the wrong
+  // boundary for historical reasons (see the note at its parse site), giving
+  // bytes 6-7 = 0x0001 = TypeH and bytes 8-9 = 0x2F01 = (TypeL << 8) | Version.
     this->transport_.send_apdu_command(
-      apdu, 5, 
-      0x0001,  // Match Sub-ID at bytes 6-7 of response frame
-      0x2F01,  // Match Obj-ID at bytes 8-9 of response frame
+      apdu, 5,
+      0x2F01,  // expect_type_low_ver: bytes 8-9 of the response
+      0x0001,  // expect_type_high:    bytes 6-7 of the response
       [this, on_complete](bool success, const uint8_t* payload, size_t payload_len) {
         if (!success) {
           ESP_LOGW(TAG, "Failed to read control mode (timeout)");
@@ -816,7 +825,7 @@ void ControlService::write_temp_range_config(float min_temp, float max_temp, boo
   // Log the full APDU for debugging
   ESP_LOGI(TAG, "write_temp_range APDU: %s", format_hex_pretty(apdu, 25).c_str());
 
-  // Pass expect_obj_id=0, expect_sub_id=0 for response matching because
+  // Pass expect_type_low_ver=0, expect_type_high=0 for response matching because
   // the pump responds with a short ACK (OpSpec 0x01) without Obj/Sub fields
   this->transport_.send_apdu_command(
       apdu, 25, 0, 0,
