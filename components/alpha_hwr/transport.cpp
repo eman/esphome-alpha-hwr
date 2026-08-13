@@ -8,6 +8,7 @@
 #include "esphome/core/log.h"
 #include "esphome/core/hal.h"
 #include "frame_builder.h"
+#include "response_match.h"
 #include <algorithm>
 #include <cinttypes>
 
@@ -373,8 +374,9 @@ bool Transport::try_dispatch_response(const uint8_t* data, size_t len) {
     // Both use a different packet structure than Class 10 DataObjects, so
     // when expect_obj_id == 0 && expect_sub_id == 0 we match by class byte
     // alone -- but only when the queued command was sent as that class.
-    if ((is_class3 || is_class7) && data[4] == queued_class &&
-        cmd.expect_obj_id == 0x0000 && cmd.expect_sub_id == 0x0000) {
+    if (protocol::class3_or_7_wildcard_matches(
+            queued_class, data[4],
+            cmd.expect_obj_id == 0x0000 && cmd.expect_sub_id == 0x0000)) {
       ESP_LOGV(TAG, "Class %d response matched (wildcard match by class byte)", is_class3 ? 3 : 7);
       if (cmd.callback) {
         cmd.callback(true, data, len);
@@ -389,7 +391,7 @@ bool Transport::try_dispatch_response(const uint8_t* data, size_t len) {
     // it's definitely not our answer -- let it fall through to the general
     // packet callback instead of risking the Class 10 wildcard path below
     // matching it by accident.
-    if ((queued_class == 0x03 || queued_class == 0x07) && !is_class3 && !is_class7) {
+    if (protocol::ignore_unrelated_while_awaiting_class3_or_7(queued_class, data[4])) {
       ESP_LOGV(TAG, "Awaiting Class %d response, ignoring unrelated Class 0x%02X packet",
                queued_class, data[4]);
       return false;

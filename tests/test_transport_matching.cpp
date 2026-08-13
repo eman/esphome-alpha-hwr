@@ -6,6 +6,8 @@
  * by extracting the pure logic into testable assertions.
  */
 
+#include "../components/alpha_hwr/response_match.h"
+
 #include <iostream>
 #include <cstdint>
 
@@ -23,24 +25,20 @@ int tests_failed = 0;
   }
 
 /**
- * Mirrors the queued-command-class gating added to
- * Transport::try_dispatch_response() in response to review feedback on
- * PR #50: a Class 3/7 wildcard match (expect_obj_id == 0 && expect_sub_id
- * == 0) must only be satisfied by a response of the *same class* the queued
- * command was actually sent as. Without this, an unrelated Class 10
- * telemetry notification arriving while a Class 3 command (e.g.
- * enable_remote_mode()) is in flight could be mistaken for that command's
- * ACK.
+ * The predicate under test now lives in production
+ * (components/alpha_hwr/response_match.h) and is called by
+ * Transport::try_dispatch_response(). This file used to carry a hand-written
+ * copy of it, which meant the test could keep passing while the shipped
+ * predicate changed underneath it.
  *
- * @param queued_class Class byte of the command currently awaiting a response
- * @param incoming_class Class byte of the packet that just arrived
- * @param wildcard_expect True if expect_obj_id == 0 && expect_sub_id == 0
- * @return True if this incoming packet should be treated as the command's response
+ * The rule: a Class 3/7 wildcard match (expect_obj_id == 0 && expect_sub_id
+ * == 0) must only be satisfied by a response of the *same class* the queued
+ * command was actually sent as. Without that, an unrelated Class 10 telemetry
+ * notification arriving while a Class 3 command (e.g. enable_remote_mode()) is
+ * in flight could be mistaken for that command's ACK (PR #50 review).
  */
-bool class3_or_7_wildcard_matches(uint8_t queued_class, uint8_t incoming_class, bool wildcard_expect) {
-  bool incoming_is_class3_or_7 = (incoming_class == 0x03 || incoming_class == 0x07);
-  return incoming_is_class3_or_7 && incoming_class == queued_class && wildcard_expect;
-}
+using esphome::alpha_hwr::protocol::class3_or_7_wildcard_matches;
+using esphome::alpha_hwr::protocol::ignore_unrelated_while_awaiting_class3_or_7;
 
 // ============================================================================
 // Test: a Class 3 ACK correctly matches a queued Class 3 command
