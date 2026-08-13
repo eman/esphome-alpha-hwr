@@ -17,6 +17,15 @@
 #include <functional>
 
 // Test result tracking (same framework as test_protocol.cpp)
+// NOTE: the notification-driven state tests that used to live here now drive
+// the real ControlService in test_control_service.cpp. What remains asserts
+// behaviour reachable only through ControlService's *private* wire primitives
+// (send_control_request, note_mode_commanded, handle_remote_mode_ack), which
+// AGENTS §8.4 keeps private because WriteOperationService is the one write
+// path. Those paths are covered end-to-end against a pump simulator in
+// test_write_operations.cpp; the replicas below remain until the cases still
+// unique to them are moved there.
+
 int tests_passed = 0;
 int tests_failed = 0;
 
@@ -358,74 +367,9 @@ float resolve_cached_setpoint_from_pump_read(ControlMode mode, ControlMode /*pre
   }
 }
 
-// ============================================================================
-// Test: Initial state (before any pump communication)
-// ============================================================================
-void test_initial_state() {
-  std::cout << "\n=== Testing Initial State ===" << std::endl;
 
-  PumpEnabledState state;
 
-  TEST_ASSERT_EQ(state.pump_enabled, false, "Initial: pump_enabled is false");
-  TEST_ASSERT_EQ(state.pump_enabled_valid, false, "Initial: pump_enabled_valid is false");
-  TEST_ASSERT_EQ(state.mode_valid, false, "Initial: mode_valid is false");
-  TEST_ASSERT(state.current_mode == ControlMode::NONE, "Initial: mode is NONE");
-}
 
-// ============================================================================
-// Test: Notification with AUTO operation mode → pump enabled
-// ============================================================================
-void test_notification_auto_mode() {
-  std::cout << "\n=== Testing Notification: AUTO Mode ===" << std::endl;
-
-  PumpEnabledState state;
-
-  // Simulate passive notification: Temperature Range mode, AUTO operation
-  state.update_from_notification(
-      static_cast<uint8_t>(ControlMode::TEMPERATURE_RANGE),
-      static_cast<uint8_t>(OperationMode::AUTO));
-
-  TEST_ASSERT_EQ(state.pump_enabled, true, "AUTO notification: pump is enabled");
-  TEST_ASSERT_EQ(state.pump_enabled_valid, true, "AUTO notification: state is valid");
-  TEST_ASSERT(state.current_mode == ControlMode::TEMPERATURE_RANGE,
-              "AUTO notification: mode is TEMPERATURE_RANGE");
-  TEST_ASSERT_EQ(state.mode_valid, true, "AUTO notification: mode is valid");
-}
-
-// ============================================================================
-// Test: Notification with STOP operation mode → pump disabled
-// ============================================================================
-void test_notification_stop_mode() {
-  std::cout << "\n=== Testing Notification: STOP Mode ===" << std::endl;
-
-  PumpEnabledState state;
-
-  // Simulate passive notification: Temperature Range mode, STOP operation
-  state.update_from_notification(
-      static_cast<uint8_t>(ControlMode::TEMPERATURE_RANGE),
-      static_cast<uint8_t>(OperationMode::STOP));
-
-  TEST_ASSERT_EQ(state.pump_enabled, false, "STOP notification: pump is disabled");
-  TEST_ASSERT_EQ(state.pump_enabled_valid, true, "STOP notification: state is valid");
-  TEST_ASSERT(state.current_mode == ControlMode::TEMPERATURE_RANGE,
-              "STOP notification: mode is still TEMPERATURE_RANGE");
-}
-
-// ============================================================================
-// Test: Notification with USER_DEFINED operation mode → pump enabled
-// ============================================================================
-void test_notification_user_defined_mode() {
-  std::cout << "\n=== Testing Notification: USER_DEFINED Mode ===" << std::endl;
-
-  PumpEnabledState state;
-
-  state.update_from_notification(
-      static_cast<uint8_t>(ControlMode::CONSTANT_SPEED),
-      static_cast<uint8_t>(OperationMode::USER_DEFINED));
-
-  TEST_ASSERT_EQ(state.pump_enabled, true, "USER_DEFINED notification: pump is enabled");
-  TEST_ASSERT_EQ(state.pump_enabled_valid, true, "USER_DEFINED notification: state is valid");
-}
 
 // ============================================================================
 // Test: start() sets pump enabled
@@ -674,63 +618,8 @@ void test_remote_mode_timeout_leaves_state_unchanged() {
                  "#46: no response (timeout) does not falsely report remote mode as enabled");
 }
 
-// ============================================================================
-// Test: control_source == 2 (Remote/Digital) sets remote mode enabled (#53)
-// ============================================================================
-void test_notification_control_source_2_sets_remote_enabled() {
-  std::cout << "\n=== Testing control_source=2 Sets Remote Enabled (#53) ===" << std::endl;
 
-  RemoteModeState state;
-  // Initially not remote; pump notification should flip it.
-  TEST_ASSERT_EQ(state.is_remote_mode_enabled, false, "Precondition: remote disabled");
 
-  state.update_remote_from_notification(/*control_source=*/2);
-
-  TEST_ASSERT_EQ(state.is_remote_mode_enabled, true,
-                 "#53: control_source=2 (Remote/Digital) → is_remote_mode_enabled set true");
-}
-
-// ============================================================================
-// Test: control_source == 1 (Local/Panel) clears remote mode enabled (#53)
-// ============================================================================
-void test_notification_control_source_1_clears_remote_enabled() {
-  std::cout << "\n=== Testing control_source=1 Clears Remote Enabled (#53) ===" << std::endl;
-
-  RemoteModeState state;
-  // Start with remote enabled (e.g. via a previous ACK).
-  state.is_remote_mode_enabled = true;
-
-  state.update_remote_from_notification(/*control_source=*/1);
-
-  TEST_ASSERT_EQ(state.is_remote_mode_enabled, false,
-                 "#53: control_source=1 (Local/Panel) → is_remote_mode_enabled cleared");
-}
-
-// ============================================================================
-// Test: unknown control_source (0) leaves remote state unchanged (#53)
-// The reporter always saw 0 before the opcode fix (PR #50). A 0 must never
-// overwrite a state that was confirmed by a clean command ACK.
-// ============================================================================
-void test_notification_control_source_0_leaves_state_unchanged() {
-  std::cout << "\n=== Testing control_source=0 Leaves Remote State Unchanged (#53) ===" << std::endl;
-
-  // Case A: was enabled — must stay enabled.
-  {
-    RemoteModeState state;
-    state.is_remote_mode_enabled = true;
-    state.update_remote_from_notification(/*control_source=*/0);
-    TEST_ASSERT_EQ(state.is_remote_mode_enabled, true,
-                   "#53: control_source=0 does not clear a confirmed remote-enabled state");
-  }
-  // Case B: was disabled — must stay disabled.
-  {
-    RemoteModeState state;
-    state.is_remote_mode_enabled = false;
-    state.update_remote_from_notification(/*control_source=*/0);
-    TEST_ASSERT_EQ(state.is_remote_mode_enabled, false,
-                   "#53: control_source=0 does not set a disabled remote-mode state");
-  }
-}
 
 // ============================================================================
 // Test: notification control_source supersedes previous ACK-based state (#53)
@@ -1345,11 +1234,6 @@ int main() {
   std::cout << "  Tests separation of pump enabled (user intent) from" << std::endl;
   std::cout << "  motor running (physical RPM > 0)" << std::endl;
   std::cout << "===========================================================" << std::endl;
-
-  test_initial_state();
-  test_notification_auto_mode();
-  test_notification_stop_mode();
-  test_notification_user_defined_mode();
   test_start_enables_pump();
   test_start_with_mode();
   test_stop_disables_pump();
@@ -1363,9 +1247,6 @@ int main() {
   test_remote_mode_rejected_ack_leaves_state_unchanged();
   test_remote_mode_timeout_leaves_state_unchanged();
   // Issue #53: control_source-based remote state tracking
-  test_notification_control_source_2_sets_remote_enabled();
-  test_notification_control_source_1_clears_remote_enabled();
-  test_notification_control_source_0_leaves_state_unchanged();
   test_notification_control_source_overrides_ack_state();
   test_set_mode_does_not_force_enable_when_off();
   test_set_mode_preserves_enabled_when_on();
