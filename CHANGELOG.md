@@ -4,6 +4,15 @@
 
 ### Fixed
 
+- **The single-event, vacation, event-log, history and cycle-timestamp text
+  sensors are change-gated.** All five republished a byte-identical string on
+  every refresh service call and every reconnect, costing an API frame per
+  subscriber each time for no change (issue #127). The single-event pair had two
+  publish sites -- the read path and the write-settled path -- and gating only
+  the first left the behaviour unchanged, which is how the bench caught it.
+  Measured on hardware: five consecutive `refresh_single_events` calls produced
+  five republishes before and zero after.
+
 - **Three sequential-read chains no longer leak their whole closure graph.**
   `HistoryService::read_trends_async`, `EventLogService::read_entries_async` and
   `ScheduleService::read_single_events_async` each drove their read through a
