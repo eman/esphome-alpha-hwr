@@ -58,6 +58,15 @@ ParsedFrame parse_frame(const uint8_t* data, size_t len) {
     result.valid = false;
     return result;
   }
+  if (expected_total < 8) {
+    // The declared length is below the protocol's own minimum (Start + Len +
+    // SvcH + SvcL + Class + OpSpec + CRC16). Clamping to it would leave a frame
+    // marked valid with no class byte and no OpSpec, so reject it outright
+    // rather than letting a guarded read paper over a malformed header.
+    ESP_LOGV(TAG, "Declared frame total %zu below the 8-byte minimum", expected_total);
+    result.valid = false;
+    return result;
+  }
   if (len > expected_total) {
     // Extra trailing bytes — clamp to expected length so CRC validation and
     // payload extraction use the correct window rather than the extra bytes.

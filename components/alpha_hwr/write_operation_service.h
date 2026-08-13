@@ -370,6 +370,15 @@ class WriteOperationService {
     uint8_t upload_written_mask{0};
     uint8_t upload_skipped_mask{0};
     uint8_t upload_failed_mask{0};
+    // The enabled state the caller asked for, preserved across the confirm
+    // readback. upload.enabled is overwritten with what the pump actually
+    // holds so the settle event reports the truth; without a separate copy of
+    // the request there is nothing left to compare it against, and a dropped
+    // enable write settles ACCEPTED.
+    int8_t upload_enabled_requested{-1};
+    // Set when the readback disagreed with the request, or could not be read.
+    bool upload_enabled_mismatch{false};
+    bool upload_enabled_unreadable{false};
 
     // Pristine copies of the request, captured at submit and never
     // overwritten, so the settle event can echo what was asked for.

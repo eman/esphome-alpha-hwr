@@ -1559,6 +1559,10 @@ void WriteOperationService::upload_apply_enabled_(uint32_t seq) {
   Operation *op = find_(seq);
   if (op == nullptr || op->phase == Phase::DONE) return;
 
+  // Snapshot the request before the confirm readback overwrites op->upload
+  // with the pump's actual state; the verdict needs both.
+  op->upload_enabled_requested = op->upload.enabled;
+
   bool current = false;
   bool have_state = schedule_service_.get_state(&current);
   if (op->upload.enabled < 0 ||
@@ -1584,7 +1588,14 @@ void WriteOperationService::upload_apply_enabled_(uint32_t seq) {
         if (op == nullptr || op->phase == Phase::DONE) return;
         bool actual = false;
         if (ok && schedule_service_.get_state(&actual)) {
-          op->upload.enabled = actual ? 1 : 0;
+          op->upload_enabled_mismatch =
+              (op->upload_enabled_requested >= 0) &&
+              (actual != (op->upload_enabled_requested == 1));
+          op->upload.enabled = actual ? 1 : 0;  // report what the pump holds
+        } else {
+          // Cannot tell whether the write took. Reporting ACCEPTED here is the
+          // exact false-accept this readback exists to prevent.
+          op->upload_enabled_unreadable = true;
         }
         op->phase = Phase::CONFIRMING;
         op->upload_layer = 0;  // reuse as the confirm cursor
@@ -1634,6 +1645,28 @@ void WriteOperationService::finish_upload_(uint32_t seq) {
   if (op == nullptr || op->phase == Phase::DONE) return;
 
   uint8_t confirmed = op->upload_written_mask | op->upload_skipped_mask;
+
+  // The enabled flag lives in ClockProgramOverview Sub 1, which no layer
+  // readback carries, so the layer masks alone cannot see a dropped enable
+  // write. Without this an enable-only upload settled ACCEPTED "no-op".
+  if (op->upload_enabled_unreadable) {
+    finish_(seq, WriteStatus::TIMEOUT,
+            "could not read the schedule-enabled state back");
+    return;
+  }
+  if (op->upload_enabled_mismatch) {
+    const char *want = op->upload_enabled_requested == 1 ? "enabled" : "disabled";
+    if (op->upload_failed_mask == 0 && confirmed != 0) {
+      finish_(seq, WriteStatus::PARTIAL,
+              format_detail("layers written but pump still reports schedule %s",
+                            op->upload.enabled == 1 ? "enabled" : "disabled"));
+    } else {
+      finish_(seq, WriteStatus::REJECTED,
+              format_detail("pump did not take schedule %s", want));
+    }
+    return;
+  }
+
   if (op->upload_failed_mask == 0) {
     finish_(seq, WriteStatus::ACCEPTED,
             op->upload_written_mask == 0 ? "no-op" : "");

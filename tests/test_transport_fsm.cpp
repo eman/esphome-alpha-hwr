@@ -63,7 +63,90 @@ void test_transport_chunking() {
   }
 }
 
+
+// ---------------------------------------------------------------------------
+// Reassembly: a continuation fragment may legitimately begin with 0x24/0x27,
+// which are ordinary payload bytes mid-frame. Treating such a fragment as a new
+// packet discarded the frame in flight and dispatched the fragment as a runt --
+// observed 8 times in the reference captures. These pin the rule and its
+// staleness escape hatch.
+// ---------------------------------------------------------------------------
+
+// A 27-byte Class 10 frame whose second fragment starts with `lead`.
+static std::vector<uint8_t> frame_with_lead_byte(uint8_t lead) {
+  std::vector<uint8_t> f{0x24, 0x00, 0x00, 0x07, 0x0A, 0x03,
+                         0x00, 0x00, 0xDE, 0x01};
+  while (f.size() < 20)
+    f.push_back(0x11);          // filler inside the first 20-byte fragment
+  f.push_back(lead);            // first byte of the continuation fragment
+  while (f.size() < 25)
+    f.push_back(0x22);
+  f.push_back(0xAA);
+  f.push_back(0xBB);            // CRC placeholder
+  f[1] = static_cast<uint8_t>(f.size() - 4);
+  return f;
+}
+
+static void test_continuation_fragment_leading_frame_start(uint8_t lead,
+                                                           const char *label) {
+  esphome::alpha_hwr::core::Transport transport;
+  std::vector<std::vector<uint8_t>> packets;
+  transport.set_packet_callback([&packets](const uint8_t *d, size_t n) {
+    packets.push_back(std::vector<uint8_t>(d, d + n));
+  });
+
+  auto frame = frame_with_lead_byte(lead);
+  transport.on_notification(frame.data(), 20);
+  transport.on_notification(frame.data() + 20, frame.size() - 20);
+
+  TEST_ASSERT(packets.size() == 1, label);
+  if (packets.size() == 1) {
+    TEST_ASSERT(packets[0].size() == frame.size(),
+                "  ...and it is the whole frame, not a runt");
+  }
+}
+
+static void test_reassembly_continuation_0x24() {
+  test_continuation_fragment_leading_frame_start(
+      0x24, "Continuation starting 0x24 does not restart reassembly");
+}
+
+static void test_reassembly_continuation_0x27() {
+  test_continuation_fragment_leading_frame_start(
+      0x27, "Continuation starting 0x27 does not restart reassembly");
+}
+
+// A frame whose tail never arrives must not swallow the next frame forever.
+static void test_reassembly_stale_partial_recovers() {
+  esphome::alpha_hwr::core::Transport transport;
+  std::vector<std::vector<uint8_t>> packets;
+  transport.set_packet_callback([&packets](const uint8_t *d, size_t n) {
+    packets.push_back(std::vector<uint8_t>(d, d + n));
+  });
+
+  auto truncated = frame_with_lead_byte(0x11);
+  transport.on_notification(truncated.data(), 20);   // tail never sent
+
+  mock_millis += 2000;                                // past the staleness bound
+
+  std::vector<uint8_t> whole{0x24, 0x00, 0x00, 0x07, 0x0A, 0x03,
+                             0x00, 0x00, 0xDE, 0x01, 0x01, 0xAA, 0xBB};
+  whole[1] = static_cast<uint8_t>(whole.size() - 4);
+  transport.on_notification(whole.data(), whole.size());
+
+  TEST_ASSERT(packets.size() == 1,
+              "A stale partial frame is abandoned so the next frame parses");
+  if (packets.size() == 1) {
+    TEST_ASSERT(packets[0].size() == whole.size(),
+                "  ...and the recovered packet is the new frame alone");
+  }
+}
+
 int main() {
+  test_reassembly_continuation_0x24();
+  test_reassembly_continuation_0x27();
+  test_reassembly_stale_partial_recovers();
+
   std::cout << "===========================================================" << std::endl;
   std::cout << "  Transport FSM Test Suite" << std::endl;
   std::cout << "===========================================================" << std::endl;

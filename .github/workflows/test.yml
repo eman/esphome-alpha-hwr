@@ -45,6 +45,11 @@ jobs:
             exit 1
           fi
         working-directory: tests
+        env:
+          # Without this the step falls back to Make's default g++ on both
+          # matrix legs, so a clang-only warning is printed by the step above
+          # and then never fails anything.
+          CXX: ${{ matrix.cxx }}
 
   # ---------------------------------------------------------------------------
   # Memory: ASan + UBSan + LeakSanitizer.
@@ -165,8 +170,10 @@ jobs:
       - name: Report image size
         if: always()
         run: |
-          find .esphome -name 'firmware.bin' -o -name '*.elf' | head -5
-          ls -la .esphome/build/ci-compile/build/ 2>/dev/null || true
+          # ESPHome writes the build tree beside the config file, so this is
+          # tests/.esphome -- not .esphome at the repo root.
+          find tests/.esphome -name 'firmware*.bin' -o -name '*.elf' 2>/dev/null | head -5 || true
+          ls -la tests/.esphome/build/ci-compile/build/ 2>/dev/null || true
 
   # ---------------------------------------------------------------------------
   # Python: the two config schemas and the bench client. AGENTS §3 asks for

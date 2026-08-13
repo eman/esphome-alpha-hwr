@@ -120,6 +120,30 @@ static void test_history_abandoned() {
               "history: chain released when a disconnect abandons it");
 }
 
+/// Build a Class 10 response the transport will match, with `sub`/`obj` in the
+/// standard positions and `body` as the payload after the 10-byte header.
+/// The CRC is not filled in: try_dispatch_response does not validate it (a
+/// separate finding), and these tests are about lifetime, not framing.
+static std::vector<uint8_t> class10_response(uint16_t sub, uint16_t obj,
+                                             const std::vector<uint8_t> &body) {
+  std::vector<uint8_t> f{0x24, 0x00, 0x00, 0x07, 0x0A, 0x03};
+  f.push_back((sub >> 8) & 0xFF);
+  f.push_back(sub & 0xFF);
+  f.push_back((obj >> 8) & 0xFF);
+  f.push_back(obj & 0xFF);
+  f.insert(f.end(), body.begin(), body.end());
+  f.push_back(0xAA);
+  f.push_back(0xBB);  // CRC placeholder
+  f[1] = static_cast<uint8_t>(f.size() - 4);
+  return f;
+}
+
+/// The event-log chain only allocates its closure *after* a successful metadata
+/// read reports a non-zero entry count. A harness that never answers leaves
+/// read_metadata_async to time out and return before the suspect closure
+/// exists, so the sentinel expires regardless -- the test would pass against
+/// the old self-cycle and prove nothing. Answer the metadata read, get an entry
+/// read in flight, then abandon it.
 static void test_event_log_abandoned() {
   Rig rig;
   services::EventLogService svc(rig.transport, rig.session);
@@ -130,10 +154,25 @@ static void test_event_log_abandoned() {
       [sentinel](bool, const std::vector<services::EventLogEntry> &) {});
   sentinel.reset();
 
-  run_to_completion(rig.transport);
-  rig.transport.reset();
+  // Let the metadata request reach the wire, then answer it:
+  // 3-byte sub-header, then cycle=1, available=4, max=20.
+  step(rig.transport, 2);
+  auto meta = class10_response(0x0000, 0xF301,
+                               {0x00, 0x00, 0x00,   // sub-header
+                                0x00, 0x01,         // cycle counter
+                                0x00, 0x04,         // available entries
+                                0x00, 0x14,         // max entries
+                                0x00});             // pad: the handler
+                                                    // requires payload_len >= 10
+  rig.transport.on_notification(meta.data(), meta.size());
+
+  // An entry read is now queued and the chain's closure exists.
+  step(rig.transport, 2);
+  rig.transport.reset();  // disconnect mid-chain
   step(rig.transport, 10);
-  TEST_ASSERT(watch.expired(), "event log: chain released");
+
+  TEST_ASSERT(watch.expired(),
+              "event log: chain released when abandoned mid-entry-read");
 }
 
 static void test_single_events_abandoned() {

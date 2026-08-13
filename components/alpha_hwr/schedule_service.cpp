@@ -343,15 +343,18 @@ void ScheduleService::set_state_async(bool enable, std::function<void(bool)> on_
 
   this->transport_.send_apdu_command(
       apdu, sizeof(apdu), 0xDA01, 0,
-      [this, enable, on_sent](bool acked, const uint8_t * /*data*/, size_t /*len*/) {
+      [enable, on_sent](bool acked, const uint8_t * /*data*/, size_t /*len*/) {
         // The pump's two-phase commit often closes the window without a
         // matchable ACK even on success; the authoritative confirm is the
         // caller's poll_state_async() readback. Report "sent" either way.
         ESP_LOGD(TAG, "Schedule %s write %s", enable ? "enable" : "disable",
                  acked ? "ACKed" : "window closed (verify via readback)");
-        // Keep the overview image consistent so a subsequent commit does not
-        // revert the flag we just wrote.
-        this->overview_structure_[4] = enable ? 0x01 : 0x00;
+        // Deliberately do not touch overview_structure_[4] either. Operations
+        // are serialized, so no commit can run between this write and the
+        // caller's confirm poll -- but if every confirm poll times out, the
+        // cached overview would keep an unverified byte and the next unrelated
+        // schedule commit would silently re-apply the timed-out enable/disable.
+        // poll_state_async() copies the whole overview back authoritatively.
         // Deliberately do NOT assert schedule_enabled_/schedule_state_cached_
         // from the *request*. This callback runs whether or not the write was
         // ACKed, so recording the requested value as cached truth made the
