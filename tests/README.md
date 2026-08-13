@@ -55,10 +55,19 @@ Tests failed: 0
 
 When modifying the protocol implementation in `components/alpha_hwr/`:
 
-1. Update the corresponding code in `tests/protocol.h`
+1. **Do not copy it into the tests.** `tests/protocol.h` is a forwarding shim
+   onto `codec.cpp` and `frame_builder.cpp`; it used to hold its own copy of the
+   CRC table and packet builder, which meant the suite kept passing through a
+   total protocol break. Anything added there must forward, never reimplement.
+   Where a decision is awkward to reach from a test, extract it into a
+   dependency-free header the way `response_match.h`, `pump_schedule_ux.h` and
+   `dhw_demand_logic.h` do, and have production call that.
 2. Run tests to verify correctness: `make test`
-3. Only commit source files (`.cpp`, `.h`, `Makefile`)
-4. Do not commit compiled binaries or temporary files
+3. Run `./tools/mutation_check.sh` if you touched the protocol layer. It breaks
+   production code on purpose and asserts the suite notices; a surviving
+   mutation means a test is validating a replica rather than the shipped code.
+4. Only commit source files (`.cpp`, `.h`, `Makefile`)
+5. Do not commit compiled binaries or temporary files
 
 ## Why Host-Based Testing?
 

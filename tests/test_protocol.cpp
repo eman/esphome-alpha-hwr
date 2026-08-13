@@ -174,10 +174,22 @@ void test_read_float_be() {
   float val5 = read_float_be(data5, 0);
   TEST_ASSERT_FLOAT_EQ(val5, 0.5f, 0.0001f, "Float BE: Read typical flow rate (0.5)");
   
-  // Test 6: Boundary check - offset too large
-  uint8_t data6[] = {0x00, 0x00, 0x00, 0x00};
-  float val6 = read_float_be(data6, 252);  // 252 + 4 = 256 > 255
-  TEST_ASSERT_FLOAT_EQ(val6, 0.0f, 0.0001f, "Float BE: Boundary check returns 0.0");
+  // Test 6 used to read 252 bytes past a 4-byte array and assert the result
+  // was 0.0. That only held because the old replica in tests/protocol.h carried
+  // a guard production does not have -- `if (offset + 4 > 255) return 0.0f;`,
+  // a hardcoded 255 unrelated to any actual buffer length. Against the shipped
+  // decode_float_be() the same call is simply an out-of-bounds read: g++ and
+  // clang++ return different values, and ASan does not flag it because at that
+  // distance the read lands in other live stack memory rather than a redzone.
+  //
+  // The assertion is removed rather than repaired: production's decode_*_be()
+  // take an offset with no length and document the caller as responsible for
+  // bounds, so there is no in-range behaviour here to pin. The replica's fake
+  // guard is what hid that contract. Bounds are exercised where they are
+  // actually enforced -- see tests/test_frame_parser.cpp.
+  uint8_t data6[] = {0x41, 0x20, 0x00, 0x00};
+  TEST_ASSERT_FLOAT_EQ(read_float_be(data6, 0), 10.0f, 0.0001f,
+                       "Float BE: in-range decode at offset 0");
 }
 
 // Test integration: Full packet round-trip

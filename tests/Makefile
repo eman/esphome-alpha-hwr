@@ -21,8 +21,10 @@ TESTS = test_protocol test_frame_parser test_read_chain_lifetime test_control_st
 all: $(TESTS)
 
 # Build test executables
-test_protocol: test_protocol.cpp protocol.h $(DEPS)
-	$(CXX) $(CXXFLAGS) test_protocol.cpp -o test_protocol $(LDFLAGS)
+PROTOCOL_SRCS = ../components/alpha_hwr/codec.cpp ../components/alpha_hwr/frame_builder.cpp
+
+test_protocol: test_protocol.cpp protocol.h $(PROTOCOL_SRCS) $(DEPS)
+	$(CXX) $(CXXFLAGS) test_protocol.cpp $(PROTOCOL_SRCS) -o test_protocol $(LDFLAGS)
 
 test_frame_parser: test_frame_parser.cpp ../components/alpha_hwr/frame_parser.cpp ../components/alpha_hwr/frame_builder.cpp ../components/alpha_hwr/codec.cpp $(DEPS)
 	$(CXX) $(CXXFLAGS) test_frame_parser.cpp ../components/alpha_hwr/frame_parser.cpp ../components/alpha_hwr/frame_builder.cpp ../components/alpha_hwr/codec.cpp -o test_frame_parser $(LDFLAGS)
@@ -42,7 +44,7 @@ test_dhw_publish_gate: test_dhw_publish_gate.cpp ../components/dhw_demand/publis
 test_dhw_demand_logic: test_dhw_demand_logic.cpp ../components/dhw_demand/dhw_demand_logic.h $(DEPS)
 	$(CXX) $(CXXFLAGS) test_dhw_demand_logic.cpp -o test_dhw_demand_logic $(LDFLAGS)
 
-test_transport_matching: test_transport_matching.cpp $(DEPS)
+test_transport_matching: test_transport_matching.cpp ../components/alpha_hwr/response_match.h $(DEPS)
 	$(CXX) $(CXXFLAGS) test_transport_matching.cpp -o test_transport_matching $(LDFLAGS)
 
 test_transport_fsm: test_transport_fsm.cpp ../components/alpha_hwr/transport.cpp ../components/alpha_hwr/frame_builder.cpp ../components/alpha_hwr/frame_parser.cpp ../components/alpha_hwr/codec.cpp $(DEPS)

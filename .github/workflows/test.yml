@@ -73,6 +73,23 @@ jobs:
           LSAN_OPTIONS: report_objects=1
 
   # ---------------------------------------------------------------------------
+  # Mutation check: does the suite actually test the shipped code?
+  #
+  # Breaks production code on purpose and asserts the suite notices. This exists
+  # because it once did not -- tests/protocol.h carried its own copy of the CRC
+  # table and packet builder, so a total protocol break left `make test`
+  # reporting 21/21.
+  # ---------------------------------------------------------------------------
+  mutation-check:
+    name: Mutation check
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Break production code and require the suite to notice
+        run: ./tools/mutation_check.sh
+
+  # ---------------------------------------------------------------------------
   # Static analysis. tools/lint.sh --strict treats warnings as errors.
   # ---------------------------------------------------------------------------
   static-analysis:

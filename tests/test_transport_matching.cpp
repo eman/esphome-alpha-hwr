@@ -6,6 +6,8 @@
  * by extracting the pure logic into testable assertions.
  */
 
+#include "../components/alpha_hwr/response_match.h"
+
 #include <iostream>
 #include <cstdint>
 
@@ -23,24 +25,20 @@ int tests_failed = 0;
   }
 
 /**
- * Mirrors the queued-command-class gating added to
- * Transport::try_dispatch_response() in response to review feedback on
- * PR #50: a Class 3/7 wildcard match (expect_obj_id == 0 && expect_sub_id
- * == 0) must only be satisfied by a response of the *same class* the queued
- * command was actually sent as. Without this, an unrelated Class 10
- * telemetry notification arriving while a Class 3 command (e.g.
- * enable_remote_mode()) is in flight could be mistaken for that command's
- * ACK.
+ * The predicate under test now lives in production
+ * (components/alpha_hwr/response_match.h) and is called by
+ * Transport::try_dispatch_response(). This file used to carry a hand-written
+ * copy of it, which meant the test could keep passing while the shipped
+ * predicate changed underneath it.
  *
- * @param queued_class Class byte of the command currently awaiting a response
- * @param incoming_class Class byte of the packet that just arrived
- * @param wildcard_expect True if expect_obj_id == 0 && expect_sub_id == 0
- * @return True if this incoming packet should be treated as the command's response
+ * The rule: a Class 3/7 wildcard match (expect_obj_id == 0 && expect_sub_id
+ * == 0) must only be satisfied by a response of the *same class* the queued
+ * command was actually sent as. Without that, an unrelated Class 10 telemetry
+ * notification arriving while a Class 3 command (e.g. enable_remote_mode()) is
+ * in flight could be mistaken for that command's ACK (PR #50 review).
  */
-bool class3_or_7_wildcard_matches(uint8_t queued_class, uint8_t incoming_class, bool wildcard_expect) {
-  bool incoming_is_class3_or_7 = (incoming_class == 0x03 || incoming_class == 0x07);
-  return incoming_is_class3_or_7 && incoming_class == queued_class && wildcard_expect;
-}
+using esphome::alpha_hwr::protocol::class3_or_7_wildcard_matches;
+using esphome::alpha_hwr::protocol::ignore_unrelated_while_awaiting_class3_or_7;
 
 // ============================================================================
 // Test: a Class 3 ACK correctly matches a queued Class 3 command
@@ -86,6 +84,49 @@ void test_class3_match_requires_wildcard_expectation() {
 // ============================================================================
 // Main
 // ============================================================================
+
+// ============================================================================
+// The second half of the gate: while a Class 3/7 command is in flight, a packet
+// that is neither must be ignored outright rather than falling through to the
+// Class 10 wildcard path, where it could be matched by accident.
+//
+// This predicate was extracted alongside the one above but initially had no
+// assertions, so a regression in it would have left this file green.
+// ============================================================================
+void test_class10_ignored_while_awaiting_class3() {
+  std::cout << "\n=== Testing Unrelated Packet Ignored While Awaiting Class 3/7 ===" << std::endl;
+
+  TEST_ASSERT(ignore_unrelated_while_awaiting_class3_or_7(0x03, 0x0A),
+              "Class 10 packet is ignored while a Class 3 command is in flight");
+  TEST_ASSERT(ignore_unrelated_while_awaiting_class3_or_7(0x07, 0x0A),
+              "Class 10 packet is ignored while a Class 7 command is in flight");
+}
+
+void test_class3_and_7_not_ignored_for_each_other() {
+  std::cout << "\n=== Testing Class 3/7 Responses Are Not Ignored ===" << std::endl;
+
+  // Both are handled by the match predicate above, so neither may be dropped
+  // here -- the mismatch case (Class 3 answer to a queued Class 7) has to reach
+  // that predicate to be rejected for the right reason.
+  TEST_ASSERT(!ignore_unrelated_while_awaiting_class3_or_7(0x03, 0x03),
+              "A Class 3 response is not ignored while awaiting Class 3");
+  TEST_ASSERT(!ignore_unrelated_while_awaiting_class3_or_7(0x03, 0x07),
+              "A Class 7 response is not ignored while awaiting Class 3");
+  TEST_ASSERT(!ignore_unrelated_while_awaiting_class3_or_7(0x07, 0x03),
+              "A Class 3 response is not ignored while awaiting Class 7");
+}
+
+void test_no_ignoring_when_queued_command_is_class10() {
+  std::cout << "\n=== Testing Gate Is Inert For Class 10 Commands ===" << std::endl;
+
+  // The gate must only engage for queued Class 3/7 commands. If it fired for a
+  // queued Class 10 command it would drop that command's own answer.
+  TEST_ASSERT(!ignore_unrelated_while_awaiting_class3_or_7(0x0A, 0x0A),
+              "A Class 10 response is not ignored while awaiting Class 10");
+  TEST_ASSERT(!ignore_unrelated_while_awaiting_class3_or_7(0x0A, 0x03),
+              "A Class 3 packet is not ignored while awaiting Class 10");
+}
+
 int main() {
   std::cout << "===========================================================" << std::endl;
   std::cout << "  Transport Class 3/7 Wildcard Matching Test Suite" << std::endl;
@@ -95,6 +136,9 @@ int main() {
   test_class10_packet_does_not_satisfy_queued_class3_command();
   test_class3_packet_does_not_satisfy_queued_class7_command();
   test_class3_match_requires_wildcard_expectation();
+  test_class10_ignored_while_awaiting_class3();
+  test_class3_and_7_not_ignored_for_each_other();
+  test_no_ignoring_when_queued_command_is_class10();
 
   std::cout << "\n===========================================================" << std::endl;
   std::cout << "  Test Results" << std::endl;
