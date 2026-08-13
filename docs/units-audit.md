@@ -56,8 +56,14 @@ end-to-end in `tests/test_write_operations.cpp` against the pump simulator.
 - **Head is meters, not kPa.** Meters of head is the pump's native domain unit
   (Grundfos GO app, datasheet pump curves, GENI Head/Distance) and matches the
   pressure setpoints. Because `m` is not a valid Home Assistant `pressure`
-  device_class unit, the Head sensor carries no device_class (plain
-  `measurement`). Head Rate follows as m/s. The DHW detector used to threshold
+  device_class unit, the Head sensor is classed `distance` instead (issue #157):
+  meters of head is dimensionally a length, and HA's `distance` class accepts
+  both `m` and `ft`. That is display metadata only — the published state, the
+  decode path and the recorded unit are all still meters — but it gives HA the
+  per-entity unit picker, so the value can be shown in feet, the unit the
+  Grundfos manual leads with. Head Rate follows as m/s, with no device_class
+  (`speed` would be defensible dimensionally; it is diagnostic and carries an
+  explicit icon, so there is little to gain). The DHW detector used to threshold
   it via `pump_head_rate_threshold` (`0.31` m/s, ≈ the former `3.0` kPa/s ÷
   9.80665); that key and the head-rate vote it fed were retired in issue #149,
   so the unit choice now only affects the published Head Rate sensor.
