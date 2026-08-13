@@ -52,11 +52,15 @@ api:
   custom_services: true
   homeassistant_services: true
   encryption:
+    # ← CHANGE THIS. Generate your own with `esphome wizard` or
+    # https://esphome.io/components/api.html#configuration-variables — this
+    # placeholder is public, so leaving it exposes every pump write service
+    # to anything on your LAN.
     key: "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA="
 
 ota:
   - platform: esphome
-    password: "test-ota"
+    password: "test-ota"  # ← CHANGE THIS (guards OTA firmware upload)
 
 # Additional Sensors (optional)
 sensor:
