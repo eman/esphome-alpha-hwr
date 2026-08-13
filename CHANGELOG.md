@@ -4,6 +4,19 @@
 
 ### Fixed
 
+- **Command responses are now CRC-checked.** Only telemetry validated the frame
+  CRC; the command-response path did not, so every control, schedule,
+  single-event, event-log and device-info payload was parsed from bytes nothing
+  had verified -- including the readbacks that decide write verdicts. A runt
+  produced by a mid-frame fragment, or any radio corruption, could satisfy the
+  class/object match and be taken for the answer to a queued command. The check
+  sits at the one point where a frame is complete, so it covers the dispatch
+  path and the general packet callback together, and the frame is trimmed to
+  its declared length first because trailing bytes are outside what the CRC
+  covers. Bench-verified against the pump: zero frames dropped across four
+  minutes of live traffic, with telemetry, both multi-frame read chains and a
+  write all confirming normally.
+
 - **Remote mode goes through the write-operation layer, and is confirmed by a
   readback instead of by the command ACK.** It was the last write in the
   component that reached the transport on its own: two standalone
