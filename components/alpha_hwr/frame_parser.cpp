@@ -75,8 +75,12 @@ ParsedFrame parse_frame(const uint8_t* data, size_t len) {
     ESP_LOGV(TAG, "CRC mismatch: calculated=0x%04X, actual=0x%04X", calculated_crc, actual_crc);
   }
 
-  // Extract class byte (offset 4 in frame)
-  result.class_byte = data[4];
+  // Extract class byte (offset 4 in frame). `len` is the clamped frame window,
+  // which a small length_field can shrink below 5 -- reading data[4] then reaches
+  // past the frame the CRC covered.
+  if (len > 4) {
+    result.class_byte = data[4];
+  }
 
   // Extract OpSpec (offset 5) if present
   if (len > 5) {
@@ -123,7 +127,11 @@ ParsedFrame parse_frame(const uint8_t* data, size_t len) {
   } else {
     // Class 2/3: Payload starts after OpSpec
     // Format: [Start][Len][SvcH][SvcL][Class][OpSpec][Register...][Payload...][CRC]
-    if (len > 6) {
+    // Needs at least header(6) + CRC(2). The old guard was `len > 6`, so a
+    // 7-byte frame underflowed `len - 8` to SIZE_MAX while leaving `valid` and
+    // `crc_valid` true -- an unbounded payload_len handed to any consumer that
+    // honours the contract.
+    if (len >= 8) {
       result.payload = data + 6;  // From after OpSpec
       result.payload_len = len - 8;  // Subtract header (6 bytes) + CRC (2 bytes)
     }
