@@ -13,9 +13,14 @@
   sits at the one point where a frame is complete, so it covers the dispatch
   path and the general packet callback together, and the frame is trimmed to
   its declared length first because trailing bytes are outside what the CRC
-  covers. Bench-verified against the pump: zero frames dropped across four
-  minutes of live traffic, with telemetry, both multi-frame read chains and a
-  write all confirming normally.
+  covers -- which also fixes a real misdispatch, since two frames arriving in
+  one notification were previously handed to the packet callback fused into a
+  single oversized packet. Verified two ways: replaying 36,394 captured BLE
+  notifications through the transport completes 17,624 frames and drops 3
+  (0.017%, all genuine corruption -- no alternate CRC window matches them);
+  and on the pump, zero drops across four minutes of live traffic with
+  telemetry, both multi-frame read chains and a write all confirming
+  normally.
 
 - **Remote mode goes through the write-operation layer, and is confirmed by a
   readback instead of by the command ACK.** It was the last write in the

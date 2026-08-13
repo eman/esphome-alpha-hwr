@@ -183,6 +183,33 @@ static void test_bad_crc_frame_is_dropped() {
   TEST_ASSERT(packets.size() == 1, "a frame with a garbage CRC is dropped");
 }
 
+// A notification carrying more than one frame's worth of bytes must dispatch
+// the first frame at its DECLARED length, not the whole buffer. The completion
+// test is `>=`, so the surplus sits in the reassembly buffer; it is outside
+// what the CRC covers, so without the trim a perfectly good frame is dropped.
+//
+// This also fixes a real misdispatch: before the trim, two frames arriving in
+// one notification were handed to the callback fused into a single oversized
+// packet, with a payload length that described neither.
+static void test_trailing_bytes_are_trimmed() {
+  esphome::alpha_hwr::core::Transport transport;
+  std::vector<std::vector<uint8_t>> packets;
+  transport.set_packet_callback([&packets](const uint8_t *d, size_t n) {
+    packets.push_back(std::vector<uint8_t>(d, d + n));
+  });
+
+  auto first = frame_with_lead_byte(0x11);
+  std::vector<uint8_t> two = first;
+  two.insert(two.end(), first.begin(), first.end());  // a second whole frame
+  transport.on_notification(two.data(), two.size());
+
+  TEST_ASSERT(packets.size() == 1, "a doubled notification yields one packet");
+  if (packets.size() == 1) {
+    TEST_ASSERT(packets[0].size() == first.size(),
+                "  ...trimmed to the declared frame length, not the whole buffer");
+  }
+}
+
 static void test_bad_crc_cannot_answer_a_command() {
   // The consequence that matters: a corrupt frame must not be taken for the
   // response to a queued command. Asserted in both directions, because a
@@ -227,6 +254,7 @@ int main() {
   test_reassembly_continuation_0x24();
   test_reassembly_continuation_0x27();
   test_reassembly_stale_partial_recovers();
+  test_trailing_bytes_are_trimmed();
   test_bad_crc_frame_is_dropped();
   test_bad_crc_cannot_answer_a_command();
 

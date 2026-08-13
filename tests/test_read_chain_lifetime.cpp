@@ -81,8 +81,14 @@ void step(Transport &t, int iters) {
 struct Rig {
   Transport transport;
   Session session;
+  /// Outgoing commands, counted by their leading 0x27 chunk. Lets a test
+  /// assert that a chain actually ADVANCED, rather than inferring it.
+  int commands_sent{0};
   Rig() {
-    transport.set_write_callback([](const uint8_t *, size_t) { return true; });
+    transport.set_write_callback([this](const uint8_t *d, size_t n) {
+      if (n > 0 && d[0] == 0x27) commands_sent++;
+      return true;
+    });
     session.on_authenticated();
   }
 };
@@ -166,10 +172,20 @@ static void test_event_log_abandoned() {
                                 0x00});             // pad: the handler
                                                     // requires payload_len >= 10
   meta = with_crc(std::move(meta));
+  const int before_answer = rig.commands_sent;
   rig.transport.on_notification(meta.data(), meta.size());
 
   // An entry read is now queued and the chain's closure exists.
   step(rig.transport, 2);
+
+  // Assert that precondition rather than assuming it. The docstring above
+  // explains why the sentinel assertion below is worthless without it -- and
+  // it was worthless: deleting the with_crc() call one line up (so the
+  // metadata frame is dropped for a bad CRC and the read times out instead)
+  // left this test reporting 5 passed, 0 failed. The chain has to have
+  // ADVANCED for "abandoned mid-entry-read" to mean anything.
+  TEST_ASSERT(rig.commands_sent > before_answer,
+              "event log: metadata read was answered and an entry read went out");
   rig.transport.reset();  // disconnect mid-chain
   step(rig.transport, 10);
 
