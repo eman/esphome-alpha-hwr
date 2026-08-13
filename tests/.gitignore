@@ -24,3 +24,8 @@ test_pump_schedule_ux
 test_publish_gate
 test_dhw_publish_gate
 test_frame_parser
+test_read_chain_lifetime
+
+# Sanitizer debug bundles and esphome scratch from local CI runs
+*.dSYM/
+.esphome/

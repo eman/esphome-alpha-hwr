@@ -98,7 +98,7 @@ void HistoryService::read_trends_async(
     // Use wildcard response matching — accept any non-register Class 10 response.
     // Timeout: 1500 ms — trend reads either respond immediately or not at all.
     transport_.send_apdu_command(apdu, sizeof(apdu), 0, 0,
-        [this, idx, trends, on_complete, self, cfg](
+        [idx, trends, on_complete, self, cfg](
             bool success, const uint8_t *payload, size_t payload_len) {
       if (success && payload_len >= 32) {  // 3 header + 29 data
         const uint8_t *data = payload + 3;
@@ -187,7 +187,7 @@ void HistoryService::read_cycle_timestamps_async(
 
   // Use wildcard matching for Object 88 responses
   transport_.send_apdu_command(apdu, sizeof(apdu), 0, 0,
-      [this, count, on_complete](bool success, const uint8_t *payload, size_t payload_len) {
+      [on_complete](bool success, const uint8_t *payload, size_t payload_len) {
     std::vector<uint32_t> timestamps;
 
     if (!success || payload_len < 7) {

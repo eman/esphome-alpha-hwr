@@ -78,10 +78,14 @@ fi
 echo "Running cppcheck..."
 echo ""
 
+# `set -e` plus --error-exitcode would abort this assignment the moment cppcheck
+# finds anything -- so --strict used to print its banner and exit without ever
+# showing a finding. Capture the status explicitly instead.
+CPPCHECK_STATUS=0
 OUTPUT=$(cppcheck "${CPPCHECK_ARGS[@]}" \
   "$COMPONENT_DIR"/*.cpp "$COMPONENT_DIR"/*.h \
   "$DHW_DIR"/*.cpp "$DHW_DIR"/*.h \
-  "$TESTS_DIR"/*.cpp "$TESTS_DIR"/*.h 2>&1)
+  "$TESTS_DIR"/*.cpp "$TESTS_DIR"/*.h 2>&1) || CPPCHECK_STATUS=$?
 
 WARNINGS=$(echo "$OUTPUT" | grep -c "warning:" || true)
 ERRORS=$(echo "$OUTPUT" | grep -c "error:" || true)

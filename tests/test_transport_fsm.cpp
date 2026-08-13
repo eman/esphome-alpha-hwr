@@ -44,13 +44,23 @@ void test_transport_chunking() {
   mock_millis += 51;
   transport.loop();
   TEST_ASSERT(sent_chunks.size() == 2, "Second chunk sent after pacing delay");
-  TEST_ASSERT(sent_chunks[1].size() == 20, "Second chunk is exactly 20 bytes");
+  // Guard the index: without it the earlier size()==1 assertion leaves cppcheck
+  // (correctly) unable to rule out an out-of-bounds read here.
+  if (sent_chunks.size() > 1) {
+    TEST_ASSERT(sent_chunks[1].size() == 20, "Second chunk is exactly 20 bytes");
+  } else {
+    TEST_ASSERT(false, "Second chunk is exactly 20 bytes (no second chunk sent)");
+  }
 
   // Tick 4 (+51ms): Should send final 13 bytes
   mock_millis += 51;
   transport.loop();
   TEST_ASSERT(sent_chunks.size() == 3, "Final chunk sent");
-  TEST_ASSERT(sent_chunks[2].size() == 13, "Final chunk is exactly 13 bytes");
+  if (sent_chunks.size() > 2) {
+    TEST_ASSERT(sent_chunks[2].size() == 13, "Final chunk is exactly 13 bytes");
+  } else {
+    TEST_ASSERT(false, "Final chunk is exactly 13 bytes (no final chunk sent)");
+  }
 }
 
 int main() {

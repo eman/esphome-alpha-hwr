@@ -118,7 +118,7 @@ void EventLogService::read_entries_async(
       // Must allow register-read matching since OpSpec 0x14 is normally filtered
       static constexpr uint16_t ENTRY_MATCH_OBJ = 0xF402;
       this->transport_.send_apdu_command(apdu, 5, ENTRY_MATCH_OBJ, 0,
-          [this, idx, entries, on_complete, count, self](
+          [idx, entries, on_complete, self](
               bool success, const uint8_t *payload, size_t payload_len) {
         if (success) {
           // Event log entries use OpSpec 0x14 (register-read format) — no 3-byte sub-header

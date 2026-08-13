@@ -648,17 +648,17 @@ protected:
   std::function<void(std::function<void()>, uint32_t)> set_timeout_callback_;
 
   // Cached state
-  bool schedule_state_cached_;
-  bool schedule_enabled_;
-  uint32_t last_state_poll_ms_;
+  bool schedule_state_cached_{false};
+  bool schedule_enabled_{false};
+  uint32_t last_state_poll_ms_{0};
 
   // Cached ClockProgramOverview (10 bytes)
-  bool overview_cached_;
-  uint8_t overview_structure_[10];
+  bool overview_cached_{false};
+  uint8_t overview_structure_[10]{};
 
   // Cached layer data: raw 42 bytes per layer (7 days × 6 bytes)
-  bool layer_cached_[5];
-  uint8_t cached_layer_data_[5][42];
+  bool layer_cached_[5]{};
+  uint8_t cached_layer_data_[5][42]{};
 
   // Cached single events
   std::vector<SingleEvent> cached_single_events_;

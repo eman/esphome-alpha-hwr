@@ -153,7 +153,9 @@ class DhwDemandComponent : public PollingComponent {
   int demand_release_seconds_{30};             // s
 
   // ── Circular buffer — household flow (30 samples × 10 s = 5 min) ─────────
-  float flow_buf_[FLOW_BUF_SIZE];
+  // Seeded to NAN in setup(); the in-class initialiser only guarantees a
+  // defined value if a future path reads before setup() runs.
+  float flow_buf_[FLOW_BUF_SIZE]{};
   int flow_buf_head_{0};
 
   // ── Previous-value registers (for derivative computation) ─────────────────

@@ -43,7 +43,7 @@ import json
 import os
 import sys
 import time
-from typing import Any
+from typing import Iterable, Any
 
 from aioesphomeapi import APIClient
 
@@ -94,6 +94,23 @@ async def connect(host: str, key: str) -> APIClient:
     client = APIClient(host, 6053, None, noise_psk=key)
     await client.connect(login=True)
     return client
+
+
+def kv_dict(items: "Iterable[str]") -> dict[str, str]:
+    """Parse `k=v` strings into a dict.
+
+    `str.split("=", 1)` yields a list, which dict()/dict.update() accept at
+    runtime but which is not a `tuple[str, str]` as far as a type checker is
+    concerned. partition() gives a real tuple and also handles a bare `k`
+    (empty value) without raising.
+    """
+    out: dict[str, str] = {}
+    for item in items:
+        if not item:
+            continue
+        k, _, v = item.partition("=")
+        out[k] = v
+    return out
 
 
 def coerce(service: Any, data: dict[str, str]) -> dict[str, Any]:
@@ -206,7 +223,7 @@ async def cmd_call(host: str, key: str, service_name: str, kvs: list[str],
     client = await connect(host, key)
     service = await find_service(client, service_name)
 
-    data = dict(kv.split("=", 1) for kv in kvs)
+    data = kv_dict(kvs)
     op_id = data.setdefault("op_id", f"bench-{int(time.time())}")
     payload = coerce(service, data)
 
@@ -245,8 +262,8 @@ async def cmd_burst(host: str, key: str, service_name: str, common: list[str],
     op_ids: list[str] = []
     base = f"burst-{int(time.time())}"
     for i, group in enumerate(groups):
-        data = dict(kv.split("=", 1) for kv in common)
-        data.update(kv.split("=", 1) for kv in group.split(",") if kv)
+        data = kv_dict(common)
+        data.update(kv_dict(group.split(",")))
         op_id = data.setdefault("op_id", f"{base}-{chr(ord('a') + i)}")
         op_ids.append(op_id)
         collector.expect(op_id)

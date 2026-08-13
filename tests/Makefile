@@ -15,7 +15,7 @@ MOCK_HDRS = $(shell find mocks -name '*.h' 2>/dev/null)
 DEPS = $(COMPONENT_HDRS) $(MOCK_HDRS)
 
 # Test executables
-TESTS = test_protocol test_frame_parser test_control_state test_dhw_demand_logic test_transport_matching test_transport_fsm test_schedule_service test_write_operations test_schedule_codec test_telemetry_units test_pump_schedule_ux test_publish_gate test_dhw_publish_gate
+TESTS = test_protocol test_frame_parser test_read_chain_lifetime test_control_state test_dhw_demand_logic test_transport_matching test_transport_fsm test_schedule_service test_write_operations test_schedule_codec test_telemetry_units test_pump_schedule_ux test_publish_gate test_dhw_publish_gate
 
 # Default target
 all: $(TESTS)
@@ -51,6 +51,11 @@ test_transport_fsm: test_transport_fsm.cpp ../components/alpha_hwr/transport.cpp
 test_schedule_service: test_schedule_service.cpp ../components/alpha_hwr/schedule_service.cpp ../components/alpha_hwr/schedule_codec.cpp ../components/alpha_hwr/transport.cpp ../components/alpha_hwr/session.cpp ../components/alpha_hwr/frame_builder.cpp ../components/alpha_hwr/frame_parser.cpp ../components/alpha_hwr/codec.cpp $(DEPS)
 	$(CXX) $(CXXFLAGS) test_schedule_service.cpp ../components/alpha_hwr/schedule_service.cpp ../components/alpha_hwr/schedule_codec.cpp ../components/alpha_hwr/transport.cpp ../components/alpha_hwr/session.cpp ../components/alpha_hwr/frame_builder.cpp ../components/alpha_hwr/frame_parser.cpp ../components/alpha_hwr/codec.cpp -o test_schedule_service $(LDFLAGS)
 
+READ_CHAIN_SRCS = ../components/alpha_hwr/history_service.cpp ../components/alpha_hwr/event_log_service.cpp ../components/alpha_hwr/schedule_service.cpp ../components/alpha_hwr/schedule_codec.cpp ../components/alpha_hwr/transport.cpp ../components/alpha_hwr/session.cpp ../components/alpha_hwr/frame_builder.cpp ../components/alpha_hwr/frame_parser.cpp ../components/alpha_hwr/codec.cpp
+
+test_read_chain_lifetime: test_read_chain_lifetime.cpp $(READ_CHAIN_SRCS) $(DEPS)
+	$(CXX) $(CXXFLAGS) test_read_chain_lifetime.cpp $(READ_CHAIN_SRCS) -o test_read_chain_lifetime $(LDFLAGS)
+
 WRITE_OP_SRCS = ../components/alpha_hwr/write_operation_service.cpp ../components/alpha_hwr/schedule_codec.cpp ../components/alpha_hwr/control_service.cpp ../components/alpha_hwr/schedule_service.cpp ../components/alpha_hwr/transport.cpp ../components/alpha_hwr/session.cpp ../components/alpha_hwr/frame_builder.cpp ../components/alpha_hwr/frame_parser.cpp ../components/alpha_hwr/codec.cpp
 
 test_schedule_codec: test_schedule_codec.cpp ../components/alpha_hwr/schedule_codec.cpp $(DEPS)
@@ -74,6 +79,11 @@ test: $(TESTS)
 	@echo "Running Frame Parser Tests..."
 	@echo "=========================================="
 	@./test_frame_parser
+	@echo ""
+	@echo "=========================================="
+	@echo "Running Read Chain Lifetime Tests..."
+	@echo "=========================================="
+	@./test_read_chain_lifetime
 	@echo ""
 	@echo "=========================================="
 	@echo "Running Control State Tests..."
@@ -130,6 +140,18 @@ test: $(TESTS)
 	@echo "=========================================="
 	@./test_dhw_publish_gate
 
+# Sanitizer run. On Linux, -fsanitize=address brings LeakSanitizer with it,
+# which is what catches the read-chain closure leaks; LSan does not run on
+# macOS ARM, so locally the weak_ptr assertions in test_read_chain_lifetime are
+# the net instead. UBSan is set to abort rather than log-and-continue so a
+# violation actually fails the build.
+ASAN_CXXFLAGS = -std=c++17 -Wall -Wextra -O1 -g -I. -I./mocks -I../ \
+                -fsanitize=address,undefined -fno-sanitize-recover=undefined \
+                -fno-omit-frame-pointer
+test-asan:
+	$(MAKE) clean
+	$(MAKE) test CXXFLAGS="$(ASAN_CXXFLAGS)" LDFLAGS="-fsanitize=address,undefined"
+
 # Alternative targets for specific compilers
 test-gcc: CXX = g++
 test-gcc: clean test
@@ -148,6 +170,7 @@ help:
 	@echo "Targets:"
 	@echo "  all         - Build all test executables (default)"
 	@echo "  test        - Build and run all tests"
+	@echo "  test-asan   - Build and run under ASan/UBSan (+LSan on Linux)"
 	@echo "  test-gcc    - Build and run tests with GCC"
 	@echo "  test-clang  - Build and run tests with Clang"
 	@echo "  clean       - Remove build artifacts"
@@ -158,4 +181,4 @@ help:
 	@echo "  CXXFLAGS    - Compiler flags"
 	@echo "  LDFLAGS     - Linker flags"
 
-.PHONY: all test test-gcc test-clang clean help
+.PHONY: all test test-asan test-gcc test-clang clean help

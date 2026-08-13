@@ -1,4 +1,4 @@
-name: Unit Tests
+name: CI
 
 on:
   push:
@@ -13,13 +13,210 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
-  test:
+  # ---------------------------------------------------------------------------
+  # Host unit tests, on both compilers. clang and gcc disagree often enough
+  # about warnings and about UB in constant expressions to be worth both.
+  # ---------------------------------------------------------------------------
+  unit-tests:
+    name: Unit tests (${{ matrix.cxx }})
     runs-on: ubuntu-latest
-    
+    strategy:
+      fail-fast: false
+      matrix:
+        cxx: [g++, clang++]
     steps:
       - uses: actions/checkout@v4
-      
-      - name: Run C++ Unit Tests
+
+      - name: Run test suite
+        run: make test
+        working-directory: tests
+        env:
+          CXX: ${{ matrix.cxx }}
+
+      # The suite built clean at -Wall -Wextra when this job was written; keep
+      # it that way rather than letting warnings accumulate unread.
+      - name: Fail on any compiler warning
         run: |
-          cd tests
-          make test
+          make clean
+          make all 2>&1 | tee build.log
+          if grep -q "warning:" build.log; then
+            echo "::error::Build produced compiler warnings"
+            grep "warning:" build.log
+            exit 1
+          fi
+        working-directory: tests
+
+  # ---------------------------------------------------------------------------
+  # Memory: ASan + UBSan + LeakSanitizer.
+  #
+  # This is the job that would have caught the read-chain closure leaks. LSan
+  # ships with ASan on Linux but does NOT run on macOS ARM, where most of this
+  # is developed -- which is exactly why those leaks survived local testing.
+  # ---------------------------------------------------------------------------
+  sanitizers:
+    name: Sanitizers (ASan/UBSan/LSan)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Run suite under sanitizers
+        run: make test-asan
+        working-directory: tests
+        env:
+          ASAN_OPTIONS: detect_leaks=1:detect_stack_use_after_return=1:strict_string_checks=1
+          UBSAN_OPTIONS: print_stacktrace=1:halt_on_error=1
+          LSAN_OPTIONS: report_objects=1
+
+  # ---------------------------------------------------------------------------
+  # Static analysis. tools/lint.sh --strict treats warnings as errors.
+  # ---------------------------------------------------------------------------
+  static-analysis:
+    name: cppcheck
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install cppcheck
+        run: sudo apt-get update && sudo apt-get install -y cppcheck
+
+      - name: Run cppcheck
+        run: ./tools/lint.sh --strict
+
+  # ---------------------------------------------------------------------------
+  # Config validation. Fast, and the only thing that exercises the Python
+  # codegen, the config schemas and the inline C++ lambdas in packages/.
+  # ---------------------------------------------------------------------------
+  config-validate:
+    name: esphome config
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install esphome
+        run: pip install esphome
+
+      # Validates the working tree via external_components: type: local.
+      - name: Validate CI config (working tree)
+        run: esphome config tests/ci-compile.yaml
+
+      # The published examples pin a release tag, so this catches drift between
+      # the documented recipes and the packages they load.
+      - name: Validate example configs
+        run: |
+          status=0
+          for f in hwr-pump-example.yaml hwr-pairing-example.yaml \
+                   hwr-pump-schedule-example.yaml dhw-demand-example.yaml \
+                   components/alpha_hwr/discovery_example.yaml; do
+            echo "::group::$f"
+            if ! esphome config "$f"; then
+              echo "::error file=$f::esphome config failed"
+              status=1
+            fi
+            echo "::endgroup::"
+          done
+          exit $status
+
+  # ---------------------------------------------------------------------------
+  # Full firmware build for the ESP32-C3. Slow, so it runs after the cheap jobs
+  # and caches the toolchain. This is what catches a break that only shows up
+  # when the real ESPHome/ESP-IDF headers are in play -- most of the component
+  # is not host-compilable against tests/mocks.
+  # ---------------------------------------------------------------------------
+  firmware-build:
+    name: ESP32-C3 firmware build
+    runs-on: ubuntu-latest
+    needs: [unit-tests, config-validate]
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Cache PlatformIO and ESPHome
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.platformio
+            ~/.esphome
+            ~/.cache/pip
+          key: esp-idf-${{ runner.os }}-${{ hashFiles('tests/ci-compile.yaml') }}
+          restore-keys: |
+            esp-idf-${{ runner.os }}-
+
+      - name: Install esphome
+        run: pip install esphome
+
+      - name: Compile firmware
+        run: esphome compile tests/ci-compile.yaml
+
+      - name: Report image size
+        if: always()
+        run: |
+          find .esphome -name 'firmware.bin' -o -name '*.elf' | head -5
+          ls -la .esphome/build/ci-compile/build/ 2>/dev/null || true
+
+  # ---------------------------------------------------------------------------
+  # Python: the two config schemas and the bench client. AGENTS §3 asks for
+  # these; nothing ran them before.
+  # ---------------------------------------------------------------------------
+  python:
+    name: Python lint and types
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install tooling
+        run: pip install ruff mypy types-PyYAML
+
+      - name: ruff
+        run: ruff check components/ tools/
+
+      - name: ruff format check
+        run: ruff format --check components/ tools/
+        continue-on-error: true  # advisory until the tree is formatted
+
+      # The component __init__.py files import esphome's codegen modules, which
+      # are not installed here; check the standalone tooling strictly and the
+      # schemas leniently.
+      - name: mypy
+        run: mypy --ignore-missing-imports tools/write_bench.py
+
+  # ---------------------------------------------------------------------------
+  # The Lovelace card. 1700+ lines that had no automated check of any kind --
+  # and which shipped broken against the current service signatures.
+  # ---------------------------------------------------------------------------
+  javascript:
+    name: Lovelace card
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+
+      - name: Syntax check
+        run: node --check homeassistant/www/alpha-hwr-schedule-card.js
+
+      # Every alpha_hwr service declares an op_id argument and Home Assistant
+      # registers those as required, so a call without one is rejected before it
+      # reaches the device -- silently, since the rejection is only an unhandled
+      # promise. The card shipped that way on all seven call sites. Cheap
+      # guard against it regressing.
+      - name: Every esphome service call must carry an op_id
+        run: |
+          if grep -n "callService('esphome'" homeassistant/www/alpha-hwr-schedule-card.js \
+             | grep -v "op_id"; then
+            echo "::error::esphome service call without op_id (see the lines above)"
+            exit 1
+          fi
+          echo "OK: all esphome service calls route through the op_id helper"
