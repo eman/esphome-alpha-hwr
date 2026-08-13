@@ -386,8 +386,11 @@ class ControlService {
     // PREVIOUS observation left behind. Object 86 Sub 7 is the prioritized
     // status after remote/local/alarm arbitration and the profile defines
     // ~40 sources for it, so a reply that is neither 1 nor 2 is a shape the
-    // pump can really produce. The confirm snapshots this counter before the
-    // command and requires it to move.
+    // pump can really produce. SET_REMOTE_MODE's confirm snapshots this
+    // counter once the Class 3 command has been answered -- acked, or its ACK
+    // window closed -- and requires it to have moved by confirm time. Both of
+    // those points are after the pump has had the command, so anything
+    // counted from there on describes the post-command pump.
     uint32_t remote_source_observations_{0};
     bool pump_enabled_{false};       // Pump enabled (AUTO/USER_DEFINED) vs stopped (STOP)
     bool pump_enabled_valid_{false}; // Whether pump_enabled_ has been determined

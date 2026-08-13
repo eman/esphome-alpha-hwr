@@ -360,9 +360,13 @@ class WriteOperationService {
     int8_t pre_on_minutes{-1}, pre_off_minutes{-1};
     float pre_flow{NAN};
     // SET_REMOTE_MODE: ControlService::remote_source_observations_ as it stood
-    // when the command went out. The confirm requires it to have MOVED, not
-    // merely to be valid -- see the counter's declaration for why sticky
-    // validity is not enough.
+    // once the Class 3 command had been answered -- NOT when it was sent. The
+    // send callback runs either on the ACK or on the ACK window closing, and
+    // both are after the pump has had the command, so snapshotting there is
+    // what makes a later observation evidence about the post-command pump
+    // rather than about the moment before it. The confirm requires this to
+    // have MOVED, not merely for the cached state to be valid -- see the
+    // counter's declaration for why sticky validity is not enough.
     uint32_t pre_remote_observations{0};
 
     // Schedule fields
