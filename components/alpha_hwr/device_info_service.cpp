@@ -128,8 +128,8 @@ void DeviceInfoService::read_class7_string_async(uint8_t string_id,
   // Instead, we'll match on Class byte (0x07) in the response handler
   transport_.send_apdu_command(
     apdu, 3,
-    0,  // expect_obj_id (not used for Class 7)
-    0,  // expect_sub_id (not used for Class 7)
+    0,  // expect_type_low_ver (not used for Class 7)
+    0,  // expect_type_high (not used for Class 7)
     [this, string_id, on_complete](bool success, const uint8_t* data, size_t len) {
       if (!success || !data || len < 10) {
         ESP_LOGW(TAG, "No response for String ID %d", string_id);

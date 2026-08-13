@@ -84,7 +84,7 @@ void Transport::loop() {
             cmd.timestamp_ms = now;
             cmd.waiting_for_response = true;
             ESP_LOGV(TAG, "Command sent, waiting for response (Obj %d Sub %d)", 
-                     cmd.expect_obj_id, cmd.expect_sub_id);
+                     cmd.expect_type_low_ver, cmd.expect_type_high);
           } else {
             ESP_LOGV(TAG, "Command sent (no response expected)");
             this->command_queue_.pop_front();
@@ -111,7 +111,7 @@ void Transport::loop() {
         // (e.g., control-mode writes that reply with OpSpec 0x15). A timeout
         // here means either the feature is absent or the window closed; either
         // way it is expected behaviour — log at DEBUG to avoid noise.
-        if (cmd.expect_obj_id == 0 && cmd.expect_sub_id == 0) {
+        if (cmd.expect_type_low_ver == 0 && cmd.expect_type_high == 0) {
           ESP_LOGD(TAG, "Command timeout (wildcard match) — pump did not respond (now=%" PRIu32 ", timestamp=%" PRIu32 ", timeout=%" PRIu32 ")",
                    now, cmd.timestamp_ms, cmd.timeout_ms);
         } else if (cmd.quiet_timeout) {
@@ -120,10 +120,10 @@ void Transport::loop() {
           // timeout is the expected settling path, not an error. See the write
           // callsites in schedule_service.cpp, which treat it as success.
           ESP_LOGD(TAG, "Command timeout (expected, fire-and-forget) for Obj %d Sub %d (now=%" PRIu32 ", timestamp=%" PRIu32 ", timeout=%" PRIu32 ")",
-                   cmd.expect_obj_id, cmd.expect_sub_id, now, cmd.timestamp_ms, cmd.timeout_ms);
+                   cmd.expect_type_low_ver, cmd.expect_type_high, now, cmd.timestamp_ms, cmd.timeout_ms);
         } else {
           ESP_LOGW(TAG, "Command timeout waiting for Obj %d Sub %d (now=%" PRIu32 ", timestamp=%" PRIu32 ", timeout=%" PRIu32 ")",
-                   cmd.expect_obj_id, cmd.expect_sub_id, now, cmd.timestamp_ms, cmd.timeout_ms);
+                   cmd.expect_type_low_ver, cmd.expect_type_high, now, cmd.timestamp_ms, cmd.timeout_ms);
         }
         if (cmd.callback) {
           cmd.callback(false, nullptr, 0);
@@ -138,13 +138,13 @@ void Transport::loop() {
   }
 }
 
-void Transport::send_command(const std::vector<uint8_t>& packet, uint16_t expect_obj_id,
-                             uint16_t expect_sub_id, CommandCallback callback, uint32_t timeout_ms,
+void Transport::send_command(const std::vector<uint8_t>& packet, uint16_t expect_type_low_ver,
+                             uint16_t expect_type_high, CommandCallback callback, uint32_t timeout_ms,
                              bool allow_register_read, bool expect_short_ack, bool quiet_timeout) {
   Command cmd;
   cmd.packet = packet;
-  cmd.expect_obj_id = expect_obj_id;
-  cmd.expect_sub_id = expect_sub_id;
+  cmd.expect_type_low_ver = expect_type_low_ver;
+  cmd.expect_type_high = expect_type_high;
   cmd.callback = callback;
   cmd.timeout_ms = timeout_ms;
   cmd.allow_register_read = allow_register_read;
@@ -156,7 +156,7 @@ void Transport::send_command(const std::vector<uint8_t>& packet, uint16_t expect
 }
 
 void Transport::send_apdu_command(const uint8_t* apdu, size_t apdu_len,
-                                  uint16_t expect_obj_id, uint16_t expect_sub_id,
+                                  uint16_t expect_type_low_ver, uint16_t expect_type_high,
                                   CommandCallback callback, uint32_t timeout_ms,
                                   bool allow_register_read, bool expect_short_ack,
                                   bool quiet_timeout) {
@@ -179,7 +179,7 @@ void Transport::send_apdu_command(const uint8_t* apdu, size_t apdu_len,
 
   std::vector<uint8_t> packet(packet_raw, packet_raw + packet_len);
   
-  this->send_command(packet, expect_obj_id, expect_sub_id, callback, timeout_ms, allow_register_read, expect_short_ack, quiet_timeout);
+  this->send_command(packet, expect_type_low_ver, expect_type_high, callback, timeout_ms, allow_register_read, expect_short_ack, quiet_timeout);
 }
 
 bool Transport::is_frame_start(uint8_t byte) {
@@ -396,11 +396,11 @@ bool Transport::try_dispatch_response(const uint8_t* data, size_t len) {
     // descriptor-only -- see ControlService::send_remote_mode_command()).
     // Class 7: device info strings, etc.
     // Both use a different packet structure than Class 10 DataObjects, so
-    // when expect_obj_id == 0 && expect_sub_id == 0 we match by class byte
+    // when expect_type_low_ver == 0 && expect_type_high == 0 we match by class byte
     // alone -- but only when the queued command was sent as that class.
     if (protocol::class3_or_7_wildcard_matches(
             queued_class, data[4],
-            cmd.expect_obj_id == 0x0000 && cmd.expect_sub_id == 0x0000)) {
+            cmd.expect_type_low_ver == 0x0000 && cmd.expect_type_high == 0x0000)) {
       ESP_LOGV(TAG, "Class %d response matched (wildcard match by class byte)",
                data[4] == protocol::CLASS_3_COMMAND_ACK ? 3 : 7);
       if (cmd.callback) {
@@ -428,7 +428,7 @@ bool Transport::try_dispatch_response(const uint8_t* data, size_t len) {
     // Class 10 OpSpec 0x01 frame that does not carry Obj/Sub fields.
     // Handle that before the generic len>=12 DataObject parser below.
     if (queued_class == 0x0A && len >= 6 && data[4] == 0x0A && (data[5] == 0x01 || data[5] == 0x81) &&
-        cmd.expect_obj_id == 0x0000 && cmd.expect_sub_id == 0x0000 &&
+        cmd.expect_type_low_ver == 0x0000 && cmd.expect_type_high == 0x0000 &&
         cmd.packet.size() > 9 &&
         (cmd.packet[5] == 0x97 || cmd.packet[5] == 0x96 || cmd.packet[5] == 0xB3 ||
          cmd.packet[5] == 0x95 || cmd.packet[5] == 0x91 || cmd.packet[5] == 0x90 ||
@@ -459,16 +459,50 @@ bool Transport::try_dispatch_response(const uint8_t* data, size_t len) {
   const uint8_t* payload = (len >= 12) ? (data + 10) : nullptr;
   size_t payload_len = (len >= 12) ? (len - 12) : 0;
 
-  // Extract identifiers from the response packet
+  // ---------------------------------------------------------------------------
+  // What a GENI response frame actually carries.
+  //
+  // These fields were called `obj_id` and `sub_id` for a long time, and that is
+  // not what they are. A pump response contains NO Object ID and NO Sub-ID: the
+  // request names an object, and the reply identifies only the object's TYPE.
+  // Measured over 23,739 captured Class 10 responses, byte 6 is 0x00 in 100% of
+  // them and bytes 7-8 always equal the type code the request named.
+  //
+  //   byte:   5        6     7       8       9        10..12
+  //         [length] [00] [TypeH] [TypeL] [Version] [size(3)]  payload...
+  //
+  // So the two values below split the type at the wrong boundary, for
+  // historical reasons this code preserves rather than fixes:
+  //
+  //   packet_type_high    = TypeH                  (the type's high byte)
+  //   packet_type_low_ver = (TypeL << 8) | Version
+  //
+  // which is why the match constants elsewhere look like Object IDs but are
+  // not: 0xF301 is Type 243 v1 (event log info), 0xF402 is Type 1012 v2 (event
+  // log entry), 0xDE01 is Type 222 v1 (schedule entries), 0x2F01 is Type 303 v1
+  // (mode/control), 0xDC01 is Type 220 v1 (single event). event_log_service.cpp
+  // already names its two `TYPE_...`, which is the honest reading.
+  //
+  // The consequence that matters: matching here discriminates object TYPES, not
+  // instances of a type. Sibling reads that share a type -- the five schedule
+  // layers (Sub 1000..1004), the single-event slots, the event-log entries, the
+  // Object 53 trends -- are byte-identical through this header and cannot be
+  // told apart by it. See docs/protocol-response-matching.md.
+  //
+  // Byte 5 is likewise not an operation code in the response direction: it is
+  // the APDU body length. `byte5 == total_len - 8` held for all 26,895 captured
+  // inbound frames without exception. It is still called `opspec` below because
+  // the matching logic keys off specific values of it.
+  // ---------------------------------------------------------------------------
   uint8_t opspec = data[5];
-  uint16_t packet_sub_id = (data[6] << 8) | data[7];
-  uint16_t packet_obj_id = (data[8] << 8) | data[9];
+  uint16_t packet_type_high = (data[6] << 8) | data[7];
+  uint16_t packet_type_low_ver = (data[8] << 8) | data[9];
 
   // Log incoming packets at verbose level when waiting for a command response
   if (this->state_ == State::AWAITING_RESPONSE && !this->command_queue_.empty()) {
     auto &cmd = this->command_queue_.front();
     ESP_LOGV(TAG, "[AWAITING] Packet received: len=%d, Class=%02X, OpSpec=%02X, Sub=%d, Obj=%d (waiting for Obj %d Sub %d)",
-             len, data[4], opspec, packet_sub_id, packet_obj_id, cmd.expect_obj_id, cmd.expect_sub_id);
+             len, data[4], opspec, packet_type_high, packet_type_low_ver, cmd.expect_type_low_ver, cmd.expect_type_high);
   }
 
   // 1. Check if we are waiting for a command response
@@ -495,7 +529,7 @@ bool Transport::try_dispatch_response(const uint8_t* data, size_t len) {
        // This is telemetry register-read response, not a DataObject response
        // Discard it for command matching purposes (unless command explicitly allows it)
        ESP_LOGV(TAG, "Class 10 register-read (OpSpec=0x%02X), skipping for command response (waiting for Obj %d Sub %d)", 
-                opspec, cmd.expect_obj_id, cmd.expect_sub_id);
+                opspec, cmd.expect_type_low_ver, cmd.expect_type_high);
        return false;
      }
     
@@ -507,32 +541,33 @@ bool Transport::try_dispatch_response(const uint8_t* data, size_t len) {
       if (len >= 10) {
         // Here GENI defines bytes 6-7 as SubID, 8-9 as ObjID.
         // We will store them correctly to avoid confusion, even though older code might have them swapped.
-        packet_sub_id = (data[6] << 8) | data[7];
-        packet_obj_id = (data[8] << 8) | data[9];
+        packet_type_high = (data[6] << 8) | data[7];
+        packet_type_low_ver = (data[8] << 8) | data[9];
         // The payload starts at data + 10 for these!
         // But our global payload extraction above did data + 10. We will keep it.
       } else {
         ESP_LOGV(TAG, "DataObject 0x0E packet too short to extract IDs");
         return false;
       }
-    } else if (opspec == 0x02) {
-      if (len >= 9) {
-        packet_obj_id = data[6];                     // 1 byte ObjID
-        packet_sub_id = (data[7] << 8) | data[8];    // 2 bytes SubID
-        // Note: Payload starts at data + 9!
-        // So we MUST override the payload extraction for this opspec!
-        payload = data + 9;
-        payload_len = len - 11; // len - header(9) - CRC(2)
-      } else {
-        ESP_LOGV(TAG, "DataObject 0x02 packet too short to extract IDs");
-        return false;
-      }
+    // There used to be an `opspec == 0x02` branch here for a "Positive ACK"
+    // layout ([Obj(1)][SubH][SubL][payload at +9]). It is deleted rather than
+    // fixed, because its premise is false and its arithmetic was broken:
+    //
+    //   - Byte 5 is the APDU body length, not an operation code, so `== 0x02`
+    //     selects "a 2-byte body", i.e. a 10-byte frame -- not a packet format.
+    //   - At len == 10 its `payload_len = len - 11` underflows to SIZE_MAX, and
+    //     the `len >= 9` guard does not stop it. Every frame that could reach
+    //     the branch would underflow, not merely some edge case.
+    //   - Zero of 24,251 captured Class 10 responses had byte 5 == 0x02.
+    //
+    // A frame that would have landed here now falls through to the length-
+    // checked path below, which rejects it for being under 10 bytes.
     } else {
       // Fallback for other opspecs (e.g. 0x90, 0x97 short ACKs already handled above, etc)
       // Assume 2-byte Sub, 2-byte Obj for safety if >= 10
       if (len >= 10) {
-        packet_sub_id = (data[6] << 8) | data[7];
-        packet_obj_id = (data[8] << 8) | data[9];
+        packet_type_high = (data[6] << 8) | data[7];
+        packet_type_low_ver = (data[8] << 8) | data[9];
       } else {
         return false;
       }
@@ -541,21 +576,26 @@ bool Transport::try_dispatch_response(const uint8_t* data, size_t len) {
     // Now check if this matches our expected Object/Sub ID
     bool matched = false;
     
-    // WILDCARD MATCH: If expect_obj_id == 0, accept ANY Class 10 packet
+    // WILDCARD MATCH: If expect_type_low_ver == 0, accept ANY Class 10 packet
     // This is used for Object 86 Sub 6 reads, which receive passive notifications (OpSpec 0x0E)
     // Reference: Python base.py::match_class10_response only checks p[4] == 0x0A
-    if (cmd.expect_obj_id == 0x0000 && cmd.expect_sub_id == 0x0000 && !cmd.expect_short_ack) {
+    if (cmd.expect_type_low_ver == 0x0000 && cmd.expect_type_high == 0x0000 && !cmd.expect_short_ack) {
       matched = true;
       ESP_LOGV(TAG, "Wildcard match: accepting any Class 10 packet (OpSpec=0x%02X, Obj=%d, Sub=%d)",
-               opspec, packet_obj_id, packet_sub_id);
+               opspec, packet_type_low_ver, packet_type_high);
     } else {
       // Exact match: check Object ID and Sub-ID
-      matched = (packet_obj_id == cmd.expect_obj_id && (packet_sub_id == cmd.expect_sub_id || packet_sub_id == 0));
+      matched = (packet_type_low_ver == cmd.expect_type_low_ver && (packet_type_high == cmd.expect_type_high || packet_type_high == 0));
       
-      // BACKUP MATCH: If ObjID doesn't match but SubID matches our expected ObjID (swapped)
-      if (!matched && cmd.expect_obj_id != 0 && packet_sub_id == cmd.expect_obj_id) {
-        matched = true;
-      }
+      // A "BACKUP MATCH" for a supposedly swapped Obj/Sub used to sit here.
+      // Deleted: the fields are not Obj/Sub and nothing swaps them. It fired
+      // when packet_type_high equalled a non-zero expectation, and the only
+      // such value any call site uses that is small enough to be reachable is
+      // 91 -- which would require an object type >= 23296, against a pump whose
+      // types top out around 1012. If it ever did fire it would attach a
+      // wrong-type response to an Object 91 config read: a misattribution, not
+      // a rescue. It was speculative from the commit that introduced it, never
+      // a fix for an observed failure.
     }
     
     // SPECIAL CASE WORKAROUND: Object 91 config reads (Cache Sync / DHW config)
@@ -566,19 +606,23 @@ bool Transport::try_dispatch_response(const uint8_t* data, size_t len) {
     // header. Python reference simply accepted these via a wildcard match and
     // sliced at byte 10. We explicitly handle the known cases here to avoid
     // wildcard matching other packets.
-    if (!matched && cmd.expect_obj_id == 91 && len >= 12 &&
-        ((cmd.expect_sub_id == 430 && opspec == 0x15) ||
-         (cmd.expect_sub_id == 421 && opspec == 0x0D))) {
+    // Obj 91 config reads. NOTE these two fields are used here as the REQUEST's
+    // object and sub-id (91 / 430 / 421), not as expected response type fields:
+    // this branch matches on what was asked for plus the reply's length byte,
+    // because the reply carries no type header the normal path could use.
+    if (!matched && cmd.expect_type_low_ver == 91 && len >= 12 &&
+        ((cmd.expect_type_high == 430 && opspec == 0x15) ||
+         (cmd.expect_type_high == 421 && opspec == 0x0D))) {
       matched = true;
       payload = data + 10;
       payload_len = len - 12; // len - 10(header) - 2(CRC)
       ESP_LOGV(TAG, "Matched Object 91 Sub %d using OpSpec 0x%02X workaround",
-               cmd.expect_sub_id, opspec);
+               cmd.expect_type_high, opspec);
     }
 
     if (matched) {
       ESP_LOGV(TAG, "Command response matched for Obj %d (Sub %d -> %d)", 
-               packet_obj_id, cmd.expect_sub_id, packet_sub_id);
+               packet_type_low_ver, cmd.expect_type_high, packet_type_high);
       if (cmd.callback) {
         cmd.callback(true, payload, payload_len);
       }
@@ -588,7 +632,7 @@ bool Transport::try_dispatch_response(const uint8_t* data, size_t len) {
      } else {
        // This is a Class 10 DataObject response but doesn't match what we're waiting for
        ESP_LOGV(TAG, "Class 10 DataObject MISMATCH: got Obj=0x%04X Sub=0x%04X, want Obj=0x%04X Sub=0x%04X, OpSpec=0x%02X",
-                packet_obj_id, packet_sub_id, cmd.expect_obj_id, cmd.expect_sub_id, opspec);
+                packet_type_low_ver, packet_type_high, cmd.expect_type_low_ver, cmd.expect_type_high, opspec);
        return false;
      }
   }
@@ -613,8 +657,8 @@ bool Transport::try_dispatch_response(const uint8_t* data, size_t len) {
   // Extract OpSpec to see what kind of response this is
   opspec = data[5];
 
-  packet_obj_id = 0;
-  packet_sub_id = 0;
+  packet_type_low_ver = 0;
+  packet_type_high = 0;
   
   // Only parse as DataObject format for non-register-read OpSpecs
   bool is_register_read = (opspec == 0x30 || opspec == 0x2B || opspec == 0x14 || 
@@ -626,17 +670,26 @@ bool Transport::try_dispatch_response(const uint8_t* data, size_t len) {
     return false;
   }
   
-  // Parse as DataObject format
-  packet_obj_id = (data[6] << 8) | data[7];  // Object ID is 16-bit big-endian at bytes 6-7
-  packet_sub_id = (data[8] << 8) | data[9];  // Sub-ID is 16-bit big-endian at bytes 8-9
+  // Parse as DataObject format.
+  //
+  // NOTE: this path assigns the OTHER WAY ROUND from try_dispatch_response
+  // above -- bytes 6-7 land in the "low_ver" slot and 8-9 in "high", which is
+  // backwards relative to the wire layout documented there. That is
+  // pre-existing, and it is left exactly as it was on purpose: the
+  // pending-handler consumers register their expectations in this same order,
+  // so the inconsistency cancels out, and this path has NO host-test coverage.
+  // Swapping it to match the other path leaves the whole suite green, which
+  // demonstrates the absence of coverage rather than the safety of the change.
+  packet_type_low_ver = (data[6] << 8) | data[7];
+  packet_type_high = (data[8] << 8) | data[9];
 
   ESP_LOGV(TAG, "DataObject response: OpSpec=0x%02X, Object %d SubID %d (checking %d handlers)",
-           opspec, packet_obj_id, packet_sub_id, pending_handlers_.size());
+           opspec, packet_type_low_ver, packet_type_high, pending_handlers_.size());
 
   // Search for matching handler
   for (auto it = pending_handlers_.begin(); it != pending_handlers_.end(); ++it) {
-    if (it->object_id == packet_obj_id && it->sub_id == packet_sub_id) {
-      ESP_LOGV(TAG, "Response handler matched for Object %d SubID %d", packet_obj_id, packet_sub_id);
+    if (it->object_id == packet_type_low_ver && it->sub_id == packet_type_high) {
+      ESP_LOGV(TAG, "Response handler matched for Object %d SubID %d", packet_type_low_ver, packet_type_high);
 
       // Invoke callback with payload (protocol header has already been stripped earlier in try_dispatch_response())
       if (it->callback) {
@@ -652,7 +705,7 @@ bool Transport::try_dispatch_response(const uint8_t* data, size_t len) {
     }
   }
 
-  ESP_LOGV(TAG, "No matching response handler for Object %d SubID %d", packet_obj_id, packet_sub_id);
+  ESP_LOGV(TAG, "No matching response handler for Object %d SubID %d", packet_type_low_ver, packet_type_high);
   return false;  // No matching handler found
 }
 

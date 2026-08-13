@@ -139,8 +139,8 @@ class Transport {
   struct Command {
     std::vector<uint8_t> packet;
     size_t bytes_sent{0};
-    uint16_t expect_obj_id{0};
-    uint16_t expect_sub_id{0};
+    uint16_t expect_type_low_ver{0};
+    uint16_t expect_type_high{0};
     CommandCallback callback{nullptr};
     uint32_t timeout_ms{3000};
     uint32_t timestamp_ms{0};
@@ -165,13 +165,13 @@ class Transport {
    * Queue a command for transmission.
    * 
    * @param packet The complete GENI packet to send
-   * @param expect_obj_id If non-zero, wait for response with this Object ID
-   * @param expect_sub_id If non-zero, wait for response with this Sub-ID
+   * @param expect_type_low_ver If non-zero, wait for response with this Object ID
+   * @param expect_type_high If non-zero, wait for response with this Sub-ID
    * @param callback Called when command completes or times out
    * @param timeout_ms How long to wait for response
    */
-  void send_command(const std::vector<uint8_t>& packet, uint16_t expect_obj_id = 0,
-                    uint16_t expect_sub_id = 0, CommandCallback callback = nullptr,
+  void send_command(const std::vector<uint8_t>& packet, uint16_t expect_type_low_ver = 0,
+                    uint16_t expect_type_high = 0, CommandCallback callback = nullptr,
                     uint32_t timeout_ms = 3000, bool allow_register_read = false,
                     bool expect_short_ack = false, bool quiet_timeout = false);
 
@@ -181,7 +181,7 @@ class Transport {
    * from the service layer.
    */
   void send_apdu_command(const uint8_t* apdu, size_t apdu_len,
-                         uint16_t expect_obj_id = 0, uint16_t expect_sub_id = 0,
+                         uint16_t expect_type_low_ver = 0, uint16_t expect_type_high = 0,
                          CommandCallback callback = nullptr,
                          uint32_t timeout_ms = 3000, bool allow_register_read = false,
                          bool expect_short_ack = false, bool quiet_timeout = false);

@@ -31,7 +31,7 @@ int tests_failed = 0;
  * copy of it, which meant the test could keep passing while the shipped
  * predicate changed underneath it.
  *
- * The rule: a Class 3/7 wildcard match (expect_obj_id == 0 && expect_sub_id
+ * The rule: a Class 3/7 wildcard match (expect_type_low_ver == 0 && expect_type_high
  * == 0) must only be satisfied by a response of the *same class* the queued
  * command was actually sent as. Without that, an unrelated Class 10 telemetry
  * notification arriving while a Class 3 command (e.g. send_remote_mode_command()) is
@@ -72,7 +72,7 @@ void test_class3_packet_does_not_satisfy_queued_class7_command() {
 }
 
 // ============================================================================
-// Test: matching requires the wildcard expectation (expect_obj_id/sub_id == 0)
+// Test: matching requires the wildcard expectation (expect_type_low_ver/type_high == 0)
 // ============================================================================
 void test_class3_match_requires_wildcard_expectation() {
   std::cout << "\n=== Testing Class 3 Match Requires Wildcard Expectation ===" << std::endl;
