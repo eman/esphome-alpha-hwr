@@ -223,14 +223,19 @@ class AlphaHwrScheduleCard extends HTMLElement {
     this._singleEvents = [];
     if (!stateStr || stateStr === 'No single events' || stateStr === 'unavailable' || stateStr === 'unknown') return;
     const lines = stateStr.split('\n');
-    const re = /^\[(\d+)\]\s+(\d{4})-(\d{2})-(\d{2})\s+(\d{2}):(\d{2})\s*-\s*(\d{2}):(\d{2})$/;
+    // The firmware appends an action suffix -- " (run)" / " (off)" -- to each
+    // line (format_single_events_display). The old pattern anchored on the end
+    // time with `$`, so every line stopped matching and the Quick Run list and
+    // today's overlay bars silently rendered empty. Accept an optional suffix.
+    const re = /^\[(\d+)\]\s+(\d{4})-(\d{2})-(\d{2})\s+(\d{2}):(\d{2})\s*-\s*(\d{2}):(\d{2})(?:\s*\(([a-z]+)\))?$/;
     for (const line of lines) {
       const m = line.trim().match(re);
       if (m) {
         const slot = parseInt(m[1]);
         const begin = new Date(parseInt(m[2]), parseInt(m[3]) - 1, parseInt(m[4]), parseInt(m[5]), parseInt(m[6]));
         const end = new Date(parseInt(m[2]), parseInt(m[3]) - 1, parseInt(m[4]), parseInt(m[7]), parseInt(m[8]));
-        this._singleEvents.push({ slot, begin, end });
+        const action = m[9] || 'run';
+        this._singleEvents.push({ slot, begin, end, action });
       }
     }
   }
@@ -1629,22 +1634,47 @@ class AlphaHwrScheduleCard extends HTMLElement {
     this._render();
   }
 
-  _saveChanges() {
+  /**
+   * Call an alpha_hwr service.
+   *
+   * Every service registered by api_bridge.cpp declares an `op_id` argument,
+   * and Home Assistant registers user-defined ESPHome service arguments as
+   * vol.Required -- so a call omitting it is rejected before it ever reaches
+   * the device. The card previously omitted it on every call, which made every
+   * write and both refreshes silent no-ops. The id also correlates the
+   * resulting esphome.alpha_hwr_write_settled event back to this action.
+   *
+   * The rejection surfaces only as an unhandled promise rejection, so failures
+   * were invisible; catch and log them.
+   */
+  _callService(service, data = {}) {
     const device = this._config.device;
+    this._opSeq = (this._opSeq || 0) + 1;
+    const opId = `card-${Date.now()}-${this._opSeq}`;
+    return this._hass
+      .callService('esphome', `${device}_${service}`, { ...data, op_id: opId })
+      .catch((err) => {
+        console.error(`[alpha-hwr-card] ${service} failed:`, err);
+      });
+  }
 
+  _saveChanges() {
     for (const [key, entry] of this._pendingChanges) {
       const [day, layer] = key.split(',').map(Number);
       if (entry === null) {
-        this._hass.callService('esphome', `${device}_clear_schedule_entry`, {
-          data: `${layer},${day}`,
-        });
+        this._callService('clear_schedule_entry', { data: `${layer},${day}` });
       } else {
         const [start, end] = entry;
+        // A block dragged to the right edge yields end === 1440, which
+        // serialises as hour 24 and api_bridge.cpp rejects (vals[4] > 23), so
+        // "run until midnight" could never be saved. 23:59 is the pump's
+        // end-of-day representation.
+        const endClamped = Math.min(end, 1439);
         const sh = Math.floor(start / 60);
         const sm = start % 60;
-        const eh = Math.floor(end / 60);
-        const em = end % 60;
-        this._hass.callService('esphome', `${device}_set_schedule_entry`, {
+        const eh = Math.floor(endClamped / 60);
+        const em = endClamped % 60;
+        this._callService('set_schedule_entry', {
           data: `${layer},${day},${sh},${sm},${eh},${em}`,
         });
       }
@@ -1674,8 +1704,7 @@ class AlphaHwrScheduleCard extends HTMLElement {
   }
 
   _callRefresh() {
-    const device = this._config.device;
-    this._hass.callService('esphome', `${device}_refresh_schedule`, {});
+    this._callService('refresh_schedule');
   }
 
   /* ─── Quick Run Actions ─── */
@@ -1684,10 +1713,7 @@ class AlphaHwrScheduleCard extends HTMLElement {
     const now = Math.floor(Date.now() / 1000);
     const begin = now + 60; // start 1 minute from now
     const end = begin + durationMinutes * 60;
-    const device = this._config.device;
-    this._hass.callService('esphome', `${device}_set_single_event`, {
-      data: `${begin},${end}`,
-    });
+    this._callService('set_single_event', { data: `${begin},${end}` });
     // Refresh after a delay to see the new event
     setTimeout(() => this._callRefreshSingleEvents(), 3000);
   }
@@ -1710,19 +1736,13 @@ class AlphaHwrScheduleCard extends HTMLElement {
 
     if (endTs <= beginTs) return;
 
-    const device = this._config.device;
-    this._hass.callService('esphome', `${device}_set_single_event`, {
-      data: `${beginTs},${endTs}`,
-    });
+    this._callService('set_single_event', { data: `${beginTs},${endTs}` });
     this._quickRunCustom = false;
     setTimeout(() => this._callRefreshSingleEvents(), 3000);
   }
 
   _clearSingleEvent(slot) {
-    const device = this._config.device;
-    this._hass.callService('esphome', `${device}_clear_single_event`, {
-      data: `${slot}`,
-    });
+    this._callService('clear_single_event', { data: `${slot}` });
     // Optimistic removal from local state
     this._singleEvents = this._singleEvents.filter(e => e.slot !== slot);
     this._render();
@@ -1730,8 +1750,7 @@ class AlphaHwrScheduleCard extends HTMLElement {
   }
 
   _callRefreshSingleEvents() {
-    const device = this._config.device;
-    this._hass.callService('esphome', `${device}_refresh_single_events`, {});
+    this._callService('refresh_single_events');
   }
 
   getCardSize() {
