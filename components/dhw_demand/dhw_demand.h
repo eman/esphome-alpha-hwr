@@ -171,6 +171,13 @@ class DhwDemandComponent : public PollingComponent {
   // cadences that set the two bounds. 0 means "never reported".
   uint32_t flow_last_update_ms_{0};
   uint32_t pump_flow_last_update_ms_{0};
+  // Same provenance problem for the motor channel, which selects the whole
+  // pump-on/pump-off branch. alpha_hwr does not publish NaN when the BLE link
+  // drops, so the last value simply stops changing -- a frozen 0 RPM reads as a
+  // confirmed-off pump forever, and the pump's own recirculation flow is then
+  // scored as household demand. Bounding the reading's age turns that into the
+  // "unknown" path, which forward-fills conservatively.
+  uint32_t motor_last_update_ms_{0};
 
   // ── DHW in-use sustain guard ──────────────────────────────────────────────
   // Ticked in *both* pump branches: the run has to be free to start while the

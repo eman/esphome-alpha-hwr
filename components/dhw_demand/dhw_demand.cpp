@@ -36,6 +36,19 @@ void DhwDemandComponent::setup() {
         pump_flow_last_update_ms_ = millis();
     });
   }
+  // The motor channel decides which branch runs, so its age matters most.
+  if (motor_speed_ != nullptr) {
+    motor_speed_->add_on_state_callback([this](float v) {
+      if (!std::isnan(v))
+        motor_last_update_ms_ = millis();
+    });
+  }
+  if (motor_current_ != nullptr) {
+    motor_current_->add_on_state_callback([this](float v) {
+      if (!std::isnan(v))
+        motor_last_update_ms_ = millis();
+    });
+  }
 
   ESP_LOGI(TAG, "DHW Demand Detector initialised (update interval %.0f s)",
            get_update_interval() / 1000.0f);
@@ -330,8 +343,16 @@ void DhwDemandComponent::update() {
   // Default is "on" (conservative): avoids entering the pump-OFF branch when
   // the pump may already be running and the meter is showing recirculation
   // flow (~2.2 GPM), which would cause a false "deterministic_flow" detection.
+  // A non-NaN motor reading is not enough: alpha_hwr keeps the last published
+  // value on a BLE drop rather than publishing NaN, so `motor_speed` stays a
+  // perfectly valid 0.0 indefinitely. Age is the real test -- an unrefreshed
+  // reading is "unknown", not "off". Bounded by the same window the pump-flow
+  // channel uses, since both come from the same BLE poll.
+  bool motor_fresh = reading_is_fresh(
+      motor_last_update_ms_, now,
+      (uint32_t) pump_on_demand_max_stale_seconds_ * 1000);
   bool pump_state_known =
-      !std::isnan(motor_speed) || !std::isnan(motor_current);
+      motor_fresh && (!std::isnan(motor_speed) || !std::isnan(motor_current));
   bool pump_on;
   if (pump_state_known) {
     pump_on = detect_pump_on_(motor_speed, motor_current);
