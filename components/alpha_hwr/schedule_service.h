@@ -477,8 +477,8 @@ public:
 
   /**
    * Whether the single-event slots have been read since connect. While false,
-   * find_free_single_event_slot() blindly answers 0 — callers that would
-   * write to the returned slot must read first (issue #92).
+   * find_free_single_event_slot() returns -1 rather than guessing — callers
+   * that would write to the returned slot must read first (issue #92).
    */
   bool is_single_events_cached() const { return single_events_cached_; }
 

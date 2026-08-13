@@ -1120,8 +1120,17 @@ void ScheduleService::read_single_events_async(
   auto slots_failed = std::make_shared<uint8_t>(0);
   auto read_next = std::make_shared<std::function<void(uint8_t)>>();
 
+  // See the note in HistoryService::read_trends_async(): capturing `read_next`
+  // inside the closure it owns is a self-reference cycle that leaks the chain
+  // once per invocation. This is the one of the three that also repeats without
+  // a reconnect -- refresh_single_events is a public HA service.
+  std::weak_ptr<std::function<void(uint8_t)>> read_next_weak = read_next;
+
   *read_next = [this, events, slots_failed, on_complete, max_events,
-                read_next](uint8_t idx) {
+                read_next_weak](uint8_t idx) {
+    auto self = read_next_weak.lock();
+    if (!self)
+      return;  // chain abandoned (disconnect)
     if (idx >= max_events) {
       // All-or-nothing. single_events_cached_ is what
       // find_free_single_event_slot() gates on, and an unread slot looks
@@ -1157,7 +1166,7 @@ void ScheduleService::read_single_events_async(
     this->transport_.send_apdu_command(
       apdu, 5, 0xDC01, 0,
         [idx, events, slots_failed, on_complete,
-         read_next](bool success, const uint8_t *payload, size_t payload_len) {
+         self](bool success, const uint8_t *payload, size_t payload_len) {
           if (!success || payload_len < 13) {
             (*slots_failed)++;
             ESP_LOGW(TAG, "Failed to read single event slot %d "
@@ -1177,7 +1186,7 @@ void ScheduleService::read_single_events_async(
             }
           }
           // Read next slot
-          (*read_next)(idx + 1);
+          (*self)(idx + 1);
         },
         3000);
   };
@@ -1261,8 +1270,12 @@ void ScheduleService::clear_single_event_async(
 int ScheduleService::find_free_single_event_slot(
     uint32_t reusable_before_ts) const {
   uint8_t max_events = overview_cached_ ? overview_structure_[1] : 35;
+  // A cold cache means every slot "looks free", so answering 0 here hands the
+  // caller a live slot to overwrite -- the clobber class issue #92 exists to
+  // prevent. -1 is this function's own "none available" answer; use it, and let
+  // the caller warm the cache first.
   if (!single_events_cached_)
-    return 0;
+    return -1;
 
   std::set<uint8_t> used;
   for (const auto &ev : cached_single_events_) {
