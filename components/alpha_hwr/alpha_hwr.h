@@ -816,10 +816,6 @@ public:
                                    : ux::schedule_off_target());
   }
 
-  bool read_schedule_entries(std::vector<ScheduleEntry> *entries,
-                             int layer = -1) {
-    return schedule_service_.read_entries(entries, layer);
-  }
   bool read_schedule_entries_async(
       int layer, std::function<void(bool, const std::vector<ScheduleEntry> &)>
                      on_complete) {

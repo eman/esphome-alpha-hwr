@@ -451,69 +451,6 @@ bool ScheduleService::send_configuration_commit() {
 // Schedule Entry Operations
 // -------------------------------------------------------------------------
 
-bool ScheduleService::read_entries(std::vector<ScheduleEntry> *entries,
-                                   int layer) {
-  if (!this->session_.is_ready()) {
-    ESP_LOGE(TAG, "Cannot read schedule entries: session not ready");
-    return false;
-  }
-
-  if (layer < 0 || layer > 4) {
-    ESP_LOGE(TAG, "Invalid layer %d (must be 0-4)", layer);
-    return false;
-  }
-
-  ESP_LOGD(TAG, "Reading schedule entries for layer %d...", layer);
-
-  uint16_t sub_id = 1000 + layer;
-
-  uint8_t apdu[5];
-  apdu[0] = 0x0A;
-  apdu[1] = 0x03;
-  apdu[2] = 84;
-  apdu[3] = (sub_id >> 8) & 0xFF;
-  apdu[4] = sub_id & 0xFF;
-
-  this->transport_.send_apdu_command(
-      apdu, 5, 0xDE01, 0,
-      [entries, layer](bool success, const uint8_t *payload,
-                       size_t payload_len) {
-        if (!success) {
-          ESP_LOGW(TAG,
-                   "Failed to read schedule entries for layer %d (timeout)",
-                   layer);
-          return;
-        }
-
-        if (payload_len < 45) {
-          ESP_LOGW(TAG, "Schedule entries response too short (%zu bytes)",
-                   payload_len);
-          entries->clear();
-          return;
-        }
-
-        const uint8_t *entry_data = payload + 3;
-        entries->clear();
-        int enabled_count = 0;
-
-        for (int day_idx = 0; day_idx < 7; day_idx++) {
-          size_t offset = day_idx * 6;
-          const uint8_t *entry_bytes = entry_data + offset;
-
-          if (entry_bytes[0] != 0) {
-            ScheduleEntry entry = ScheduleEntry::from_bytes(
-                entry_bytes, DAY_NAMES[day_idx], layer);
-            entries->push_back(entry);
-            enabled_count++;
-          }
-        }
-
-        ESP_LOGD(TAG, "Read %d enabled entries from layer %d", enabled_count,
-                 layer);
-      });
-
-  return true;
-}
 
 bool ScheduleService::read_entries_async(
     int layer,
@@ -785,67 +722,6 @@ bool ScheduleService::write_entries_async(
   return true;
 }
 
-void ScheduleService::clear_entry(const std::string &day, uint8_t layer,
-                                   std::function<void(bool)> on_complete) {
-  if (!this->session_.is_ready()) {
-    ESP_LOGE(TAG, "Cannot clear schedule entry: session not ready");
-    if (on_complete) on_complete(false);
-    return;
-  }
-
-  // Validate day
-  bool valid_day = false;
-  for (const char *valid : DAY_NAMES) {
-    if (day == valid) {
-      valid_day = true;
-      break;
-    }
-  }
-  if (!valid_day) {
-    ESP_LOGE(TAG, "Invalid day name: %s", day.c_str());
-    if (on_complete) on_complete(false);
-    return;
-  }
-
-  // Validate layer
-  if (layer > 4) {
-    ESP_LOGE(TAG, "Invalid layer: %d. Must be 0-4.", layer);
-    if (on_complete) on_complete(false);
-    return;
-  }
-
-  ESP_LOGI(TAG, "Clearing schedule entry for %s on layer %d...", day.c_str(),
-           layer);
-
-  // Fully async: read → filter → write, with completion propagation.
-  this->read_entries_async(layer,
-    [this, day, layer, on_complete](bool success, const std::vector<ScheduleEntry> &entries) {
-      if (!success) {
-        ESP_LOGE(TAG, "Failed to read current schedule for layer %d", layer);
-        if (on_complete) on_complete(false);
-        return;
-      }
-
-      // Filter out the entry for the specified day
-      std::vector<ScheduleEntry> filtered_entries;
-      for (const auto &entry : entries) {
-        if (entry.get_day() != day) {
-          filtered_entries.push_back(entry);
-        }
-      }
-
-      // Write back the filtered entries asynchronously
-      this->write_entries_async(filtered_entries, layer,
-        [on_complete, day, layer](bool write_success) {
-          if (write_success) {
-            ESP_LOGI(TAG, "Cleared schedule entry for %s on layer %d", day.c_str(), layer);
-          } else {
-            ESP_LOGE(TAG, "Failed to write filtered schedule for layer %d", layer);
-          }
-          if (on_complete) on_complete(write_success);
-        });
-    });
-}
 
 // -------------------------------------------------------------------------
 // Validation Methods
