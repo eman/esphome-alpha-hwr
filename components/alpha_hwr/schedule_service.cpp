@@ -349,10 +349,19 @@ void ScheduleService::set_state_async(bool enable, std::function<void(bool)> on_
         // caller's poll_state_async() readback. Report "sent" either way.
         ESP_LOGD(TAG, "Schedule %s write %s", enable ? "enable" : "disable",
                  acked ? "ACKed" : "window closed (verify via readback)");
-        // Update cached copy so a subsequent commit doesn't revert the flag.
+        // Keep the overview image consistent so a subsequent commit does not
+        // revert the flag we just wrote.
         this->overview_structure_[4] = enable ? 0x01 : 0x00;
-        this->schedule_enabled_ = enable;
-        this->schedule_state_cached_ = true;
+        // Deliberately do NOT assert schedule_enabled_/schedule_state_cached_
+        // from the *request*. This callback runs whether or not the write was
+        // ACKed, so recording the requested value as cached truth made the
+        // cache claim a state the pump may never have taken -- and callers gate
+        // on that cache. Concretely: a retry of a failed enable then saw
+        // "already in the requested state", skipped the write entirely, and
+        // still settled ACCEPTED, so the documented idempotent recovery path
+        // was a no-op exactly when it was needed. current_hash() folds the same
+        // flag in, so the settle event's hash agreed with the lie. The
+        // authoritative update is the caller's poll_state_async() readback.
         if (on_sent)
           on_sent(true);
       },

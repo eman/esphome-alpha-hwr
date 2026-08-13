@@ -1572,9 +1572,24 @@ void WriteOperationService::upload_apply_enabled_(uint32_t seq) {
     [this, seq](bool /*sent*/) {
       Operation *op = find_(seq);
       if (op == nullptr || op->phase == Phase::DONE) return;
-      op->phase = Phase::CONFIRMING;
-      op->upload_layer = 0;  // reuse as the confirm cursor
-      schedule_([this, seq]() { confirm_upload_(seq); }, SCHED_SETTLE_DELAY_MS);
+      // Read the flag back before confirming. confirm_upload_ only walks the
+      // written *layers*, and the enabled flag lives in Sub 1, which no layer
+      // readback carries -- so without this the operation settled ACCEPTED and
+      // reported the requested value even when the enable write was dropped
+      // entirely (AGENTS §8.4 rule 3: the readback decides, not the ACK).
+      // Overwrite the operation's field with what the pump actually holds so
+      // the settle event and its schedule_hash describe the device.
+      schedule_service_.poll_state_async([this, seq](bool ok) {
+        Operation *op = find_(seq);
+        if (op == nullptr || op->phase == Phase::DONE) return;
+        bool actual = false;
+        if (ok && schedule_service_.get_state(&actual)) {
+          op->upload.enabled = actual ? 1 : 0;
+        }
+        op->phase = Phase::CONFIRMING;
+        op->upload_layer = 0;  // reuse as the confirm cursor
+        schedule_([this, seq]() { confirm_upload_(seq); }, SCHED_SETTLE_DELAY_MS);
+      });
     });
 }
 
