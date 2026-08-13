@@ -103,6 +103,14 @@ jobs:
       - name: Validate CI config (working tree)
         run: esphome config tests/ci-compile.yaml
 
+      # Some examples reference !secret. secrets.yaml is gitignored, so seed a
+      # throwaway one from the committed template. ESPHome resolves !secret
+      # relative to the config file, hence the copy beside the nested example.
+      - name: Seed placeholder secrets
+        run: |
+          cp secrets-example.yaml secrets.yaml
+          cp secrets-example.yaml components/alpha_hwr/secrets.yaml
+
       # The published examples pin a release tag, so this catches drift between
       # the documented recipes and the packages they load.
       - name: Validate example configs

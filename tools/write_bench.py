@@ -43,14 +43,15 @@ import json
 import os
 import sys
 import time
-from typing import Iterable, Any
+from collections.abc import Iterable
+from typing import Any
 
 from aioesphomeapi import APIClient
 
 EVENT = "esphome.alpha_hwr_write_settled"
 
 
-def die(msg: str) -> "None":
+def die(msg: str) -> None:
     print(f"ERROR: {msg}", file=sys.stderr)
     sys.exit(2)
 
@@ -96,7 +97,7 @@ async def connect(host: str, key: str) -> APIClient:
     return client
 
 
-def kv_dict(items: "Iterable[str]") -> dict[str, str]:
+def kv_dict(items: Iterable[str]) -> dict[str, str]:
     """Parse `k=v` strings into a dict.
 
     `str.split("=", 1)` yields a list, which dict()/dict.update() accept at
