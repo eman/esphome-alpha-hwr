@@ -478,16 +478,29 @@ bool Transport::try_dispatch_response(const uint8_t* data, size_t len) {
   //   packet_type_low_ver = (TypeL << 8) | Version
   //
   // which is why the match constants elsewhere look like Object IDs but are
-  // not: 0xF301 is Type 243 v1 (event log info), 0xF402 is Type 1012 v2 (event
-  // log entry), 0xDE01 is Type 222 v1 (schedule entries), 0x2F01 is Type 303 v1
-  // (mode/control), 0xDC01 is Type 220 v1 (single event). event_log_service.cpp
-  // already names its two `TYPE_...`, which is the honest reading.
+  // not. Each is (TypeL << 8) | Version, and the type's HIGH byte is the
+  // separate expect_type_high value:
+  //
+  //   0xF301  Type  243 v1  event log info      wire 00 00 F3 01
+  //   0xF402  Type  244 v2  event log entry     wire 00 00 F4 02
+  //   0xDE01  Type  222 v1  schedule entries    wire 00 00 DE 01
+  //   0xDC01  Type  220 v1  single event        wire 00 00 DC 01
+  //   0x2F01  Type  303 v1  mode / control      wire 00 01 2F 01
+  //
+  // Note that (TypeL << 8) | Version does NOT identify a type on its own:
+  // Type 1012 (the temperature-range user settings object) also ends in
+  // F4 02, but its wire header is 00 03 F4 02 -- it differs from Type 244
+  // only in expect_type_high. An earlier version of this comment recorded
+  // 0xF402 as "Type 1012", which is precisely the confusion this block
+  // exists to prevent.
   //
   // The consequence that matters: matching here discriminates object TYPES, not
   // instances of a type. Sibling reads that share a type -- the five schedule
   // layers (Sub 1000..1004), the single-event slots, the event-log entries, the
   // Object 53 trends -- are byte-identical through this header and cannot be
-  // told apart by it. See docs/protocol-response-matching.md.
+  // told apart by it. Verified against the captures: obj 84 sub 1000-1004 all
+  // answer 00 00 DE 01, obj 84 sub 900-904 all answer 00 00 DC 01, and obj 88
+  // sub 10200-10219 all answer 00 00 F4 02.
   //
   // Byte 5 is likewise not an operation code in the response direction: it is
   // the APDU body length. `byte5 == total_len - 8` held for all 26,895 captured
@@ -537,40 +550,29 @@ bool Transport::try_dispatch_response(const uint8_t* data, size_t len) {
     // Frame structure depends on OpSpec!
     // OpSpec 0x0E (Passive Notif): [SubH][SubL][ObjH][ObjL][Payload...]
     // OpSpec 0x02 (Positive ACK):  [Obj(1 byte)][SubH][SubL][Payload...]
-    if (opspec == 0x0E || opspec == 0x01) {
-      if (len >= 10) {
-        // Here GENI defines bytes 6-7 as SubID, 8-9 as ObjID.
-        // We will store them correctly to avoid confusion, even though older code might have them swapped.
-        packet_type_high = (data[6] << 8) | data[7];
-        packet_type_low_ver = (data[8] << 8) | data[9];
-        // The payload starts at data + 10 for these!
-        // But our global payload extraction above did data + 10. We will keep it.
-      } else {
-        ESP_LOGV(TAG, "DataObject 0x0E packet too short to extract IDs");
-        return false;
-      }
-    // There used to be an `opspec == 0x02` branch here for a "Positive ACK"
-    // layout ([Obj(1)][SubH][SubL][payload at +9]). It is deleted rather than
-    // fixed, because its premise is false and its arithmetic was broken:
+    // Both the OpSpec 0x0E/0x01 case and every other case read the same two
+    // fields from the same offsets, so there is one body rather than two
+    // identical arms. There used to be an `opspec == 0x02` branch between them
+    // for a "Positive ACK" layout ([Obj(1)][SubH][SubL][payload at +9]); it is
+    // deleted because its premise is false, not because of any arithmetic
+    // problem:
     //
-    //   - Byte 5 is the APDU body length, not an operation code, so `== 0x02`
-    //     selects "a 2-byte body", i.e. a 10-byte frame -- not a packet format.
-    //   - At len == 10 its `payload_len = len - 11` underflows to SIZE_MAX, and
-    //     the `len >= 9` guard does not stop it. Every frame that could reach
-    //     the branch would underflow, not merely some edge case.
-    //   - Zero of 24,251 captured Class 10 responses had byte 5 == 0x02.
-    //
-    // A frame that would have landed here now falls through to the length-
-    // checked path below, which rejects it for being under 10 bytes.
+    //   - Byte 5 is the APDU body length in the response direction, not an
+    //     operation code, so `== 0x02` selects "a 10-byte frame" rather than a
+    //     packet format. Verified: `byte5 == total_len - 8` holds for all
+    //     26,897 captured inbound frames, no exceptions.
+    //   - Zero of 24,253 captured Class 10 responses had byte 5 == 0x02, and a
+    //     10-byte frame cannot reach here anyway: the `len < 11` guard above
+    //     returns first. (An earlier version of this comment claimed the
+    //     branch underflowed at len == 10. It could not -- that guard makes
+    //     len >= 11 here, so its `len - 11` was never reachable, let alone
+    //     wrong. The branch was simply dead.)
+    if (len >= 10) {
+      packet_type_high = (data[6] << 8) | data[7];
+      packet_type_low_ver = (data[8] << 8) | data[9];
     } else {
-      // Fallback for other opspecs (e.g. 0x90, 0x97 short ACKs already handled above, etc)
-      // Assume 2-byte Sub, 2-byte Obj for safety if >= 10
-      if (len >= 10) {
-        packet_type_high = (data[6] << 8) | data[7];
-        packet_type_low_ver = (data[8] << 8) | data[9];
-      } else {
-        return false;
-      }
+      ESP_LOGV(TAG, "DataObject packet too short to extract type fields");
+      return false;
     }
     
     // Now check if this matches our expected Object/Sub ID
@@ -587,15 +589,25 @@ bool Transport::try_dispatch_response(const uint8_t* data, size_t len) {
       // Exact match: check Object ID and Sub-ID
       matched = (packet_type_low_ver == cmd.expect_type_low_ver && (packet_type_high == cmd.expect_type_high || packet_type_high == 0));
       
-      // A "BACKUP MATCH" for a supposedly swapped Obj/Sub used to sit here.
-      // Deleted: the fields are not Obj/Sub and nothing swaps them. It fired
-      // when packet_type_high equalled a non-zero expectation, and the only
-      // such value any call site uses that is small enough to be reachable is
-      // 91 -- which would require an object type >= 23296, against a pump whose
-      // types top out around 1012. If it ever did fire it would attach a
-      // wrong-type response to an Object 91 config read: a misattribution, not
-      // a rescue. It was speculative from the commit that introduced it, never
-      // a fix for an observed failure.
+      // A "BACKUP MATCH" for a supposedly swapped Obj/Sub used to sit here:
+      //   if (!matched && expect != 0 && packet_type_high == expect) matched = true;
+      //
+      // Deleted. The fields are not Obj/Sub and the real pump does not swap
+      // them; the branch was speculative from the commit that introduced it,
+      // never a fix for an observed failure. What it actually absorbed was the
+      // Object 86 Sub 7 mode read passing its two arguments the wrong way
+      // round, which is fixed at that call site.
+      //
+      // It was not the mode read's alone, though. Instrumenting it shows a
+      // second caller in the host suite: test_write_operations builds the
+      // Obj 91 Sub 430 reply echoing 91/430 at bytes 6-9, which puts 0x005B in
+      // packet_type_high and matches an expectation of 91. That fixture does
+      // not describe the real pump -- captured Sub 430 replies carry the
+      // ordinary type header 00 03 F4 02 (442 samples) -- and the Obj-91
+      // workaround branch below catches it identically, so removing this
+      // changes no behaviour. Recorded because the deletion was first
+      // justified by a claim ("no call site can reach it") that instrumenting
+      // disproved.
     }
     
     // SPECIAL CASE WORKAROUND: Object 91 config reads (Cache Sync / DHW config)
@@ -607,9 +619,15 @@ bool Transport::try_dispatch_response(const uint8_t* data, size_t len) {
     // sliced at byte 10. We explicitly handle the known cases here to avoid
     // wildcard matching other packets.
     // Obj 91 config reads. NOTE these two fields are used here as the REQUEST's
-    // object and sub-id (91 / 430 / 421), not as expected response type fields:
-    // this branch matches on what was asked for plus the reply's length byte,
-    // because the reply carries no type header the normal path could use.
+    // object and sub-id (91 / 430 / 421), not as expected response type fields,
+    // so this branch matches on what was asked for plus the reply's length byte.
+    //
+    // Not because the reply lacks a type header -- it has an ordinary one
+    // (Sub 430 answers 00 03 F4 02, Sub 421 answers 00 03 D9 01, 442 and 563
+    // captured samples). The reason is only that these call sites pass the
+    // object and sub-id rather than the expected type, so the normal path has
+    // nothing to compare. Giving them their real type expectations would let
+    // this workaround go.
     if (!matched && cmd.expect_type_low_ver == 91 && len >= 12 &&
         ((cmd.expect_type_high == 430 && opspec == 0x15) ||
          (cmd.expect_type_high == 421 && opspec == 0x0D))) {
@@ -674,12 +692,14 @@ bool Transport::try_dispatch_response(const uint8_t* data, size_t len) {
   //
   // NOTE: this path assigns the OTHER WAY ROUND from try_dispatch_response
   // above -- bytes 6-7 land in the "low_ver" slot and 8-9 in "high", which is
-  // backwards relative to the wire layout documented there. That is
-  // pre-existing, and it is left exactly as it was on purpose: the
-  // pending-handler consumers register their expectations in this same order,
-  // so the inconsistency cancels out, and this path has NO host-test coverage.
-  // Swapping it to match the other path leaves the whole suite green, which
-  // demonstrates the absence of coverage rather than the safety of the change.
+  // backwards relative to the wire layout documented there.
+  //
+  // Left exactly as it was, because the whole path is unreachable:
+  // register_response_handler() has no callers anywhere in the repo, so
+  // pending_handlers_ is always empty. Swapping the assignment to agree with
+  // the dispatch path leaves the suite green -- that is deadness, not
+  // coverage. Deleting the path is a reasonable follow-up; it is out of scope
+  // for a change about naming.
   packet_type_low_ver = (data[6] << 8) | data[7];
   packet_type_high = (data[8] << 8) | data[9];
 

@@ -10,8 +10,9 @@
   passed its two response-matching arguments in the wrong order, so its primary
   comparison never succeeded. It matched only via a "backup" branch in the
   transport that existed to absorb exactly that mistake. The call site is fixed,
-  the fallback is gone, and the ordering is pinned by a test asserting both
-  directions.
+  the fallback is gone, and the ordering is pinned in two places: at the
+  transport, and at the call site itself, where a swap now names its own cause
+  instead of surfacing as 36 unrelated-looking write failures.
 
   The underlying confusion is that a GENI response carries **no Object ID and no
   Sub-ID**: bytes 6-9 are `[00][TypeH][TypeL][Version]`, the object type and
@@ -22,8 +23,9 @@
 
   Also removes an `opspec == 0x02` branch: byte 5 is the APDU body length in the
   response direction, not an operation code, so that test selected a 10-byte
-  frame rather than a packet format -- and at that length its `payload_len =
-  len - 11` underflowed to `SIZE_MAX` on every frame that could reach it.
+  frame rather than a packet format -- and no such frame can reach it, since the
+  `len < 11` guard above returns first. Zero of 24,253 captured Class 10
+  responses had it.
 
 - **Command responses are now CRC-checked.** Only telemetry validated the frame
   CRC; the command-response path did not, so every control, schedule,

@@ -42,7 +42,9 @@ void EventLogService::read_metadata_async(
   apdu[3] = (SUBID_METADATA >> 8) & 0xFF;
   apdu[4] = SUBID_METADATA & 0xFF;
 
-  // Type 243 (EventLogInfo) → response bytes 6-7 = 0xF301
+  // Type 243 v1 (EventLogInfo). The reply's type header is 00 00 F3 01 at
+  // bytes 6-9, so this value matches bytes 8-9 -- (TypeL << 8) | Version --
+  // not bytes 6-7 as this comment used to say.
   static constexpr uint16_t TYPE_EVENT_LOG_INFO = 0xF301;
   transport_.send_apdu_command(apdu, sizeof(apdu), TYPE_EVENT_LOG_INFO, 0,
       [this, on_complete](bool success, const uint8_t *payload, size_t payload_len) {
