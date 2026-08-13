@@ -9,7 +9,7 @@ Provides essential pump monitoring without BLE pairing.
 
 **Sensors Included:**
 - Flow Rate (m³/h)
-- Head Pressure (m)
+- Head (m)
 - Water Temperature (°C)
 - Motor Speed (RPM)
 - Power Consumption (W)

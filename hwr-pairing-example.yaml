@@ -12,7 +12,7 @@ esphome:
 # Enhanced Telemetry Available:
 # - Grid Voltage (AC), Motor Current
 # - Water, PCB, and Control Box temperatures
-# - Flow Rate, Head Pressure, Motor Speed, Power
+# - Flow Rate, Head, Motor Speed, Power
 # - Pairing Status plus schedule/diagnostic text sensors
 #
 # Setup Instructions:

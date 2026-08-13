@@ -66,6 +66,43 @@
   naming the replacement, following the same rule as the keys retired in #149:
   config that validates but does nothing is a trap.
 
+- **BREAKING — the Head sensor is now named "Head", not "Head Pressure"**
+  ([#157](https://github.com/eman/esphome-alpha-hwr/issues/157)) — head is a
+  length, measured in meters, and calling it a pressure was wrong everywhere
+  except the entity name: Grundfos calls it "Head (H)", the config key is
+  `head:`, the package header comments say "Head (m)", `docs/units-audit.md`
+  says "Head", and the history trend label is "Head". The diagnostic
+  `head_rate` entity follows as **"Head Rate"** (was "Head Pressure Rate").
+  Only the names shipped by `packages/alpha_hwr_base.yaml` and
+  `packages/alpha_hwr_pairing.yaml` change; the component sets no default name,
+  so a config that writes its own `alpha_hwr:` block is unaffected.
+
+  **This orphans the old entity in Home Assistant.** ESPHome derives the API
+  key from a hash of the object_id and the Home Assistant integration builds
+  `unique_id` from that key, so the renamed sensor arrives as a *new* entity —
+  `sensor.<device>_head` — and `sensor.<device>_head_pressure` is left behind
+  with its history and long-term statistics. Rename or delete the orphan in
+  Home Assistant's entity registry; renaming it to the new entity_id first
+  carries the statistics across.
+
+  **Migration, one line:** to keep the old entity_id, re-declare
+  `name: "Head Pressure"` under `head:` in your own `alpha_hwr:` block — the
+  main config wins over the package, the same override the
+  `pump_head_rate_sensor` migration in 0.15.0 uses.
+
+- **The Head sensor carries `device_class: distance`**
+  ([#157](https://github.com/eman/esphome-alpha-hwr/issues/157)) — it had none,
+  because `m` is not a valid Home Assistant `pressure` unit, so Home Assistant
+  offered no way to display it in anything but meters. Meters of head is
+  dimensionally a length and HA's `distance` class accepts both `m` and `ft`,
+  which unlocks the per-entity unit picker — the pump's datasheet leads with
+  feet (§13: "Head (H) 15-55: max. 18 ft (5.5 m)").
+
+  **Nothing about the value changes.** The decode path, the published state and
+  the recorded unit are all still meters; `distance` is display metadata and the
+  conversion happens in the frontend, per user. Unlike the kPa → m change in
+  0.13.0, history does not step at the upgrade.
+
 - **Docs and comments no longer name a specific flow meter or water heater** —
   README, `AGENTS.md`, `docs/configuration.md`, the packages and the component
   comments now say "household flow meter" and "water heater". The detector was

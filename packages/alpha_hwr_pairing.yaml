@@ -176,9 +176,9 @@ alpha_hwr:
    flow:
      name: "Flow Rate"
    head:
-     name: "Head Pressure"
+     name: "Head"
    head_rate:
-     name: "Head Pressure Rate"
+     name: "Head Rate"
      entity_category: diagnostic
    
    # Pressure Sensors (requires pairing)

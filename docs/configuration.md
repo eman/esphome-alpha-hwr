@@ -51,7 +51,7 @@ alpha_hwr:
   flow:
     name: "Flow Rate"
   head:
-    name: "Head Pressure"
+    name: "Head"
   rpm:
     name: "Motor Speed"
   voltage:

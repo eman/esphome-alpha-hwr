@@ -134,10 +134,16 @@ CONFIG_SCHEMA = cv.Schema(
         ),
         # Head is published in meters of head (the pump's native unit and the
         # same unit as the pressure setpoints). "m" is not a valid Home
-        # Assistant `pressure` device_class unit, so no device_class is set.
+        # Assistant `pressure` device_class unit, so the class is `distance`:
+        # meters of head is dimensionally a length, and `distance` accepts both
+        # m and ft. This is display metadata only — the published value stays
+        # meters — but it gives Home Assistant the unit picker, so the value can
+        # be shown in feet, the unit the Grundfos manual leads with for this
+        # pump (§13: "Head (H) 15-55: max. 18 ft (5.5 m)"). See issue #157.
         cv.Optional(CONF_HEAD): sensor.sensor_schema(
             unit_of_measurement="m",
             accuracy_decimals=2,
+            device_class="distance",
             state_class=STATE_CLASS_MEASUREMENT,
         ),
         cv.Optional(CONF_POWER): sensor.sensor_schema(
