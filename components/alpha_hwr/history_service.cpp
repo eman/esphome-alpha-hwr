@@ -63,7 +63,20 @@ void HistoryService::read_trends_async(
   auto trends = std::make_shared<std::vector<TrendSeries>>();
   auto read_next = std::make_shared<std::function<void(size_t)>>();
 
-  *read_next = [this, trends, on_complete, read_next](size_t idx) {
+  // The closure is owned by `read_next`, so capturing that shared_ptr inside it
+  // would make the closure own itself: the refcount never reaches zero and the
+  // whole chain (plus `trends` and `on_complete`) leaks once per invocation --
+  // i.e. on every reconnect. Hold a weak_ptr here and let the transport command
+  // queue hold the only strong reference, so the chain is released either by the
+  // final pop_front() or by command_queue_.clear() in Transport::reset() when a
+  // disconnect abandons it mid-flight. Nulling the pointer in the terminal branch
+  // would not cover that second case.
+  std::weak_ptr<std::function<void(size_t)>> read_next_weak = read_next;
+
+  *read_next = [this, trends, on_complete, read_next_weak](size_t idx) {
+    auto self = read_next_weak.lock();
+    if (!self)
+      return;  // chain abandoned (disconnect) -- nothing left to continue
     if (idx >= NUM_TRENDS) {
       cached_trends_ = *trends;
       trends_cached_ = true;
@@ -85,7 +98,7 @@ void HistoryService::read_trends_async(
     // Use wildcard response matching — accept any non-register Class 10 response.
     // Timeout: 1500 ms — trend reads either respond immediately or not at all.
     transport_.send_apdu_command(apdu, sizeof(apdu), 0, 0,
-        [this, idx, trends, on_complete, read_next, cfg](
+        [this, idx, trends, on_complete, self, cfg](
             bool success, const uint8_t *payload, size_t payload_len) {
       if (success && payload_len >= 32) {  // 3 header + 29 data
         const uint8_t *data = payload + 3;
@@ -112,7 +125,7 @@ void HistoryService::read_trends_async(
         ESP_LOGD(TAG, "Trend %s: no data (success=%d, len=%zu) — may not be supported by this pump",
                  cfg.name, success, payload_len);
       }
-      (*read_next)(idx + 1);
+      (*self)(idx + 1);
     }, 1500);
   };
 

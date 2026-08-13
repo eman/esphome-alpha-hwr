@@ -89,7 +89,15 @@ void EventLogService::read_entries_async(
     auto entries = std::make_shared<std::vector<EventLogEntry>>();
     auto read_next = std::make_shared<std::function<void(uint16_t)>>();
 
-    *read_next = [this, entries, on_complete, count, read_next](uint16_t idx) {
+    // See the note in HistoryService::read_trends_async(): capturing `read_next`
+    // inside the closure it owns is a self-reference cycle that leaks the chain
+    // once per invocation. The transport command queue holds the strong ref.
+    std::weak_ptr<std::function<void(uint16_t)>> read_next_weak = read_next;
+
+    *read_next = [this, entries, on_complete, count, read_next_weak](uint16_t idx) {
+      auto self = read_next_weak.lock();
+      if (!self)
+        return;  // chain abandoned (disconnect)
       if (idx >= count) {
         cached_entries_ = *entries;
         entries_cached_ = true;
@@ -110,7 +118,7 @@ void EventLogService::read_entries_async(
       // Must allow register-read matching since OpSpec 0x14 is normally filtered
       static constexpr uint16_t ENTRY_MATCH_OBJ = 0xF402;
       this->transport_.send_apdu_command(apdu, 5, ENTRY_MATCH_OBJ, 0,
-          [this, idx, entries, on_complete, count, read_next](
+          [this, idx, entries, on_complete, count, self](
               bool success, const uint8_t *payload, size_t payload_len) {
         if (success) {
           // Event log entries use OpSpec 0x14 (register-read format) — no 3-byte sub-header
@@ -125,7 +133,7 @@ void EventLogService::read_entries_async(
         } else {
           ESP_LOGW(TAG, "Entry %d read failed", idx);
         }
-        (*read_next)(idx + 1);
+        (*self)(idx + 1);
       }, 5000, true);  // allow_register_read=true
     };
 
