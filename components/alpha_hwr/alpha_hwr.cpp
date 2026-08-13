@@ -302,12 +302,17 @@ void AlphaHwrComponent::setup() {
       case WriteCommand::CLEAR_SINGLE_EVENT:
       case WriteCommand::REFRESH_SINGLE_EVENTS:
 #ifdef USE_TEXT_SENSOR
+        // Gated like the read path in the header: this fires on every
+        // single-event write *and* every refresh_single_events settle, and the
+        // string is usually identical (issue #127 / AGENTS §4).
         if (applied && this->single_events_text_sensor_ != nullptr) {
-          this->single_events_text_sensor_->publish_state(
+          publish_text_sensor_if_changed(
+              this->single_events_text_sensor_,
               schedule_service_.format_single_events_display());
         }
         if (applied && this->vacation_text_sensor_ != nullptr) {
-          this->vacation_text_sensor_->publish_state(
+          publish_text_sensor_if_changed(
+              this->vacation_text_sensor_,
               schedule_service_.format_vacation_display());
         }
 #endif

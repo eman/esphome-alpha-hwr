@@ -883,12 +883,19 @@ public:
                             const std::vector<services::SingleEvent> &events) {
           if (success) {
 #ifdef USE_TEXT_SENSOR
+            // Gated: this runs on every refresh_single_events service call --
+            // which the schedule card fires after each save -- and again on
+            // every reconnect, almost always with an identical string. An
+            // ungated publish is an API frame per subscriber each time for no
+            // change (issue #127 / AGENTS §4).
             if (this->single_events_text_sensor_) {
-              this->single_events_text_sensor_->publish_state(
+              publish_text_sensor_if_changed(
+                  this->single_events_text_sensor_,
                   schedule_service_.format_single_events_display());
             }
             if (this->vacation_text_sensor_) {
-              this->vacation_text_sensor_->publish_state(
+              publish_text_sensor_if_changed(
+                  this->vacation_text_sensor_,
                   schedule_service_.format_vacation_display());
             }
 #endif
@@ -1016,7 +1023,7 @@ public:
                 display.resize(252);
                 display += "...";
               }
-              this->event_log_text_sensor_->publish_state(display);
+              publish_text_sensor_if_changed(this->event_log_text_sensor_, display);
             }
 #endif
           }
@@ -1038,7 +1045,7 @@ public:
                 display.resize(252);
                 display += "...";
               }
-              this->history_text_sensor_->publish_state(display);
+              publish_text_sensor_if_changed(this->history_text_sensor_, display);
             }
 #endif
             // Chain: read cycle timestamps after trends
@@ -1072,7 +1079,7 @@ public:
                 display.resize(252);
                 display += "...";
               }
-              this->cycle_timestamps_text_sensor_->publish_state(display);
+              publish_text_sensor_if_changed(this->cycle_timestamps_text_sensor_, display);
             }
 #endif
             ESP_LOGI(TAG, "Read %zu cycle timestamps", timestamps.size());
