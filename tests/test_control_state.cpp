@@ -19,12 +19,20 @@
 // Test result tracking (same framework as test_protocol.cpp)
 // NOTE: the notification-driven state tests that used to live here now drive
 // the real ControlService in test_control_service.cpp. What remains asserts
-// behaviour reachable only through ControlService's *private* wire primitives
-// (send_control_request, note_mode_commanded, handle_remote_mode_ack), which
-// AGENTS §8.4 keeps private because WriteOperationService is the one write
-// path. Those paths are covered end-to-end against a pump simulator in
-// test_write_operations.cpp; the replicas below remain until the cases still
-// unique to them are moved there.
+// behaviour reachable only through ControlService's *private* wire primitives,
+// which AGENTS §8.4 keeps private because WriteOperationService is the one
+// write path. Those split two ways:
+//
+//   - send_control_request() / note_mode_commanded() are reached through the
+//     operation layer, and test_write_operations.cpp already drives them
+//     end-to-end against a pump simulator. The replicas here duplicate that.
+//   - handle_remote_mode_ack() is not. There is no remote-mode WriteCommand --
+//     ControlService::enable_remote_mode()/disable_remote_mode() call it
+//     directly, one of the standalone write paths the audit flagged -- so the
+//     remote-mode replicas below are the ONLY thing asserting it anywhere.
+//     That is a real coverage gap, not a duplication: routing remote mode
+//     through WriteOperationService would close both it and the architecture
+//     violation.
 
 int tests_passed = 0;
 int tests_failed = 0;

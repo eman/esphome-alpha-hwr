@@ -66,14 +66,34 @@ mutated_files() {
   done | sort -u
 }
 
+# Returns non-zero if any file could not be restored. A silently-swallowed
+# failure here (a locked index, say) would let the run continue -- and even exit
+# 0 -- with a production source still mutated, which is the exact state this
+# script exists to avoid leaving behind.
+RESTORE_FAILED=0
 restore_all() {
-  local f
-  cd "$PROJECT_DIR" || return
+  local f rc=0
+  cd "$PROJECT_DIR" || return 1
   for f in $(mutated_files); do
     # From HEAD, not the index: a mutation that got staged (git add -A while
     # debugging, say) would otherwise be "restored" to the mutated version.
-    git checkout HEAD -- "$f" 2>/dev/null || true
+    if ! git checkout HEAD -- "$f" 2>/dev/null; then
+      echo -e "${RED}✗ FAILED TO RESTORE $f -- it is still mutated.${NC}" >&2
+      echo "  Restore it by hand: git checkout HEAD -- $f" >&2
+      rc=1
+    fi
   done
+  [ "$rc" -eq 0 ] || RESTORE_FAILED=1
+  return $rc
+}
+
+# Abort the run the moment a restore fails, rather than mutating further on top
+# of a source we could not put back.
+restore_or_die() {
+  if ! restore_all; then
+    echo -e "${RED}✗ Aborting: the working tree is left modified.${NC}" >&2
+    exit 3
+  fi
 }
 
 # Refuse to run against a dirty tree: this script edits tracked sources and
@@ -145,7 +165,7 @@ PY
     echo "    The code this mutation targets moved or changed. Update the"
     echo "    mutation rather than deleting it -- the coverage it proves is real."
     SURVIVORS+=("$name (not applied)")
-    restore_all
+    restore_or_die
     continue
   fi
 
@@ -156,7 +176,7 @@ PY
     echo -e "${GREEN}✓ caught${NC}"
     CAUGHT=$((CAUGHT + 1))
   fi
-  restore_all
+  restore_or_die
 done
 
 cd "$TESTS_DIR" && make clean >/dev/null 2>&1 || true
@@ -176,4 +196,8 @@ if [[ ${#SURVIVORS[@]} -gt 0 ]]; then
   exit 1
 fi
 echo ""
+if [ "$RESTORE_FAILED" -ne 0 ]; then
+  echo -e "${RED}✗ A restore failed during the run; the tree may be modified.${NC}"
+  exit 3
+fi
 echo -e "${GREEN}✓ Every mutation was caught${NC}"

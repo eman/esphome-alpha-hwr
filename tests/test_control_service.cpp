@@ -11,12 +11,22 @@
  * behaviour instead:
  *
  * Scope: the notification-driven state surface, which ControlService exposes
- * publicly. The command primitives (send_control_request, note_mode_commanded,
- * handle_remote_mode_ack) are deliberately private -- AGENTS §8.4 makes
- * WriteOperationService the one write path and a `friend` of this class -- so
- * they are exercised through the operation layer in test_write_operations.cpp,
- * against a pump simulator. Reaching around that with a test-only friend
- * declaration would assert a path the firmware does not use.
+ * publicly. The command primitives are private because AGENTS §8.4 makes
+ * WriteOperationService the one write path and a `friend` of this class, and
+ * they divide unevenly:
+ *
+ *   - send_control_request() and note_mode_commanded() are reached through the
+ *     operation layer, and test_write_operations.cpp drives them end-to-end
+ *     against a pump simulator.
+ *   - handle_remote_mode_ack() is NOT. There is no remote-mode WriteCommand;
+ *     ControlService::enable_remote_mode()/disable_remote_mode() call it
+ *     directly, which is one of the standalone write paths the audit flagged as
+ *     bypassing the operation layer. So it has no production-linked coverage
+ *     anywhere, and the replica in test_control_state.cpp is still the only
+ *     thing asserting it. Routing remote mode through WriteOperationService
+ *     would fix both the architecture violation and the coverage gap; until
+ *     then this file cannot reach it without a test-only friend declaration,
+ *     which would assert a path the firmware does not use.
  */
 
 #include <cmath>
@@ -52,10 +62,14 @@ using esphome::alpha_hwr::services::ControlService;
 namespace {
 
 // Operation-mode byte as the pump reports it in a passive notification.
-// Values from ControlService's own OperationMode enum -- not a re-guess.
-constexpr uint8_t OP_AUTO = 0;
-constexpr uint8_t OP_STOP = 1;
-constexpr uint8_t OP_USER_DEFINED = 4;
+// Derived from the production enum, not restated. Writing the numbers here
+// would reintroduce the replica problem in miniature: renumber USER_DEFINED and
+// this test would keep sending a stale 4 and still pass, because the
+// implementation only special-cases STOP.
+using esphome::alpha_hwr::services::OperationMode;
+constexpr uint8_t OP_AUTO = static_cast<uint8_t>(OperationMode::AUTO);
+constexpr uint8_t OP_STOP = static_cast<uint8_t>(OperationMode::STOP);
+constexpr uint8_t OP_USER_DEFINED = static_cast<uint8_t>(OperationMode::USER_DEFINED);
 
 /// Control-source byte: 2 = Remote/Digital, 1 = Local/Panel, 0 = unknown.
 constexpr uint8_t SRC_REMOTE = 2;

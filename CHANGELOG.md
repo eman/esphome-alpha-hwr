@@ -99,6 +99,28 @@
 
 ### Changed
 
+- **The test suite now links production code instead of validating copies of
+  it.** Three test files asserted hand-written replicas of shipped logic, so
+  they passed regardless of what the firmware did — corrupting the CRC table and
+  swapping the CRC bytes in the packet builder left `make test` reporting 21/21
+  with byte-identical output. `tests/protocol.h` is now a forwarding shim onto
+  `codec.cpp`/`frame_builder.cpp`; the Class 3/7 response-match predicate moved
+  into `components/alpha_hwr/response_match.h` so production and the test share
+  one implementation; and `ControlService`'s notification-driven state is
+  asserted against the real service in `tests/test_control_service.cpp`. One
+  replica remains, covering `handle_remote_mode_ack()` — remote mode has no
+  `WriteCommand`, so that path has no production-linked coverage anywhere;
+  routing it through the write-operation layer would close both that gap and
+  the standalone-write-path violation.
+
+- **`tools/mutation_check.sh` and a CI job guard against replica-testing
+  returning.** It breaks production code on purpose, one mutation at a time, and
+  fails if the suite does not notice. Seven mutations, all currently caught. It
+  refuses to run against a tree with uncommitted changes to any file it mutates,
+  restores from `HEAD` rather than the index, aborts if a restore fails rather
+  than continuing over a source it could not put back, and treats a mutation
+  whose target has moved as a failure rather than skipping it.
+
 - **`ScheduleService::read_entries()` and `clear_entry()` are removed.** The
   synchronous read wrote through a caller-owned pointer from a callback that
   fires seconds later, which is a use-after-scope for the stack vector the
