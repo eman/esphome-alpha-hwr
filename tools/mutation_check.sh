@@ -38,6 +38,7 @@ MUTATIONS=(
 "class-match-equality|components/alpha_hwr/response_match.h|incoming_class == queued_class &&|true &&"
 "frame-length-guard|components/alpha_hwr/frame_parser.cpp|if (len < expected_total) {|if (false) {"
 "schedule-day-bound|components/alpha_hwr/schedule_codec.cpp|if (v[1] > 6) return fail|if (v[1] > 99) return fail"
+"ignore-unrelated-gate|components/alpha_hwr/response_match.h|return is_class3_or_7(queued_class) && !is_class3_or_7(incoming_class);|return false;"
 )
 
 if [[ "${1:-}" == "--list" ]]; then
@@ -60,10 +61,14 @@ restore_all() {
     components/alpha_hwr/frame_parser.cpp \
     components/alpha_hwr/schedule_codec.cpp 2>/dev/null || true
 }
-trap restore_all EXIT INT TERM
 
 # Refuse to run against a dirty tree: this script edits tracked sources and
 # restores them with `git checkout --`, which would discard real work.
+#
+# This guard runs BEFORE the cleanup trap is installed, and that ordering is
+# load-bearing: with the trap already armed, `exit 2` here would fire it and
+# `git checkout --` would destroy precisely the uncommitted edits the guard
+# exists to protect.
 cd "$PROJECT_DIR"
 if ! git diff --quiet -- components/alpha_hwr/; then
   echo -e "${RED}✗ components/alpha_hwr has uncommitted changes.${NC}"
@@ -71,6 +76,32 @@ if ! git diff --quiet -- components/alpha_hwr/; then
   echo "  which would discard those changes. Commit or stash first."
   exit 2
 fi
+
+# Safe from here: every tracked file this touches is committed, so restoring is
+# lossless. Interrupts restore and then terminate rather than resuming the loop
+# with a mutation still applied.
+trap restore_all EXIT
+trap 'echo; echo -e "${YELLOW}Interrupted — restoring sources.${NC}"; restore_all; exit 130' INT TERM
+
+# Establish that the suite passes unmutated. Without this, a pre-existing build
+# or test failure — or a missing compiler — makes every mutation "fail the
+# suite" and get counted as caught, so the job reports full mutation coverage
+# while proving nothing. That is the same false-confidence failure this script
+# exists to detect, so it must not be able to produce it.
+echo -n "baseline (unmutated suite)  "
+if (cd "$TESTS_DIR" && make clean >/dev/null 2>&1 && make test >/tmp/mutation_baseline.log 2>&1); then
+  echo -e "${GREEN}✓ passes${NC}"
+else
+  echo -e "${RED}✗ FAILS${NC}"
+  echo ""
+  echo "  The suite does not pass before any mutation is applied, so a mutation"
+  echo "  appearing to be 'caught' would prove nothing. Fix the build or the"
+  echo "  failing tests first. Last 20 lines:"
+  echo ""
+  tail -20 /tmp/mutation_baseline.log | sed 's/^/    /'
+  exit 2
+fi
+echo ""
 
 SURVIVORS=()
 CAUGHT=0
