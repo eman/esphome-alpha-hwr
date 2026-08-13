@@ -81,14 +81,24 @@
   key from a hash of the object_id and the Home Assistant integration builds
   `unique_id` from that key, so the renamed sensor arrives as a *new* entity —
   `sensor.<device>_head` — and `sensor.<device>_head_pressure` is left behind
-  with its history and long-term statistics. Rename or delete the orphan in
-  Home Assistant's entity registry; renaming it to the new entity_id first
-  carries the statistics across.
+  with its history and long-term statistics.
 
-  **Migration, one line:** to keep the old entity_id, re-declare
-  `name: "Head Pressure"` under `head:` in your own `alpha_hwr:` block — the
-  main config wins over the package, the same override the
-  `pump_head_rate_sensor` migration in 0.15.0 uses.
+  **There is no registry-side way to carry that history onto the new entity.**
+  Home Assistant does migrate statistics when an entity is renamed, but it
+  refuses a rename onto an entity_id that is already taken (`Entity with this
+  ID is already registered`) — and the live sensor already holds
+  `sensor.<device>_head`. Deleting the orphan first does not help either: it
+  frees the *old* id, not the new one, and the two entities have different
+  unique_ids, so nothing links them.
+
+  **Migration, one line — this is also the only way to keep your history:** to
+  stay on the old entity_id, re-declare `name: "Head Pressure"` under `head:`
+  in your own `alpha_hwr:` block. The main config wins over the package, the
+  same override the `pump_head_rate_sensor` migration in 0.15.0 uses.
+
+  If you would rather take the new name, accept that the series restarts:
+  delete the orphaned entity, and clear its leftover long-term statistics under
+  **Developer tools → Statistics**.
 
 - **The Head sensor carries `device_class: distance`**
   ([#157](https://github.com/eman/esphome-alpha-hwr/issues/157)) — it had none,
