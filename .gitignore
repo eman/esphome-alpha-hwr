@@ -57,6 +57,12 @@ coverage.xml
 *.obj
 *.d
 
+# Host test binaries (tests/Makefile builds these next to their sources, so a
+# `git add -A` while the suite is built otherwise commits an ~800KB executable).
+tests/test_*
+!tests/test_*.cpp
+!tests/test_*.h
+
 # IDEs and Editors
 .vscode/
 .idea/

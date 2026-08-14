@@ -14,6 +14,44 @@
 
 ### Fixed
 
+- **A pump that stopped answering could report itself connected forever.**
+  Nothing in the connection sequence checked that data was coming back:
+  authentication is a chain of timers that sends its packets and declares
+  success 1.2 s later without inspecting a single reply, and of the six paths
+  through notification subscription, four give up silently while the other two
+  — CCCD write failed and CCCD write succeeded — both continue identically, so
+  a failed subscription is indistinguishable from a good one. A link whose GATT
+  writes succeed but whose notifications never arrive therefore reached the
+  ready state and stayed there.
+
+  The link-status ladder could not catch it either — its first rung is "session
+  is ready", which refreshes the very timestamp the "Unreachable" rung below it
+  measures, so a deaf link kept itself healthy-looking indefinitely. What the
+  user saw was Connected and Pairing on, Pump Ready off, every sensor frozen at
+  its last value, and a control-cache retry every 5 s that never completed.
+  Nothing recovered from it, because recovery is driven by BLE disconnection
+  and the BLE connection was fine.
+
+  A new `data_timeout` option (default `60s`, `0s` disables) drops the link
+  when nothing has been received for that long, letting the normal reconnect
+  run. It is a liveness check rather than a gate on becoming ready: this pump
+  does answer during authentication, but that is one specimen, and a variant
+  that stayed quiet until first polled would otherwise never become ready at
+  all. One timer covers every cause — both CCCD failure paths, the four
+  subscription paths that give up silently, and a session that goes deaf
+  mid-run. A ready link is polled every 10 s, so in steady state the default
+  tolerates five missed cycles and acts on the sixth; the tightest case is the
+  handshake, which reaches ready in about 6 s and sees its first data within
+  ~17 s worst case.
+
+  What this fixes is a link that *can* recover. It does not make a permanently
+  deaf pump legible: because becoming ready still does not require data, such a
+  pump cycles between ~60 s of looking connected and ~6 s of reconnecting, so
+  the status mostly still reads Connected and both link sensors flap once per
+  cycle. The **Pump Link Fault** sensor reads `No data from pump (60s)` during
+  the reconnect — held there rather than overwritten by the local disconnect
+  that caused it — and returns to `None` on recovery.
+
 - **The pump's control-mode read was matching its response through a fallback,
   not on its own terms.** The Object 86 Sub 7 read -- which drives control mode,
   run state, remote/local control source and the per-mode setpoint cache --
@@ -26,15 +64,16 @@
 
   The underlying confusion is that a GENI response carries **no Object ID and no
   Sub-ID**: bytes 6-9 are `[00][TypeH][TypeL][Version]`, the object type and
-  version. Byte 6 is `0x00` in 100% of 23,739 captured Class 10 responses, and
-  bytes 7-8 always equal the type the request named. The fields are renamed
+  version. Byte 6 is `0x00` in 100% of the 21,236 captured Class 10 responses
+  long enough to carry a type header, and bytes 7-8 always equal the type the
+  request named. The fields are renamed
   accordingly and the wire layout is documented where it is parsed, because the
   old names had already caused one incorrect analysis.
 
   Also removes an `opspec == 0x02` branch: byte 5 is the APDU body length in the
   response direction, not an operation code, so that test selected a 10-byte
   frame rather than a packet format -- and no such frame can reach it, since the
-  `len < 11` guard above returns first. Zero of 24,253 captured Class 10
+  `len < 11` guard above returns first. Zero of 21,720 captured Class 10
   responses had it.
 
 - **Command responses are now CRC-checked.** Only telemetry validated the frame

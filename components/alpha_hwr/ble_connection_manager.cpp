@@ -221,6 +221,20 @@ void BLEConnectionManager::subscribe_to_notifications() {
   }
 }
 
+void BLEConnectionManager::force_disconnect(const char *reason) {
+  ESP_LOGW(TAG, "Forcing BLE disconnect: %s", reason);
+  // Latch the real cause before tearing the link down. The DISCONNECT event we
+  // are about to provoke would otherwise overwrite it with "Local Host
+  // Terminated", which is true but says nothing; holding it keeps the actual
+  // reason readable through the reconnect loop that follows. Cleared by
+  // handle_notification() the moment data flows again.
+  last_failure_ = reason;
+  failure_hold_ = FailureHold::DATA;
+  if (client_ != nullptr) {
+    client_->disconnect();
+  }
+}
+
 void BLEConnectionManager::handle_connection_opened(const esp_ble_gattc_cb_param_t *param) {
   ESP_LOGI(TAG, "BLE connection opened. Pairing enabled: %s", pairing_enabled_ ? "YES" : "NO");
   
@@ -358,6 +372,14 @@ void BLEConnectionManager::handle_notification(const esp_ble_gattc_cb_param_t *p
   auto *notify_evt = &param->notify;
   if (notify_evt->value_len > 0) {
     ESP_LOGV(TAG, "Received notification, %d bytes", notify_evt->value_len);
+    // Inbound data refutes a held "no data from pump" reason by construction,
+    // so release that hold here rather than waiting for the AUTH_CMPL clear
+    // below — with pairing disabled (the default) AUTH_CMPL never fires at all,
+    // so a watchdog hold would otherwise never be released. Scoped to the
+    // watchdog's own hold: see FailureHold for why an auth-failure hold must
+    // survive notifications.
+    if (failure_hold_ == FailureHold::DATA)
+      failure_hold_ = FailureHold::NONE;
     if (notification_callback_) {
       notification_callback_(notify_evt->value, notify_evt->value_len);
     }
@@ -383,11 +405,17 @@ void BLEConnectionManager::handle_auth_complete(const esp_ble_gap_cb_param_t *pa
     encryption_pending_ = false;
     // Recovery: a successful (re-)auth clears any held significant-failure reason,
     // so the fault sensor stops showing the old cause once the link is healthy.
-    // This single clear site is sufficient: the hold is only ever set on an auth
-    // failure, which erases the bond, so recovery must pass back through a fresh
-    // AUTH_CMPL success here to reach READY. (The fault display is also gated on
-    // is_ready().) So no path reaches READY with the hold still set.
-    significant_failure_held_ = false;
+    // This covers the hold set on an auth failure, which erases the bond, so
+    // recovery must pass back through a fresh AUTH_CMPL success here to reach
+    // READY. The watchdog's hold is released in handle_notification() instead.
+    //
+    // Clears an AUTH hold only. A DATA hold must survive this: reaching a
+    // successful AUTH_CMPL does not prove the pump is answering — that is the
+    // very defect the watchdog exists for — so releasing it here would drop the
+    // deaf-link reason on a link that is still deaf. It is released by inbound
+    // data instead, which is the evidence that actually refutes it.
+    if (failure_hold_ == FailureHold::AUTH)
+      failure_hold_ = FailureHold::NONE;
     if (subscription_deferred_) {
       // Service discovery finished while SMP was negotiating; the link is now
       // encrypted, so the held-back CCCD write is safe to send (issue #12).
@@ -437,7 +465,10 @@ void BLEConnectionManager::handle_auth_complete(const esp_ble_gap_cb_param_t *pa
       char afbuf[64];
       snprintf(afbuf, sizeof(afbuf), "%s (0x%02x)", fail_reason, auth_cmpl.fail_reason);
       last_failure_ = afbuf;
-      significant_failure_held_ = true;
+      // Overwrites any DATA hold: this is the newer and more specific fault,
+      // and leaving the origin as DATA would let the next notification erase it
+      // (an unbonded pump keeps delivering notifications after a failed SMP).
+      failure_hold_ = FailureHold::AUTH;
     }
     // Bonded reconnect whose encryption failed: the link may stay up in an
     // unauthenticated state, and a later discovery-complete would then send
@@ -515,10 +546,10 @@ void BLEConnectionManager::handle_gattc_event(esp_gattc_cb_event_t event, esp_ga
       ESP_LOGW(TAG, "Disconnected (reason: 0x%02x)", param->disconnect.reason);
       // Latch a human-readable failure reason for the Pump Link Status companion
       // (set before the callback so the component can read it on the same event).
-      // Skip while a significant auth/encryption failure is being held, so the
-      // routine disconnects of the ensuing reconnect loop don't overwrite the
-      // real cause before recovery.
-      if (!significant_failure_held_) {
+      // Skip while any hold is in place (an auth/encryption failure, or the
+      // watchdog's deaf-link reason), so the routine disconnects of the ensuing
+      // reconnect loop don't overwrite the real cause before recovery.
+      if (failure_hold_ == FailureHold::NONE) {
         const char *rname;
         switch (param->disconnect.reason) {
           case ESP_GATT_CONN_L2C_FAILURE:          rname = "L2CAP Failure"; break;
