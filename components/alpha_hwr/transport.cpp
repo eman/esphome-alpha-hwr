@@ -465,8 +465,10 @@ bool Transport::try_dispatch_response(const uint8_t* data, size_t len) {
   // These fields were called `obj_id` and `sub_id` for a long time, and that is
   // not what they are. A pump response contains NO Object ID and NO Sub-ID: the
   // request names an object, and the reply identifies only the object's TYPE.
-  // Measured over 23,739 captured Class 10 responses, byte 6 is 0x00 in 100% of
-  // them and bytes 7-8 always equal the type code the request named.
+  // Measured over 21,236 captured Class 10 responses, byte 6 is 0x00 in 100% of
+  // them, and bytes 7-8 identify the type of the object the request asked for.
+  // Note the reply is not echoing anything: a read request is
+  // `0A 03 [obj] [subH] [subL]` and carries no type at all.
   //
   //   byte:   5        6     7       8       9        10..12
   //         [length] [00] [TypeH] [TypeL] [Version] [size(3)]  payload...
@@ -503,7 +505,7 @@ bool Transport::try_dispatch_response(const uint8_t* data, size_t len) {
   // sub 10200-10219 all answer 00 00 F4 02.
   //
   // Byte 5 is likewise not an operation code in the response direction: it is
-  // the APDU body length. `byte5 == total_len - 8` held for all 26,898 captured
+  // the APDU body length. `byte5 == total_len - 8` held for all 24,233 CRC-valid captured
   // inbound frames without exception. It is still called `opspec` below because
   // the matching logic keys off specific values of it.
   // ---------------------------------------------------------------------------
@@ -537,8 +539,11 @@ bool Transport::try_dispatch_response(const uint8_t* data, size_t len) {
     // The telemetry-response filter, and why it only guards wildcard commands.
     //
     // Byte 5 is the APDU body length, not an operation code (`byte5 ==
-    // total_len - 8` holds for all 26,898 CRC-valid inbound frames, no
-    // exceptions), so this test does not ask "is this a register read". It asks
+    // total_len - 8` holds for all 24,233 CRC-valid inbound frames, no
+    // exceptions). Strictly it is a flag bit plus a length -- the short-ACK
+    // branch above reads 0x81 as bit 7 set over length 1 -- but no captured
+    // Class 10 response has bit 7 set, so over the corpus it is a plain length.
+    // Either way this test does not ask "is this a register read". It asks
     // "is this response's body 48, 43, 20, 46, 45 or 9 bytes". Those six values
     // are simply the reply sizes of the five registers TelemetryService polls;
     // they line up one-for-one with the OpSpec switch in
@@ -549,7 +554,7 @@ bool Transport::try_dispatch_response(const uint8_t* data, size_t len) {
     // without it a telemetry reply satisfies whatever wildcard command happens
     // to be at the head of the queue. The capture-derived discriminator does not
     // help here -- the phone app read telemetry as Class 2, and response class
-    // always equals request class (25,400 of 25,401 frames), so `data[4]` sorts
+    // always equals request class (22,802 of 22,803 paired exchanges), so `data[4]` sorts
     // the app's traffic perfectly and ours not at all.
     //
     // But it must not outrank an exact type match. It used to run ahead of all
@@ -588,7 +593,7 @@ bool Transport::try_dispatch_response(const uint8_t* data, size_t len) {
     //   - Byte 5 is the APDU body length in the response direction, not an
     //     operation code, so `== 0x02` selects "a 10-byte frame" rather than a
     //     packet format. Verified: `byte5 == total_len - 8` holds for all
-    //     26,898 CRC-valid inbound frames, no exceptions.
+    //     24,233 CRC-valid inbound frames, no exceptions.
     //   - Zero of 24,253 captured Class 10 responses had byte 5 == 0x02, and a
     //     10-byte frame cannot reach here anyway: the `len < 11` guard above
     //     returns first. (An earlier version of this comment claimed the
