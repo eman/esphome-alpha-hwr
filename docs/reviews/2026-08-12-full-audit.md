@@ -251,7 +251,7 @@ immune via the OpSpec 0x15/0x0D workaround.
 Not in the original audit; found while investigating finding 7.
 
 Byte 5 of a response is the APDU **body length**, not an operation code: `byte5 == total_len - 8`
-held for all 26,895 captured inbound frames without exception. So
+held for all 26,898 CRC-valid captured inbound frames without exception. So
 
 ```cpp
 bool is_register_read = (opspec == 0x30 || opspec == 0x2B || opspec == 0x14 ||
@@ -267,11 +267,38 @@ This is not hypothetical: event-log entry replies are 20 bytes (`0x14`) and alre
 being fixed. Every other read is one payload byte away from the same fate — cycle timestamps
 currently answer `0x2F` (47), with `0x2E` (46) and `0x2D` (45) both on the list.
 
-*Before fixing:* the filter exists to stop telemetry responses matching a queued command through the
-Class 10 wildcard path, so it cannot simply be deleted. Establish from the captures what actually
-distinguishes a telemetry register-read reply from a DataObject reply — the investigation behind
-PR #166 found they share the same `[00][TypeH][TypeL][Version]` header, so a real discriminator may
-not exist and the answer may be to narrow the wildcard callers instead.
+**RESOLVED 2026-08-13.** The investigation this called for changed the severity, the blast radius and
+the fix, so all three are recorded here.
+
+*The blocklist is not arbitrary.* Its six values are exactly the reply sizes of the five registers
+`TelemetryService::poll()` reads, and they line up one-for-one with the OpSpec switch in
+`telemetry_service.cpp::on_packet` (`0x30` motor state, `0x2B` flow/pressure, `0x14` temperature,
+`0x09` alarms/warnings). It was never a format test; it was "the lengths our telemetry replies
+happen to have", which is correct only for as long as that register set and the pump's payload
+sizes both hold still.
+
+*It cannot be deleted, and the captures cannot supply a discriminator.* Telemetry reads are queued
+as Class 10 **wildcard** commands (`expect 0/0`), so without the guard a telemetry reply satisfies
+whatever wildcard command is at the head of the queue. The obvious discriminator does not transfer:
+in the reference captures the response class always equals the request class (25,400 of 25,401
+frames) and the phone app read telemetry as **Class 2**, so `data[4]` sorts the app's traffic
+perfectly — but this firmware reads telemetry as Class 10 (`build_class10_read`), so the same byte
+sorts none of ours. There is no header-level discriminator available to us.
+
+*The defect was worse than described above.* The filter ran ahead of **all** matching, so it applied
+to exact-match reads too: a reply carrying exactly the type the command asked for was discarded
+purely because its body length collided, and the command then timed out with its answer already in
+hand. A host probe against the shipped transport confirms it — with the command expecting type
+`DA01`, replies of body length 20/43/45/46/48/9 were dropped while 14/25/35/47/49 matched, the type
+field never consulted. So this was not a wildcard-path problem; it was every read.
+
+*Fix:* the guard now applies only to wildcard commands. When a command names a type, that type is
+the discriminator and length gets no vote; wildcard commands, which have nothing else to match on,
+keep the guard unchanged. `event_log_service.cpp`'s `allow_register_read=true` workaround is dropped
+as a result — the exact-match read now gets its own 20-byte answer. Pinned by
+`test_length_collision_does_not_veto_a_type_match` and two entries in `tools/mutation_check.sh`
+(`register-read-vetoes-type-match`, `register-read-guard-removed`), each verified to fail the suite
+in the correct direction.
 
 ### 8. The deaf node reports "Connected" forever
 `ble_connection_manager.cpp:212-213`, `:490-498`; `auth.cpp` — **CONFIRMED, P2**

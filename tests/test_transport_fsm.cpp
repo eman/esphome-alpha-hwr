@@ -290,6 +290,68 @@ static void test_mode_read_matches_without_fallback() {
               "  ...and does NOT match when the two are swapped");
 }
 
+// The telemetry filter keys off byte 5, which is the APDU body length, not an
+// operation code. It therefore drops responses by SIZE. Run ahead of matching
+// -- as it used to be -- that discards a reply carrying exactly the type the
+// queued command asked for, purely because the body happened to be 20, 43, 45,
+// 46, 48 or 9 bytes; the command then times out with its answer in hand. Event
+// log entries (20 bytes) hit this for real and were worked around at the call
+// site.
+//
+// The rule these pin: a command that names a type is matched on that type, and
+// length gets no vote. Wildcard commands, which have nothing else to go on,
+// keep the guard.
+static void test_length_collision_does_not_veto_a_type_match() {
+  // Deliver a Class 10 reply of the given body length, carrying type 00 00 F4 02
+  // (an event-log entry -- the case that actually broke), to a command with the
+  // given expectation. Returns true if the command was satisfied.
+  auto run = [](uint16_t low_ver, uint16_t high, uint8_t body_len) {
+    esphome::alpha_hwr::core::Transport transport;
+    transport.set_write_callback([](const uint8_t *, size_t) { return true; });
+    int callbacks = 0;
+    bool ok = false;
+    const uint8_t apdu[5] = {0x0A, 0x03, 0x58, 0x27, 0xD8};
+    transport.send_apdu_command(apdu, 5, low_ver, high,
+        [&](bool success, const uint8_t *, size_t) { callbacks++; ok = success; });
+    for (int i = 0; i < 4; i++) { mock_millis += 51; transport.loop(); }
+
+    std::vector<uint8_t> reply{0x24, 0x00, 0xF8, 0xE7, 0x0A, body_len,
+                               0x00, 0x00, 0xF4, 0x02};
+    // byte 5 is the body length, so the frame must be body_len + 8 bytes total
+    // for the fixture to describe a real pump reply rather than an impossible one.
+    while (reply.size() + 2 < static_cast<size_t>(body_len) + 8) reply.push_back(0x00);
+    reply.push_back(0xAA);
+    reply.push_back(0xBB);
+    reply[1] = static_cast<uint8_t>(reply.size() - 4);
+    reply = with_crc(std::move(reply));
+    TEST_ASSERT(reply.size() == static_cast<size_t>(body_len) + 8,
+                "  (fixture is self-consistent: byte5 == total_len - 8)");
+    transport.on_notification(reply.data(), reply.size());
+    return callbacks > 0 && ok;
+  };
+
+  // 0x14 == 20 bytes: on the filter's list, and the real event-log entry size.
+  TEST_ASSERT(run(0xF402, 0x0000, 0x14),
+              "a 20-byte reply still matches the type the command asked for");
+  // 0x2E/0x2D (46/45) bracket the 47-byte cycle-timestamp reply.
+  TEST_ASSERT(run(0xF402, 0x0000, 0x2E),
+              "  ...and so does a 46-byte one");
+  TEST_ASSERT(run(0xF402, 0x0000, 0x30),
+              "  ...and a 48-byte one");
+  // The guard survives where it is actually needed: a wildcard command has no
+  // type to match on, so a telemetry-sized reply must not satisfy it.
+  TEST_ASSERT(!run(0x0000, 0x0000, 0x14),
+              "a telemetry-sized reply does NOT satisfy a wildcard command");
+  TEST_ASSERT(!run(0x0000, 0x0000, 0x30),
+              "  ...at either size");
+  // ...but a wildcard command still accepts a reply that is not telemetry-sized.
+  TEST_ASSERT(run(0x0000, 0x0000, 0x0E),
+              "a wildcard command still accepts a non-telemetry-sized reply");
+  // And a type mismatch is still a mismatch, at a non-filtered length.
+  TEST_ASSERT(!run(0xDE01, 0x0000, 0x0E),
+              "a reply of the wrong type still does not match");
+}
+
 int main() {
   test_reassembly_continuation_0x24();
   test_reassembly_continuation_0x27();
@@ -298,6 +360,7 @@ int main() {
   test_mode_read_matches_without_fallback();
   test_bad_crc_frame_is_dropped();
   test_bad_crc_cannot_answer_a_command();
+  test_length_collision_does_not_veto_a_type_match();
 
   std::cout << "===========================================================" << std::endl;
   std::cout << "  Transport FSM Test Suite" << std::endl;

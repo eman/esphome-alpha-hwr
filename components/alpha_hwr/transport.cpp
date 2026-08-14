@@ -503,7 +503,7 @@ bool Transport::try_dispatch_response(const uint8_t* data, size_t len) {
   // sub 10200-10219 all answer 00 00 F4 02.
   //
   // Byte 5 is likewise not an operation code in the response direction: it is
-  // the APDU body length. `byte5 == total_len - 8` held for all 26,895 captured
+  // the APDU body length. `byte5 == total_len - 8` held for all 26,898 captured
   // inbound frames without exception. It is still called `opspec` below because
   // the matching logic keys off specific values of it.
   // ---------------------------------------------------------------------------
@@ -534,15 +534,43 @@ bool Transport::try_dispatch_response(const uint8_t* data, size_t len) {
     // Extract OpSpec
     opspec = data[5];
     
-    // Determine packet structure based on OpSpec
-    bool is_register_read = (opspec == 0x30 || opspec == 0x2B || opspec == 0x14 || 
+    // The telemetry-response filter, and why it only guards wildcard commands.
+    //
+    // Byte 5 is the APDU body length, not an operation code (`byte5 ==
+    // total_len - 8` holds for all 26,898 CRC-valid inbound frames, no
+    // exceptions), so this test does not ask "is this a register read". It asks
+    // "is this response's body 48, 43, 20, 46, 45 or 9 bytes". Those six values
+    // are simply the reply sizes of the five registers TelemetryService polls;
+    // they line up one-for-one with the OpSpec switch in
+    // telemetry_service.cpp::on_packet.
+    //
+    // That makes it a usable heuristic and nothing more. It cannot be deleted:
+    // telemetry reads are queued as Class 10 wildcard commands (expect 0/0), so
+    // without it a telemetry reply satisfies whatever wildcard command happens
+    // to be at the head of the queue. The capture-derived discriminator does not
+    // help here -- the phone app read telemetry as Class 2, and response class
+    // always equals request class (25,400 of 25,401 frames), so `data[4]` sorts
+    // the app's traffic perfectly and ours not at all.
+    //
+    // But it must not outrank an exact type match. It used to run ahead of all
+    // matching, so a reply carrying exactly the type the command asked for was
+    // still discarded when its length collided -- the command then timed out
+    // with its answer already in hand. Event-log entries (20 bytes) hit this and
+    // were worked around at the call site with allow_register_read=true; cycle
+    // timestamps reply at 47 bytes with 45 and 46 both on the list.
+    //
+    // So: when the command names a type, that type is the discriminator and
+    // length gets no vote. Only wildcard commands, which have nothing else to
+    // match on, still need the guard.
+    bool is_register_read = (opspec == 0x30 || opspec == 0x2B || opspec == 0x14 ||
                              opspec == 0x2E || opspec == 0x2D || opspec == 0x09);
-    
-     if (is_register_read && !cmd.allow_register_read) {
-       // This is telemetry register-read response, not a DataObject response
-       // Discard it for command matching purposes (unless command explicitly allows it)
-       ESP_LOGV(TAG, "Class 10 register-read (OpSpec=0x%02X), skipping for command response (waiting for Obj %d Sub %d)", 
-                opspec, cmd.expect_type_low_ver, cmd.expect_type_high);
+    bool wildcard_command = (cmd.expect_type_low_ver == 0x0000 && cmd.expect_type_high == 0x0000);
+
+     if (is_register_read && wildcard_command && !cmd.allow_register_read) {
+       // Telemetry register-read response answering nothing we can match by
+       // type. Let it fall through to the packet callback, which decodes it.
+       ESP_LOGV(TAG, "Class 10 register-read (body=%u bytes), skipping for wildcard command response",
+                (unsigned) opspec);
        return false;
      }
     
@@ -560,7 +588,7 @@ bool Transport::try_dispatch_response(const uint8_t* data, size_t len) {
     //   - Byte 5 is the APDU body length in the response direction, not an
     //     operation code, so `== 0x02` selects "a 10-byte frame" rather than a
     //     packet format. Verified: `byte5 == total_len - 8` holds for all
-    //     26,897 captured inbound frames, no exceptions.
+    //     26,898 CRC-valid inbound frames, no exceptions.
     //   - Zero of 24,253 captured Class 10 responses had byte 5 == 0x02, and a
     //     10-byte frame cannot reach here anyway: the `len < 11` guard above
     //     returns first. (An earlier version of this comment claimed the

@@ -116,8 +116,11 @@ void EventLogService::read_entries_async(
       apdu[3] = (sub_id >> 8) & 0xFF;
       apdu[4] = sub_id & 0xFF;
 
-      // Entry responses use OpSpec 0x14 with bytes 6-7=0x0000, 8-9=0xF402
-      // Must allow register-read matching since OpSpec 0x14 is normally filtered
+      // Entry responses carry the type header 00 00 F4 02 (Type 244 v2) and a
+      // 20-byte body. That body length used to collide with the transport's
+      // telemetry filter and the read needed allow_register_read=true to get its
+      // own answer delivered; the filter now only guards wildcard commands, so
+      // this exact-match read no longer needs the override.
       static constexpr uint16_t ENTRY_MATCH_OBJ = 0xF402;
       this->transport_.send_apdu_command(apdu, 5, ENTRY_MATCH_OBJ, 0,
           [idx, entries, on_complete, self](
@@ -136,7 +139,7 @@ void EventLogService::read_entries_async(
           ESP_LOGW(TAG, "Entry %d read failed", idx);
         }
         (*self)(idx + 1);
-      }, 5000, true);  // allow_register_read=true
+      }, 5000);
     };
 
     (*read_next)(0);
