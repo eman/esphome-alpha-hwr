@@ -679,12 +679,14 @@ doc recipes with it.
 > by the unit suite, cppcheck and the mutation check alike. The component is now host-compiled and
 > driven by `tests/test_dhw_demand_component.cpp`. `clang-tidy` and `black` remain absent.
 >
+> The same gap turned out to cover four more files, and they are closed too: `auth.cpp`,
+> `sensor_publisher.cpp`, `telemetry_service.cpp` and `device_info_service.cpp` compiled against
+> the existing mocks unmodified, so each needed only a Makefile target and a test. Host-compiling
+> `device_info_service.cpp` for the first time immediately surfaced three dead-code defects in it.
+>
 > Still firmware-build-only for real reasons: `alpha_hwr.cpp`, `ble_connection_manager.cpp` and
-> `api_bridge.cpp` need ESP-IDF or the API SDK. Firmware-build-only for no reason at all:
-> `auth.cpp`, `sensor_publisher.cpp`, `telemetry_service.cpp` and `device_info_service.cpp` each
-> compile against the current mocks unmodified — checked, in a clean worktree — and would each
-> take only a Makefile target plus a test. `time_service.cpp` additionally wants a
-> `real_time_clock.h` mock.
+> `api_bridge.cpp` need ESP-IDF or the API SDK. `time_service.cpp` is the one remaining file that
+> could be host-compiled but is not — it wants a `real_time_clock.h` mock first.
 
 **`tools/lint.sh --strict` swallows its own output.** `set -euo pipefail` plus `--error-exitcode=1`
 kills the script at the `OUTPUT=$(cppcheck …)` assignment the moment cppcheck finds anything, so
