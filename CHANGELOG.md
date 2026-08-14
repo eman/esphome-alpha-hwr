@@ -4,27 +4,13 @@
 
 ### Added
 
-- **A `Heap Pressure` diagnostic sensor** (`device_class: problem`). The node
-  has repeatedly rebooted on an allocation failure whose backtrace contains no
-  component frames -- most recently inside
-  `api::UserServiceDynamic::encode_list_service_response()`, which every API
-  client runs on connect (issue #127). Those reboots read like a regression in
-  whatever was last flashed and are not, and the only way to tell has been to
-  decode the backtrace afterwards. This names the pressure before the
-  allocation fails.
-
-  It watches **Largest Free Block**, not Free Heap, because the heap fragments:
-  measured on a healthy node, Free Heap sat at ~72 KB while the largest
-  contiguous block was 40,960 B, so an allocation can fail while free heap
-  still looks comfortable. The 16 KB threshold is ~40% of that steady-state
-  block. Verified on hardware in both directions -- temporarily raising the
-  threshold above the current value makes it report `True`, so it is not an
-  alarm that can only ever read `False`.
-
-- **`write_bench.py chain`** runs several services over a single connection.
-  Every connect makes the node encode its whole 16-service / 34-argument list,
-  so invoking `call` repeatedly is itself the load that exhausts the heap -- a
-  bench harness that reboots the node it is measuring.
+- **`write_bench.py chain`** runs several services over a single connection,
+  resolving every service once up front. Each connection costs an
+  `APIConnection` and its frame buffers on a node with ~72 KB free, and four
+  stacked clients were enough to exhaust it (issue #127) -- a bench harness
+  that reboots the node it is measuring. Note that the service-list encode in
+  that crash's backtrace was the *victim*, not the cause: the failing
+  allocation was at most ~48 bytes, so the heap was already gone.
 
 ### Fixed
 
