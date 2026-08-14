@@ -114,6 +114,115 @@ inline bool reading_is_fresh(uint32_t last_update_ms, uint32_t now_ms,
   return (now_ms - last_update_ms) <= max_stale_ms;
 }
 
+// Does a motor reading say the pump is running? Speed wins when present; the
+// current channel is the fallback for installs that wire only that. Both NaN
+// answers "not running", which callers must not confuse with "known off" — that
+// distinction is decide_pump_state()'s job, below.
+inline bool motor_reading_indicates_on(float motor_speed, float motor_current,
+                                       float pump_off_current_threshold) {
+  // Threshold mirrors Python: pump_off = motor_speed < 10 RPM
+  if (!std::isnan(motor_speed))
+    return motor_speed >= 10.0f;
+  if (!std::isnan(motor_current))
+    return motor_current >= pump_off_current_threshold;
+  return false;
+}
+
+struct PumpStateInputs {
+  float motor_speed{NAN};
+  float motor_current{NAN};
+  uint32_t motor_speed_last_update_ms{0};
+  uint32_t motor_current_last_update_ms{0};
+  uint32_t now_ms{0};
+  /// Age bound for the motor channels. Same window the pump-flow channel uses,
+  /// since both arrive on the same BLE poll.
+  uint32_t motor_max_stale_ms{0};
+  float pump_off_current_threshold{0.0f};
+  /// Caller-held forward-fill state from previous ticks.
+  bool pump_state_ever_known{false};
+  bool last_known_pump_on{false};
+};
+
+struct PumpStateResult {
+  /// A fresh motor reading was available on at least one channel.
+  bool pump_state_known{false};
+  /// Reporting, but not refreshing: values are arriving stale-dated.
+  bool motor_frozen{false};
+  bool pump_on{true};
+  /// Positive evidence the pump is off. Gates the pump-OFF demand branch, so a
+  /// false one hands the pump's own recirculation flow to the household-demand
+  /// scorer at full confidence.
+  bool pump_confirmed_off{false};
+  /// The age-masked readings actually used, for logging.
+  float speed_used{NAN};
+  float current_used{NAN};
+};
+
+// Decide what the motor channels say about the pump, given that they may be
+// stale, frozen, absent, or genuinely NaN.
+//
+// This is the branch selector for the whole detector: pump_confirmed_off gates
+// the pump-OFF path, which scores raw meter flow as household demand. Getting it
+// wrong in the OFF direction is the expensive mistake, because the loop's own
+// recirculation (~2.2 GPM) then reads as a draw at confidence 1.0.
+//
+// The subtle case, and the one this exists for: alpha_hwr keeps publishing the
+// last value on a BLE drop rather than publishing NaN, so `motor_speed` stays a
+// perfectly valid 0.0 indefinitely. NaN-checking alone therefore reads a dead
+// link as a confident "pump off" forever. Age is the real test — an unrefreshed
+// reading is *unknown*, not *off* — so each channel is masked by its own
+// staleness before anything looks at its value.
+//
+// Three regimes, deliberately distinguished:
+//
+//   fresh   — a real measurement; believe it in both directions.
+//   frozen  — reporting but not refreshing. Assume ON and refuse to assert
+//             confirmed-off. Assuming ON is safe because the pump-ON branch
+//             measures demand as (flow - pump_flow) and carries its own
+//             staleness bound, so with the pump-flow channel equally stale it
+//             declines and reports uncertainty. Assuming OFF would instead hand
+//             recirculation to deterministic_flow at confidence 1.
+//   absent  — genuine NaN gap, or nothing wired at all. Forward-fill the last
+//             known state, defaulting to ON before anything has been known.
+//             A never-configured sensor has last_update 0, which
+//             reading_is_fresh() reports as not fresh, so it lands here and
+//             behaves exactly as it did before any of this existed.
+inline PumpStateResult decide_pump_state(const PumpStateInputs &in) {
+  PumpStateResult out;
+
+  // Mask each channel by its own age, so a frozen value cannot be read as a
+  // measurement.
+  out.speed_used = reading_is_fresh(in.motor_speed_last_update_ms, in.now_ms, in.motor_max_stale_ms)
+                       ? in.motor_speed
+                       : NAN;
+  out.current_used =
+      reading_is_fresh(in.motor_current_last_update_ms, in.now_ms, in.motor_max_stale_ms)
+          ? in.motor_current
+          : NAN;
+
+  const bool motor_reported = !std::isnan(in.motor_speed) || !std::isnan(in.motor_current);
+  out.pump_state_known = !std::isnan(out.speed_used) || !std::isnan(out.current_used);
+  out.motor_frozen = motor_reported && !out.pump_state_known;
+
+  if (out.pump_state_known) {
+    out.pump_on =
+        motor_reading_indicates_on(out.speed_used, out.current_used, in.pump_off_current_threshold);
+    out.pump_confirmed_off = !out.pump_on;
+  } else if (out.motor_frozen) {
+    out.pump_on = true;
+    // A frozen reading is not evidence of anything, least of all "off". Letting
+    // it assert confirmed-off is what reopened the pump-off branch even after
+    // the staleness test had already rejected the reading.
+    out.pump_confirmed_off = false;
+  } else {
+    out.pump_on = in.pump_state_ever_known ? in.last_known_pump_on : true;
+    // Forward-filled: confirmed-off only if the last *known* state was off.
+    out.pump_confirmed_off = in.pump_state_ever_known && !in.last_known_pump_on;
+  }
+
+  return out;
+}
+
 // Was this reading taken before the pump run it is being used to describe?
 //
 // reading_is_fresh bounds a reading's *age*, and age is the wrong question at a

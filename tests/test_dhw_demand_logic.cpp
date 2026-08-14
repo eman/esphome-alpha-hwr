@@ -21,6 +21,10 @@ using esphome::dhw_demand::pump_on_continuation_is_active;
 using esphome::dhw_demand::pump_flow_estimate_is_settled;
 using esphome::dhw_demand::pump_on_demand_flow;
 using esphome::dhw_demand::PumpOnInputs;
+using esphome::dhw_demand::decide_pump_state;
+using esphome::dhw_demand::motor_reading_indicates_on;
+using esphome::dhw_demand::PumpStateInputs;
+using esphome::dhw_demand::PumpStateResult;
 using esphome::dhw_demand::PumpOnResult;
 using esphome::dhw_demand::PumpOnThresholds;
 using esphome::dhw_demand::latch_suppressed_after_shutdown;
@@ -821,6 +825,141 @@ void test_the_loop_estimate_must_settle_before_it_is_differenced() {
               "A real draw after the settle window is still detected");
 }
 
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Pump-state branch selection (audit finding 9)
+//
+// decide_pump_state() picks between the pump-ON and pump-OFF demand paths, and
+// the pump-OFF path scores raw meter flow as household demand. A false
+// "confirmed off" therefore hands the loop's own recirculation (~2.2 GPM) to
+// deterministic_flow at confidence 1.0 -- the worst available false positive.
+//
+// The trap this guards: alpha_hwr keeps publishing the last value on a BLE drop
+// rather than publishing NaN, so motor_speed stays a perfectly valid 0.0
+// forever. NaN-checking alone reads a dead link as a confident pump-off, which
+// is exactly how the false positive was reached. Only age distinguishes them.
+// ─────────────────────────────────────────────────────────────────────────────
+
+static PumpStateInputs pump_state_tick() {
+  PumpStateInputs in;
+  in.now_ms = 600000;
+  in.motor_max_stale_ms = 30000;
+  in.pump_off_current_threshold = 0.05f;
+  return in;
+}
+
+void test_fresh_motor_readings_are_believed_both_ways() {
+  PumpStateInputs in = pump_state_tick();
+  in.motor_speed = 0.0f;
+  in.motor_speed_last_update_ms = in.now_ms - 5000;  // 5 s old: fresh
+  PumpStateResult r = decide_pump_state(in);
+  TEST_ASSERT(r.pump_state_known, "A fresh reading is a known pump state");
+  TEST_ASSERT(!r.pump_on, "0 RPM fresh reads as pump off");
+  TEST_ASSERT(r.pump_confirmed_off, "...and that is positive evidence of off");
+  TEST_ASSERT(!r.motor_frozen, "...and is not frozen");
+
+  in.motor_speed = 2402.0f;
+  r = decide_pump_state(in);
+  TEST_ASSERT(r.pump_on, "2402 RPM fresh reads as pump on");
+  TEST_ASSERT(!r.pump_confirmed_off, "...and never asserts confirmed-off");
+}
+
+void test_a_frozen_zero_rpm_is_not_evidence_of_off() {
+  // THE regression. The BLE link dropped; alpha_hwr keeps republishing the last
+  // value it saw, which was 0 RPM. The value is non-NaN and looks like a
+  // confident "pump off" forever.
+  PumpStateInputs in = pump_state_tick();
+  in.motor_speed = 0.0f;
+  in.motor_speed_last_update_ms = in.now_ms - 120000;  // 2 min stale
+  in.pump_state_ever_known = true;
+  in.last_known_pump_on = false;
+
+  PumpStateResult r = decide_pump_state(in);
+  TEST_ASSERT(!r.pump_state_known, "A stale motor reading is not a known state");
+  TEST_ASSERT(r.motor_frozen, "Reporting but not refreshing is 'frozen'");
+  TEST_ASSERT(!r.pump_confirmed_off,
+              "A frozen 0 RPM must NOT assert confirmed-off (the false positive)");
+  TEST_ASSERT(r.pump_on, "...it assumes ON, so the pump-on branch runs and declines safely");
+  TEST_ASSERT(std::isnan(r.speed_used), "...and the stale value is masked out entirely");
+}
+
+void test_a_frozen_running_reading_also_yields_on() {
+  // Same staleness, opposite last value. Assuming ON here is not a lucky
+  // coincidence of the 0 RPM case -- it is unconditional for frozen.
+  PumpStateInputs in = pump_state_tick();
+  in.motor_speed = 2402.0f;
+  in.motor_speed_last_update_ms = in.now_ms - 120000;
+  PumpStateResult r = decide_pump_state(in);
+  TEST_ASSERT(r.motor_frozen && r.pump_on && !r.pump_confirmed_off,
+              "A frozen running reading also assumes ON and asserts nothing");
+}
+
+void test_the_staleness_boundary() {
+  PumpStateInputs in = pump_state_tick();
+  in.motor_speed = 0.0f;
+  in.motor_speed_last_update_ms = in.now_ms - 30000;  // exactly the bound
+  TEST_ASSERT(decide_pump_state(in).pump_confirmed_off,
+              "Exactly at the bound the reading is still fresh");
+  in.motor_speed_last_update_ms = in.now_ms - 30001;
+  TEST_ASSERT(!decide_pump_state(in).pump_confirmed_off,
+              "One millisecond past it, confirmed-off is withdrawn");
+}
+
+void test_unconfigured_motor_forward_fills_as_before() {
+  // packages/dhw_demand_detector.yaml -- the documented standalone entry point
+  // -- wires neither motor sensor, so both are NaN with last_update 0 forever.
+  // That must land in the 'absent' regime and behave exactly as it did before
+  // any staleness masking existed (AGENTS §11.8 rule 2 governs unconfigured
+  // inputs; this path satisfies it).
+  PumpStateInputs in = pump_state_tick();  // both NaN, both last_update 0
+  PumpStateResult r = decide_pump_state(in);
+  TEST_ASSERT(!r.pump_state_known, "Nothing wired is not a known state");
+  TEST_ASSERT(!r.motor_frozen, "...and is a genuine gap, not a frozen channel");
+  TEST_ASSERT(r.pump_on, "...defaulting to ON before anything has been known");
+  TEST_ASSERT(!r.pump_confirmed_off, "...and asserting nothing");
+
+  // Once a state has been known, the gap forward-fills it -- including OFF,
+  // which is the one case where a gap may still assert confirmed-off.
+  in.pump_state_ever_known = true;
+  in.last_known_pump_on = false;
+  r = decide_pump_state(in);
+  TEST_ASSERT(!r.pump_on && r.pump_confirmed_off,
+              "A genuine NaN gap forward-fills a known-OFF state");
+  in.last_known_pump_on = true;
+  r = decide_pump_state(in);
+  TEST_ASSERT(r.pump_on && !r.pump_confirmed_off,
+              "...and a known-ON state, which asserts nothing");
+}
+
+void test_current_channel_is_the_fallback() {
+  // Installs that wire only motor_current must still work, and each channel is
+  // aged independently -- a fresh current reading rescues a stale speed one.
+  PumpStateInputs in = pump_state_tick();
+  in.motor_current = 0.30f;
+  in.motor_current_last_update_ms = in.now_ms - 5000;
+  PumpStateResult r = decide_pump_state(in);
+  TEST_ASSERT(r.pump_state_known && r.pump_on,
+              "Current above threshold reads as pump on with no speed channel");
+
+  in.motor_speed = 0.0f;
+  in.motor_speed_last_update_ms = in.now_ms - 120000;  // stale speed...
+  r = decide_pump_state(in);
+  TEST_ASSERT(r.pump_state_known, "...is rescued by the fresh current channel");
+  TEST_ASSERT(r.pump_on, "...and the frozen 0 RPM does not win over it");
+  TEST_ASSERT(std::isnan(r.speed_used) && !std::isnan(r.current_used),
+              "...because only the stale channel is masked");
+}
+
+void test_pump_state_millis_rollover() {
+  PumpStateInputs in = pump_state_tick();
+  in.now_ms = 1000;                                  // just wrapped
+  in.motor_speed = 0.0f;
+  in.motor_speed_last_update_ms = 0xFFFFF000u;       // 5096 ms of true age
+  PumpStateResult r = decide_pump_state(in);
+  TEST_ASSERT(r.pump_state_known && r.pump_confirmed_off,
+              "A fresh reading spanning the millis() rollover stays fresh");
+}
+
 int main() {
   std::cout << "==========================================================="
             << std::endl;
@@ -844,6 +983,14 @@ int main() {
   test_loop_flow_from_before_the_pump_start_is_not_subtracted();
   test_flow_latch_is_disarmed_after_a_shutdown();
   test_the_loop_estimate_must_settle_before_it_is_differenced();
+
+  test_fresh_motor_readings_are_believed_both_ways();
+  test_a_frozen_zero_rpm_is_not_evidence_of_off();
+  test_a_frozen_running_reading_also_yields_on();
+  test_the_staleness_boundary();
+  test_unconfigured_motor_forward_fills_as_before();
+  test_current_channel_is_the_fallback();
+  test_pump_state_millis_rollover();
 
   std::cout << "\n==========================================================="
             << std::endl;

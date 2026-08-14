@@ -406,6 +406,27 @@ household demand — `deterministic_flow` at 100%.
 *Also:* the finder misread AGENTS §11.8 rule 2, which governs *unconfigured* inputs — the
 nullptr→NAN path satisfies it exactly. It was never falsified.
 
+> **RESOLVED** — behaviour in `6632e2e` and `d3560d9`; the test gap closed 2026-08-14.
+>
+> The fix landed as the correction above prescribed: each motor channel is masked by its own age
+> before anything reads its value, and a third regime — *frozen*, meaning reporting but not
+> refreshing — sits between "fresh" and "genuine NaN gap". Frozen assumes the pump is ON and refuses
+> to assert `pump_confirmed_off`, which is what had reopened the pump-OFF branch after the staleness
+> test had already rejected the reading.
+>
+> **The gap was that none of it was tested.** The decision lived in `dhw_demand.cpp`, which no host
+> test compiles — only the pure header is linked — so the branch selecting between the pump-ON and
+> pump-OFF demand paths had zero coverage, in a component whose logic is otherwise well covered.
+> Extracted verbatim into `decide_pump_state()` in `dhw_demand_logic.h` and pinned by 25 assertions,
+> the load-bearing one being that a frozen 0 RPM does not assert confirmed-off. Two mutations
+> (`frozen-motor-asserts-pump-off`, `motor-staleness-mask-removed`) confirm the tests bind the
+> shipped predicate.
+>
+> The extraction also found a live defect the refactor would otherwise have hidden: `pump_confirmed_off`
+> was computed a *second* time, thirty lines below `pump_on`, from the same inputs. Two
+> copies of one three-way judgement that could disagree. Now returned together from the single
+> decision. It had not diverged, but nothing prevented it.
+
 ### 10. The pump-on continuation tier cannot release during a run
 `dhw_demand_logic.h:418` — **CONFIRMED, P1 → P2, and the AGENTS directive is NOT violated**
 
