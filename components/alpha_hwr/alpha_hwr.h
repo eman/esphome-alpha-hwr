@@ -24,6 +24,7 @@
 #include "event_log_service.h"
 #include "frame_builder.h"
 #include "history_service.h"
+#include "initial_read_retry.h"  // re-arm predicate for the one-shot initial read chain
 #include "link_watchdog.h"  // inbound-data watchdog predicate for a deaf-but-open link
 #include "publish_gate.h"  // publish-on-change gates for the YAML control entities (#127)
 #include "pump_schedule_ux.h"
@@ -465,6 +466,43 @@ private:
   // Ensures device info, event log, history, etc. are read even when
   // the BLE connection persists through an ESP32 restart (no re-auth).
   bool initial_data_read_done_{false};
+
+  // millis() when the current initial-read attempt was triggered. The chain is
+  // a one-shot, so an attempt whose reads never land would otherwise leave the
+  // device half-initialised until the next disconnect; this timestamp is what
+  // lets update() notice and re-arm. See initial_read_retry.h.
+  uint32_t initial_read_started_ms_{0};
+
+  // How long the first attempt gets before update() re-arms the chain. A
+  // healthy link lands everything in ~20 s.
+  static constexpr uint32_t INITIAL_READ_SYNC_TIMEOUT_MS = 60000;
+
+  // Ceiling for the doubling backoff between re-arms. A pump that never
+  // returns one of these values settles here rather than being re-read at a
+  // fixed rate forever.
+  static constexpr uint32_t INITIAL_READ_RETRY_MAX_MS = 600000;
+
+  // Current re-arm interval; doubles on each retry, resets when the chain
+  // finally lands. See initial_read_retry.h.
+  uint32_t initial_read_retry_interval_ms_{INITIAL_READ_SYNC_TIMEOUT_MS};
+
+  // What the chain itself produces, as opposed to what heals on its own. The
+  // control and schedule caches are refreshed by update()'s own polls, so they
+  // cannot tell whether the chain landed; these can. Reset on disconnect and on
+  // each re-arm so a retry re-proves them rather than inheriting the verdict.
+  bool device_info_read_ok_{false};
+  bool statistics_read_ok_{false};
+
+  // The chain writes the pump RTC. Replaying it on every re-arm would bypass
+  // the 24 h throttle that check_and_sync_time() applies to that same write,
+  // so the clock leg runs on the first attempt only; the daily sync owns it
+  // from then on.
+  bool initial_clock_sync_started_{false};
+
+  /// True once the reads that only the chain performs have landed.
+  bool chain_products_complete_() const {
+    return device_info_read_ok_ && statistics_read_ok_;
+  }
 
   // Generation counter for the initial-read chain timers. Bumped on
   // disconnect so pending set_timeout lambdas from a previous connection

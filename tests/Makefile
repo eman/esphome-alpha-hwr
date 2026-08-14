@@ -15,7 +15,7 @@ MOCK_HDRS = $(shell find mocks -name '*.h' 2>/dev/null)
 DEPS = $(COMPONENT_HDRS) $(MOCK_HDRS)
 
 # Test executables
-TESTS = test_protocol test_frame_parser test_read_chain_lifetime test_control_service test_control_state test_dhw_demand_logic test_transport_matching test_transport_fsm test_schedule_service test_write_operations test_schedule_codec test_telemetry_units test_pump_schedule_ux test_publish_gate test_dhw_publish_gate test_link_watchdog
+TESTS = test_protocol test_frame_parser test_read_chain_lifetime test_control_service test_control_state test_dhw_demand_logic test_transport_matching test_transport_fsm test_schedule_service test_write_operations test_schedule_codec test_telemetry_units test_pump_schedule_ux test_publish_gate test_dhw_publish_gate test_link_watchdog test_initial_read_retry
 
 # Default target
 all: $(TESTS)
@@ -45,6 +45,9 @@ test_publish_gate: test_publish_gate.cpp ../components/alpha_hwr/publish_gate.h 
 
 test_link_watchdog: test_link_watchdog.cpp ../components/alpha_hwr/link_watchdog.h $(DEPS)
 	$(CXX) $(CXXFLAGS) test_link_watchdog.cpp -o test_link_watchdog $(LDFLAGS)
+
+test_initial_read_retry: test_initial_read_retry.cpp ../components/alpha_hwr/initial_read_retry.h $(DEPS)
+	$(CXX) $(CXXFLAGS) test_initial_read_retry.cpp -o test_initial_read_retry $(LDFLAGS)
 
 test_dhw_publish_gate: test_dhw_publish_gate.cpp ../components/dhw_demand/publish_gate.h $(DEPS)
 	$(CXX) $(CXXFLAGS) test_dhw_publish_gate.cpp -o test_dhw_publish_gate $(LDFLAGS)
@@ -119,6 +122,7 @@ test: $(TESTS)
 	@echo "Running Link Watchdog Tests..."
 	@echo "=========================================="
 	@./test_link_watchdog
+	@./test_initial_read_retry
 	@echo ""
 	@echo "=========================================="
 	@echo "Running Transport Matching Tests..."

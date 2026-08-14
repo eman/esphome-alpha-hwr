@@ -95,6 +95,12 @@ void AlphaHwrComponent::setup() {
     // Reset initial-read flag so device info, clock sync, etc. are re-fetched
     // after reconnect (pump may have rebooted).
     this->initial_data_read_done_ = false;
+    // The chain re-runs on reconnect, so its products must be re-proven and
+    // the backoff must start over rather than inheriting the old link's.
+    this->device_info_read_ok_ = false;
+    this->statistics_read_ok_ = false;
+    this->initial_clock_sync_started_ = false;
+    this->initial_read_retry_interval_ms_ = INITIAL_READ_SYNC_TIMEOUT_MS;
     
     // Invalidate caches so old values don't falsely satisfy ready gating
     this->control_service_.invalidate_cache();
@@ -614,6 +620,7 @@ void AlphaHwrComponent::trigger_initial_data_reads() {
   if (initial_data_read_done_)
     return;
   initial_data_read_done_ = true;
+  initial_read_started_ms_ = millis();
   ESP_LOGD(TAG, "Triggering initial data reads...");
 
   // Capture the current generation; each timer lambda below checks it so a
@@ -637,6 +644,15 @@ void AlphaHwrComponent::trigger_initial_data_reads() {
   // Sync pump clock (Read time first to calculate drift, then sync)
   this->set_timeout(2000, [this, gen]() {
     if (gen != this->read_chain_gen_) return;
+    // First attempt only. This leg WRITES the pump RTC, and check_and_sync_time()
+    // throttles that same write to once per 24 h precisely because it is a
+    // write; replaying it on every re-arm would bypass that throttle entirely.
+    // The daily sync owns the clock from here on.
+    if (this->initial_clock_sync_started_) {
+      ESP_LOGD(TAG, "Skipping pump clock sync on read-chain retry");
+      return;
+    }
+    this->initial_clock_sync_started_ = true;
     ESP_LOGD(TAG, "Performing initial pump clock sync...");
 
     // First read the pump clock to measure drift
@@ -788,7 +804,11 @@ void AlphaHwrComponent::update() {
     if (!initial_data_read_done_) {
       ESP_LOGD(TAG,
                "Session ready but initial data not yet read - triggering now");
-      telemetry_service_.start();
+      // Already running on the re-arm path, where only the read chain is being
+      // retried; calling start() again would log a misleading warning.
+      if (!telemetry_service_.is_running()) {
+        telemetry_service_.start();
+      }
       trigger_initial_data_reads();
     } else {
       // If we are initialized, evaluate cache validity to update Ready sensor
@@ -802,6 +822,34 @@ void AlphaHwrComponent::update() {
       // only path that reconciles run state at boot.
       if (is_state_synchronized()) {
         reconcile_run_state_();
+      }
+
+      if (core::should_rearm_initial_read(
+              session_.is_ready(), initial_data_read_done_,
+              is_state_synchronized(), chain_products_complete_(), millis(),
+              initial_read_started_ms_, initial_read_retry_interval_ms_)) {
+        // The chain ran but its reads never landed, and only a disconnect would
+        // otherwise clear the latch — so without this the device stays
+        // half-initialised for as long as the link stays up. Bumping the
+        // generation first retires any still-pending timers from the failed
+        // attempt, so the retry cannot double up with them.
+        ESP_LOGW(TAG,
+                 "Initial data reads incomplete after %" PRIu32
+                 " s (device_info=%d statistics=%d caches=%d) - re-arming the "
+                 "read chain",
+                 initial_read_retry_interval_ms_ / 1000,
+                 (int) device_info_read_ok_, (int) statistics_read_ok_,
+                 (int) is_state_synchronized());
+        read_chain_gen_++;
+        initial_data_read_done_ = false;
+        // Re-prove these on the retry rather than inheriting a stale verdict.
+        device_info_read_ok_ = false;
+        statistics_read_ok_ = false;
+        initial_read_retry_interval_ms_ = core::next_initial_read_backoff_ms(
+            initial_read_retry_interval_ms_, INITIAL_READ_RETRY_MAX_MS);
+      } else if (chain_products_complete_() && is_state_synchronized()) {
+        // Landed: forget the backoff so a later reconnect starts fresh.
+        initial_read_retry_interval_ms_ = INITIAL_READ_SYNC_TIMEOUT_MS;
       }
     }
 
@@ -926,6 +974,7 @@ void AlphaHwrComponent::read_device_info() {
   device_info_service_.read_device_info_async([this](bool success) {
     if (success) {
       ESP_LOGI(TAG, "Device info read completed successfully");
+      this->device_info_read_ok_ = true;
       // Publish device info strings to text sensors
 #ifdef USE_TEXT_SENSOR
       if (this->product_name_sensor_) {
@@ -961,6 +1010,7 @@ void AlphaHwrComponent::read_statistics() {
         if (success) {
           ESP_LOGI(TAG, "Statistics read successful: %" PRIu32 " starts, %.1f hours",
                    start_count, operating_hours);
+          this->statistics_read_ok_ = true;
           if (this->start_count_sensor_) {
             this->start_count_sensor_->publish_state(start_count);
           }
