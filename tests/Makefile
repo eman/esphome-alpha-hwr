@@ -15,7 +15,7 @@ MOCK_HDRS = $(shell find mocks -name '*.h' 2>/dev/null)
 DEPS = $(COMPONENT_HDRS) $(MOCK_HDRS)
 
 # Test executables
-TESTS = test_protocol test_frame_parser test_read_chain_lifetime test_control_service test_control_state test_dhw_demand_logic test_transport_matching test_transport_fsm test_schedule_service test_write_operations test_schedule_codec test_telemetry_units test_pump_schedule_ux test_publish_gate test_dhw_publish_gate test_link_watchdog test_initial_read_retry
+TESTS = test_protocol test_frame_parser test_read_chain_lifetime test_control_service test_control_state test_dhw_demand_logic test_dhw_demand_component test_transport_matching test_transport_fsm test_schedule_service test_write_operations test_schedule_codec test_telemetry_units test_pump_schedule_ux test_publish_gate test_dhw_publish_gate test_link_watchdog test_initial_read_retry
 
 # Default target
 all: $(TESTS)
@@ -54,6 +54,13 @@ test_dhw_publish_gate: test_dhw_publish_gate.cpp ../components/dhw_demand/publis
 
 test_dhw_demand_logic: test_dhw_demand_logic.cpp ../components/dhw_demand/dhw_demand_logic.h $(DEPS)
 	$(CXX) $(CXXFLAGS) test_dhw_demand_logic.cpp -o test_dhw_demand_logic $(LDFLAGS)
+
+# The component shell itself. Until this target existed, `esphome compile` was
+# the only thing in the toolchain that compiled dhw_demand.cpp at all -- the
+# unit suite, cppcheck and the mutation check all read past it, which is how a
+# block referencing an out-of-scope variable once got through 905 green tests.
+test_dhw_demand_component: test_dhw_demand_component.cpp ../components/dhw_demand/dhw_demand.cpp $(DEPS)
+	$(CXX) $(CXXFLAGS) test_dhw_demand_component.cpp ../components/dhw_demand/dhw_demand.cpp -o test_dhw_demand_component $(LDFLAGS)
 
 test_transport_matching: test_transport_matching.cpp ../components/alpha_hwr/response_match.h $(DEPS)
 	$(CXX) $(CXXFLAGS) test_transport_matching.cpp -o test_transport_matching $(LDFLAGS)
@@ -117,6 +124,11 @@ test: $(TESTS)
 	@echo "Running DHW Detector Logic Tests..."
 	@echo "=========================================="
 	@./test_dhw_demand_logic
+	@echo ""
+	@echo "=========================================="
+	@echo "Running DHW Detector Component Tests..."
+	@echo "=========================================="
+	@./test_dhw_demand_component
 	@echo ""
 	@echo "=========================================="
 	@echo "Running Link Watchdog Tests..."
