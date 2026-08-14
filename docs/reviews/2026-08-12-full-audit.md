@@ -285,12 +285,15 @@ currently answer `0x2F` (47), with `0x2E` (46) and `0x2D` (45) both on the list.
 **RESOLVED 2026-08-13.** The investigation this called for changed the severity, the blast radius and
 the fix, so all three are recorded here.
 
-*The blocklist is not arbitrary.* Its six values are exactly the reply sizes of the five registers
-`TelemetryService::poll()` reads, and they line up one-for-one with the OpSpec switch in
+*The blocklist is roughly, but only roughly, telemetry-shaped.* Four of its six values (`0x30`,
+`0x2B`, `0x14`, `0x09`) are reply sizes of registers `TelemetryService::poll()` reads and match cases
+in the OpSpec switch in
 `telemetry_service.cpp::on_packet` (`0x30` motor state, `0x2B` flow/pressure, `0x14` temperature,
-`0x09` alarms/warnings). It was never a format test; it was "the lengths our telemetry replies
-happen to have", which is correct only for as long as that register set and the pump's payload
-sizes both hold still.
+`0x09` alarms/warnings). The other two, `0x2E` and `0x2D`, match nothing in that switch; and `0x13`,
+which the switch *does* handle, is absent from the list. So it neither covers telemetry nor is
+limited to it. It was never a format test; it was approximately "the lengths our telemetry replies
+happen to have", which holds only for as long as that register set and the pump's payload sizes
+both do.
 
 *It cannot be deleted, and the captures cannot supply a discriminator.* Telemetry reads are queued
 as Class 10 **wildcard** commands (`expect 0/0`), so without the guard a telemetry reply satisfies

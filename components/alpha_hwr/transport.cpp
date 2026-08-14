@@ -544,10 +544,13 @@ bool Transport::try_dispatch_response(const uint8_t* data, size_t len) {
     // branch above reads 0x81 as bit 7 set over length 1 -- but no captured
     // Class 10 response has bit 7 set, so over the corpus it is a plain length.
     // Either way this test does not ask "is this a register read". It asks
-    // "is this response's body 48, 43, 20, 46, 45 or 9 bytes". Those six values
-    // are simply the reply sizes of the five registers TelemetryService polls;
-    // they line up one-for-one with the OpSpec switch in
-    // telemetry_service.cpp::on_packet.
+    // "is this response's body 48, 43, 20, 46, 45 or 9 bytes". Those values are
+    // mostly the reply sizes of the registers TelemetryService polls, but the
+    // correspondence is loose in both directions, which is the point: four of
+    // the six (0x30, 0x2B, 0x14, 0x09) match cases in the OpSpec switch in
+    // telemetry_service.cpp::on_packet; 0x2E and 0x2D match nothing there; and
+    // 0x13, which that switch does handle, is not on this list at all. So the
+    // list neither covers telemetry nor is limited to it.
     //
     // That makes it a usable heuristic and nothing more. It cannot be deleted:
     // telemetry reads are queued as Class 10 wildcard commands (expect 0/0), so
