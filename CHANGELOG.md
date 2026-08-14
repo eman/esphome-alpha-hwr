@@ -2,6 +2,16 @@
 
 ## [Unreleased]
 
+### Added
+
+- **`write_bench.py chain`** runs several services over a single connection,
+  resolving every service once up front. Each connection costs an
+  `APIConnection` and its frame buffers on a node with ~72 KB free, and four
+  stacked clients were enough to exhaust it (issue #127) -- a bench harness
+  that reboots the node it is measuring. Note that the service-list encode in
+  that crash's backtrace was the *victim*, not the cause: the failing
+  allocation was at most ~48 bytes, so the heap was already gone.
+
 ### Fixed
 
 - **The pump's control-mode read was matching its response through a fallback,

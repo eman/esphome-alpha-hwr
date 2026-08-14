@@ -12,12 +12,28 @@ Usage:
   write_bench.py services
   write_bench.py states
   write_bench.py call <service> [k=v ...] [--timeout N] [--linger N]
+  write_bench.py chain <service> [k=v ...] -- <service> [k=v ...] -- ...
   write_bench.py burst <service> <common k=v ...> --each k=v[,k=v] [--each ...]
   write_bench.py upload <enabled 0|1|-> [layer,day,sh,sm,eh,em ...]
 
 `call` auto-generates an op_id if none is passed. `burst` fires one call per
 --each group (merged over the common args) back to back on a single
 connection, which is how to exercise the queued-write supersede path.
+
+`chain` runs several DIFFERENT services over one connection, resolving every
+service once up front. Prefer it to invoking `call` repeatedly.
+
+The reason is heap, but not the reason it first appears. A bench OOM on
+2026-08-13 aborted inside encode_list_service_response() with four clients
+stacked on top of Home Assistant, which looks like the service-list encode
+being the load. It is not: ListEntitiesServicesArgument is 12 bytes and no
+service here takes more than 4 arguments, so that allocation is at most ~48
+bytes and is freed as soon as the message is sent. A 48-byte allocation
+failing means the heap was already exhausted -- the encode was the victim,
+not the cause. The real per-client cost is the APIConnection and its frame
+buffers, so what matters is the number of CONNECTIONS, which is what this
+command reduces. Resolving services per call would not help, since
+list_entities_services() is uncached and re-lists every time.
 
 Connection settings (flag overrides environment):
   --host / ALPHA_HWR_HOST          node address (e.g. hwr-pump.local)
@@ -152,7 +168,15 @@ class EventCollector:
         self.waiters: dict[str, asyncio.Event] = {}
 
     def expect(self, op_id: str) -> asyncio.Event:
-        return self.waiters.setdefault(op_id, asyncio.Event())
+        # Refuse a reused op_id outright. setdefault() silently handed back an
+        # ALREADY-SET event, so a second call waiting on it returned instantly
+        # on the first call's event and its own terminal event went unchecked --
+        # a false pass in the one tool whose job is catching missing and
+        # duplicate terminal events.
+        if op_id in self.waiters:
+            die(f"op_id {op_id!r} used twice in one run; give each call its own")
+        self.waiters[op_id] = asyncio.Event()
+        return self.waiters[op_id]
 
     def on_service_call(self, call: Any) -> None:
         if getattr(call, "service", "") != EVENT:
@@ -219,19 +243,39 @@ async def cmd_states(host: str, key: str) -> int:
     return 0
 
 
-async def cmd_call(host: str, key: str, service_name: str, kvs: list[str],
-                   timeout: float, linger: float) -> int:
-    client = await connect(host, key)
-    service = await find_service(client, service_name)
+async def run_call(client: APIClient, collector: EventCollector,
+                   service: Any, service_name: str, kvs: list[str],
+                   timeout: float, linger: float, seq: int = 0) -> int:
+    """One service call on an ALREADY-CONNECTED client. Returns 0 on success.
 
+    Split out of cmd_call so `chain` can run several calls over a single
+    connection. That matters because each connection costs an APIConnection and
+    its frame buffers on a node with ~72 KB free, and four stacked clients were
+    enough to exhaust it (issue #127). See the module docstring for why the
+    service-list encode in that backtrace was the victim rather than the cause.
+    """
+    # `service` is resolved by the caller. Resolving it here would defeat the
+    # whole point of a shared connection: find_service() calls
+    # list_entities_services(), which aioesphomeapi does NOT cache -- it sends
+    # a fresh ListEntitiesRequest every time. A four-call chain that resolved
+    # per call made the node encode its full service list four times, exactly
+    # as four separate `call` invocations would.
     data = kv_dict(kvs)
-    op_id = data.setdefault("op_id", f"bench-{int(time.time())}")
+    # Unique per call, not per second. `int(time.time())` has one-second
+    # resolution and expect() uses setdefault, so two calls settling inside the
+    # same second on a shared collector reused an already-set Event: the second
+    # call's wait() returned instantly on the FIRST call's event and its
+    # terminal event was never checked. A tool whose only job is detecting
+    # missing and duplicate terminal events reported "contract holds" for a
+    # call it had not verified.
+    op_id = data.setdefault("op_id", f"bench-{time.monotonic_ns():x}-{seq}")
     payload = coerce(service, data)
 
-    collector = EventCollector()
+    # The collector is owned by the caller and subscribed ONCE per connection.
+    # Subscribing per call looked harmless but is not: on a shared connection
+    # every earlier collector stays attached, so each of them also receives and
+    # prints later events. A two-call chain printed its second settle twice.
     matched = collector.expect(op_id)
-    await maybe_await(client.subscribe_service_calls(collector.on_service_call))
-    await asyncio.sleep(0.3)
 
     t0 = time.monotonic()
     print(f"-> {service_name}({json.dumps(payload, sort_keys=True)})")
@@ -242,13 +286,73 @@ async def cmd_call(host: str, key: str, service_name: str, kvs: list[str],
         print(f"settled in {time.monotonic() - t0:.1f}s")
     except asyncio.TimeoutError:
         print(f"NO TERMINAL EVENT for op_id={op_id} within {timeout}s <-- CONTRACT VIOLATION")
-        await maybe_await(client.disconnect())
         return 1
 
     await asyncio.sleep(linger)  # catch duplicate terminal events
     bad = collector.report([op_id])
-    await maybe_await(client.disconnect())
     return 1 if bad else 0
+
+
+async def cmd_call(host: str, key: str, service_name: str, kvs: list[str],
+                   timeout: float, linger: float) -> int:
+    client = await connect(host, key)
+    try:
+        collector = EventCollector()
+        await maybe_await(client.subscribe_service_calls(collector.on_service_call))
+        await asyncio.sleep(0.3)
+        service = await find_service(client, service_name)
+        return await run_call(client, collector, service, service_name,
+                              kvs, timeout, linger)
+    finally:
+        await maybe_await(client.disconnect())
+
+
+async def cmd_chain(host: str, key: str, calls: list[list[str]],
+                    timeout: float, linger: float) -> int:
+    """Several service calls over ONE connection.
+
+    Use this instead of invoking `call` N times: N invocations means N
+    connects, and every connect re-encodes the whole service list. See
+    run_call() for why that matters on this node.
+    """
+    client = await connect(host, key)
+    worst = 0
+    try:
+        collector = EventCollector()
+        await maybe_await(client.subscribe_service_calls(collector.on_service_call))
+        await asyncio.sleep(0.3)
+
+        # ONE ListEntitiesRequest for the whole chain. find_service() sends
+        # its own, and it is uncached, so calling it per service (let alone per
+        # call) would put the node back to re-encoding its service list N
+        # times -- the exact thing this command exists to avoid.
+        _entities, services = await client.list_entities_services()
+        by_name = {s.name: s for s in services}
+        missing = sorted({c[0] for c in calls} - set(by_name))
+        if missing:
+            die(f"no service(s) named {', '.join(missing)}; "
+                f"available: {', '.join(sorted(by_name))}")
+        resolved = {name: by_name[name] for name in {c[0] for c in calls}}
+
+        op_ids: list[str] = []
+        for i, call in enumerate(calls, 1):
+            print(f"\n[{i}/{len(calls)}] {call[0]}")
+            before = set(collector.waiters)
+            rc = await run_call(client, collector, resolved[call[0]], call[0],
+                                call[1:], timeout, linger, seq=i)
+            op_ids.extend(sorted(set(collector.waiters) - before))
+            worst = max(worst, rc)
+
+        # Re-check every op at the end, as `burst` does. Without this a
+        # duplicate terminal event for call 1 arriving during call 3 is printed
+        # but never flagged, and the exit code stays 0.
+        if len(op_ids) > 1:
+            print("\nfinal check across the whole chain:")
+            if collector.report(op_ids):
+                worst = max(worst, 1)
+    finally:
+        await maybe_await(client.disconnect())
+    return worst
 
 
 async def cmd_burst(host: str, key: str, service_name: str, common: list[str],
@@ -390,6 +494,22 @@ def main() -> int:
         print(f"expected hash: {expected}")
         return asyncio.run(cmd_call(host, key, "upload_schedule",
                                     [f"data={payload}"], max(timeout, 160.0), linger))
+    if cmd == "chain":
+        # chain <service> [k=v ...] -- <service> [k=v ...] -- ...
+        calls: list[list[str]] = []
+        cur: list[str] = []
+        for a in rest:
+            if a == "--":
+                if cur:
+                    calls.append(cur)
+                cur = []
+            else:
+                cur.append(a)
+        if cur:
+            calls.append(cur)
+        if not calls:
+            die("chain requires at least one service name")
+        return asyncio.run(cmd_chain(host, key, calls, timeout, linger))
     if cmd == "burst":
         if not rest or not groups:
             die("burst requires a service name and at least one --each group")
