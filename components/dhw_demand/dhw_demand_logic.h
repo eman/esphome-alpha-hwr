@@ -153,7 +153,11 @@ struct PumpStateResult {
   /// false one hands the pump's own recirculation flow to the household-demand
   /// scorer at full confidence.
   bool pump_confirmed_off{false};
-  /// The age-masked readings actually used, for logging.
+  /// The age-masked readings the decision was actually taken on: the input
+  /// value where its channel was fresh, NaN where it was not. Nothing in the
+  /// component consumes these — they exist so a test can assert that a stale
+  /// channel was masked out rather than merely that its verdict came out right,
+  /// which two different bugs can both satisfy.
   float speed_used{NAN};
   float current_used{NAN};
 };

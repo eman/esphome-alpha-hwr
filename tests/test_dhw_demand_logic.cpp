@@ -960,6 +960,61 @@ void test_pump_state_millis_rollover() {
               "A fresh reading spanning the millis() rollover stays fresh");
 }
 
+
+void test_the_current_channel_is_aged_too() {
+  // The same trap as the frozen 0 RPM, on the other channel — and it survived a
+  // mutation battery until this test existed. An install that wires only
+  // motor_current, whose BLE link then drops: alpha_hwr keeps republishing the
+  // last value (0.0 A), so without an age mask on THIS channel the detector
+  // reads a dead link as a confident pump-off and hands the loop's own
+  // recirculation to deterministic_flow at confidence 1.0.
+  PumpStateInputs in = pump_state_tick();
+  in.motor_current = 0.0f;                             // below the 0.05 A threshold
+  in.motor_current_last_update_ms = in.now_ms - 120000; // 2 min stale
+  in.pump_state_ever_known = true;
+  in.last_known_pump_on = false;
+
+  PumpStateResult r = decide_pump_state(in);
+  TEST_ASSERT(!r.pump_state_known, "A stale current reading is not a known state either");
+  TEST_ASSERT(r.motor_frozen, "...it is frozen, not absent");
+  TEST_ASSERT(!r.pump_confirmed_off,
+              "A frozen 0.0 A must NOT assert confirmed-off (same trap, other channel)");
+  TEST_ASSERT(std::isnan(r.current_used), "...and the stale current is masked out");
+}
+
+void test_the_speed_threshold_boundary() {
+  // "Mirrors Python: pump_off = motor_speed < 10 RPM", so 10.0 is ON. Pinning
+  // the boundary because >= vs > is exactly the kind of edit that reads as a
+  // harmless tidy-up.
+  PumpStateInputs in = pump_state_tick();
+  in.motor_speed_last_update_ms = in.now_ms - 5000;
+  in.motor_speed = 10.0f;
+  TEST_ASSERT(decide_pump_state(in).pump_on, "Exactly 10 RPM is running");
+  in.motor_speed = 9.999f;
+  TEST_ASSERT(!decide_pump_state(in).pump_on, "Just under 10 RPM is stopped");
+}
+
+void test_speed_wins_over_current_when_both_are_fresh() {
+  // The header promises speed takes precedence. Nothing tested it: every other
+  // case either has one channel absent or lets the age mask decide, so swapping
+  // the precedence changed no assertion. Make the two disagree.
+  PumpStateInputs in = pump_state_tick();
+  in.motor_speed = 0.0f;    // speed says stopped
+  in.motor_current = 0.30f; // current says running, well over the 0.05 A threshold
+  in.motor_speed_last_update_ms = in.now_ms - 5000;
+  in.motor_current_last_update_ms = in.now_ms - 5000;
+
+  PumpStateResult r = decide_pump_state(in);
+  TEST_ASSERT(!r.pump_on, "With both fresh and disagreeing, speed decides");
+  TEST_ASSERT(r.pump_confirmed_off, "...so this is a genuine confirmed-off");
+
+  // And the direct predicate, so the precedence is pinned where it is written.
+  TEST_ASSERT(!motor_reading_indicates_on(0.0f, 0.30f, 0.05f),
+              "motor_reading_indicates_on: a present speed beats the current channel");
+  TEST_ASSERT(motor_reading_indicates_on(NAN, 0.30f, 0.05f),
+              "...and the current channel is used only when speed is absent");
+}
+
 int main() {
   std::cout << "==========================================================="
             << std::endl;
@@ -991,6 +1046,9 @@ int main() {
   test_unconfigured_motor_forward_fills_as_before();
   test_current_channel_is_the_fallback();
   test_pump_state_millis_rollover();
+  test_the_current_channel_is_aged_too();
+  test_the_speed_threshold_boundary();
+  test_speed_wins_over_current_when_both_are_fresh();
 
   std::cout << "\n==========================================================="
             << std::endl;

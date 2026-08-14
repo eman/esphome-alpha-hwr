@@ -422,10 +422,18 @@ nullptr→NAN path satisfies it exactly. It was never falsified.
 > (`frozen-motor-asserts-pump-off`, `motor-staleness-mask-removed`) confirm the tests bind the
 > shipped predicate.
 >
-> The extraction also found a live defect the refactor would otherwise have hidden: `pump_confirmed_off`
-> was computed a *second* time, thirty lines below `pump_on`, from the same inputs. Two
-> copies of one three-way judgement that could disagree. Now returned together from the single
-> decision. It had not diverged, but nothing prevented it.
+> The extraction also collapsed a duplicate: `pump_confirmed_off` was computed a *second* time,
+> thirty lines below `pump_on`, from the same inputs. I first wrote this up as a latent defect —
+> "two copies that could disagree" — and the skeptic pass demolished that. They were *structurally
+> incapable* of disagreeing: divergence needs a member write between the two blocks, and their
+> branch predicates are mutually exclusive, so the second block can never observe the first block's
+> update. A differential harness over 25,600 input combinations found not one mismatch, and further
+> showed `pump_confirmed_off == !pump_on` on every one of them — all three arms collapse to that.
+> Worth removing as duplication; it was never a bug, and calling it one was me dressing up a tidy-up.
+>
+> That same harness is the evidence the extraction is behaviour-preserving, comparing 13 outputs per
+> tick (including both log-branch selections and the downstream edge stamps) against the pre-change
+> logic transcribed from `main`.
 
 ### 10. The pump-on continuation tier cannot release during a run
 `dhw_demand_logic.h:418` — **CONFIRMED, P1 → P2, and the AGENTS directive is NOT violated**

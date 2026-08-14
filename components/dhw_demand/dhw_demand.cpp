@@ -357,8 +357,6 @@ void DhwDemandComponent::update() {
   pump_state_in.last_known_pump_on = last_known_pump_on_;
 
   const PumpStateResult pump_state = decide_pump_state(pump_state_in);
-  const float speed_now = pump_state.speed_used;
-  const float current_now = pump_state.current_used;
   const bool pump_state_known = pump_state.pump_state_known;
   const bool pump_on = pump_state.pump_on;
 
