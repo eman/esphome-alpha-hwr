@@ -81,7 +81,6 @@ class DhwDemandComponent : public PollingComponent {
   float compute_deriv_(float current, float &prev, uint32_t &prev_ms,
                       uint32_t now);
   bool flow_latch_active_();
-  bool detect_pump_on_(float motor_speed, float motor_current);
 
   // Pump-off branch: returns confidence > 0 if demand detected, else 0
   float detect_pump_off_(float flow, bool prev_flow_present_pump_off,
@@ -179,7 +178,7 @@ class DhwDemandComponent : public PollingComponent {
   // as a confirmed-off pump forever, and the pump's own recirculation flow then
   // gets scored as household demand.
   //
-  // Tracked per sensor rather than as one shared stamp: detect_pump_on_ prefers
+  // Tracked per sensor rather than as one shared stamp: the pump-state decision prefers
   // speed whenever it is non-NaN, so a shared stamp kept alive by a still-
   // updating current reading would let a frozen 0 RPM outvote it.
   uint32_t motor_speed_last_update_ms_{0};

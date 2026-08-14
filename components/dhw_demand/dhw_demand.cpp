@@ -37,8 +37,8 @@ void DhwDemandComponent::setup() {
     });
   }
   // The motor channel decides which branch runs, so its age matters most --
-  // and each sensor needs its own stamp, since detect_pump_on_() prefers speed
-  // whenever speed is non-NaN.
+  // and each sensor needs its own stamp, since motor_reading_indicates_on()
+  // prefers speed whenever speed is non-NaN.
   if (motor_speed_ != nullptr) {
     motor_speed_->add_on_state_callback([this](float v) {
       if (!std::isnan(v))
@@ -144,16 +144,6 @@ bool DhwDemandComponent::flow_latch_active_() {
       return true;
     }
   }
-  return false;
-}
-
-bool DhwDemandComponent::detect_pump_on_(float motor_speed,
-                                          float motor_current) {
-  // Threshold mirrors Python: pump_off = motor_speed < 10 RPM
-  if (!std::isnan(motor_speed))
-    return motor_speed >= 10.0f;
-  if (!std::isnan(motor_current))
-    return motor_current >= pump_off_current_threshold_;
   return false;
 }
 
@@ -350,46 +340,33 @@ void DhwDemandComponent::update() {
   // perfectly valid 0.0 indefinitely. Age is the real test -- an unrefreshed
   // reading is "unknown", not "off". Bounded by the same window the pump-flow
   // channel uses, since both come from the same BLE poll.
-  const uint32_t motor_stale_ms =
+  // The three-regime decision (fresh / frozen / absent) lives in
+  // dhw_demand_logic.h so the host tests exercise the production predicate
+  // rather than a replica -- this branch selects between the pump-ON and
+  // pump-OFF demand paths, and the .cpp is not host-testable (AGENTS §4).
+  PumpStateInputs pump_state_in;
+  pump_state_in.motor_speed = motor_speed;
+  pump_state_in.motor_current = motor_current;
+  pump_state_in.motor_speed_last_update_ms = motor_speed_last_update_ms_;
+  pump_state_in.motor_current_last_update_ms = motor_current_last_update_ms_;
+  pump_state_in.now_ms = now;
+  pump_state_in.motor_max_stale_ms =
       (uint32_t) pump_on_demand_max_stale_seconds_ * 1000;
-  // Mask each channel by its own age, so a frozen value cannot be read as a
-  // measurement. A never-configured sensor has last_update 0, which
-  // reading_is_fresh() already reports as not fresh, so it stays NaN as before.
-  const float speed_now =
-      reading_is_fresh(motor_speed_last_update_ms_, now, motor_stale_ms)
-          ? motor_speed
-          : NAN;
-  const float current_now =
-      reading_is_fresh(motor_current_last_update_ms_, now, motor_stale_ms)
-          ? motor_current
-          : NAN;
+  pump_state_in.pump_off_current_threshold = pump_off_current_threshold_;
+  pump_state_in.pump_state_ever_known = pump_state_ever_known_;
+  pump_state_in.last_known_pump_on = last_known_pump_on_;
 
-  const bool motor_reported =
-      !std::isnan(motor_speed) || !std::isnan(motor_current);
-  const bool motor_usable = !std::isnan(speed_now) || !std::isnan(current_now);
-  // A channel that is publishing values but whose values have stopped changing.
-  // Distinct from a genuine NaN gap, and it must NOT be forward-filled as OFF:
-  // that is precisely how a frozen 0 RPM kept the pump-off branch selected and
-  // scored the pump's own recirculation as household demand.
-  const bool motor_frozen = motor_reported && !motor_usable;
+  const PumpStateResult pump_state = decide_pump_state(pump_state_in);
+  const bool pump_state_known = pump_state.pump_state_known;
+  const bool pump_on = pump_state.pump_on;
 
-  bool pump_state_known = motor_usable;
-  bool pump_on;
   if (pump_state_known) {
-    pump_on = detect_pump_on_(speed_now, current_now);
     last_known_pump_on_ = pump_on;
     pump_state_ever_known_ = true;
-  } else if (motor_frozen) {
-    // Assume ON. The pump-on branch measures demand as (flow - pump_flow) and
-    // has its own staleness bound, so with the pump channel equally stale it
-    // declines and reports pump_on_uncertain -- the safe answer. Assuming OFF
-    // here would hand recirculation flow to deterministic_flow at confidence 1.
-    pump_on = true;
+  } else if (pump_state.motor_frozen) {
     ESP_LOGD(TAG, "Motor reading frozen (no update in %us) — assuming pump ON",
              (unsigned) pump_on_demand_max_stale_seconds_);
   } else {
-    // Genuine NaN gap (or nothing wired): forward-fill as before.
-    pump_on = pump_state_ever_known_ ? last_known_pump_on_ : true;
     ESP_LOGD(TAG, "Pump state unknown (BLE gap) — forward-filling as %s",
              pump_on ? "ON" : "OFF");
   }
@@ -408,18 +385,9 @@ void DhwDemandComponent::update() {
   // starts as false but the pump is already running.  Only set it on a confirmed
   // off reading so that a BLE reconnect (NaN → known-on) does not falsely prime
   // the continuation path.
-  bool pump_confirmed_off;
-  if (pump_state_known) {
-    pump_confirmed_off = !pump_on;
-  } else if (motor_frozen) {
-    // A frozen reading is not evidence of anything, least of all "off". Letting
-    // it assert confirmed-off is what reopened the pump-off branch even after
-    // the staleness test rejected the reading.
-    pump_confirmed_off = false;
-  } else {
-    // Forward-filled: treat as confirmed-off only if last-known was off.
-    pump_confirmed_off = pump_state_ever_known_ && !last_known_pump_on_;
-  }
+  // Decided alongside pump_on in decide_pump_state() -- the two answers come
+  // from the same three-regime judgement and must not be able to disagree.
+  const bool pump_confirmed_off = pump_state.pump_confirmed_off;
   if (pump_confirmed_off) {
     observed_pump_off_ = true;
     pre_pump_on_flow_ = NAN;  // Clear stale transition state

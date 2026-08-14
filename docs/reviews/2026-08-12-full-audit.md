@@ -406,6 +406,44 @@ household demand — `deterministic_flow` at 100%.
 *Also:* the finder misread AGENTS §11.8 rule 2, which governs *unconfigured* inputs — the
 nullptr→NAN path satisfies it exactly. It was never falsified.
 
+> **RESOLVED** — behaviour in `6632e2e` and `d3560d9`; the test gap closed 2026-08-14.
+>
+> The fix landed as the correction above prescribed: each motor channel is masked by its own age
+> before anything reads its value, and a third regime — *frozen*, meaning reporting but not
+> refreshing — sits between "fresh" and "genuine NaN gap". Frozen assumes the pump is ON and refuses
+> to assert `pump_confirmed_off`, which is what had reopened the pump-OFF branch after the staleness
+> test had already rejected the reading.
+>
+> **The gap was that none of it was tested.** The decision lived in `dhw_demand.cpp`, which no host
+> test compiles — only the pure header is linked — so the branch selecting between the pump-ON and
+> pump-OFF demand paths had zero coverage, in a component whose logic is otherwise well covered.
+> Extracted verbatim into `decide_pump_state()` in `dhw_demand_logic.h` and pinned by 35 assertions,
+> the load-bearing one being that a frozen 0 RPM does not assert confirmed-off. Five mutations
+> (`frozen-motor-asserts-pump-off`, `motor-staleness-mask-removed`,
+> `motor-current-staleness-mask-removed`, `motor-speed-on-threshold`,
+> `motor-channel-precedence-swapped`) confirm the tests bind the shipped predicate; the last three
+> were added after a skeptic pass showed they survived the first round of tests.
+>
+> **Reproduced on hardware.** The frozen regime is not a hypothetical: forcing a BLE drop
+> (`data_timeout: 5s`) and holding the reconnect past the 30 s motor-staleness bound
+> (`reconnect_settle_time: 90s`) put the detector into it 17 times over one run. Throughout, it
+> reported `pump_on_uncertain` at 50 % confidence — the safe answer the design predicts — returning
+> to `deterministic_idle` at 100 % once readings were fresh again. **`deterministic_flow`, the false
+> positive this finding is about, occurred zero times.**
+>
+> The extraction also collapsed a duplicate: `pump_confirmed_off` was computed a *second* time,
+> thirty lines below `pump_on`, from the same inputs. I first wrote this up as a latent defect —
+> "two copies that could disagree" — and the skeptic pass demolished that. They were *structurally
+> incapable* of disagreeing: divergence needs a member write between the two blocks, and their
+> branch predicates are mutually exclusive, so the second block can never observe the first block's
+> update. A differential harness over 25,600 input combinations found not one mismatch, and further
+> showed `pump_confirmed_off == !pump_on` on every one of them — all three arms collapse to that.
+> Worth removing as duplication; it was never a bug, and calling it one was me dressing up a tidy-up.
+>
+> That same harness is the evidence the extraction is behaviour-preserving, comparing 13 outputs per
+> tick (including both log-branch selections and the downstream edge stamps) against the pre-change
+> logic transcribed from `main`.
+
 ### 10. The pump-on continuation tier cannot release during a run
 `dhw_demand_logic.h:418` — **CONFIRMED, P1 → P2, and the AGENTS directive is NOT violated**
 

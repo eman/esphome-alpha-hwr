@@ -775,7 +775,13 @@ void AlphaHwrComponent::do_control_cache_sync(uint32_t gen) {
 
 // Called every 10 seconds by PollingComponent
 void AlphaHwrComponent::update() {
-  if (session_.is_ready() && parent_ && parent_->get_conn_id() != 0xFF) {
+  // The sentinel is 0xFFFF (esp32_ble_client::UNSET_CONN_ID) on a uint16_t
+  // conn_id, so the 0xFF this used to compare against was never equal to it and
+  // the guard could not fire: every poll ran regardless of whether a connection
+  // handle existed. Named constant rather than a literal so it cannot drift
+  // out of step with the base class again.
+  if (session_.is_ready() && parent_ &&
+      parent_->get_conn_id() != esp32_ble_client::UNSET_CONN_ID) {
     // If session is ready but initial data reads haven't been triggered yet
     // (e.g., BLE connection persisted through ESP32 restart, no re-auth),
     // trigger them now.
