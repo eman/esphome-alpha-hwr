@@ -254,6 +254,42 @@ void test_restart_after_cancel_runs_a_full_handshake() {
               "And completes once — the cancelled run's timers stayed dead");
 }
 
+// The case the sequence number actually exists for, and the one the ordering
+// above hides. `running_ = false` alone is enough to stop a cancelled
+// handshake, because every stage and send_packet() checks it — so a test that
+// drains the stale timers *before* restarting passes with the sequence bump
+// deleted. The mutation check caught exactly that.
+//
+// The dangerous order is cancel, restart, and only then the old timers firing:
+// `running_` is true again by that point, so nothing but the sequence number
+// distinguishes a stale callback from a live one. A leaked stage-1 timer
+// re-enters the burst mid-flight and the two handshakes interleave.
+void test_stale_timers_cannot_re_enter_a_restarted_handshake() {
+  std::cout << "\n=== Stale timers cannot re-enter a restarted handshake ==="
+            << std::endl;
+  mock_millis = 0;
+  AuthRig r;
+
+  r.auth.start();  // handshake A
+  r.drain();
+  const size_t sent_by_a = r.sent.size();
+  TEST_ASSERT(sent_by_a == 1, "Handshake A got one packet out before cancel");
+  TEST_ASSERT(!r.scheduled.empty(), "...and left a timer queued");
+
+  r.auth.cancel();
+  r.auth.start();  // handshake B, before A's timer has fired
+  r.drain();
+
+  // Now let everything queued run: A's orphan first, then B's.
+  r.run_scheduled();
+
+  TEST_ASSERT(r.sent.size() == sent_by_a + 10,
+              "Exactly ten packets belong to B — A's orphaned timer did not "
+              "re-enter the burst and add more");
+  TEST_ASSERT(r.completions == 1,
+              "And exactly one completion, not one per handshake");
+}
+
 // ── 6. Degenerate wiring ─────────────────────────────────────────────────────
 // Nothing here should crash or half-complete if a caller forgets a callback.
 void test_missing_scheduler_stalls_without_completing() {
@@ -298,6 +334,7 @@ int main() {
   test_start_while_running_is_ignored();
   test_cancel_invalidates_pending_timers();
   test_restart_after_cancel_runs_a_full_handshake();
+  test_stale_timers_cannot_re_enter_a_restarted_handshake();
   test_missing_scheduler_stalls_without_completing();
 
   std::cout << "\n==========================================" << std::endl;

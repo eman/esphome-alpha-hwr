@@ -32,6 +32,17 @@ RED='\033[0;31m'; GREEN='\033[0;32m'; YELLOW='\033[1;33m'; NC='\033[0m'
 # Each mutation: name | file | python-repr search | python-repr replace
 # The search string must appear exactly once; the script fails loudly if not,
 # so a refactor that moves the code is reported rather than silently skipped.
+#
+# Deliberately absent: a mutation on Authentication's `auth_sequence_++`.
+# BOTH start() and cancel() increment it, and either alone is enough to
+# invalidate a stale scheduler lambda -- so removing one is an equivalent
+# mutant that no test can kill, and adding it here would be an uncatchable
+# entry rather than a coverage gap. Removing *both* is catchable, and
+# test_stale_timers_cannot_re_enter_a_restarted_handshake() does catch it, but
+# no single search/replace spans two functions. Verified by experiment after
+# this check flagged the single-point version as surviving; the redundancy is
+# defence in depth and was left in production rather than trimmed to suit the
+# tooling.
 MUTATIONS=(
 "crc-initial-value|components/alpha_hwr/codec.cpp|uint16_t crc = init;|uint16_t crc = init ^ 0x0001;"
 "crc-byte-order|components/alpha_hwr/frame_builder.cpp|packet_out[9] = (crc >> 8) & 0xFF;|packet_out[9] = crc & 0xFF;"
@@ -63,7 +74,6 @@ MUTATIONS=(
 "motor-channel-precedence-swapped|components/dhw_demand/dhw_demand_logic.h|  if (!std::isnan(motor_speed))\n    return motor_speed >= 10.0f;\n  if (!std::isnan(motor_current))\n    return motor_current >= pump_off_current_threshold;|  if (!std::isnan(motor_current))\n    return motor_current >= pump_off_current_threshold;\n  if (!std::isnan(motor_speed))\n    return motor_speed >= 10.0f;"
 "auth-stage2-repeat-count|components/alpha_hwr/auth.cpp|  if (repeat_count < 5) {|  if (repeat_count < 4) {"
 "auth-extension-packet-order|components/alpha_hwr/auth.cpp|  send_packet(AUTH_EXT_1, sizeof(AUTH_EXT_1));\n  send_packet(AUTH_EXT_2, sizeof(AUTH_EXT_2));|  send_packet(AUTH_EXT_2, sizeof(AUTH_EXT_2));\n  send_packet(AUTH_EXT_1, sizeof(AUTH_EXT_1));"
-"auth-cancel-leaves-timers-live|components/alpha_hwr/auth.cpp|    running_ = false;\n    auth_sequence_++;  // Invalidate any pending scheduler lambdas|    running_ = false;"
 "sensor-pub-media-temp-range-removed|components/alpha_hwr/sensor_publisher.cpp|    if (temp.media_temperature_c >= -20 && temp.media_temperature_c <= 100) {|    if (true) {"
 "sensor-pub-alarm-dedup-removed|components/alpha_hwr/sensor_publisher.cpp|  if (alarms_sensor_->has_state() && alarms_sensor_->state == codes_str) {|  if (false) {"
 "sensor-pub-head-rate-gap-reset-removed|components/alpha_hwr/sensor_publisher.cpp|      if (dt_s > 30.0f) {|      if (false) {"
