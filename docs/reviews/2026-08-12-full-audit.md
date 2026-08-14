@@ -193,20 +193,24 @@ catch the lie agrees with it.
 *Fix:* give the enable leg the readback `confirm_schedule_enabled_` already has.
 
 ### 7. A late response is delivered to the next command
-`transport.cpp:105-133` (timeout), `:581` (wildcard), `:589` (exact match) —
+`transport.cpp` — the `AWAITING_RESPONSE` timeout in `Transport::loop()`, and the `WILDCARD MATCH`
+and `Exact match` branches in `Transport::try_dispatch_response()` —
 **CONFIRMED, P1 → P2 — MECHANISM CORRECTED, see the note below**
 
-> *Citation note.* This section originally cited `:501` and `:507` for the wildcard and exact-match
-> paths. Neither resolved even at the audit's own commit (`e28688c`), where they were `return false;`
-> and a byte extraction; the paths were at `:520` and `:526`. The line numbers above are current as of
-> the register-read fix. Where the body text below quotes `:501`/`:507`, it is quoting the original
-> claim, not asserting the location.
+> *Citation note.* This section originally cited `transport.cpp:501` and `:507` for the wildcard and
+> exact-match paths. Neither resolved even at the audit's own commit (`e28688c`), where they were
+> `return false;` and a byte extraction; the paths were then at `:520` and `:526`. A first attempt to
+> fix this substituted `:581`/`:589`, which were also wrong by the time they were written — the
+> section is edited more often than the line numbers are re-derived. Hence the search-by-name
+> citation above, which does not rot. Where the body text below quotes `:501`/`:507`, it is quoting
+> the original claim, not asserting a location.
 
 > **Correction (2026-08-13, from the capture investigation behind PR #166).** The collision is real
 > but this section gets *why* wrong, and the wrong reason points at the wrong fix.
 >
 > A GENI response carries **no Object ID and no Sub-ID**. Bytes 6-9 are `[00][TypeH][TypeL][Version]`
-> — the object *type* and version. Byte 6 is `0x00` in 100% of 21,236 captured Class 10 responses.
+> — the object *type* and version. Byte 6 is `0x00` in 100% of the 21,236 captured Class 10
+> responses long enough to carry a type header (the remaining 484 are 9-byte short ACKs with none).
 > A request names an object and a sub-id (`0A 03 [obj] [subH] [subL]`) and carries no type at all, so
 > the reply is not echoing the request: it is naming the type of whatever object was asked for.
 >
@@ -220,13 +224,14 @@ catch the lie agrees with it.
 > Consequently "stop using the wildcard" does **not** fix the collisions reproduced below: those are
 > same-type siblings that no field matching can separate. It is still worth doing for a different
 > reason than this section gives — the wildcard accepts *any* Class 10 frame, including the passive
-> `00 01 2F 01` mode notifications the pump emits constantly (3,233 in the captures), so narrowing it
+> `00 01 2F 01` mode notifications the pump emits constantly (4,306 in the captures), so narrowing it
 > removes a genuine cross-*type* misattribution risk. Note the wildcard is not confined to singleton
 > reads: Object 53 trends (`history_service.cpp:100`, `:189`) and the clock read
 > (`time_service.cpp:47`) both use it, and trends are one of the three collisions below.
 >
-> Observed exposure is also **zero**: across 22,803 paired request/response exchanges no response
-> arrived later than 295 ms against a 3000 ms timeout. The misattributions visible in the captures come from the
+> Observed exposure is also **zero**: across 24,224 paired request/response exchanges no response
+> arrived later than 268 ms against a 3000 ms timeout (excluding one 154 s gap that is a capture
+> artifact, not a reply). The misattributions visible in the captures come from the
 > phone app *pipelining* requests, which this firmware never does (single `command_queue_.front()`,
 > `AWAITING_RESPONSE` gate, 50 ms pacing).
 >
@@ -258,15 +263,16 @@ mode is silence, which produces no stale frame.
 immune via the OpSpec 0x15/0x0D workaround.
 
 ### 7b. `is_register_read` is a length blocklist wearing a format filter's name
-`transport.cpp:538`, `:682` — **NEW, added 2026-08-13, P2**
+`transport.cpp` — the two `is_register_read` tests, in `Transport::try_dispatch_response()` and in
+the registered-response-handler path below it — **NEW, added 2026-08-13, P2**
 
 Not in the original audit; found while investigating finding 7.
 
 Byte 5 of a response is the APDU **body length**, not an operation code: `byte5 == total_len - 8`
 held for all 24,233 CRC-valid captured inbound frames without exception. (More precisely it is a
-flag bit plus a length — `transport.cpp:441` reads `0x81` as a short-ACK status, i.e. bit 7 set over
-length 1. No captured Class 10 response has bit 7 set, so the equality holds across the corpus but
-is a statement about the corpus, not about the format.) So
+flag bit plus a length — the short-ACK branch in `try_dispatch_response()` reads `0x81` as a status,
+i.e. bit 7 set over length 1. No captured Class 10 response has bit 7 set, so the equality holds
+across the corpus but is a statement about the corpus, not about the format.) So
 
 ```cpp
 bool is_register_read = (opspec == 0x30 || opspec == 0x2B || opspec == 0x14 ||
@@ -298,8 +304,8 @@ both do.
 *It cannot be deleted, and the captures cannot supply a discriminator.* Telemetry reads are queued
 as Class 10 **wildcard** commands (`expect 0/0`), so without the guard a telemetry reply satisfies
 whatever wildcard command is at the head of the queue. The obvious discriminator does not transfer:
-in the reference captures the response class always equals the request class (22,802 of 22,803 paired
-frames) and the phone app read telemetry as **Class 2**, so `data[4]` sorts the app's traffic
+in the reference captures the response class always equals the request class (24,223 of 24,224 paired
+exchanges) and the phone app read telemetry as **Class 2**, so `data[4]` sorts the app's traffic
 perfectly — but this firmware reads telemetry as Class 10 (`build_class10_read`), so the same byte
 sorts none of ours. There is no header-level discriminator available to us.
 
