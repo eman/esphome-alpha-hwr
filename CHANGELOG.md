@@ -253,6 +253,34 @@
 
 ### Changed
 
+- **`dhw_demand.cpp` is now compiled and driven by the host test suite.**
+  `esphome compile` was the only thing in the toolchain that compiled it at
+  all: 538 lines holding the sensor-callback wiring, the branch that selects
+  between the pump-ON and pump-OFF detection paths, the flow latch, the
+  derivative helper and every publish — none of it reachable by the unit suite,
+  by cppcheck, or by the mutation check. The consequence was not theoretical:
+  while closing the pump-state coverage gap, that file was left with a block
+  referencing an out-of-scope variable, and 905 host assertions plus cppcheck
+  all reported green. Only the firmware build objected.
+
+  The ESPHome entity mocks were extended to the point where the component
+  compiles against them, and `tests/test_dhw_demand_component.cpp` now
+  instantiates the real component, wires mock entities through its real
+  setters, and ticks `update()` on an injected clock — asserting on what the
+  output entities received. It covers what lives in the `.cpp` and nowhere
+  else, including the frozen-motor case that previously needed a bench session
+  with a deliberately shortened timeout to provoke. Six mutations now point at
+  `dhw_demand.cpp`, which was an unreachable file for the mutation check for as
+  long as nothing host-compiled it. 951 host assertions, up from 905, and 25 of
+  25 mutations caught.
+
+  The mocks deliberately mirror ESPHome's real behaviour rather than a tidier
+  version of it — `sensor` and `text_sensor` publish unconditionally while
+  `binary_sensor` de-duplicates, and `has_state()` means "has published", never
+  "is fresh". Both asymmetries are the reason `publish_gate.h` and the
+  detector's staleness registers exist, so a friendlier mock would have made
+  each of them look like an oversight.
+
 - **The test suite now links production code instead of validating copies of
   it.** Three test files asserted hand-written replicas of shipped logic, so
   they passed regardless of what the firmware did — corrupting the CRC table and

@@ -18,9 +18,15 @@
 //     unchanged. That asymmetry against BinarySensor is the whole subject of
 //     publish_gate.h (issue #129), so a de-duplicating mock here would make the
 //     gate tests pass against a bug that does not exist.
-//   * With no filters configured, raw_state == state and the raw callback is
-//     the same callback list, which is what this mock models. The components
-//     under test never install filters.
+//   * raw_state == state here, because the components under test never install
+//     filters on their own outputs. Raw *callbacks* are a different matter:
+//     USE_SENSOR_FILTER is a global define switched on by any sensor in the
+//     YAML carrying `filters:`, and this project's own dhw-demand-example.yaml
+//     puts a `multiply` on the sensor feeding `pump_flow`. So real builds have
+//     it on, and there raw callbacks fire from publish_state() BEFORE state and
+//     has_state are updated. The mock reproduces that ordering rather than the
+//     filter-free shortcut, so a callback that reads back the entity sees what
+//     the firmware would show it.
 //
 // publish_count has no counterpart in real ESPHome; it is the test's way of
 // counting API frames, one per publish per subscriber.
@@ -40,6 +46,9 @@ class Sensor : public EntityBase {
 
   void publish_state(float state) {
     this->raw_state = state;
+    // Fires before state/has_state are updated, matching sensor.cpp.
+    for (auto &callback : this->raw_callbacks_)
+      callback(state);
     this->internal_send_state_to_frontend(state);
   }
 
@@ -55,9 +64,7 @@ class Sensor : public EntityBase {
     this->callbacks_.emplace_back(std::forward<F>(callback));
   }
   template<typename F> void add_on_raw_state_callback(F &&callback) {
-    // No filters in the mock, so raw and filtered are the same stream -- which
-    // is also what the real header does when USE_SENSOR_FILTER is off.
-    this->callbacks_.emplace_back(std::forward<F>(callback));
+    this->raw_callbacks_.emplace_back(std::forward<F>(callback));
   }
 
   /// Test-only: publishes since construction. Not part of the ESPHome API.
@@ -65,6 +72,7 @@ class Sensor : public EntityBase {
 
  protected:
   std::vector<std::function<void(float)>> callbacks_;
+  std::vector<std::function<void(float)>> raw_callbacks_;
   bool force_update_{false};
 };
 

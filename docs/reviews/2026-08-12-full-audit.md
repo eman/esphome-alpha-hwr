@@ -670,6 +670,22 @@ doc recipes with it.
 
 ## Tooling gaps
 
+> **Status, 2026-08-14.** All six ranked items below have landed: `.github/workflows/test.yml` now
+> runs sanitizers, `esphome config` on every example, cppcheck via the fixed `lint.sh --strict`,
+> both compilers, ruff + mypy, and a syntax/`op_id` check on the card — plus a mutation check and
+> the full ESP32-C3 firmware build. One gap the audit did not name has also been closed: `esphome
+> compile` was the **only** thing in the toolchain that compiled `dhw_demand.cpp`, so the 538 lines
+> holding the branch selection behind finding 9, the flow latch and every publish were unreachable
+> by the unit suite, cppcheck and the mutation check alike. The component is now host-compiled and
+> driven by `tests/test_dhw_demand_component.cpp`. `clang-tidy` and `black` remain absent.
+>
+> Still firmware-build-only for real reasons: `alpha_hwr.cpp`, `ble_connection_manager.cpp` and
+> `api_bridge.cpp` need ESP-IDF or the API SDK. Firmware-build-only for no reason at all:
+> `auth.cpp`, `sensor_publisher.cpp`, `telemetry_service.cpp` and `device_info_service.cpp` each
+> compile against the current mocks unmodified — checked, in a clean worktree — and would each
+> take only a Makefile target plus a test. `time_service.cpp` additionally wants a
+> `real_time_clock.h` mock.
+
 **`tools/lint.sh --strict` swallows its own output.** `set -euo pipefail` plus `--error-exitcode=1`
 kills the script at the `OUTPUT=$(cppcheck …)` assignment the moment cppcheck finds anything, so
 the mode meant to enforce quality prints its header and exits without showing a finding. Fix:

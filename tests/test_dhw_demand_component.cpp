@@ -174,33 +174,42 @@ void test_flow_onset_takes_two_ticks() {
 
 // ── 3. Frozen motor channel ──────────────────────────────────────────────────
 // The issue #149 failure, reproduced on the host in microseconds instead of on
-// the bench in minutes. The motor sensor keeps its last value forever when the
-// BLE link drops -- alpha_hwr does not publish NaN -- so a frozen 0 RPM would
-// read as a confirmed-off pump and hand the loop's own recirculation to
-// deterministic_flow at confidence 1.0.
+// the bench in minutes.
 //
-// The second half is the part that makes this an assertion about staleness
-// rather than about anything else: republishing the *same* 0 RPM, fresh, gets
-// deterministic_flow within two ticks. Only the age of the reading differs.
+// The frozen value has to be **0 RPM** for this to test anything. An earlier
+// version of this test froze at 2400 RPM, which is inert: fresh 2400 says the
+// pump is on and frozen 2400 is assumed on, so the answer is identical under
+// every possible staleness policy and the test passed with the staleness mask
+// deleted outright. 0 RPM is where the two policies disagree — fresh 0 is a
+// *confirmed-off* pump, which opens the pump-OFF branch and scores raw meter
+// flow as household demand at confidence 1.0.
+//
+// The scenario is the real one: the pump was off and quiet, the link dropped,
+// and the pump then started without anyone seeing it. alpha_hwr keeps
+// republishing the last value rather than NaN, so the detector still reads
+// 0 RPM while the meter climbs to recirculation level.
 void test_frozen_motor_never_enters_pump_off_branch() {
-  std::cout << "\n=== A frozen motor reading never opens the pump-off branch ==="
+  std::cout << "\n=== A frozen 0 RPM never opens the pump-off branch ==="
             << std::endl;
   Rig r;
   r.det.setup();
 
-  // Pump running, both flow channels reporting.
-  r.at(T0);
-  r.motor_speed.publish_state(2400.0f);
-  r.pump_flow.publish_state(2.1f);
-  r.flow.publish_state(2.2f);
-  r.tick(T0);
-  TEST_ASSERT(r.method_state() == "pump_on_uncertain",
-              "Pump-on with a quiet loop claims nothing");
+  // Pump off, house quiet. The last healthy reports before the link drops.
+  for (int i = 0; i <= 3; i++) {  // ticks 0..3: reading still inside the 30 s bound
+    uint32_t now = T0 + i * TICK_MS;
+    r.at(now);
+    if (i == 0)
+      r.motor_speed.publish_state(0.0f);  // the last motor report there will be
+    r.flow.publish_state(0.0f);
+    r.tick(now);
+  }
+  TEST_ASSERT(r.method_state() == "deterministic_idle",
+              "A fresh 0 RPM with no flow is idle");
 
-  // The link drops: the motor channel stops refreshing but keeps its value.
-  // The meter keeps reporting, so raw flow stays at recirculation level.
+  // Past the staleness bound. The pump has started, unobserved; the meter is
+  // now reading the recirculation loop, and the motor channel still says 0.
   bool saw_flow_method = false;
-  for (int i = 1; i <= 6; i++) {  // out to 60 s, twice the 30 s staleness bound
+  for (int i = 4; i <= 9; i++) {
     uint32_t now = T0 + i * TICK_MS;
     r.at(now);
     r.flow.publish_state(2.2f);
@@ -211,41 +220,76 @@ void test_frozen_motor_never_enters_pump_off_branch() {
 
   TEST_ASSERT(!saw_flow_method,
               "Recirculation is never scored as household flow while the "
-              "motor reading is frozen");
+              "motor reading is frozen (issue #149)");
   TEST_ASSERT(r.method_state() == "pump_on_uncertain",
               "A frozen motor holds the detector in pump-on uncertainty");
   TEST_ASSERT(r.demand.state == false, "No demand claimed from a frozen link");
   TEST_ASSERT(near(r.confidence.state, 50.0f),
               "Pump-on uncertainty publishes 50% confidence");
-  TEST_ASSERT(std::isnan(r.motor_speed.state) == false &&
-                  near(r.motor_speed.state, 2400.0f),
-              "The frozen reading is still a perfectly valid 2400 RPM — age, "
-              "not NaN, is what rejected it");
 
-  // Same value, now fresh: the pump really is off and the meter really is
-  // seeing a draw. Two ticks for the onset debounce.
-  uint32_t t7 = T0 + 7 * TICK_MS;
-  r.at(t7);
-  r.motor_speed.publish_state(0.0f);
-  r.flow.publish_state(2.2f);
-  r.tick(t7);
-  // The first fresh-off tick must still be pending, and this is the whole of
-  // issue #147: flow was above threshold on the previous tick too, but that
-  // tick was pump-ON, when the meter is reading the recirculation loop. An
-  // unqualified "flow was present last tick" satisfies the debounce here and
-  // makes it a no-op at the one transition it exists for.
-  TEST_ASSERT(r.method_state() == "flow_onset_pending",
-              "Flow carried over from the pump-ON ticks does not arm the "
-              "debounce (issue #147)");
-
-  uint32_t t8 = T0 + 8 * TICK_MS;
-  r.at(t8);
-  r.motor_speed.publish_state(0.0f);
-  r.flow.publish_state(2.2f);
-  r.tick(t8);
+  // Now the same 0 RPM arrives fresh: the pump really is off and the meter
+  // really is seeing a draw. Two ticks for the onset debounce. Nothing differs
+  // from the loop above except the age of the motor reading, which is what
+  // makes this a test of staleness rather than of anything else.
+  for (int i = 10; i <= 11; i++) {
+    uint32_t now = T0 + i * TICK_MS;
+    r.at(now);
+    r.motor_speed.publish_state(0.0f);
+    r.flow.publish_state(2.2f);
+    r.tick(now);
+  }
   TEST_ASSERT(r.method_state() == "deterministic_flow",
-              "A fresh 0 RPM does open the pump-off branch");
+              "The same 0 RPM, arriving fresh, does open the pump-off branch");
   TEST_ASSERT(r.demand.state == true, "Demand raised once the reading is live");
+}
+
+// ── 3b. Recirculation must not arm the onset debounce ────────────────────────
+// Issue #147, at the pump-ON → pump-OFF transition. Flow was above threshold on
+// the previous tick, but that tick was pump-ON, when the meter is reading the
+// recirculation loop and says nothing about household demand. An unqualified
+// "flow was present last tick" satisfies the debounce immediately and makes it
+// a no-op at the one transition it exists for.
+//
+// The composition being tested is the call in dhw_demand.cpp, not the predicate
+// -- the predicate has its own test, and the historical defect was in what the
+// caller passed it.
+void test_recirculation_does_not_arm_the_onset_debounce() {
+  std::cout << "\n=== Recirculation does not arm the flow-onset debounce ==="
+            << std::endl;
+  Rig r;
+  r.det.setup();
+
+  // Pump running with a quiet loop; the meter reads recirculation throughout.
+  for (int i = 0; i <= 2; i++) {
+    uint32_t now = T0 + i * TICK_MS;
+    r.at(now);
+    r.motor_speed.publish_state(2400.0f);
+    r.pump_flow.publish_state(2.1f);
+    r.flow.publish_state(2.2f);
+    r.tick(now);
+  }
+  TEST_ASSERT(r.method_state() == "pump_on_uncertain",
+              "Pump-on with a quiet loop claims nothing");
+
+  // Pump stops. Meter flow is unchanged from the previous tick -- but that tick
+  // was pump-ON, so it contributes no evidence.
+  uint32_t t3 = T0 + 3 * TICK_MS;
+  r.at(t3);
+  r.motor_speed.publish_state(0.0f);
+  r.flow.publish_state(2.2f);
+  r.tick(t3);
+  TEST_ASSERT(r.method_state() == "flow_onset_pending",
+              "The first pump-off tick is pending, not a draw (issue #147)");
+  TEST_ASSERT(r.demand.state == false,
+              "No demand from flow carried over from the pump-ON regime");
+
+  uint32_t t4 = T0 + 4 * TICK_MS;
+  r.at(t4);
+  r.motor_speed.publish_state(0.0f);
+  r.flow.publish_state(2.2f);
+  r.tick(t4);
+  TEST_ASSERT(r.method_state() == "deterministic_flow",
+              "A second pump-off tick of flow confirms the draw");
 }
 
 // ── 4. Flow latch ────────────────────────────────────────────────────────────
@@ -401,9 +445,10 @@ void test_release_hold_reports_coherently() {
 }
 
 // ── 7. Session accounting ────────────────────────────────────────────────────
-// update_session_() must drive the tracker from the *held* demand and on the
-// caller's tick timestamp, not a fresh millis(), or the session and the hold
-// disagree about when the draw ended.
+// This one runs with the release hold disabled, so it isolates the tracker's
+// own arithmetic. The coupling between the hold and the session is the *next*
+// test — with release_seconds at 0 the held and raw values are identical, so
+// nothing here can tell them apart.
 void test_session_duration_tracks_the_draw() {
   std::cout << "\n=== Session duration tracks the draw ===" << std::endl;
   Rig r;
@@ -433,10 +478,49 @@ void test_session_duration_tracks_the_draw() {
               "Session closes and duration returns to 0 past the gap tolerance");
 }
 
+// ── 7b. The session sees the held demand, not the raw one ────────────────────
+// update_session_() is fed the value the release hold produced. If it were fed
+// raw_demand instead, the session would close the moment flow stopped while the
+// demand binary sensor was still ON — the two would be describing different
+// draws. Isolating that needs a non-zero release window and a gap tolerance
+// short enough that the raw-fed version would already have closed.
+void test_session_follows_the_held_demand() {
+  std::cout << "\n=== The session tracks held demand, not raw ===" << std::endl;
+  Rig r;
+  r.det.set_demand_release_seconds(30);
+  r.det.set_session_gap_tolerance_seconds(0);  // close on the first quiet tick
+  r.det.setup();
+
+  // Ticks 0-1: onset debounce, then one tick of real draw.
+  for (int i = 0; i <= 1; i++) {
+    uint32_t now = T0 + i * TICK_MS;
+    r.at(now);
+    r.motor_speed.publish_state(0.0f);
+    r.flow.publish_state(1.5f);
+    r.tick(now);
+  }
+
+  // Flow stops. Raw demand is false from here; the hold keeps it true.
+  for (int i = 2; i <= 3; i++) {
+    uint32_t now = T0 + i * TICK_MS;
+    r.at(now);
+    r.motor_speed.publish_state(0.0f);
+    r.flow.publish_state(0.0f);
+    r.tick(now);
+  }
+
+  TEST_ASSERT(r.demand.state == true, "Hold still latching at +30 s");
+  TEST_ASSERT(near(r.session_duration.state, 20.0f),
+              "Session is still open and counting through the hold — fed raw "
+              "demand it would have closed at the first dry tick and read 0");
+}
+
 // ── 8. Nothing wired ─────────────────────────────────────────────────────────
 // Every input and output is optional in the schema. All the null guards are in
-// the .cpp, so this is the only place they can be exercised; under ASan a
-// missing one is a crash rather than a judgement call.
+// the .cpp, so this is the only place they can be exercised. The assertion is
+// nominally tautological, but the test is not: dropping the nullptr guard in
+// read_sensor_() segfaults here, and `make test` fails on the exit code.
+// `make test-asan` (a CI job) turns the near misses into failures too.
 void test_unwired_component_is_inert() {
   std::cout << "\n=== A component with nothing wired ticks safely ==="
             << std::endl;
@@ -459,10 +543,12 @@ int main() {
   test_idle_publishes_once();
   test_flow_onset_takes_two_ticks();
   test_frozen_motor_never_enters_pump_off_branch();
+  test_recirculation_does_not_arm_the_onset_debounce();
   test_flow_latch_holds_then_expires();
   test_derivative_spans_a_nan_gap();
   test_release_hold_reports_coherently();
   test_session_duration_tracks_the_draw();
+  test_session_follows_the_held_demand();
   test_unwired_component_is_inert();
 
   std::cout << "\n==========================================" << std::endl;

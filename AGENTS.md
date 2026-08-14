@@ -65,6 +65,13 @@ Two established styles in `tests/`:
 
 * **Logic replicas** (`test_control_state.cpp`) — re-declare minimal copies of production enums/logic in the test file; no component sources compiled.
 * **Real sources with mocks** (`test_schedule_service.cpp`, `test_write_operations.cpp`) — compile the actual component `.cpp` files against the mock ESPHome SDK in `tests/mocks/`, capture outgoing frames via `transport.set_write_callback`, drive time with the `mock_millis` global, and inject synthetic response frames via `transport.on_notification`. `test_write_operations.cpp` adds a small pump simulator that answers reads and applies/ignores/clamps writes, which is the template for testing write-operation behavior end-to-end.
+* **A whole ESPHome component** (`test_dhw_demand_component.cpp`) — same idea one level up: instantiate the component, wire mock entities through its real setters, call `setup()` and then `update()` on the `mock_millis` clock, and assert on what the output entities received. Use this for the parts of a component that live in its `.cpp` and nowhere else — sensor-callback wiring, branch selection, publish gating.
+
+**A mock must match real ESPHome, not a convenient version of it.** A mock that behaves better than the SDK makes the code guarding against the SDK look like an oversight, and the test then passes against a bug that does not exist. The entity mocks are annotated with the behaviour they mirror and why it matters: `sensor` and `text_sensor` publish unconditionally while `binary_sensor` de-duplicates (which is what `publish_gate.h` exists for), and `has_state()` means "has published at least once", never "is fresh" (which is what the `dhw_demand` staleness registers exist for).
+
+**If a component `.cpp` can be compiled against the mocks, it should be.** A file no host target compiles is a file the mutation check cannot reach, and `esphome compile` catching a type error is a ten-minute CI round trip that says nothing about behaviour. `dhw_demand.cpp` sat in exactly that state, and the cost was visible: a block referencing an out-of-scope variable passed 905 green tests and cppcheck, and only the firmware build objected.
+
+`alpha_hwr.cpp`, `ble_connection_manager.cpp` and `api_bridge.cpp` genuinely need ESP-IDF or the API SDK, and stay firmware-build-only. Of the rest, `auth.cpp`, `sensor_publisher.cpp`, `telemetry_service.cpp` and `device_info_service.cpp` each compile against the current mocks *unmodified* — verified, not assumed — and are firmware-build-only for no reason but that nobody added the target. `time_service.cpp` needs one small mock it does not have (`esphome/components/time/real_time_clock.h`).
 
 ### Hardware Verification
 
