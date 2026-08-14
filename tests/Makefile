@@ -15,7 +15,7 @@ MOCK_HDRS = $(shell find mocks -name '*.h' 2>/dev/null)
 DEPS = $(COMPONENT_HDRS) $(MOCK_HDRS)
 
 # Test executables
-TESTS = test_protocol test_frame_parser test_read_chain_lifetime test_control_service test_control_state test_dhw_demand_logic test_dhw_demand_component test_transport_matching test_transport_fsm test_schedule_service test_write_operations test_schedule_codec test_telemetry_units test_pump_schedule_ux test_publish_gate test_dhw_publish_gate test_link_watchdog test_initial_read_retry
+TESTS = test_protocol test_frame_parser test_read_chain_lifetime test_control_service test_control_state test_dhw_demand_logic test_dhw_demand_component test_transport_matching test_transport_fsm test_schedule_service test_write_operations test_schedule_codec test_telemetry_units test_pump_schedule_ux test_publish_gate test_dhw_publish_gate test_link_watchdog test_auth test_sensor_publisher test_telemetry_service test_device_info_service test_initial_read_retry
 
 # Default target
 all: $(TESTS)
@@ -86,6 +86,31 @@ test_telemetry_units: test_telemetry_units.cpp ../components/alpha_hwr/telemetry
 
 test_write_operations: test_write_operations.cpp $(WRITE_OP_SRCS) $(DEPS)
 	$(CXX) $(CXXFLAGS) test_write_operations.cpp $(WRITE_OP_SRCS) -o test_write_operations $(LDFLAGS)
+
+AUTH_SRCS = ../components/alpha_hwr/auth.cpp ../components/alpha_hwr/transport.cpp ../components/alpha_hwr/frame_builder.cpp ../components/alpha_hwr/frame_parser.cpp ../components/alpha_hwr/codec.cpp
+
+test_auth: test_auth.cpp $(AUTH_SRCS) $(DEPS)
+	$(CXX) $(CXXFLAGS) test_auth.cpp $(AUTH_SRCS) -o test_auth $(LDFLAGS)
+
+# -DUSE_TEXT_SENSOR is not optional here. The issue #127 publish-on-change
+# guards for the alarm and warning text live inside that ifdef, and the
+# component's AUTO_LOAD pulls text_sensor into every real build -- so without
+# the define this target would compile a different program from the shipped one
+# and report the guards as covered when they had not been compiled at all.
+SENSOR_PUB_SRCS = ../components/alpha_hwr/sensor_publisher.cpp ../components/alpha_hwr/telemetry_decoder.cpp ../components/alpha_hwr/codec.cpp
+
+test_sensor_publisher: test_sensor_publisher.cpp $(SENSOR_PUB_SRCS) $(DEPS)
+	$(CXX) $(CXXFLAGS) -DUSE_TEXT_SENSOR test_sensor_publisher.cpp $(SENSOR_PUB_SRCS) -o test_sensor_publisher $(LDFLAGS)
+
+TELEMETRY_SVC_SRCS = ../components/alpha_hwr/telemetry_service.cpp ../components/alpha_hwr/sensor_publisher.cpp ../components/alpha_hwr/control_service.cpp ../components/alpha_hwr/telemetry_decoder.cpp ../components/alpha_hwr/schedule_service.cpp ../components/alpha_hwr/schedule_codec.cpp ../components/alpha_hwr/transport.cpp ../components/alpha_hwr/session.cpp ../components/alpha_hwr/frame_builder.cpp ../components/alpha_hwr/frame_parser.cpp ../components/alpha_hwr/codec.cpp
+
+test_telemetry_service: test_telemetry_service.cpp $(TELEMETRY_SVC_SRCS) $(DEPS)
+	$(CXX) $(CXXFLAGS) -DUSE_TEXT_SENSOR test_telemetry_service.cpp $(TELEMETRY_SVC_SRCS) -o test_telemetry_service $(LDFLAGS)
+
+DEVICE_INFO_SRCS = ../components/alpha_hwr/device_info_service.cpp ../components/alpha_hwr/transport.cpp ../components/alpha_hwr/session.cpp ../components/alpha_hwr/frame_builder.cpp ../components/alpha_hwr/frame_parser.cpp ../components/alpha_hwr/codec.cpp
+
+test_device_info_service: test_device_info_service.cpp $(DEVICE_INFO_SRCS) $(DEPS)
+	$(CXX) $(CXXFLAGS) test_device_info_service.cpp $(DEVICE_INFO_SRCS) -o test_device_info_service $(LDFLAGS)
 
 
 # Run tests
@@ -175,6 +200,26 @@ test: $(TESTS)
 	@echo "Running DHW Publish Gate Tests..."
 	@echo "=========================================="
 	@./test_dhw_publish_gate
+	@echo ""
+	@echo "=========================================="
+	@echo "Running Authentication Handshake Tests..."
+	@echo "=========================================="
+	@./test_auth
+	@echo ""
+	@echo "=========================================="
+	@echo "Running Sensor Publisher Tests..."
+	@echo "=========================================="
+	@./test_sensor_publisher
+	@echo ""
+	@echo "=========================================="
+	@echo "Running Telemetry Service Tests..."
+	@echo "=========================================="
+	@./test_telemetry_service
+	@echo ""
+	@echo "=========================================="
+	@echo "Running Device Info Service Tests..."
+	@echo "=========================================="
+	@./test_device_info_service
 
 # Sanitizer run. On Linux, -fsanitize=address brings LeakSanitizer with it,
 # which is what catches the read-chain closure leaks; LSan does not run on

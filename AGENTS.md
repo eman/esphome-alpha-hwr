@@ -71,7 +71,12 @@ Two established styles in `tests/`:
 
 **If a component `.cpp` can be compiled against the mocks, it should be.** A file no host target compiles is a file the mutation check cannot reach, and `esphome compile` catching a type error is a ten-minute CI round trip that says nothing about behaviour. `dhw_demand.cpp` sat in exactly that state, and the cost was visible: a block referencing an out-of-scope variable passed 905 green tests and cppcheck, and only the firmware build objected.
 
-`alpha_hwr.cpp`, `ble_connection_manager.cpp` and `api_bridge.cpp` genuinely need ESP-IDF or the API SDK, and stay firmware-build-only. Of the rest, `auth.cpp`, `sensor_publisher.cpp`, `telemetry_service.cpp` and `device_info_service.cpp` each compile against the current mocks *unmodified* — verified, not assumed — and are firmware-build-only for no reason but that nobody added the target. `time_service.cpp` needs one small mock it does not have (`esphome/components/time/real_time_clock.h`).
+`alpha_hwr.cpp`, `ble_connection_manager.cpp` and `api_bridge.cpp` genuinely need ESP-IDF or the API SDK, and stay firmware-build-only. Everything else in `components/` is host-compiled and host-tested, with one exception: `time_service.cpp`, which needs a `esphome/components/time/real_time_clock.h` mock that does not exist yet.
+
+Two things the first round of this taught, worth repeating when adding the next target:
+
+* **Compile with the same defines the firmware uses.** `sensor_publisher.cpp` keeps the issue #127 publish guards inside `#ifdef USE_TEXT_SENSOR`, and the component's `AUTO_LOAD` defines it on every real build — so the host target passes `-DUSE_TEXT_SENSOR`. Without it the target would compile a *different program* and report guards as covered that had never been compiled.
+* **Expect the first host compile to find something.** Adding `device_info_service.cpp` turned up three dead things in one pass that the firmware build had never reported: a file-static `TAG` shadowed by the class's own, a lambda capturing `this` and not using it, and an unused `Session &` member (which the constructor no longer takes).
 
 ### Hardware Verification
 

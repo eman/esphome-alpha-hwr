@@ -59,6 +59,12 @@ static const uint32_t TICK_MS = 10000;
 // The component plus the twelve entities it talks to, wired the way the codegen
 // wires them. Inputs are left unpublished until a test publishes them, which is
 // the real boot condition: has_state() false, so read_sensor_() returns NaN.
+// Anonymous namespace: several test files in this suite define their own
+// Rig, and cppcheck's whole-program pass reports same-named structs across
+// translation units as an ODR violation even though each test is its own
+// binary. Same treatment as test_read_chain_lifetime.cpp.
+namespace {
+
 struct Rig {
   esphome::sensor::Sensor motor_speed, motor_current, pump_flow, flow;
   esphome::sensor::Sensor tank_lower_temp, dhw_charge, dhw_in_use;
@@ -97,6 +103,9 @@ struct Rig {
 
   const std::string &method_state() const { return method.state; }
 };
+
+}  // namespace
+
 
 static bool near(float a, float b) { return std::fabs(a - b) < 0.001f; }
 

@@ -48,9 +48,8 @@ class DeviceInfoService {
    * Constructor
    * 
    * @param transport BLE transport layer for packet I/O
-   * @param session Session manager for state tracking
    */
-  DeviceInfoService(core::Transport &transport, core::Session &session);
+  explicit DeviceInfoService(core::Transport &transport);
 
   /**
    * Destructor
@@ -134,7 +133,6 @@ class DeviceInfoService {
 
  private:
   core::Transport &transport_;
-  core::Session &session_;
 
   // Cached device information
   std::string product_name_;
