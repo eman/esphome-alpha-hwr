@@ -9,16 +9,19 @@ namespace core {
 /**
  * Re-arm predicate for the one-shot initial data read chain.
  *
- * trigger_initial_data_reads() latches initial_data_read_done_, and the only
- * thing that clears it is a BLE disconnect. That is fine when the chain runs
- * after a fresh handshake, but the chain also runs from update() when the link
- * persists through an ESP32 restart and there is no re-auth. On that path it
- * can fire before the pump is answering: the reads fail, the latch stays set,
- * and nothing ever retries. The device then stays half-initialised for as long
- * as the link stays up -- telemetry keeps streaming, so it looks alive, but
- * device info and the operating statistics are never read.
+ * trigger_initial_data_reads() latches initial_data_read_done_. Until this
+ * predicate existed, a BLE disconnect was the only thing that cleared it: fine
+ * when the chain runs after a fresh handshake, but the chain also runs from
+ * update() when the link persists through an ESP32 restart and there is no
+ * re-auth, and on that path it can fire before the pump is answering. The reads
+ * failed, the latch stayed set, and nothing retried -- so the device stayed
+ * half-initialised for as long as the link stayed up. Telemetry keeps streaming
+ * throughout, so it looks alive, but device info and the operating statistics
+ * were never read.
  *
- * This decides when to abandon an attempt and run the chain again.
+ * This decides when to abandon an attempt and run the chain again; the caller
+ * clears the latch on the strength of it, which is now the second way it can be
+ * cleared.
  */
 inline bool should_rearm_initial_read(bool session_ready, bool chain_done,
                                       bool caches_synchronized,

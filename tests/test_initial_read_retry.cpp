@@ -1,12 +1,14 @@
 // Host tests for the initial-read re-arm predicate.
 //
-// trigger_initial_data_reads() latches initial_data_read_done_ and the ONLY
-// thing that clears it is a BLE disconnect. The chain has two callers -- the
-// auth-complete callback, and update() for the case where the link persists
-// through an ESP32 restart and no re-auth happens. On that second path it can
-// fire before the pump is answering; its reads miss, the latch stays set, and
-// nothing retries, so device info and the operating statistics stay unread for
-// as long as the link stays up.
+// trigger_initial_data_reads() latches initial_data_read_done_, and before the
+// re-arm under test here, a BLE disconnect was the ONLY thing that cleared it.
+// The chain has two callers -- the auth-complete callback, and update() for the
+// case where the link persists through an ESP32 restart and no re-auth happens.
+// On that second path it can fire before the pump is answering; its reads miss,
+// the latch stays set, and nothing retries, so device info and the operating
+// statistics stay unread for as long as the link stays up. The re-arm is now
+// the second thing that clears the latch, and these tests are what decide when
+// it does.
 //
 // The subtle part, and what the first version of this fix got wrong: the
 // control cache and the schedule overview are NOT products of this chain. The
