@@ -14,6 +14,33 @@
 
 ### Fixed
 
+- **Device information and the operating statistics could silently never be
+  read.** The one-time chain that fetches them is latched by a flag that only a
+  BLE disconnect clears. It normally runs after authentication, but it also
+  runs when the BLE link survives an ESP32 restart and no re-authentication
+  happens — and on that path it can fire before the pump is answering. When it
+  does, those reads miss, the flag stays set, and nothing runs them again for
+  as long as the link holds.
+
+  Nothing surfaces it. Telemetry polling is a separate path, so the sensors
+  keep updating at their usual cadence, and the two caches that gate Pump Ready
+  — the control cache and the schedule overview — are refreshed by their own
+  polls rather than by this chain, so they recover on their own and Pump Ready
+  comes on as usual. The node therefore looks entirely healthy while the
+  product name, serial, firmware versions, start count and operating hours are
+  simply absent.
+
+  The chain is now re-armed when what it alone produces has not arrived, rather
+  than when the self-healing caches are still invalid — the distinction matters,
+  because those caches typically recover well inside the timeout and would
+  otherwise call the attempt a success. Pending timers from the failed attempt
+  are retired first so the retry cannot double up with them, the interval
+  doubles from 60 s to a 10 minute ceiling so a pump that never returns these
+  values is not re-read forever, and the pump-clock write in the chain runs on
+  the first attempt only, leaving that write throttled to once a day as before.
+  The retry itself is deliberately unbounded — a limit would restore the same
+  permanent stall it exists to prevent.
+
 - **A pump that stopped answering could report itself connected forever.**
   Nothing in the connection sequence checked that data was coming back:
   authentication is a chain of timers that sends its packets and declares
