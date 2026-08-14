@@ -125,7 +125,15 @@ guard at `:32` runs *before* the clamp at `:65`. Latent only because no caller c
 Separately: every response fixture in the suite ends in a literal `0xAA 0xBB` — a garbage CRC — and
 is accepted, because `Transport::try_dispatch_response` never validates CRC (only
 `telemetry_service.cpp:94-97` does). **Fixing the CRC gap would fail 300+ assertions.** Understand
-that coupling before attempting it. The underlying gap is real: every control, schedule,
+that coupling before attempting it.
+
+> **Resolved in PR #165 (2026-08-13).** The count was **144**, not 300+
+> (`test_write_operations` 136, `test_schedule_service` 5, `test_transport_fsm` 3), and they funnel
+> through about five injection points rather than living in 144 separate fixtures — so
+> `tests/fixture_crc.h` stamps a real CRC at each, using the *production* `calc_crc16_read` so the
+> suite can only pass when fixtures and firmware agree. Replaying 36,394 captured notifications
+> through the real `Transport` completes 17,624 frames and drops 3 (0.017%), all genuine
+> corruption: no alternate CRC window matches them. The underlying gap is real: every control, schedule,
 single-event, event-log and device-info payload is parsed from unverified bytes, including the
 readbacks that decide write verdicts.
 
@@ -185,7 +193,34 @@ catch the lie agrees with it.
 *Fix:* give the enable leg the readback `confirm_schedule_enabled_` already has.
 
 ### 7. A late response is delivered to the next command
-`transport.cpp:103-132`, `:501` — **CONFIRMED, P1 → P2**
+`transport.cpp:103-132`, `:501` — **CONFIRMED, P1 → P2 — MECHANISM CORRECTED, see the note below**
+
+> **Correction (2026-08-13, from the capture investigation behind PR #166).** The collision is real
+> but this section gets *why* wrong, and the wrong reason points at the wrong fix.
+>
+> A GENI response carries **no Object ID and no Sub-ID**. Bytes 6-9 are `[00][TypeH][TypeL][Version]`
+> — the object *type* and version. Byte 6 is `0x00` in 100% of 23,739 captured Class 10 responses,
+> and bytes 7-8 always equal the type the request named.
+>
+> So matching discriminates object **types**, never *instances* of a type — and that is true on the
+> exact-match path too. This section's claim that "it holds only for the exact-match path at `:507`"
+> is therefore backwards: the exact-match sites collide identically wherever siblings share a type.
+> Verified byte-for-byte: schedule layers Sub 1000-1004 all answer `00 00 DE 01`, single-event slots
+> Sub 900-904 all answer `00 00 DC 01`, event-log entries Sub 10200-10219 all answer `00 00 F4 02`.
+> The latter two are not mentioned here at all.
+>
+> Consequently "stop using the wildcard" fixes only the *singleton* reads, which were never the
+> problem — the three collisions reproduced below are same-type siblings that no field matching can
+> separate.
+>
+> Observed exposure is also **zero**: across ~26,900 captured exchanges no response arrived later
+> than 264 ms against a 3000 ms timeout. The misattributions visible in the captures come from the
+> phone app *pipelining* requests, which this firmware never does (single `command_queue_.front()`,
+> `AWAITING_RESPONSE` gate, 50 ms pacing).
+>
+> What the investigation *did* find is a real bug this section's framing hid: the Object 86 Sub 7
+> mode read passed its two matching arguments in the wrong order and matched only through a fallback
+> branch. Fixed in PR #166.
 
 `Transport` keeps no per-command identity; matching is against `command_queue_.front()` only, and
 GENI frames carry no sequence number. The timeout path records nothing about the command that died.
@@ -209,6 +244,34 @@ mode is silence, which produces no stale frame.
 
 *Refuted sub-claims:* the Class 3 run/remote-mode pair is unreachable, and Obj 91 Sub 430 vs 421 is
 immune via the OpSpec 0x15/0x0D workaround.
+
+### 7b. `is_register_read` is a length blocklist wearing a format filter's name
+`transport.cpp:538`, `:682` — **NEW, added 2026-08-13, P2**
+
+Not in the original audit; found while investigating finding 7.
+
+Byte 5 of a response is the APDU **body length**, not an operation code: `byte5 == total_len - 8`
+held for all 26,895 captured inbound frames without exception. So
+
+```cpp
+bool is_register_read = (opspec == 0x30 || opspec == 0x2B || opspec == 0x14 ||
+                         opspec == 0x2E || opspec == 0x2D || opspec == 0x09);
+```
+
+does not mean "this is a telemetry register read". It means **"this response's body is 48, 43, 20,
+46, 45 or 9 bytes"** — and any such response is silently dropped for command matching, so the
+command it was answering times out instead.
+
+This is not hypothetical: event-log entry replies are 20 bytes (`0x14`) and already trip it.
+`event_log_service.cpp:139` works around it with `allow_register_read=true` rather than the filter
+being fixed. Every other read is one payload byte away from the same fate — cycle timestamps
+currently answer `0x2F` (47), with `0x2E` (46) and `0x2D` (45) both on the list.
+
+*Before fixing:* the filter exists to stop telemetry responses matching a queued command through the
+Class 10 wildcard path, so it cannot simply be deleted. Establish from the captures what actually
+distinguishes a telemetry register-read reply from a DataObject reply — the investigation behind
+PR #166 found they share the same `[00][TypeH][TypeL][Version]` header, so a real discriminator may
+not exist and the answer may be to narrow the wildcard callers instead.
 
 ### 8. The deaf node reports "Connected" forever
 `ble_connection_manager.cpp:212-213`, `:490-498`; `auth.cpp` — **CONFIRMED, P2**
