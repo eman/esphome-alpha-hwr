@@ -221,6 +221,21 @@ void BLEConnectionManager::subscribe_to_notifications() {
   }
 }
 
+void BLEConnectionManager::force_disconnect(const char *reason) {
+  ESP_LOGW(TAG, "Forcing BLE disconnect: %s", reason);
+  // Latch the real cause before tearing the link down. The DISCONNECT event we
+  // are about to provoke would otherwise overwrite it with "Local Host
+  // Terminated", which is true but says nothing; holding it keeps the actual
+  // reason readable through the reconnect loop that follows. Cleared by
+  // handle_notification() the moment data flows again.
+  last_failure_ = reason;
+  significant_failure_held_ = true;
+  data_watchdog_hold_ = true;
+  if (client_ != nullptr) {
+    client_->disconnect();
+  }
+}
+
 void BLEConnectionManager::handle_connection_opened(const esp_ble_gattc_cb_param_t *param) {
   ESP_LOGI(TAG, "BLE connection opened. Pairing enabled: %s", pairing_enabled_ ? "YES" : "NO");
   
@@ -358,6 +373,16 @@ void BLEConnectionManager::handle_notification(const esp_ble_gattc_cb_param_t *p
   auto *notify_evt = &param->notify;
   if (notify_evt->value_len > 0) {
     ESP_LOGV(TAG, "Received notification, %d bytes", notify_evt->value_len);
+    // Inbound data refutes a held "no data from pump" reason by construction,
+    // so release that hold here rather than waiting for the AUTH_CMPL clear
+    // below — with pairing disabled (the default) AUTH_CMPL never fires at all,
+    // so a watchdog hold would otherwise never be released. Scoped to the
+    // watchdog's own hold: see data_watchdog_hold_ for why an auth-failure hold
+    // must survive notifications.
+    if (data_watchdog_hold_) {
+      data_watchdog_hold_ = false;
+      significant_failure_held_ = false;
+    }
     if (notification_callback_) {
       notification_callback_(notify_evt->value, notify_evt->value_len);
     }
@@ -383,10 +408,17 @@ void BLEConnectionManager::handle_auth_complete(const esp_ble_gap_cb_param_t *pa
     encryption_pending_ = false;
     // Recovery: a successful (re-)auth clears any held significant-failure reason,
     // so the fault sensor stops showing the old cause once the link is healthy.
-    // This single clear site is sufficient: the hold is only ever set on an auth
-    // failure, which erases the bond, so recovery must pass back through a fresh
-    // AUTH_CMPL success here to reach READY. (The fault display is also gated on
-    // is_ready().) So no path reaches READY with the hold still set.
+    // This covers the hold set on an auth failure, which erases the bond, so
+    // recovery must pass back through a fresh AUTH_CMPL success here to reach
+    // READY. The watchdog's hold is released in handle_notification() instead.
+    //
+    // Note the watchdog's hold CAN outlive a return to READY, because reaching
+    // READY does not prove the pump is answering — that is the very defect the
+    // watchdog exists for. That is the correct outcome, not a leak: while the
+    // node is deaf, "No data from pump" is the true fault, and the display is
+    // gated on is_ready() so a healthy link never shows it. The bounded cost is
+    // that a deaf pump which then disappears entirely keeps showing the deaf
+    // reason rather than the newer connection-failure reason.
     significant_failure_held_ = false;
     if (subscription_deferred_) {
       // Service discovery finished while SMP was negotiating; the link is now

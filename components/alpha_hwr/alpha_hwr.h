@@ -24,6 +24,7 @@
 #include "event_log_service.h"
 #include "frame_builder.h"
 #include "history_service.h"
+#include "link_watchdog.h"  // inbound-data watchdog predicate for a deaf-but-open link
 #include "publish_gate.h"  // publish-on-change gates for the YAML control entities (#127)
 #include "pump_schedule_ux.h"
 #include "schedule_entry.h"
@@ -252,6 +253,11 @@ public:
   // just-powered-up pump has time to be ready before encryption is requested.
   // 0 = disabled (immediate reconnect; the default/legacy behavior).
   void set_reconnect_settle_time(uint32_t ms) { this->reconnect_settle_ms_ = ms; }
+  // Budget (ms) the inbound-data watchdog allows between received
+  // notifications before it tears the link down; timed from connection-open
+  // while nothing has arrived yet. 0 = disabled. See link_watchdog.h for why
+  // this is a liveness check rather than a gate on READY.
+  void set_data_timeout(uint32_t ms) { this->link_data_timeout_ms_ = ms; }
   // Interval (ms) for periodic control state polling to detect out-of-band pump
   // state changes (e.g., internal schedule execution, manual button press).
   // 0 = disabled (default is 30 seconds; fixes issue #54).
@@ -357,6 +363,8 @@ private:
   uint32_t reconnect_settle_ms_{0};   // Post-disconnect reconnect hold-off (ms)
   bool reconnect_settling_{false};    // True while holding off reconnect after a disconnect
   bool reconnect_timer_armed_{false}; // True once the settle timer has started this episode
+
+  uint32_t link_data_timeout_ms_{60000};  // Inbound-data watchdog budget (ms); 0 = disabled
 
   uint32_t control_state_poll_interval_ms_{30000};  // Control state poll interval (ms); default 30s (fixes #54)
   uint32_t last_control_state_poll_time_{0};        // Timestamp of last control state poll
@@ -479,6 +487,14 @@ private:
   // published (plus the latched last-failure string) on change. Driven by the
   // connection/disconnection/auth callbacks and a periodic check in loop().
   void evaluate_link_status();
+
+  // Inbound-data watchdog (link_watchdog.h): recycles a link that is open and
+  // apparently healthy but delivers no notifications. Timed from
+  // connection-open and refreshed on every received notification, so it covers
+  // both a handshake that never produced data and a session that goes deaf.
+  void check_link_liveness_();
+  uint32_t link_last_inbound_ms_{0};
+
   uint32_t link_boot_ms_{0};
   uint32_t link_last_open_ms_{0};
   uint32_t link_last_eval_ms_{0};

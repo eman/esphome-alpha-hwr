@@ -325,9 +325,11 @@ as a result — the exact-match read now gets its own 20-byte answer. Pinned by
 in the correct direction.
 
 ### 8. The deaf node reports "Connected" forever
-`ble_connection_manager.cpp:212-213`, `:490-498`; `auth.cpp` — **CONFIRMED, P2**
+`ble_connection_manager.cpp` — the CCCD return-code check in
+`BLEConnectionManager::subscribe_to_notifications()` and the `ESP_GATTC_WRITE_DESCR_EVT` case in
+`handle_gattc_event()`; `auth.cpp` — **CONFIRMED, P2 — RESOLVED 2026-08-14**
 
-`auth.cpp` is a pure scheduler chain; nothing inspects a reply, and READY arrives ~1.05 s after
+`auth.cpp` is a pure scheduler chain; nothing inspects a reply, and READY arrives 1200 ms after
 `authenticate()` regardless of received data. Both CCCD-failure paths reach it — the synchronous
 return code only logs then falls through to `subscribed_callback_()`.
 
@@ -335,6 +337,51 @@ I expected the link-status ladder to catch this. **It does not:** `is_ready()` i
 *first* rung, so this state reports "Connected" forever and keeps refreshing `link_last_open_ms_`,
 so it can never fall through. The user sees Connected + Pairing on, Pump Ready off, every sensor
 frozen, and a control-cache retry every 5 s indefinitely.
+
+> **RESOLVED** — `components/alpha_hwr/link_watchdog.h`, wired in
+> `AlphaHwrComponent::check_link_liveness_()`.
+>
+> The fix is a liveness check, not the handshake gate the finding implies. Gating READY on the
+> async `ESP_GATTC_WRITE_DESCR_EVT` status trades a falsely-ready node for one that may never
+> become ready; gating it on "a notification arrived during auth" appears to hold on this pump —
+> notifications are received during the handshake, which is why no default control mode is
+> published at setup — but that rests on a single specimen, and nothing committed to this repo pins
+> the timing, so it is an observation, not a measured margin. Both fail closed on a variant that
+> stays quiet until first polled. Instead a single timer, seeded at connection-open and refreshed
+> on every received notification, tears the link down when nothing arrives within `data_timeout`
+> (new option, default 60 s, 0 disables).
+>
+> **The remedy had to be a disconnect, not a session-state transition.** Recovery in this component
+> is driven by the BLE disconnection callback, not by session state, so transitioning to ERROR
+> would swap a falsely-ready node for a permanently stuck one — strictly worse. `force_disconnect()`
+> follows the precedent already in `ble_connection_manager.cpp` for a bonded reconnect whose
+> encryption failed, and latches its reason through the ensuing reconnect loop so the Pump Link
+> Fault sensor is not overwritten by the "Local Host Terminated" event it provokes.
+>
+> Timing the window from the open rather than from READY also covers the finding's unstated half:
+> the other four subscription paths return *without* calling `subscribed_callback_()` at all,
+> parking the session in SUBSCRIBING forever. Same observable, same remedy.
+>
+> Sizing is not a guess — a READY link is polled every 10 s and `update_interval` is rejected as an
+> invalid option (verified against the schema), so no configuration can widen the healthy gap past
+> the 60 s budget. Worst case to first data is the handshake, not steady state: 17.2 s by the
+> constants, 5.90/6.17/5.94 s to READY measured across three reconnects on hardware. Benched both
+> directions — at a deliberately short 5 s budget the full path fires, force-disconnects
+> (reason 0x16), reconnects and returns to READY, reaching the "Reconnecting" rung after repeated
+> failures; at the shipped 60 s it did not fire once in a 4m56s soak with 381 sensor publishes and
+> no session transitions. Pinned by `tests/test_link_watchdog.cpp` (16 assertions) and two entries
+> in `tools/mutation_check.sh`.
+>
+> **What it does not do**, per the skeptic pass: it recycles a deaf link rather than making one
+> legible. READY is still reached without data, so a *permanently* deaf pump cycles ~60 s
+> looking connected against ~6 s reconnecting, and the link status reads "Connected" for most of
+> that. The finding's headline symptom is therefore corrected only in the sense that the node now
+> keeps trying; a user watching the sensors sees flapping rather than a steady fault. Gating READY
+> on received data would fix that too and remains the deeper fix — it was declined here for the
+> single-specimen reason above, not because it was overlooked. The rollover mutation is the one worth noting: written the obvious way
+> as `now > last + timeout`, the predicate agrees with the shipped form on both of the rollover
+> assertions I first wrote, and a node near 49 days of uptime would be torn down on every tick. The
+> test that discriminates them was added only after checking the mutation actually failed.
 
 ### 9. `dhw_demand` trusts a stale pump-OFF reading indefinitely
 `dhw_demand.cpp:333-346` — **CONFIRMED (consequence), REFUTED (mechanism), P2**

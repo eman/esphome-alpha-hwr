@@ -83,6 +83,7 @@ CONF_READY_STATUS = "ready_status"
 CONF_ENABLE_PAIRING = "enable_pairing"
 CONF_RECONNECT_SETTLE_TIME = "reconnect_settle_time"
 CONF_CONTROL_STATE_POLL_INTERVAL = "control_state_poll_interval"
+CONF_DATA_TIMEOUT = "data_timeout"
 CONF_ALARMS = "alarms"
 CONF_WARNINGS = "warnings"
 CONF_SCHEDULE_HASH = "schedule_hash"
@@ -125,6 +126,14 @@ CONFIG_SCHEMA = cv.Schema(
         ): cv.positive_time_period_milliseconds,
         cv.Optional(
             CONF_CONTROL_STATE_POLL_INTERVAL, default="30s"
+        ): cv.positive_time_period_milliseconds,
+        # Inbound-data watchdog: tear the BLE link down when the pump stops
+        # answering while the session still reports itself connected. A READY
+        # link is polled every 10s (five telemetry registers plus the schedule),
+        # so 60s is six missed poll cycles. 0 disables it. See
+        # components/alpha_hwr/link_watchdog.h.
+        cv.Optional(
+            CONF_DATA_TIMEOUT, default="60s"
         ): cv.positive_time_period_milliseconds,
         cv.Optional(CONF_FLOW): sensor.sensor_schema(
             unit_of_measurement="m³/h",
@@ -342,6 +351,7 @@ async def to_code(config):
     # Set pairing enabled flag
     cg.add(var.set_pairing_enabled(config[CONF_ENABLE_PAIRING]))
     cg.add(var.set_reconnect_settle_time(config[CONF_RECONNECT_SETTLE_TIME]))
+    cg.add(var.set_data_timeout(config[CONF_DATA_TIMEOUT]))
     if config[CONF_RECONNECT_SETTLE_TIME].total_milliseconds > 0:
         # Register as an esp32_ble_tracker listener (at codegen, so the count
         # macro that enables the listener path is defined) — this is what makes

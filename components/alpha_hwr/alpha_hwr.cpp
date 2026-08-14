@@ -76,6 +76,10 @@ void AlphaHwrComponent::setup() {
     this->link_last_open_ms_ = millis();
     this->link_ever_opened_ = true;
     this->link_reached_ready_ = false;
+    // Start the inbound-data watchdog from the open, not from READY: the
+    // subscribe paths that never call subscribed_callback_() leave the session
+    // short of READY forever, and those need recycling too.
+    this->link_last_inbound_ms_ = this->link_last_open_ms_;
     this->evaluate_link_status();
   });
 
@@ -165,6 +169,11 @@ void AlphaHwrComponent::setup() {
 
   ble_manager_.set_notification_callback(
       [this](const uint8_t *data, size_t len) {
+        // Inbound-data watchdog: stamped here, before any parsing, so that a
+        // pump answering with frames this build cannot decode still counts as
+        // alive. The watchdog is a liveness check on the link, not a
+        // correctness check on the payload.
+        this->link_last_inbound_ms_ = millis();
         // Pass to transport for reassembly
         this->transport_.on_notification(data, len);
       });
@@ -385,8 +394,40 @@ void AlphaHwrComponent::loop() {
   // produces no callbacks, so only an elapsed-time check can detect it.
   if (millis() - this->link_last_eval_ms_ >= 1000) {
     this->link_last_eval_ms_ = millis();
+    this->check_link_liveness_();
     this->evaluate_link_status();
   }
+}
+
+// Inbound-data watchdog. See link_watchdog.h for why a link can be open,
+// authenticated and completely deaf, and why the remedy is a disconnect rather
+// than a session-state transition.
+void AlphaHwrComponent::check_link_liveness_() {
+  if (!link_data_timeout_expired(this->session_.is_connected(), millis(),
+                                 this->link_last_inbound_ms_, this->link_data_timeout_ms_)) {
+    return;
+  }
+
+  ESP_LOGE(TAG, "No data from pump for %" PRIu32 " ms while %s - recycling the link",
+           this->link_data_timeout_ms_, this->session_.get_state_name());
+
+  // Count this as a failed attempt even though the session had reached READY.
+  // Without it the disconnect handler reads link_reached_ready_ and clears
+  // link_consecutive_failures_, so a pump that is deaf on every connection
+  // would cycle forever showing "Connected" then "Connecting" and never reach
+  // the "Reconnecting" rung that says the link keeps failing.
+  this->link_reached_ready_ = false;
+
+  char reason[64];
+  snprintf(reason, sizeof(reason), "No data from pump (%" PRIu32 "s)",
+           this->link_data_timeout_ms_ / 1000);
+  // Re-arm before disconnecting. esp_ble_gattc_close() is asynchronous, so the
+  // session stays is_connected() for some number of loop() ticks after this
+  // call; without the re-arm the window is still expired on every one of them
+  // and the watchdog would re-fire (and re-latch its failure reason) each tick
+  // until the DISCONNECT event finally lands.
+  this->link_last_inbound_ms_ = millis();
+  this->ble_manager_.force_disconnect(reason);
 }
 
 // Pump Link Status state machine. The status is the FIRST matching condition

@@ -28,6 +28,35 @@ events fire.
 | `enable_pairing` | boolean | `false` | Enable BLE pairing for control and enhanced telemetry |
 | `reconnect_settle_time` | time | `2s` | Delay after disconnect before reconnecting |
 | `control_state_poll_interval` | time | `30s` | Interval for periodic control state polling. Set to `0s` to disable. |
+| `data_timeout` | time | `60s` | Tear the BLE link down after this long with no data from the pump, so the normal reconnect runs. Set to `0s` to disable. |
+
+### `data_timeout`
+
+The GENI handshake does not verify that the pump is answering: authentication
+sends its packets on timers and never inspects a reply, so the session reaches
+its ready state whether or not anything came back. A link whose writes succeed
+but whose notifications never arrive therefore reports itself healthy
+indefinitely — every sensor frozen, nothing to trigger a reconnect, because the
+BLE connection itself is fine.
+
+`data_timeout` closes that hole with a liveness check: if nothing is received
+for this long while connected, the link is dropped and the usual reconnect
+takes over. During the reconnect the **Pump Link Fault** sensor reads
+`No data from pump (60s)` — held there rather than overwritten by the local
+disconnect that caused it — and returns to `None` once data flows again.
+
+The window is timed from connection-open and refreshed on every received
+notification. A working link is polled every 10 seconds, so in steady state the
+default tolerates five missed poll cycles and acts on the sixth.
+
+This recovers a link that *can* recover. A pump that is permanently deaf will
+instead cycle — roughly 60 seconds looking connected, then about 6 seconds
+reconnecting — because reaching the ready state still does not require data. If
+you see the link status and fault sensors flapping on that cadence, the pump
+itself is not answering and reconnecting will not fix it.
+
+Raise `data_timeout` if your setup has long legitimate quiet periods; set it to
+`0s` to disable the check entirely.
 
 ## Examples
 

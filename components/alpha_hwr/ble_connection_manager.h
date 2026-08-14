@@ -94,6 +94,13 @@ class BLEConnectionManager {
                                    uint8_t product_type,
                                    const esp32_ble_tracker::ESPBTUUID &service_uuid);
 
+  /// Tear down the current GATT link, latching @p reason for the Pump Link
+  /// Status companion sensor. Used by the component's inbound-data watchdog
+  /// (link_watchdog.h): recovery in this component is driven by the BLE
+  /// disconnection callback, so dropping the link is how a dead-but-open
+  /// connection gets recycled. No-op when no client is attached.
+  void force_disconnect(const char *reason);
+
   // Debug helpers
   void dump_services();
 
@@ -153,6 +160,13 @@ class BLEConnectionManager {
   std::string last_failure_;     // latched last failure reason (human-readable)
   bool bonded_at_open_{false};   // bond state captured at the last connection-open
   bool significant_failure_held_{false};  // hold an auth/encryption failure reason over routine disconnects until recovery
+  // True when the hold above was placed by force_disconnect() rather than by an
+  // auth failure. Only this kind is released by inbound data: an SMP failure on
+  // an UNBONDED pump latches its reason without tearing the link down, and that
+  // link then subscribes and delivers notifications normally (passive telemetry
+  // needs no bond) — releasing on data there would wipe the pairing diagnostic
+  // that the hold exists to preserve.
+  bool data_watchdog_hold_{false};
 
   // Advertisement identifiers decoded at scan time (pre-connection)
   PumpAdvertisementInfo adv_info_;
