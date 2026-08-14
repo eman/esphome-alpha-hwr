@@ -417,10 +417,19 @@ nullptr→NAN path satisfies it exactly. It was never falsified.
 > **The gap was that none of it was tested.** The decision lived in `dhw_demand.cpp`, which no host
 > test compiles — only the pure header is linked — so the branch selecting between the pump-ON and
 > pump-OFF demand paths had zero coverage, in a component whose logic is otherwise well covered.
-> Extracted verbatim into `decide_pump_state()` in `dhw_demand_logic.h` and pinned by 25 assertions,
-> the load-bearing one being that a frozen 0 RPM does not assert confirmed-off. Two mutations
-> (`frozen-motor-asserts-pump-off`, `motor-staleness-mask-removed`) confirm the tests bind the
-> shipped predicate.
+> Extracted verbatim into `decide_pump_state()` in `dhw_demand_logic.h` and pinned by 35 assertions,
+> the load-bearing one being that a frozen 0 RPM does not assert confirmed-off. Five mutations
+> (`frozen-motor-asserts-pump-off`, `motor-staleness-mask-removed`,
+> `motor-current-staleness-mask-removed`, `motor-speed-on-threshold`,
+> `motor-channel-precedence-swapped`) confirm the tests bind the shipped predicate; the last three
+> were added after a skeptic pass showed they survived the first round of tests.
+>
+> **Reproduced on hardware.** The frozen regime is not a hypothetical: forcing a BLE drop
+> (`data_timeout: 5s`) and holding the reconnect past the 30 s motor-staleness bound
+> (`reconnect_settle_time: 90s`) put the detector into it 17 times over one run. Throughout, it
+> reported `pump_on_uncertain` at 50 % confidence — the safe answer the design predicts — returning
+> to `deterministic_idle` at 100 % once readings were fresh again. **`deterministic_flow`, the false
+> positive this finding is about, occurred zero times.**
 >
 > The extraction also collapsed a duplicate: `pump_confirmed_off` was computed a *second* time,
 > thirty lines below `pump_on`, from the same inputs. I first wrote this up as a latent defect —
