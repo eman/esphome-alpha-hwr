@@ -366,11 +366,11 @@ frozen, and a control-cache retry every 5 s indefinitely.
 > invalid option (verified against the schema), so no configuration can widen the healthy gap past
 > the 60 s budget. Worst case to first data is the handshake, not steady state: 17.2 s by the
 > constants, 5.90/6.17/5.94 s to READY measured across three reconnects on hardware. Benched both
-> directions — at a deliberately short 5 s budget the full path fires, force-disconnects
-> (reason 0x16), reconnects and returns to READY, reaching the "Reconnecting" rung after repeated
-> failures; at the shipped 60 s it did not fire once in a 4m56s soak with 381 sensor publishes and
-> no session transitions. Pinned by `tests/test_link_watchdog.cpp` (16 assertions) and two entries
-> in `tools/mutation_check.sh`.
+> directions against the final tree — at a deliberately short 5 s budget the full path fires,
+> force-disconnects (reason 0x16), latches the fault, reconnects, re-authenticates and returns to
+> READY with the fault released; at the shipped 60 s it did not fire once in a 5m23s soak carrying
+> 404 sensor publishes with no drops. Pinned by `tests/test_link_watchdog.cpp` (18 assertions) and
+> two entries in `tools/mutation_check.sh`.
 >
 > **What it does not do**, per the skeptic pass: it recycles a deaf link rather than making one
 > legible. READY is still reached without data, so a *permanently* deaf pump cycles ~60 s

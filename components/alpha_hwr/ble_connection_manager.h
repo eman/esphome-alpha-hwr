@@ -159,14 +159,31 @@ class BLEConnectionManager {
   // Pump Link Status support
   std::string last_failure_;     // latched last failure reason (human-readable)
   bool bonded_at_open_{false};   // bond state captured at the last connection-open
-  bool significant_failure_held_{false};  // hold an auth/encryption failure reason over routine disconnects until recovery
-  // True when the hold above was placed by force_disconnect() rather than by an
-  // auth failure. Only this kind is released by inbound data: an SMP failure on
-  // an UNBONDED pump latches its reason without tearing the link down, and that
-  // link then subscribes and delivers notifications normally (passive telemetry
-  // needs no bond) — releasing on data there would wipe the pairing diagnostic
-  // that the hold exists to preserve.
-  bool data_watchdog_hold_{false};
+  // Why last_failure_ is being held over the routine disconnects of a reconnect
+  // loop, if it is. One value rather than two booleans on purpose: the origin
+  // decides how the hold is released, so a "held" flag and a separate "who set
+  // it" flag can disagree, and every site that sets one must remember the
+  // other. That went wrong immediately -- a successful auth cleared the hold
+  // but left the origin set, so a LATER pairing failure could be silently
+  // erased by the next notification.
+  //
+  // AUTH is released only by a successful AUTH_CMPL, because the failure it
+  // records erases the bond and recovery must pass back through one. DATA is
+  // released by any inbound notification, which refutes it by construction --
+  // and must NOT be released by AUTH_CMPL, which never fires at all when
+  // pairing is disabled (the default).
+  //
+  // Crucially the two are not interchangeable: an SMP failure on an UNBONDED
+  // pump latches its reason WITHOUT tearing the link down, and that link then
+  // subscribes and delivers notifications normally (passive telemetry needs no
+  // bond). Releasing an AUTH hold on inbound data would wipe exactly the
+  // pairing diagnostic the hold exists to preserve.
+  enum class FailureHold : uint8_t {
+    NONE,  // no hold; the next disconnect reason may overwrite last_failure_
+    AUTH,  // auth/encryption failure; released by a successful AUTH_CMPL
+    DATA,  // inbound-data watchdog; released by any received notification
+  };
+  FailureHold failure_hold_{FailureHold::NONE};
 
   // Advertisement identifiers decoded at scan time (pre-connection)
   PumpAdvertisementInfo adv_info_;
