@@ -156,7 +156,10 @@ class DeviceInfoService {
    *   itself starts at byte 6. See issue #179 -- this was read as a seven-byte
    *   [Cmd][ID] header, which cost every string its first character.
    *
-   * Reference: base.py::_read_class7_string() lines 121-160
+   * Reference: base.py::_read_class7_string() in the Python client -- but note
+   * it slices response[7:-2] and therefore still has the off-by-one described
+   * above. It is where this parser was ported from, not a source to check
+   * against; its own recorded device-info values are truncated for this reason.
    */
   void read_class7_string_async(uint8_t string_id, 
                                 std::function<void(bool, const char*)> on_complete);

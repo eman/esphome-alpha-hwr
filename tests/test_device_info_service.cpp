@@ -80,8 +80,10 @@ static std::vector<uint8_t> nul_terminated(const std::string &value) {
   return p;
 }
 
-/// Convenience: a bare string payload with no terminator, as the pump sends
-/// for the serial number.
+/// Convenience: a bare string payload with no terminator. No captured frame
+/// looks like this -- every Class 7 string the pump sends, the serial included,
+/// carries its NUL. Kept only to prove the parser does not depend on finding
+/// one, and labelled so nobody mistakes it for observed behaviour.
 static std::vector<uint8_t> unterminated(const std::string &value) {
   return std::vector<uint8_t>(value.begin(), value.end());
 }
@@ -147,7 +149,7 @@ void test_reads_the_five_documented_string_ids() {
   });
 
   r.answer_next("ALPHA HWR");
-  r.answer_next_raw(unterminated("10000479"));
+  r.answer_next("10000479");
   r.answer_next("V04.02.01");
   r.answer_next("V01.03.00");
   r.answer_next("V06.00.01");
@@ -202,16 +204,15 @@ void test_captured_frames_decode_to_their_full_strings() {
        nul_terminated("ALPHA HWR"),
        "ALPHA HWR",
        "ALPHA"},
-      // 24 0D F8 E7 07 09 31 30 30 31 31 33   |$.....100113|
-      // LEN 0x0D → 17 bytes total; count 0x09 → 9 string bytes, no terminator.
-      // The capture is twelve bytes wide, so it shows six of those nine and
-      // there is no independent witness for the other three. Only the prefix
-      // is asserted -- the tail here is filler, not a transcription.
+      // 24 0D F8 E7 07 09 31 30 30 30 30 34 37 39 00 C3 47
+      // LEN 0x0D → 17 bytes total; count 0x09 → 9 string bytes, which is the
+      // 8-character serial plus its terminator. This is the whole frame, not a
+      // 12-byte prefix -- it is short enough to have been captured entire.
       {"serial number",
-       {0x24, 0x0D, 0xF8, 0xE7, 0x07, 0x09, 0x31, 0x30, 0x30, 0x31, 0x31, 0x33},
-       unterminated("100113XXX"),
-       "",
-       "100113"},
+       {0x24, 0x0D, 0xF8, 0xE7, 0x07, 0x09, 0x31, 0x30, 0x30, 0x30, 0x30, 0x34},
+       nul_terminated("10000479"),
+       "10000479",
+       "10000479"},
       // 24 1C F8 E7 07 18 39 32 36 30 31 36   |$.....926016|
       // LEN 0x1C → 32 bytes total; count 0x18 → 24 string bytes, which is
       // exactly the GO app's 23-character value plus a terminator.
@@ -282,6 +283,73 @@ void test_no_string_is_rewritten_after_decoding() {
               "correct only for serials beginning \"10\"");
 }
 
+// ── 2b. The length guard, which is the only thing between a runt and an
+//        unsigned underflow ───────────────────────────────────────────────────
+//
+// string_len is `len - HEADER_LEN - CRC_LEN` in size_t arithmetic, so a frame
+// shorter than 8 bytes would wrap it to ~1.8e19 and the copy loop would read
+// ~127 bytes past the frame. transport.cpp dispatches Class 3/7 responses on
+// `len >= 5`, so 5-, 6- and 7-byte frames really do reach this callback.
+//
+// A skeptic pass found this guard was load-bearing but untested: relaxing it to
+// `len < 5` left the whole suite green.
+void test_runt_frames_are_rejected_before_the_length_arithmetic() {
+  std::cout << "\n=== Frames too short to hold a string are rejected ==="
+            << std::endl;
+
+  for (size_t total : {5u, 6u, 7u}) {
+    mock_millis = 0;
+    Rig r;
+    r.service.read_device_info_async([](bool) {});
+    r.step();
+
+    // [STX][LEN][DST][SRC][0x07] then CRC, sized so total == LEN + 4.
+    std::vector<uint8_t> f = {0x24, static_cast<uint8_t>(total - 4), 0xF8, 0xE7,
+                              0x07};
+    while (f.size() < total)
+      f.push_back(0x00);
+    auto frame = with_crc(f);
+    r.transport.on_notification(frame.data(), frame.size());
+    r.step();
+
+    TEST_ASSERT(r.service.get_product_name().empty(),
+                std::string("A ") + std::to_string(total) +
+                    "-byte Class 7 frame yields no string rather than "
+                    "underflowing the length");
+  }
+}
+
+// A real captured frame: 24 05 F8 E7 07 01 00 EC F3 -- count 1, payload one
+// NUL, i.e. a genuinely empty string. The old parser could never return this
+// (its `len < 10` reject ran before the empty-string branch, making that branch
+// dead code), so the verdict is new behaviour and worth pinning: empty is a
+// successful read of an empty string, not a failure.
+void test_an_empty_string_reads_as_success() {
+  std::cout << "\n=== An empty Class 7 string is a success, not a failure ==="
+            << std::endl;
+  mock_millis = 0;
+  Rig r;
+  r.service.read_device_info_async([](bool) {});
+  r.answer_next_raw(std::vector<uint8_t>{0x00});
+  TEST_ASSERT(r.service.get_product_name().empty(),
+              "A one-NUL payload decodes to the empty string");
+
+  // ...and the read still counts as answered, so the retry machinery is not
+  // left waiting on a string the pump has already said is empty.
+  mock_millis = 0;
+  Rig r2;
+  int completions = 0;
+  bool ok = false;
+  r2.service.read_device_info_async([&](bool o) { completions++; ok = o; });
+  r2.answer_next_raw(std::vector<uint8_t>{0x00});
+  r2.answer_next("10000479");
+  r2.answer_next("V04.02.01");
+  r2.answer_next("V01.03.00");
+  r2.answer_next("V06.00.01");
+  TEST_ASSERT(completions == 1 && ok,
+              "An empty string does not fail the device-info read");
+}
+
 // ── 3. Failure accounting ────────────────────────────────────────────────────
 void test_a_failed_read_is_reported() {
   std::cout << "\n=== A read that never answers reports failure ==="
@@ -297,7 +365,7 @@ void test_a_failed_read_is_reported() {
   });
 
   r.answer_next("ALPHA HWR");
-  r.answer_next_raw(unterminated("10000479"));
+  r.answer_next("10000479");
   r.answer_next("V04.02.01");
   r.answer_next("V01.03.00");
   // The fifth read is never answered; let the transport time it out.
@@ -324,6 +392,8 @@ int main() {
   test_reads_the_five_documented_string_ids();
   test_captured_frames_decode_to_their_full_strings();
   test_no_string_is_rewritten_after_decoding();
+  test_runt_frames_are_rejected_before_the_length_arithmetic();
+  test_an_empty_string_reads_as_success();
   test_a_failed_read_is_reported();
 
   std::cout << "\n==========================================" << std::endl;

@@ -81,6 +81,12 @@ MUTATIONS=(
 # fixtures are transcribed from a capture now, which is what makes this mutation
 # fail rather than merely shift both sides together.
 "class7-header-length|components/alpha_hwr/device_info_service.cpp|      static const size_t HEADER_LEN = 6;|      static const size_t HEADER_LEN = 7;"
+# The length guard is the only thing standing between a runt frame and an
+# unsigned underflow: string_len is size_t, so a frame under 8 bytes wraps it to
+# ~1.8e19 and the copy loop reads ~127 bytes past the frame. transport.cpp
+# dispatches Class 3/7 on len >= 5, so 5-, 6- and 7-byte frames do reach the
+# callback. A skeptic pass found this relaxation left the whole suite green.
+"class7-runt-guard-relaxed|components/alpha_hwr/device_info_service.cpp|      if (!success || !data || len < HEADER_LEN + CRC_LEN) {|      if (!success || !data || len < 5) {"
 "response-crc-enforcement|components/alpha_hwr/transport.cpp|if (!protocol::frame_crc_valid(reassembly_buffer_.data(), frame_len)) {|if (false) {"
 "response-crc-trim|components/alpha_hwr/transport.cpp|if (expected_packet_length_ >= 4 && frame_len > expected_packet_length_) {|if (false) {"
 "register-read-vetoes-type-match|components/alpha_hwr/transport.cpp|bool wildcard_command = (cmd.expect_type_low_ver == 0x0000 && cmd.expect_type_high == 0x0000);|bool wildcard_command = true;"
