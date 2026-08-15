@@ -228,7 +228,14 @@ echo -n "baseline (unmutated suite)  "
 # what this check did before and remains the definition of correct -- use it if
 # a scoped result ever looks wrong.
 SCOPED="${SCOPED:-1}"
-DEPMAP="$(mktemp -t mutation_depmap)"
+# `mktemp -t NAME` is a BSD form: GNU coreutils requires the XXXXXX template
+# and fails, which silently left DEPMAP empty and sent CI down the slow path
+# for 21 minutes without failing anything. This form is valid on both.
+DEPMAP="$(mktemp "${TMPDIR:-/tmp}/mutation_depmap.XXXXXX")"
+if [[ -z "$DEPMAP" ]]; then
+  echo -e "${RED}Could not create the dependency-map temp file.${NC}" >&2
+  SCOPED=0
+fi
 # Extend the EXIT trap rather than calling `trap ... EXIT` again: bash replaces
 # a trap, it does not add to one, so a second `trap ... EXIT` here would
 # silently disarm the restore_all installed above -- and restoring mutated
@@ -239,7 +246,14 @@ trap 'restore_all; rm -f "$DEPMAP"' EXIT
 trap 'echo; echo -e "${YELLOW}Interrupted — restoring sources.${NC}"; restore_all; rm -f "$DEPMAP"; exit 130' INT TERM
 if [[ "$SCOPED" == "1" ]]; then
   if ! python3 "$SCRIPT_DIR/mutation_targets.py" --build-map "$DEPMAP"; then
+    # Falling back is *correct* -- it runs everything, which is the definition
+    # of right -- but it costs about 4x, and a silent 4x is exactly the kind of
+    # regression nobody notices. Surface it as a CI annotation so a broken map
+    # shows up in the run summary rather than only as a longer wall-clock.
     echo -e "${RED}Could not map files to test targets; falling back to full runs.${NC}"
+    if [[ -n "${GITHUB_ACTIONS:-}" ]]; then
+      echo "::warning title=Mutation check unscoped::Dependency mapping failed; ran the full suite per mutation (~4x slower). Results are still valid."
+    fi
     SCOPED=0
   fi
 fi
