@@ -45,10 +45,6 @@ bool DeviceInfoService::read_device_info_async(std::function<void(bool)> on_comp
       [this](bool ok, const char* value) {
       if (ok && value) {
         product_name_ = value;
-        // Fix: Python prepends "A" if result is "LPHA HWR"
-        if (product_name_ == "LPHA HWR") {
-          product_name_ = "ALPHA HWR";
-        }
         ESP_LOGD(TAG, "Product name: %s", product_name_.c_str());
       } else {
         ESP_LOGW(TAG, "Failed to read product name");
@@ -62,10 +58,6 @@ bool DeviceInfoService::read_device_info_async(std::function<void(bool)> on_comp
       [this](bool ok, const char* value) {
       if (ok && value) {
         serial_number_ = value;
-        // Fix: Python prepends "1" if result starts with "0"
-        if (!serial_number_.empty() && serial_number_[0] == '0') {
-          serial_number_ = "1" + serial_number_;
-        }
         ESP_LOGD(TAG, "Serial number: %s", serial_number_.c_str());
       } else {
         ESP_LOGW(TAG, "Failed to read serial number");
@@ -129,32 +121,54 @@ void DeviceInfoService::read_class7_string_async(uint8_t string_id,
     0,  // expect_type_low_ver (not used for Class 7)
     0,  // expect_type_high (not used for Class 7)
     [string_id, on_complete](bool success, const uint8_t* data, size_t len) {
-      if (!success || !data || len < 10) {
+      // Response frame (issue #179):
+      //   [STX][LEN][DST][SRC][0x07][Count][...STRING...][CRC_H][CRC_L]
+      //     0    1    2    3     4     5      6 ..            len-2
+      //
+      // The header is six bytes, not seven: byte 5 is a byte count for the
+      // string that follows, not an [Cmd][ID] pair. Every captured frame has
+      // `byte5 == len - 8` and the first character of the string at byte 6 --
+      // e.g. `24 0E F8 E7 07 0A 41 4C 50 48 41 ...` is a 10-byte "ALPHA HWR\0"
+      // in an 18-byte frame. Reading from byte 7 dropped the first character
+      // of all five strings, which is what the two transcribed "Python fix"
+      // string rewrites were papering over.
+      static const size_t HEADER_LEN = 6;
+      static const size_t CRC_LEN = 2;
+
+      if (!success || !data || len < HEADER_LEN + CRC_LEN) {
         ESP_LOGW(TAG, "No response for String ID %d", string_id);
         on_complete(false, nullptr);
         return;
       }
-      
-      // Verify it's a Class 7 response
-      // Frame: [STX][LEN][DST][SRC][Class][Cmd][ID][...STRING...][CRC_H][CRC_L]
-      if (len < 9 || data[4] != 0x07) {
-        ESP_LOGW(TAG, "Invalid Class 7 response for String ID %d (class=0x%02X)", 
-                 string_id, len > 4 ? data[4] : 0);
+
+      if (data[4] != 0x07) {
+        ESP_LOGW(TAG, "Invalid Class 7 response for String ID %d (class=0x%02X)",
+                 string_id, data[4]);
         on_complete(false, nullptr);
         return;
       }
-      
-      // Extract string data: skip frame header (7 bytes) and CRC (2 bytes)
-      // String data starts at byte 7, ends 2 bytes before end
-      if (len <= 9) {
+
+      size_t string_len = len - HEADER_LEN - CRC_LEN;
+
+      // The count byte is not needed to bound the read -- the frame length
+      // already does that, and trusting a radio-supplied count would be an
+      // overread waiting to happen. It is checked only so that a pump whose
+      // layout differs from the captures says so, instead of silently handing
+      // back a shifted string the way this parser did for its whole life.
+      if (data[5] != string_len) {
+        ESP_LOGW(TAG, "String ID %d: count byte %u disagrees with the frame's "
+                      "%u string bytes; parsing by frame length",
+                 string_id, (unsigned) data[5], (unsigned) string_len);
+      }
+
+      if (string_len == 0) {
         ESP_LOGW(TAG, "Empty string for ID %d", string_id);
         on_complete(true, "");
         return;
       }
-      
-      const uint8_t* string_data = data + 7;
-      size_t string_len = len - 9;  // Total - header (7) - CRC (2)
-      
+
+      const uint8_t* string_data = data + HEADER_LEN;
+
       // Create null-terminated C string (strip trailing nulls)
       char string_buffer[128];
       size_t actual_len = 0;

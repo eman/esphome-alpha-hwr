@@ -89,10 +89,7 @@ class DeviceInfoService {
 
   /**
    * Get serial number.
-   * 
-   * Note: The pump returns a partial serial (e.g., "0000479").
-   *       A "1" is prepended to form the full serial (e.g., "10000479").
-   * 
+   *
    * @return Full serial number, or empty string if not read yet
    */
   const std::string& get_serial_number() const { return serial_number_; }
@@ -154,8 +151,11 @@ class DeviceInfoService {
    * 
    * Protocol Notes:
    * - APDU: [0x07][0x01][StringID]
-   * - Response: [STX][LEN][DST][SRC][0x07][Cmd][ID][...STRING...][CRC]
-   * 
+   * - Response: [STX][LEN][DST][SRC][0x07][Count][...STRING...][CRC]
+   *   Six-byte header. Byte 5 counts the string bytes that follow; the string
+   *   itself starts at byte 6. See issue #179 -- this was read as a seven-byte
+   *   [Cmd][ID] header, which cost every string its first character.
+   *
    * Reference: base.py::_read_class7_string() lines 121-160
    */
   void read_class7_string_async(uint8_t string_id, 
