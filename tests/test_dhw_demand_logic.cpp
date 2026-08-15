@@ -598,45 +598,94 @@ void test_pump_on_tier_ordering() {
                   "deterministic_continuation",
               "Continuation outranks the dhw_in_use tier");
 
-  // Reached only when everything above declines. This is the recall case it
-  // exists for: a low-signal draw the subtraction could not measure.
-  PumpOnInputs flag_only = live_tick();
-  flag_only.dhw_in_use_sustained = true;
-  r = decide_pump_on(flag_only, t);
-  TEST_ASSERT(std::string(r.method) == "deterministic_dhw_in_use",
-              "The flag decides once continuation and the subtraction decline");
-  TEST_ASSERT(r.demand, "The dhw_in_use tier declares demand");
-  TEST_ASSERT_NEAR(r.confidence, 0.6f, 0.0001f,
-                   "The dhw_in_use tier reports 0.6 confidence");
-  TEST_ASSERT_NEAR(r.demand_level, 0.4f, 0.0001f,
-                   "With no measurement it publishes the no-claim constant, "
-                   "not a value derived from meter flow");
+  // Reached only when everything above declines *and* nothing measured the
+  // loop. `live_tick()` is not that case: its channels are fresh and its pump
+  // is turning at 2402 rpm, so the subtraction is available and reads 0.00 --
+  // a measured no-draw. The flag does not get to overrule it (issue #173).
+  //
+  // This is B1-INSIDE's no-draw phase, the bench case the gate is really
+  // about: the pump running, the loop quiet, a human holding the tap shut, and
+  // the heater's flag high anyway. The measurement is the only thing in the
+  // system that knows there is no water moving.
+  PumpOnInputs flag_over_quiet_loop = live_tick();
+  flag_over_quiet_loop.dhw_in_use_sustained = true;
+  r = decide_pump_on(flag_over_quiet_loop, t);
+  TEST_ASSERT(std::string(r.method) == "pump_on_uncertain",
+              "A sustained flag over a measured-quiet loop publishes nothing");
+  TEST_ASSERT(!r.demand, "...and declares no demand");
+  TEST_ASSERT_NEAR(r.demand_gpm, 0.0f, 0.0001f,
+                   "The measurement that suppressed it is still reported");
 
-  // Where the subtraction *is* available but simply below threshold, intensity
-  // still comes from the measurement rather than the meter. This is the whole
-  // of issue #143: scaling off pump-on meter flow inverts the ordering, since a
-  // quiet 2.2 GPM loop would publish 0.88 while a real 0.25 GPM draw publishes
-  // 0.4.
+  // Where the subtraction *is* available and measures no draw, the flag must
+  // not overrule it (issue #173). This assertion used to run the other way --
+  // it fired the tier here and scaled intensity off the 0.20 GPM measurement.
+  //
+  // The #143 question it came from ("where does intensity come from?") was
+  // answered correctly: never from raw meter flow. It simply never asked the
+  // prior question, whether a tier should declare a draw at all when the
+  // measurement in its hand says there is none. Over 30 days of replayed data
+  // on the companion detector, every one of the 937 cells that reached here
+  // with a measurement available measured no draw; none was a real one.
+  //
+  // The intensity half of #143 is still covered, above, where a measured draw
+  // reaches tier 2 and scales off the measurement.
   PumpOnInputs flag_with_small_draw = live_tick();
   flag_with_small_draw.dhw_in_use_sustained = true;
   flag_with_small_draw.flow = 1.54f;   // 1.54 - 1.34 = 0.20 GPM, under 0.30
   r = decide_pump_on(flag_with_small_draw, t);
-  TEST_ASSERT(std::string(r.method) == "deterministic_dhw_in_use",
-              "0.20 GPM is below the subtraction threshold, so the flag decides");
-  TEST_ASSERT_NEAR(r.demand_level, 0.20f / 2.5f, 0.0001f,
-                   "Intensity comes from the measurement, not from meter flow");
+  TEST_ASSERT(std::string(r.method) == "pump_on_uncertain",
+              "A measured 0.20 GPM is a measured no-draw, and the flag does "
+              "not overrule it");
+  TEST_ASSERT(!r.demand,
+              "...so no demand is published on the strength of the flag alone");
 
-  // A stale channel means no measurement, so the tier falls back to the
-  // no-claim constant rather than inventing intensity from the meter.
+  // Just under the threshold is still "tier 2 looked and declined", so the flag
+  // stays suppressed there too. Pinning near the edge because the gate keys off
+  // tier 2's own comparison; an inverted one would reopen the whole population.
+  // (Exactly 0.30 is not asserted: float subtraction lands either side of the
+  // cut depending on the operands, which would make the test about arithmetic
+  // rather than about the tier.)
+  PumpOnInputs flag_just_under = live_tick();
+  flag_just_under.dhw_in_use_sustained = true;
+  flag_just_under.flow = 1.63f;  // 1.63 - 1.34 = 0.29 GPM, a hair under
+  TEST_ASSERT(std::string(decide_pump_on(flag_just_under, t).method) ==
+                  "pump_on_uncertain",
+              "A measurement just under the threshold suppresses the flag too");
+
+  // The recall case the tier actually exists for, and the one the gate must
+  // leave alone: a stale loop channel means there is no measurement, so
+  // nothing contradicts the flag and it is the only signal left. Every one of
+  // the tier's corpus-confirmed true positives lives in cells shaped like this
+  // one -- the gate above costs it none of them.
   PumpOnInputs flag_with_stale = live_tick();
   flag_with_stale.dhw_in_use_sustained = true;
   flag_with_stale.flow = 2.22f;  // would look like a big draw on the meter alone
   flag_with_stale.pump_flow_last_update_ms = 900000;
   r = decide_pump_on(flag_with_stale, t);
-  TEST_ASSERT_NEAR(decide_pump_on(flag_with_stale, t).demand_level, 0.4f,
-                   0.0001f,
+  TEST_ASSERT(std::string(r.method) == "deterministic_dhw_in_use",
+              "With no measurement to contradict it, the flag still decides");
+  TEST_ASSERT(r.demand, "The dhw_in_use tier declares demand");
+  TEST_ASSERT_NEAR(r.confidence, 0.6f, 0.0001f,
+                   "The dhw_in_use tier reports 0.6 confidence");
+  TEST_ASSERT(std::isnan(r.demand_gpm),
+              "...and it fires precisely because no measurement was available");
+  TEST_ASSERT_NEAR(r.demand_level, 0.4f, 0.0001f,
                    "A 2.22 GPM meter reading with no measurement still "
-                   "publishes 0.4, not 0.89");
+                   "publishes the no-claim constant, not 0.89");
+
+  // A pump below its speed floor is the other way the measurement goes away --
+  // a pump clamped at 1650 rpm never offers one at all. The tier must keep
+  // firing there, or the gate would cost recall on exactly the hardware that
+  // needs it most.
+  PumpOnInputs flag_below_speed_floor = live_tick();
+  flag_below_speed_floor.dhw_in_use_sustained = true;
+  flag_below_speed_floor.motor_speed = 1650.0f;
+  r = decide_pump_on(flag_below_speed_floor, t);
+  TEST_ASSERT(std::string(r.method) == "deterministic_dhw_in_use",
+              "Below the speed floor there is no measurement, so the flag "
+              "still decides");
+  TEST_ASSERT_NEAR(r.demand_level, 0.4f, 0.0001f,
+                   "...at the no-claim constant");
 
   // An unsustained flag changes nothing — the guard is the whole tier.
   PumpOnInputs unsustained = live_tick();

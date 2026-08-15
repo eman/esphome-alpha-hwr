@@ -112,6 +112,14 @@ MUTATIONS=(
 "dhw-falsified-capture-not-retired|components/dhw_demand/dhw_demand.cpp|      pre_pump_on_flow_ = NAN;\n      pre_pump_on_flow_since_ms_ = 0;\n      continuation_stopping_ticks_ = 0;\n    } else if (result.continuation == ContinuationVerdict::EXPIRED &&|    } else if (result.continuation == ContinuationVerdict::EXPIRED &&"
 "dhw-expired-capture-not-retired|components/dhw_demand/dhw_demand.cpp|               pump_on_continuation_max_seconds_);\n      pre_pump_on_flow_ = NAN;\n      pre_pump_on_flow_since_ms_ = 0;|               pump_on_continuation_max_seconds_);"
 "dhw-continuation-arm-never-stamped|components/dhw_demand/dhw_demand.cpp|      pre_pump_on_flow_since_ms_ = now;\n      continuation_stopping_ticks_ = 0;\n|      continuation_stopping_ticks_ = 0;\n"
+
+# The dhw_in_use tier is a recall path for cells where nothing measured the
+# loop (issue #173). Dropping the gate restores the state where a flag could
+# overrule a measured no-draw -- 937 of 1007 replayed cells, every one of them
+# recirculation. The second mutation inverts the gate instead, which silences
+# the tier in exactly the cells that are its whole reason for existing.
+"dhw-in-use-overrules-a-measured-no-draw|components/dhw_demand/dhw_demand_logic.h|  if (in.dhw_in_use_sustained \&\& std::isnan(r.demand_gpm)) {|  if (in.dhw_in_use_sustained) {"
+"dhw-in-use-fires-only-when-measured|components/dhw_demand/dhw_demand_logic.h|  if (in.dhw_in_use_sustained \&\& std::isnan(r.demand_gpm)) {|  if (in.dhw_in_use_sustained \&\& !std::isnan(r.demand_gpm)) {"
 "frozen-motor-asserts-pump-off|components/dhw_demand/dhw_demand_logic.h|  } else if (out.motor_frozen) {\n    out.pump_on = true;|  } else if (out.motor_frozen) {\n    out.pump_on = false;"
 "motor-staleness-mask-removed|components/dhw_demand/dhw_demand_logic.h|  out.speed_used = reading_is_fresh(in.motor_speed_last_update_ms, in.now_ms, in.motor_max_stale_ms)\n                       ? in.motor_speed\n                       : NAN;|  out.speed_used = in.motor_speed;"
 "motor-current-staleness-mask-removed|components/dhw_demand/dhw_demand_logic.h|  out.current_used =\n      reading_is_fresh(in.motor_current_last_update_ms, in.now_ms, in.motor_max_stale_ms)\n          ? in.motor_current\n          : NAN;|  out.current_used = in.motor_current;"

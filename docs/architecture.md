@@ -120,12 +120,24 @@ two are normally paired, with pump telemetry feeding the detector.
   `dhw_in_use_min_seconds` (70). The flag is far too noisy bare (~77 events/day,
   median 15 s), and the guard is what makes it usable; its survivors corroborate
   against a channel sharing no sensor with it, the lower tank falling a median
-  −0.390 °F/min when it fires against −0.043 when it stays silent. Strictly
-  additive: it sits below everything, only ever adds demand, and its whole
+  −0.390 °F/min when it fires against −0.043 when it stays silent. Its whole
   measured footprint is 9 windows totalling ~20 minutes a week. Where the
   subtraction declined there is no honest intensity to publish, so it reports
   the shared no-claim constant 0.4 rather than deriving one from meter flow.
   See [issue #138](https://github.com/eman/esphome-alpha-hwr/issues/138).
+- **It is a recall tier only, and fires only where nothing measured the loop.**
+  It used to be described as strictly additive — below everything, only ever
+  adding demand — and that was true of its *ordering* but not of its effect. A
+  tier reached because the one above it declined can overrule that decline just
+  as effectively as one that ran ahead of it. Where the subtraction has an
+  answer and that answer is "no draw", the flag is now suppressed. Replaying 30
+  days of stored data through the companion detector: of 1007 cells with the
+  flag sustained, 937 had a measurement available and *all* of them measured no
+  draw — the tier's marginal contribution over the subtraction, wherever the
+  subtraction exists, is zero, and what it was adding there was recirculation.
+  It keeps every corpus-confirmed true positive, all of which live in the
+  no-measurement cells. See
+  [issue #173](https://github.com/eman/esphome-alpha-hwr/issues/173).
 - **Release-hold on the output**: demand is recomputed from scratch each tick, so an
   input dithering around its threshold would chatter the binary sensor. Rising edges
   pass through immediately; falling edges are held for `demand_release_seconds`.
