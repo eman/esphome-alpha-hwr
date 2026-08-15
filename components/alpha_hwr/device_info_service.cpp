@@ -18,8 +18,6 @@ namespace esphome {
 namespace alpha_hwr {
 namespace services {
 
-static const char* TAG = "alpha_hwr.device_info";
-
 // String IDs (from Python reference device_info.py)
 static const uint8_t STRING_ID_PRODUCT_NAME = 1;
 static const uint8_t STRING_ID_SERIAL = 9;
@@ -27,8 +25,8 @@ static const uint8_t STRING_ID_SOFTWARE_VERSION = 50;
 static const uint8_t STRING_ID_HARDWARE_VERSION = 52;
 static const uint8_t STRING_ID_BLE_VERSION = 58;
 
-DeviceInfoService::DeviceInfoService(core::Transport &transport, core::Session &session)
-    : transport_(transport), session_(session) {
+DeviceInfoService::DeviceInfoService(core::Transport &transport)
+    : transport_(transport) {
   ESP_LOGD(TAG, "Device Info Service initialized");
 }
 
@@ -130,7 +128,7 @@ void DeviceInfoService::read_class7_string_async(uint8_t string_id,
     apdu, 3,
     0,  // expect_type_low_ver (not used for Class 7)
     0,  // expect_type_high (not used for Class 7)
-    [this, string_id, on_complete](bool success, const uint8_t* data, size_t len) {
+    [string_id, on_complete](bool success, const uint8_t* data, size_t len) {
       if (!success || !data || len < 10) {
         ESP_LOGW(TAG, "No response for String ID %d", string_id);
         on_complete(false, nullptr);

@@ -12,6 +12,204 @@
   that crash's backtrace was the *victim*, not the cause: the failing
   allocation was at most ~48 bytes, so the heap was already gone.
 
+### Changed
+
+- **`dhw_demand.cpp` is now compiled and driven by the host test suite.**
+  `esphome compile` was the only thing in the toolchain that compiled it at
+  all: 538 lines holding the sensor-callback wiring, the branch that selects
+  between the pump-ON and pump-OFF detection paths, the flow latch, the
+  derivative helper and every publish — none of it reachable by the unit suite,
+  by cppcheck, or by the mutation check. The consequence was not theoretical:
+  while closing the pump-state coverage gap, that file was left with a block
+  referencing an out-of-scope variable, and 905 host assertions plus cppcheck
+  all reported green. Only the firmware build objected.
+
+  The ESPHome entity mocks were extended to the point where the component
+  compiles against them, and `tests/test_dhw_demand_component.cpp` now
+  instantiates the real component, wires mock entities through its real
+  setters, and ticks `update()` on an injected clock — asserting on what the
+  output entities received. It covers what lives in the `.cpp` and nowhere
+  else, including the frozen-motor case that previously needed a bench session
+  with a deliberately shortened timeout to provoke. Six mutations now point at
+  `dhw_demand.cpp`, which was an unreachable file for the mutation check for as
+  long as nothing host-compiled it.
+
+  The same gap turned out to cover four more files, so they were closed too:
+  `auth.cpp`, `sensor_publisher.cpp`, `telemetry_service.cpp` and
+  `device_info_service.cpp` each compiled against the mocks unmodified and were
+  firmware-build-only for no reason but a missing target. Each now has a test
+  suite: the authentication handshake's packet sequence and its 1200 ms
+  timer-only completion (the figure the deaf-node fix rests on, previously
+  added up by eye); the publisher's presence gating, temperature bounds, head-
+  rate derivative and issue #127 text guards; the telemetry poll set and the
+  OpSpec routing that tells alarms from warnings by an echoed register; and the
+  device-info string reads with the two hand-ported repairs for a pump that
+  drops the first character of its product name and serial.
+
+  Host-compiling `device_info_service.cpp` immediately found three dead things
+  the firmware build had never reported — a file-static `TAG` shadowed by the
+  class's own, a lambda capturing `this` without using it, and an unused
+  `Session &` member, now dropped from the constructor.
+
+  1052 host assertions, up from 905, and 31 of 31 mutations caught.
+
+  Only `alpha_hwr.cpp`, `ble_connection_manager.cpp` and `api_bridge.cpp`
+  remain firmware-build-only for real reasons (ESP-IDF and the API SDK), plus
+  `time_service.cpp`, which wants a `real_time_clock.h` mock that does not
+  exist yet.
+
+  The mocks deliberately mirror ESPHome's real behaviour rather than a tidier
+  version of it — `sensor` and `text_sensor` publish unconditionally while
+  `binary_sensor` de-duplicates, and `has_state()` means "has published", never
+  "is fresh". Both asymmetries are the reason `publish_gate.h` and the
+  detector's staleness registers exist, so a friendlier mock would have made
+  each of them look like an oversight.
+
+- **The test suite now links production code instead of validating copies of
+  it.** Three test files asserted hand-written replicas of shipped logic, so
+  they passed regardless of what the firmware did — corrupting the CRC table and
+  swapping the CRC bytes in the packet builder left `make test` reporting 21/21
+  with byte-identical output. `tests/protocol.h` is now a forwarding shim onto
+  `codec.cpp`/`frame_builder.cpp`; the Class 3/7 response-match predicate moved
+  into `components/alpha_hwr/response_match.h` so production and the test share
+  one implementation; and `ControlService`'s notification-driven state is
+  asserted against the real service in `tests/test_control_service.cpp`. One
+  replica remains, covering `handle_remote_mode_ack()` — remote mode has no
+  `WriteCommand`, so that path has no production-linked coverage anywhere;
+  routing it through the write-operation layer would close both that gap and
+  the standalone-write-path violation.
+
+- **`tools/mutation_check.sh` and a CI job guard against replica-testing
+  returning.** It breaks production code on purpose, one mutation at a time, and
+  fails if the suite does not notice. Seven mutations, all currently caught. It
+  refuses to run against a tree with uncommitted changes to any file it mutates,
+  restores from `HEAD` rather than the index, aborts if a restore fails rather
+  than continuing over a source it could not put back, and treats a mutation
+  whose target has moved as a failure rather than skipping it.
+
+- **`ScheduleService::read_entries()` and `clear_entry()` are removed.** The
+  synchronous read wrote through a caller-owned pointer from a callback that
+  fires seconds later, which is a use-after-scope for the stack vector the
+  documented recipe told users to pass. Its own default argument masked the
+  hazard by failing before any wire traffic, so only the explicit-layer form —
+  the one the recipe used — reached it. Use `read_schedule_entries_async()`,
+  which owns its vector, and route writes through the write-operation services.
+
+- **The pump-on subtraction no longer differences across its own pump start.**
+  The two flow channels do not begin reporting together: at a start the meter
+  publishes loop flow before the pump publishes its own, measured at 13 s. For
+  those seconds `flow − pump_flow` was taken against a **stale zero from before
+  the motor started** — inside the 30 s staleness bound and past the speed
+  floor — and published `demand_level` 0.57 at confidence **0.90**, the top of
+  the tier's range. Measured on the Python detector over 30 days, 42 % of all
+  subtraction firings fell within 10 s of a pump-on edge, against 8.8 % of
+  pump-on cells overall; scored against its bench corpus the fix removed 3 of 6
+  false positives with **no true positive lost** (precision 0.903 → 0.949).
+  `reading_predates_pump_start` is a regime test, not a suppression window:
+  nothing is blocked for a fixed time and the tier resumes on the pump's very
+  next reading.
+
+- **The pump-on subtraction declines while the pump's flow estimate is still
+  spinning up** (`pump_on_demand_settle_seconds`, new, default 10 s). The
+  sibling of the fix below it, and the one that dominates in production: there
+  the pump channel is silent across the start, here it reports *promptly* while
+  the impeller is still accelerating, so the estimate reads low against a loop
+  the meter already sees moving — `pump_flow 0.713` at 3172 rpm against a meter
+  reading 1.712, published as 1.00 GPM at confidence 0.81.
+  `pump_on_demand_min_speed_rpm` does not cover it: that floor is for a low
+  *steady* speed. Measured on the Python detector across 296 pump starts in 30
+  days, `meter - pump_flow` by age of the run: 0–10 s is p90 0.820 GPM with
+  26.6 % above the 0.3 threshold, against p90 0.13–0.19 and a flat 6–9 % for
+  every band out to 180 s. Over three production days the subtraction's startup
+  firings fell 13 → 1 with no session lost. Set to `0` for the previous
+  behaviour.
+
+- **The falling-edge flow latch is disarmed for 30 s after a pump-off edge**
+  (`latch_pump_off_suppression_seconds`, new, matched to `flow_latch_seconds`).
+  The latch exists for gaps between meter reports during a draw; a shutdown
+  presents the same shape because loop flow runs a median 1.45 GPM and
+  collapses through the threshold within seconds of the motor parking. Since
+  the flow signal outranks thermal and charge on confidence, a *published*
+  thermal or charge verdict means flow was below threshold now and above it
+  within the latch window — exactly what a shutdown supplies, while the thermal
+  signal fires because the pump has been returning cooled loop water to the
+  tank. Measured on the Python detector over 30 days, 71 % of thermal and 62 %
+  of charge firings fell within 30 s of a pump-off edge against 0.38 % of
+  pump-off cells; over a production week the fix removed **93 false positives
+  for 1 true positive** (precision 0.768 → 0.810, recall flat at 0.993). A real
+  draw puts the meter above threshold on its own and never consults the latch,
+  which is why it costs almost no recall — controlled runs of a draw spanning a
+  shutdown, and of a draw starting 41 s after one, are detected identically
+  with it on and off. Set to `0` for the previous behaviour.
+
+  Both defects were found and fixed on the Python detector first
+  (`dhw-sensor-apps`) and are ported here to keep the two implementations in
+  parity; neither had an equivalent guard on this side.
+
+- **BREAKING — `droplet_max_stale_seconds` is now `flow_max_stale_seconds`** —
+  the staleness bound on the household flow channel was named after the meter
+  one installation happened to use. `dhw_demand` reads whatever GPM sensor you
+  wire to `flow`, so the key now names the channel rather than a product.
+  Behavior, default (60 s) and semantics are unchanged; only the spelling
+  moves. A config still setting the old name **fails at `esphome config` time**
+  naming the replacement, following the same rule as the keys retired in #149:
+  config that validates but does nothing is a trap.
+
+- **BREAKING — the Head sensor is now named "Head", not "Head Pressure"**
+  ([#157](https://github.com/eman/esphome-alpha-hwr/issues/157)) — head is a
+  length, measured in meters, and calling it a pressure was wrong everywhere
+  except the entity name: Grundfos calls it "Head (H)", the config key is
+  `head:`, the package header comments say "Head (m)", `docs/units-audit.md`
+  says "Head", and the history trend label is "Head". The diagnostic
+  `head_rate` entity follows as **"Head Rate"** (was "Head Pressure Rate").
+  Only the names shipped by `packages/alpha_hwr_base.yaml` and
+  `packages/alpha_hwr_pairing.yaml` change; the component sets no default name,
+  so a config that writes its own `alpha_hwr:` block is unaffected.
+
+  **This orphans the old entity in Home Assistant.** ESPHome derives the API
+  key from a hash of the object_id and the Home Assistant integration builds
+  `unique_id` from that key, so the renamed sensor arrives as a *new* entity —
+  `sensor.<device>_head` — and `sensor.<device>_head_pressure` is left behind
+  with its history and long-term statistics.
+
+  **There is no registry-side way to carry that history onto the new entity.**
+  Home Assistant does migrate statistics when an entity is renamed, but it
+  refuses a rename onto an entity_id that is already taken (`Entity with this
+  ID is already registered`) — and the live sensor already holds
+  `sensor.<device>_head`. Deleting the orphan first does not help either: it
+  frees the *old* id, not the new one, and the two entities have different
+  unique_ids, so nothing links them.
+
+  **Migration, one line — this is also the only way to keep your history:** to
+  stay on the old entity_id, re-declare `name: "Head Pressure"` under `head:`
+  in your own `alpha_hwr:` block. The main config wins over the package, the
+  same override the `pump_head_rate_sensor` migration in 0.15.0 uses.
+
+  If you would rather take the new name, accept that the series restarts:
+  delete the orphaned entity, and clear its leftover long-term statistics under
+  **Developer tools → Statistics**.
+
+- **The Head sensor carries `device_class: distance`**
+  ([#157](https://github.com/eman/esphome-alpha-hwr/issues/157)) — it had none,
+  because `m` is not a valid Home Assistant `pressure` unit, so Home Assistant
+  offered no way to display it in anything but meters. Meters of head is
+  dimensionally a length and HA's `distance` class accepts both `m` and `ft`,
+  which unlocks the per-entity unit picker — the pump's datasheet leads with
+  feet (§13: "Head (H) 15-55: max. 18 ft (5.5 m)").
+
+  **Nothing about the value changes.** The decode path, the published state and
+  the recorded unit are all still meters; `distance` is display metadata and the
+  conversion happens in the frontend, per user. Unlike the kPa → m change in
+  0.13.0, history does not step at the upgrade.
+
+- **Docs and comments no longer name a specific flow meter or water heater** —
+  README, `AGENTS.md`, `docs/configuration.md`, the packages and the component
+  comments now say "household flow meter" and "water heater". The detector was
+  always sensor-agnostic; the prose implied otherwise. Example entity IDs in
+  the packages changed to neutral placeholders (`sensor.dhw_flow_rate`,
+  `sensor.water_heater_*`) — these are illustrative substitution values, so
+  they change nothing at build time.
+
 ### Fixed
 
 - **Device information and the operating statistics could silently never be
@@ -251,157 +449,6 @@
   (issue #127). Bench-verified: three consecutive `refresh_schedule` calls now
   produce zero republishes.
 
-### Changed
-
-- **The test suite now links production code instead of validating copies of
-  it.** Three test files asserted hand-written replicas of shipped logic, so
-  they passed regardless of what the firmware did — corrupting the CRC table and
-  swapping the CRC bytes in the packet builder left `make test` reporting 21/21
-  with byte-identical output. `tests/protocol.h` is now a forwarding shim onto
-  `codec.cpp`/`frame_builder.cpp`; the Class 3/7 response-match predicate moved
-  into `components/alpha_hwr/response_match.h` so production and the test share
-  one implementation; and `ControlService`'s notification-driven state is
-  asserted against the real service in `tests/test_control_service.cpp`. One
-  replica remains, covering `handle_remote_mode_ack()` — remote mode has no
-  `WriteCommand`, so that path has no production-linked coverage anywhere;
-  routing it through the write-operation layer would close both that gap and
-  the standalone-write-path violation.
-
-- **`tools/mutation_check.sh` and a CI job guard against replica-testing
-  returning.** It breaks production code on purpose, one mutation at a time, and
-  fails if the suite does not notice. Seven mutations, all currently caught. It
-  refuses to run against a tree with uncommitted changes to any file it mutates,
-  restores from `HEAD` rather than the index, aborts if a restore fails rather
-  than continuing over a source it could not put back, and treats a mutation
-  whose target has moved as a failure rather than skipping it.
-
-- **`ScheduleService::read_entries()` and `clear_entry()` are removed.** The
-  synchronous read wrote through a caller-owned pointer from a callback that
-  fires seconds later, which is a use-after-scope for the stack vector the
-  documented recipe told users to pass. Its own default argument masked the
-  hazard by failing before any wire traffic, so only the explicit-layer form —
-  the one the recipe used — reached it. Use `read_schedule_entries_async()`,
-  which owns its vector, and route writes through the write-operation services.
-
-- **The pump-on subtraction no longer differences across its own pump start.**
-  The two flow channels do not begin reporting together: at a start the meter
-  publishes loop flow before the pump publishes its own, measured at 13 s. For
-  those seconds `flow − pump_flow` was taken against a **stale zero from before
-  the motor started** — inside the 30 s staleness bound and past the speed
-  floor — and published `demand_level` 0.57 at confidence **0.90**, the top of
-  the tier's range. Measured on the Python detector over 30 days, 42 % of all
-  subtraction firings fell within 10 s of a pump-on edge, against 8.8 % of
-  pump-on cells overall; scored against its bench corpus the fix removed 3 of 6
-  false positives with **no true positive lost** (precision 0.903 → 0.949).
-  `reading_predates_pump_start` is a regime test, not a suppression window:
-  nothing is blocked for a fixed time and the tier resumes on the pump's very
-  next reading.
-
-- **The pump-on subtraction declines while the pump's flow estimate is still
-  spinning up** (`pump_on_demand_settle_seconds`, new, default 10 s). The
-  sibling of the fix below it, and the one that dominates in production: there
-  the pump channel is silent across the start, here it reports *promptly* while
-  the impeller is still accelerating, so the estimate reads low against a loop
-  the meter already sees moving — `pump_flow 0.713` at 3172 rpm against a meter
-  reading 1.712, published as 1.00 GPM at confidence 0.81.
-  `pump_on_demand_min_speed_rpm` does not cover it: that floor is for a low
-  *steady* speed. Measured on the Python detector across 296 pump starts in 30
-  days, `meter - pump_flow` by age of the run: 0–10 s is p90 0.820 GPM with
-  26.6 % above the 0.3 threshold, against p90 0.13–0.19 and a flat 6–9 % for
-  every band out to 180 s. Over three production days the subtraction's startup
-  firings fell 13 → 1 with no session lost. Set to `0` for the previous
-  behaviour.
-
-- **The falling-edge flow latch is disarmed for 30 s after a pump-off edge**
-  (`latch_pump_off_suppression_seconds`, new, matched to `flow_latch_seconds`).
-  The latch exists for gaps between meter reports during a draw; a shutdown
-  presents the same shape because loop flow runs a median 1.45 GPM and
-  collapses through the threshold within seconds of the motor parking. Since
-  the flow signal outranks thermal and charge on confidence, a *published*
-  thermal or charge verdict means flow was below threshold now and above it
-  within the latch window — exactly what a shutdown supplies, while the thermal
-  signal fires because the pump has been returning cooled loop water to the
-  tank. Measured on the Python detector over 30 days, 71 % of thermal and 62 %
-  of charge firings fell within 30 s of a pump-off edge against 0.38 % of
-  pump-off cells; over a production week the fix removed **93 false positives
-  for 1 true positive** (precision 0.768 → 0.810, recall flat at 0.993). A real
-  draw puts the meter above threshold on its own and never consults the latch,
-  which is why it costs almost no recall — controlled runs of a draw spanning a
-  shutdown, and of a draw starting 41 s after one, are detected identically
-  with it on and off. Set to `0` for the previous behaviour.
-
-  Both defects were found and fixed on the Python detector first
-  (`dhw-sensor-apps`) and are ported here to keep the two implementations in
-  parity; neither had an equivalent guard on this side.
-
-### Changed
-
-- **BREAKING — `droplet_max_stale_seconds` is now `flow_max_stale_seconds`** —
-  the staleness bound on the household flow channel was named after the meter
-  one installation happened to use. `dhw_demand` reads whatever GPM sensor you
-  wire to `flow`, so the key now names the channel rather than a product.
-  Behavior, default (60 s) and semantics are unchanged; only the spelling
-  moves. A config still setting the old name **fails at `esphome config` time**
-  naming the replacement, following the same rule as the keys retired in #149:
-  config that validates but does nothing is a trap.
-
-- **BREAKING — the Head sensor is now named "Head", not "Head Pressure"**
-  ([#157](https://github.com/eman/esphome-alpha-hwr/issues/157)) — head is a
-  length, measured in meters, and calling it a pressure was wrong everywhere
-  except the entity name: Grundfos calls it "Head (H)", the config key is
-  `head:`, the package header comments say "Head (m)", `docs/units-audit.md`
-  says "Head", and the history trend label is "Head". The diagnostic
-  `head_rate` entity follows as **"Head Rate"** (was "Head Pressure Rate").
-  Only the names shipped by `packages/alpha_hwr_base.yaml` and
-  `packages/alpha_hwr_pairing.yaml` change; the component sets no default name,
-  so a config that writes its own `alpha_hwr:` block is unaffected.
-
-  **This orphans the old entity in Home Assistant.** ESPHome derives the API
-  key from a hash of the object_id and the Home Assistant integration builds
-  `unique_id` from that key, so the renamed sensor arrives as a *new* entity —
-  `sensor.<device>_head` — and `sensor.<device>_head_pressure` is left behind
-  with its history and long-term statistics.
-
-  **There is no registry-side way to carry that history onto the new entity.**
-  Home Assistant does migrate statistics when an entity is renamed, but it
-  refuses a rename onto an entity_id that is already taken (`Entity with this
-  ID is already registered`) — and the live sensor already holds
-  `sensor.<device>_head`. Deleting the orphan first does not help either: it
-  frees the *old* id, not the new one, and the two entities have different
-  unique_ids, so nothing links them.
-
-  **Migration, one line — this is also the only way to keep your history:** to
-  stay on the old entity_id, re-declare `name: "Head Pressure"` under `head:`
-  in your own `alpha_hwr:` block. The main config wins over the package, the
-  same override the `pump_head_rate_sensor` migration in 0.15.0 uses.
-
-  If you would rather take the new name, accept that the series restarts:
-  delete the orphaned entity, and clear its leftover long-term statistics under
-  **Developer tools → Statistics**.
-
-- **The Head sensor carries `device_class: distance`**
-  ([#157](https://github.com/eman/esphome-alpha-hwr/issues/157)) — it had none,
-  because `m` is not a valid Home Assistant `pressure` unit, so Home Assistant
-  offered no way to display it in anything but meters. Meters of head is
-  dimensionally a length and HA's `distance` class accepts both `m` and `ft`,
-  which unlocks the per-entity unit picker — the pump's datasheet leads with
-  feet (§13: "Head (H) 15-55: max. 18 ft (5.5 m)").
-
-  **Nothing about the value changes.** The decode path, the published state and
-  the recorded unit are all still meters; `distance` is display metadata and the
-  conversion happens in the frontend, per user. Unlike the kPa → m change in
-  0.13.0, history does not step at the upgrade.
-
-- **Docs and comments no longer name a specific flow meter or water heater** —
-  README, `AGENTS.md`, `docs/configuration.md`, the packages and the component
-  comments now say "household flow meter" and "water heater". The detector was
-  always sensor-agnostic; the prose implied otherwise. Example entity IDs in
-  the packages changed to neutral placeholders (`sensor.dhw_flow_rate`,
-  `sensor.water_heater_*`) — these are illustrative substitution values, so
-  they change nothing at build time.
-
-### Fixed
-
 - README dropped a stale reference to a local, gitignored hardware config that
   is not part of the repo.
 
@@ -507,7 +554,6 @@
   act on it. Both default to null, so every existing card config renders
   exactly as before, and both are `pointer-events: none` beneath the
   interactive blocks — dragging and editing are untouched.
-
 
 ### Changed
 
@@ -615,7 +661,6 @@
   `demand_level` are identical, and the pump-off branch is untouched. 28 new
   assertions pin the ordering.
 
-
 ### Removed
 
 - **BREAKING — `packages/alpha_hwr_pairing.yaml` no longer assigns
@@ -635,7 +680,6 @@
   in your own `alpha_hwr:` block. That is where a config wanting a handle on this
   sensor should declare it anyway, rather than depending on an id the package
   happens to assign.
-
 
 ### Fixed
 
@@ -682,7 +726,6 @@
   untouched. Failure is not inferred from an empty result, since a layer or
   pump with no enabled entries legitimately reads back empty. Every consumer
   branch this makes reachable was already written — the paths were simply dead.
-
 
 ## [0.14.0] - 2026-07-28
 

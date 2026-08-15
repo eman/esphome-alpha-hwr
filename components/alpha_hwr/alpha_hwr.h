@@ -101,7 +101,7 @@ public:
       : PollingComponent(10000), auth_(transport_),
         telemetry_service_(transport_), control_service_(transport_, session_),
         schedule_service_(transport_, session_),
-        device_info_service_(transport_, session_), time_service_(&transport_),
+        device_info_service_(transport_), time_service_(&transport_),
         event_log_service_(transport_, session_),
         history_service_(transport_, session_),
         write_op_service_(control_service_, schedule_service_) {

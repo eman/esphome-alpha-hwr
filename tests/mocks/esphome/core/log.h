@@ -21,6 +21,7 @@ template <typename... Args> inline void sink(const Args &...) {}
     } \
   } while (0)
 
+#define ESP_LOGCONFIG(...) ESPHOME_MOCK_LOG(__VA_ARGS__)
 #define ESP_LOGD(...) ESPHOME_MOCK_LOG(__VA_ARGS__)
 #define ESP_LOGI(...) ESPHOME_MOCK_LOG(__VA_ARGS__)
 #define ESP_LOGW(...) ESPHOME_MOCK_LOG(__VA_ARGS__)

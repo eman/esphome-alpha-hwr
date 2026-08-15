@@ -24,6 +24,16 @@ void DhwDemandComponent::setup() {
   // how old it is — so differencing two channels needs its own notion of
   // reading age (issue #149). Only a real (non-NaN) reading counts: a NaN
   // publish is the channel going away, not reporting.
+  //
+  // These fire at the *end* of the source sensor's filter chain, so what they
+  // measure is post-filter cadence, not how often the device reports. That is
+  // the right thing to measure — a value the filters withheld is not a reading
+  // this component ever saw — but it does mean a filter can push a channel past
+  // its own staleness bound. `throttle: 10s`, which packages/README suggests,
+  // is comfortable against the 30 s motor/pump bound and the 60 s meter bound;
+  // a longer throttle or a `delta` filter on any of these four inputs would
+  // silently disable the subtraction, and the only symptom is a detector stuck
+  // on `pump_on_uncertain`.
   if (flow_sensor_ != nullptr) {
     flow_sensor_->add_on_state_callback([this](float v) {
       if (!std::isnan(v))
