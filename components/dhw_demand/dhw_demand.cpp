@@ -555,9 +555,17 @@ void DhwDemandComponent::update() {
     // transitions at LOGD and names these two as its one documented exception,
     // because they are the only record of *why* the tier stopped.
     if (result.continuation == ContinuationVerdict::MEASURED_STOPPED) {
-      ESP_LOGI(TAG, "Continuation retired: subtraction measured %.2f GPM, at "
-                    "or below the %.2f GPM threshold",
-               result.demand_gpm, pump_on_demand_flow_threshold_);
+      // The *release* threshold, not the firing one. Printing
+      // pump_on_demand_flow_threshold_ here named a number this decision no
+      // longer uses -- caught on the bench, where a genuine release logged
+      // "-0.20 GPM, at or below the 0.30 GPM threshold" while the line
+      // actually applied was 0.00.
+      ESP_LOGI(TAG, "Continuation retired: subtraction measured %.2f GPM on "
+                    "%u consecutive ticks, at or below the %.2f GPM release "
+                    "threshold",
+               result.demand_gpm,
+               (unsigned) kDefaultPumpOnThresholds.continuation_release_ticks,
+               kDefaultPumpOnThresholds.continuation_release);
       pre_pump_on_flow_ = NAN;
       pre_pump_on_flow_since_ms_ = 0;
       continuation_stopping_ticks_ = 0;
