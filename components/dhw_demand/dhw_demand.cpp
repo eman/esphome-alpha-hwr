@@ -248,7 +248,8 @@ PumpOnThresholds DhwDemandComponent::pump_on_thresholds_() const {
       pump_on_demand_min_speed_rpm_,
       (uint32_t) pump_on_demand_max_stale_seconds_ * 1000,
       (uint32_t) flow_max_stale_seconds_ * 1000,
-      (uint32_t) pump_on_demand_settle_seconds_ * 1000};
+      (uint32_t) pump_on_demand_settle_seconds_ * 1000,
+      (uint32_t) pump_on_continuation_max_seconds_ * 1000};
 }
 
 // ── Publish & session helpers ─────────────────────────────────────────────────
@@ -401,6 +402,7 @@ void DhwDemandComponent::update() {
   if (pump_confirmed_off) {
     observed_pump_off_ = true;
     pre_pump_on_flow_ = NAN;  // Clear stale transition state
+    pre_pump_on_flow_since_ms_ = 0;
   }
 
   // Stamp both regime boundaries. Only ever from a *known* pump state: a
@@ -433,11 +435,17 @@ void DhwDemandComponent::update() {
       // Pump just turned ON — record the previous tick's meter flow only if
       // the previous pump-off tick had non-ambiguous demand evidence.
       pre_pump_on_flow_ = prev_flow_;
+      // Stamped here rather than from pump_on_since_ms_: that one is written
+      // only on a *known* pump state, so a capture taken through a BLE gap
+      // would inherit either a zero (tier abstains) or the previous run's edge
+      // (tier expires instantly). The continuation's own age is what expires.
+      pre_pump_on_flow_since_ms_ = now;
       ESP_LOGD(TAG, "Pump turned ON; pre-pump flow: %.2f GPM",
                std::isnan(pre_pump_on_flow_) ? -1.0f
                                              : pre_pump_on_flow_);
     } else {
       pre_pump_on_flow_ = NAN;
+      pre_pump_on_flow_since_ms_ = 0;
       ESP_LOGD(TAG, "Pump turned ON without confirmed pre-pump demand evidence");
     }
   }
@@ -482,6 +490,7 @@ void DhwDemandComponent::update() {
     in.flow_last_update_ms = flow_last_update_ms_;
     in.pump_flow_last_update_ms = pump_flow_last_update_ms_;
     in.pump_on_since_ms = pump_on_since_ms_;
+    in.continuation_since_ms = pre_pump_on_flow_since_ms_;
     in.dhw_in_use_sustained = dhw_in_use_sustained;
 
     PumpOnResult result = decide_pump_on(in, pump_on_thresholds_());
@@ -489,6 +498,26 @@ void DhwDemandComponent::update() {
     confidence = result.confidence;
     demand_level = result.demand_level;
     method = result.method;
+
+    // A subtraction that reads below threshold has *measured* the draw as
+    // over, which is the one release that falsifies the stored evidence rather
+    // than merely failing to confirm it. Retire the capture so a later loss of
+    // the subtraction — the pump dropping below its speed floor, say — cannot
+    // resurrect a claim that has already been disproved. Every other release
+    // leaves it alone: a NaN meter reading for one tick must not permanently
+    // end a continuation that is still true.
+    if (result.continuation == ContinuationVerdict::MEASURED_STOPPED) {
+      ESP_LOGD(TAG, "Continuation retired: subtraction measured %.2f GPM, at "
+                    "or below the %.2f GPM threshold",
+               result.demand_gpm, pump_on_demand_flow_threshold_);
+      pre_pump_on_flow_ = NAN;
+      pre_pump_on_flow_since_ms_ = 0;
+    } else if (result.continuation == ContinuationVerdict::EXPIRED &&
+               pre_pump_on_flow_since_ms_ != 0) {
+      ESP_LOGD(TAG, "Continuation expired: nothing has measured the draw for "
+                    "%d s",
+               pump_on_continuation_max_seconds_);
+    }
 
     if (std::isnan(result.demand_gpm)) {
       ESP_LOGD(TAG, "Pump-on subtraction unavailable (missing, stale or "

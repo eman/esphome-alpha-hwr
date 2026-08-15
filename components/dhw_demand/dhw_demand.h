@@ -70,6 +70,9 @@ class DhwDemandComponent : public PollingComponent {
   void set_pump_on_demand_settle_seconds(int v) {
     pump_on_demand_settle_seconds_ = v;
   }
+  void set_pump_on_continuation_max_seconds(int v) {
+    pump_on_continuation_max_seconds_ = v;
+  }
   void set_demand_release_seconds(int v) { demand_release_seconds_ = v; }
   void set_session_gap_tolerance_seconds(int v) {
     session_gap_tolerance_seconds_ = v;
@@ -148,6 +151,12 @@ class DhwDemandComponent : public PollingComponent {
   // pump_on_demand_settle_seconds.
   int pump_on_demand_settle_seconds_{
       static_cast<int>(kDefaultPumpOnThresholds.pump_on_settle_ms / 1000)};
+  // How long the continuation tier may hold a draw nothing has measured since.
+  // Only reachable at all while the subtraction is unavailable — a measurement
+  // releases the tier immediately — so this is the ceiling for the blind case,
+  // chiefly a pump turning below pump_on_demand_min_speed_rpm.
+  int pump_on_continuation_max_seconds_{
+      static_cast<int>(kDefaultPumpOnThresholds.continuation_max_ms / 1000)};
   int session_gap_tolerance_seconds_{60};      // s
   int demand_release_seconds_{30};             // s
 
@@ -206,6 +215,10 @@ class DhwDemandComponent : public PollingComponent {
   bool prev_pre_pump_demand_eligible_{false};
   float prev_flow_{NAN};           // Flow from the *previous* tick
   float pre_pump_on_flow_{NAN};    // Flow captured from the last confirmed pump-off tick
+  // When that capture happened, for the continuation expiry. Written and
+  // cleared in lockstep with pre_pump_on_flow_, never separately: 0 alongside a
+  // valid flow would make the tier abstain, which is safe but silent.
+  uint32_t pre_pump_on_flow_since_ms_{0};
 
   // ── Transition timestamps ─────────────────────────────────────────────────
   // Both edges matter, and for symmetric reasons: a reading taken on one side

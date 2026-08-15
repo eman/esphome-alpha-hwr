@@ -82,6 +82,11 @@ struct PumpOnThresholds {
   // How long after a pump start the loop-flow estimate is still ramping and
   // must not be differenced. See pump_flow_estimate_is_settled.
   uint32_t pump_on_settle_ms;
+
+  // How long the continuation tier may keep asserting a draw that nothing has
+  // measured since. See pump_on_continuation_is_active for why an expiry is
+  // needed at all; 0 disables the tier outright.
+  uint32_t continuation_max_ms;
 };
 
 inline constexpr PumpOnThresholds kDefaultPumpOnThresholds{
@@ -91,6 +96,7 @@ inline constexpr PumpOnThresholds kDefaultPumpOnThresholds{
     /*pump_flow_max_stale_ms=*/30000,
     /*flow_max_stale_ms=*/60000,
     /*pump_on_settle_ms=*/10000,
+    /*continuation_max_ms=*/600000,
 };
 
 // The intensity a tier publishes when it is confident a draw is happening but
@@ -426,18 +432,100 @@ struct SustainedHigh {
   }
 };
 
+// Everything the continuation tier decides on. A struct rather than seven
+// positional arguments because two of the five numbers are GPM thresholds that
+// share a default value and two more are millisecond stamps — exactly the shape
+// that let pump_off_flow_onset_is_confirmed be fed the wrong argument for
+// months (#147/#148). Named initialisation makes that misorder unrepresentable.
+struct ContinuationInputs {
+  float pre_pump_on_flow{NAN};  // meter flow at the last confirmed pump-off tick
+  float flow{NAN};              // meter flow now, GPM
+  float flow_threshold{0.0f};   // GPM, PumpOnThresholds::flow
+
+  // The subtraction's verdict for this same tick — NaN when it could not be
+  // computed. Passing it in rather than recomputing keeps one oracle for the
+  // whole branch: the tier that releases on a measurement and the tier that
+  // fires on it must never be able to read different numbers.
+  float demand_gpm{NAN};
+  float demand_flow_threshold{0.0f};  // GPM, PumpOnThresholds::demand_flow
+
+  uint32_t now_ms{0};
+  // When this continuation armed — the pump-on edge that captured
+  // pre_pump_on_flow. 0 means never armed.
+  uint32_t continuation_since_ms{0};
+  uint32_t max_ms{0};  // PumpOnThresholds::continuation_max_ms
+};
+
 // Pump-on continuation. Demand was already established just before the pump
-// turned on, and household flow is still above threshold now — so the draw that
-// was being detected has not stopped, whatever the recirculation loop is doing
-// on top of it. `pre_pump_on_flow` is NaN unless the last confirmed pump-off
-// tick carried unambiguous demand evidence; the caller owns that capture.
-inline bool pump_on_continuation_is_active(float pre_pump_on_flow, float flow,
-                                           float flow_threshold) {
-  if (std::isnan(pre_pump_on_flow) || pre_pump_on_flow <= flow_threshold)
-    return false;
-  if (std::isnan(flow) || flow <= flow_threshold)
-    return false;
-  return true;
+// turned on, so the draw that was being detected is presumed to still be
+// running until something says otherwise. `pre_pump_on_flow` is NaN unless the
+// last confirmed pump-off tick carried unambiguous demand evidence; the caller
+// owns that capture.
+//
+// The hard part is not arming this tier but releasing it, and until issue #10
+// of the 2026-08-12 audit it effectively never released. The only exit was
+// `flow <= flow_threshold` on the raw meter, which cannot happen while the pump
+// runs: the meter sees the recirculation loop, and every pump-on reading this
+// repo records — 0.71 GPM at the 1650 rpm floor, 1.31 no-draw median, 1.45
+// pre-shutdown, 2.22 no-draw p90 — clears the 0.3 threshold by at least 2.4×.
+// So a draw that stopped five minutes into a thirty-minute run went on being
+// published as demand at confidence 0.85 for the remaining twenty-five, with
+// the subtraction sitting right there reading 0.00 GPM.
+//
+// Two exits replace it, and the raw-flow test is kept only for the cases it can
+// still decide (a dead or genuinely zero meter):
+//
+//  1. **A measurement that contradicts it.** When the subtraction is available
+//     it is the only pump-on reading of household draw there is, and a
+//     first-hand measurement outranks a memory of one. Note this is not a new
+//     signal and not a raw-flow rule: it is tier 2's own oracle, under tier 2's
+//     own guards, used to release rather than to fire.
+//
+//  2. **An expiry, for when no measurement ever arrives.** The subtraction goes
+//     quiet whenever the pump turns below min_speed_rpm — a pump clamped to
+//     1650 rpm never offers one at all — and an unfalsifiable claim that only
+//     gets older has to end somewhere. Once it expires the lower tiers decide,
+//     and if the draw is real *and* measurable the subtraction picks it straight
+//     back up, so the expiry costs recall only in the regime where nothing can
+//     see the draw anyway.
+// Why the tier fired or declined. The caller needs the distinction, not just
+// the boolean: MEASURED_STOPPED is the one release that *falsifies* the stored
+// evidence rather than merely failing to confirm it, so it is the one that must
+// clear the capture. Releasing on a NaN meter reading must not, or a single
+// dropped sample would permanently kill a continuation that is still true.
+enum class ContinuationVerdict : uint8_t {
+  ACTIVE,
+  NOT_ARMED,         // no pre-pump demand evidence was captured
+  METER_QUIET,       // the meter itself reports nothing, or reports nothing at all
+  MEASURED_STOPPED,  // the subtraction measured the draw as over
+  EXPIRED,           // nothing has measured it for max_ms
+};
+
+inline ContinuationVerdict
+pump_on_continuation_verdict(const ContinuationInputs &in) {
+  if (std::isnan(in.pre_pump_on_flow) ||
+      in.pre_pump_on_flow <= in.flow_threshold)
+    return ContinuationVerdict::NOT_ARMED;
+  if (std::isnan(in.flow) || in.flow <= in.flow_threshold)
+    return ContinuationVerdict::METER_QUIET;
+  // Exit 1. Strictly-greater matches the subtraction tier's own comparison, so
+  // the two cannot disagree about a reading sitting exactly on the threshold.
+  if (!std::isnan(in.demand_gpm) && in.demand_gpm <= in.demand_flow_threshold)
+    return ContinuationVerdict::MEASURED_STOPPED;
+  // Exit 2. An unstamped arm is treated as never armed rather than as
+  // infinitely old: failing closed here is the direction that cannot resurrect
+  // the stuck-on behaviour this exists to remove.
+  if (in.continuation_since_ms == 0)
+    return ContinuationVerdict::EXPIRED;
+  // Unsigned subtraction is intentional: it wraps correctly across the ~49-day
+  // millis() rollover, the same as reading_is_fresh's.
+  if ((in.now_ms - in.continuation_since_ms) >= in.max_ms)
+    return ContinuationVerdict::EXPIRED;
+  return ContinuationVerdict::ACTIVE;
+}
+
+inline bool pump_on_continuation_is_active(const ContinuationInputs &in) {
+  return pump_on_continuation_verdict(in) == ContinuationVerdict::ACTIVE;
 }
 
 // Everything the pump-on branch decides on, in one place so the ordering below
@@ -464,6 +552,12 @@ struct PumpOnInputs {
   // When the current pump run started, for reading_predates_pump_start. 0 means
   // no start has been observed, which makes that test abstain.
   uint32_t pump_on_since_ms{0};
+
+  // When pre_pump_on_flow was captured, for the continuation expiry. Stamped by
+  // the same branch that captures the flow, so the two are always consistent;
+  // separate from pump_on_since_ms because that one is stamped only on a
+  // *known* pump state and the capture can happen without one.
+  uint32_t continuation_since_ms{0};
 };
 
 // One pump-on decision. `demand_gpm` is the computed household draw where the
@@ -476,6 +570,12 @@ struct PumpOnResult {
   float demand_level{0.0f};
   const char *method{"pump_on_uncertain"};
   float demand_gpm{NAN};
+
+  // What tier 1 decided, and why. Reported whichever tier ultimately fired, so
+  // the component can retire a capture the subtraction has falsified without
+  // re-deriving the reason from `method` — a replica of this decision in the
+  // .cpp is exactly what issue #144 removed.
+  ContinuationVerdict continuation{ContinuationVerdict::NOT_ARMED};
 };
 
 // The pump-on branch, in priority order. Extracted from
@@ -528,7 +628,22 @@ inline PumpOnResult decide_pump_on(const PumpOnInputs &in,
       reading_is_fresh(in.flow_last_update_ms, in.now_ms, t.flow_max_stale_ms),
       pump_flow_usable, t.min_speed_rpm);
 
-  if (pump_on_continuation_is_active(in.pre_pump_on_flow, in.flow, t.flow)) {
+  // Fed r.demand_gpm, computed just above, so the tier that releases on the
+  // subtraction and the tier that fires on it read the same number.
+  const ContinuationInputs cont{
+      /*pre_pump_on_flow=*/in.pre_pump_on_flow,
+      /*flow=*/in.flow,
+      /*flow_threshold=*/t.flow,
+      /*demand_gpm=*/r.demand_gpm,
+      /*demand_flow_threshold=*/t.demand_flow,
+      /*now_ms=*/in.now_ms,
+      /*continuation_since_ms=*/in.continuation_since_ms,
+      /*max_ms=*/t.continuation_max_ms,
+  };
+
+  r.continuation = pump_on_continuation_verdict(cont);
+
+  if (r.continuation == ContinuationVerdict::ACTIVE) {
     r.demand = true;
     r.confidence = 0.85f;
     // Intensity from the measurement where it is available; the meter alone is

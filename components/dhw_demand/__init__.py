@@ -48,6 +48,7 @@ CONF_DHW_IN_USE_MIN_SECONDS = "dhw_in_use_min_seconds"
 CONF_FLOW_LATCH_SECONDS = "flow_latch_seconds"
 CONF_LATCH_PUMP_OFF_SUPPRESSION_SECONDS = "latch_pump_off_suppression_seconds"
 CONF_PUMP_ON_SETTLE_SECONDS = "pump_on_demand_settle_seconds"
+CONF_PUMP_ON_CONTINUATION_MAX_SECONDS = "pump_on_continuation_max_seconds"
 CONF_SESSION_GAP_TOLERANCE_SECONDS = "session_gap_tolerance_seconds"
 CONF_DEMAND_RELEASE_SECONDS = "demand_release_seconds"
 
@@ -234,6 +235,19 @@ CONFIG_SCHEMA = (
             # Bounded for the uint32_t wrap reason; 0 disables.
             cv.Optional(CONF_PUMP_ON_SETTLE_SECONDS, default=10):
                 cv.int_range(min=0, max=3600),
+            # How long the continuation tier may keep asserting a draw that
+            # nothing has measured since. It only ever runs out while the
+            # subtraction is unavailable, because a subtraction below threshold
+            # releases the tier on the spot; the case it bounds is a pump
+            # turning below pump_on_demand_min_speed_rpm, where no measurement
+            # of household draw exists at all and the claim would otherwise
+            # stand for the whole run.
+            #
+            # Bounded for the same uint32_t wrap reason as the staleness keys.
+            # 0 disables the tier outright rather than making it unbounded --
+            # unbounded is the behaviour being removed.
+            cv.Optional(CONF_PUMP_ON_CONTINUATION_MAX_SECONDS, default=600):
+                cv.int_range(min=0, max=3600),
             cv.Optional(CONF_SESSION_GAP_TOLERANCE_SECONDS, default=60):
                 cv.positive_int,
             cv.Optional(CONF_DEMAND_RELEASE_SECONDS, default=30):
@@ -317,6 +331,8 @@ async def to_code(config):
         config[CONF_LATCH_PUMP_OFF_SUPPRESSION_SECONDS]))
     cg.add(var.set_pump_on_demand_settle_seconds(
         config[CONF_PUMP_ON_SETTLE_SECONDS]))
+    cg.add(var.set_pump_on_continuation_max_seconds(
+        config[CONF_PUMP_ON_CONTINUATION_MAX_SECONDS]))
     cg.add(var.set_session_gap_tolerance_seconds(
         config[CONF_SESSION_GAP_TOLERANCE_SECONDS]))
     cg.add(var.set_demand_release_seconds(

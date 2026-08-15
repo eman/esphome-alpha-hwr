@@ -524,7 +524,133 @@ void test_session_follows_the_held_demand() {
               "demand it would have closed at the first dry tick and read 0");
 }
 
-// ── 8. Nothing wired ─────────────────────────────────────────────────────────
+// ── 8. The continuation across a whole pump run ──────────────────────────────
+// Audit finding 10, end to end. The tier's release used to be raw meter flow
+// above 0.3 GPM, which cannot go false while the pump runs, so a draw that
+// stopped mid-run went on being published as demand until the pump did.
+//
+// What is only testable here rather than in the predicate's own file: the
+// capture is *retired* when the subtraction falsifies it, so a later loss of
+// the subtraction cannot resurrect a claim already disproved. That clearing
+// lives in the .cpp, and without it the last two assertions fail while every
+// unit test still passes.
+void test_a_stopped_draw_ends_the_continuation() {
+  std::cout << "\n=== A draw that stops mid-run ends the continuation ==="
+            << std::endl;
+  Rig r;
+  r.det.set_demand_release_seconds(0);  // observe raw demand, not the hold
+  r.det.setup();
+
+  // Two pump-off ticks of a real 1.80 GPM draw: past the onset debounce, so the
+  // pump-on edge has confirmed demand evidence to capture.
+  for (int i = 0; i < 2; i++) {
+    uint32_t now = T0 + i * TICK_MS;
+    r.at(now);
+    r.motor_speed.publish_state(0.0f);
+    r.flow.publish_state(1.80f);
+    r.tick(now);
+  }
+  TEST_ASSERT(r.method_state() == "deterministic_flow",
+              "A draw is established while the pump is off");
+
+  // Pump starts. The meter now reads the draw plus the loop.
+  uint32_t on = T0 + 2 * TICK_MS;
+  r.at(on);
+  r.motor_speed.publish_state(2400.0f);
+  r.pump_flow.publish_state(1.31f);
+  r.flow.publish_state(3.11f);
+  r.tick(on);
+  TEST_ASSERT(r.method_state() == "deterministic_continuation",
+              "The draw in progress carries across the pump start");
+
+  // Past the settle window, with the draw still running: the subtraction agrees
+  // and the tier holds.
+  uint32_t drawing = on + TICK_MS;
+  r.at(drawing);
+  r.motor_speed.publish_state(2400.0f);
+  r.pump_flow.publish_state(1.31f);
+  r.flow.publish_state(3.11f);
+  r.tick(drawing);
+  TEST_ASSERT(r.method_state() == "deterministic_continuation",
+              "A measured draw keeps the continuation alive");
+  TEST_ASSERT(r.demand.state == true, "...and demand stays true");
+
+  // The tap closes. The meter still reads 1.31 GPM -- the no-draw median, and
+  // 4.4x the 0.3 threshold -- because that is the recirculation loop. Only the
+  // subtraction can tell: 1.31 - 1.31 = 0.00.
+  uint32_t stopped = drawing + TICK_MS;
+  r.at(stopped);
+  r.motor_speed.publish_state(2400.0f);
+  r.pump_flow.publish_state(1.31f);
+  r.flow.publish_state(1.31f);
+  r.tick(stopped);
+  TEST_ASSERT(r.demand.state == false,
+              "The draw stopping ends the demand, meter flow notwithstanding");
+  TEST_ASSERT(r.method_state() == "pump_on_uncertain",
+              "...and the tick falls through to the fallback");
+
+  // Now the pump slows below its speed floor, so no subtraction exists at all.
+  // The disproved capture must not come back on the strength of the meter
+  // reading that never fell.
+  for (int i = 1; i <= 3; i++) {
+    uint32_t slow = stopped + i * TICK_MS;
+    r.at(slow);
+    r.motor_speed.publish_state(1650.0f);
+    r.pump_flow.publish_state(0.25f);
+    r.flow.publish_state(0.71f);
+    r.tick(slow);
+  }
+  TEST_ASSERT(r.demand.state == false,
+              "Losing the subtraction does not resurrect a disproved draw");
+  TEST_ASSERT(r.method_state() == "pump_on_uncertain",
+              "...and the continuation does not re-fire");
+}
+
+// The other half: a run where the subtraction is never available, so nothing
+// can ever contradict the tier. A pump clamped below its speed floor is the
+// real case. The expiry is the only thing that ends it there, and without one
+// this run publishes demand for its entire length.
+void test_an_unmeasurable_continuation_expires() {
+  std::cout << "\n=== An unmeasured continuation expires ===" << std::endl;
+  Rig r;
+  r.det.set_demand_release_seconds(0);
+  r.det.set_pump_on_continuation_max_seconds(600);
+  r.det.setup();
+
+  for (int i = 0; i < 2; i++) {
+    uint32_t now = T0 + i * TICK_MS;
+    r.at(now);
+    r.motor_speed.publish_state(0.0f);
+    r.flow.publish_state(1.80f);
+    r.tick(now);
+  }
+  TEST_ASSERT(r.method_state() == "deterministic_flow", "Draw established");
+
+  // Pump starts and stays at 1650 rpm -- below pump_on_demand_min_speed_rpm,
+  // where the pump's own flow estimate is not trustworthy enough to subtract.
+  // The meter reads 0.71 GPM of loop flow throughout, still 2.4x threshold.
+  const uint32_t on = T0 + 2 * TICK_MS;
+  int continuation_ticks = 0;
+  for (int i = 0; i <= 180; i++) {  // 30 minutes
+    uint32_t now = on + i * TICK_MS;
+    r.at(now);
+    r.motor_speed.publish_state(1650.0f);
+    r.pump_flow.publish_state(0.25f);
+    r.flow.publish_state(0.71f);
+    r.tick(now);
+    if (r.method_state() == "deterministic_continuation")
+      continuation_ticks++;
+  }
+
+  TEST_ASSERT(continuation_ticks == 60,
+              "A blind 30-minute run holds demand for 10 minutes, not 30");
+  TEST_ASSERT(r.demand.state == false,
+              "The run ends with no demand claimed");
+  TEST_ASSERT(r.method_state() == "pump_on_uncertain",
+              "...and the fallback has taken over");
+}
+
+// ── 9. Nothing wired ─────────────────────────────────────────────────────────
 // Every input and output is optional in the schema. All the null guards are in
 // the .cpp, so this is the only place they can be exercised. The assertion is
 // nominally tautological, but the test is not: dropping the nullptr guard in
@@ -558,6 +684,8 @@ int main() {
   test_release_hold_reports_coherently();
   test_session_duration_tracks_the_draw();
   test_session_follows_the_held_demand();
+  test_a_stopped_draw_ends_the_continuation();
+  test_an_unmeasurable_continuation_expires();
   test_unwired_component_is_inert();
 
   std::cout << "\n==========================================" << std::endl;
