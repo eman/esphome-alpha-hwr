@@ -1,8 +1,8 @@
 /**
  * Host tests for homeassistant/www/alpha-hwr-schedule-card.js.
  *
- * The card is 1800 lines that had no automated check beyond `node --check`, and
- * it has already shipped broken twice for want of one: every service call
+ * The card is ~2000 lines that had no automated check beyond `node --check`,
+ * and it has already shipped broken twice for want of one: every service call
  * omitted the required `op_id`, and the single-event regex could not match the
  * format the firmware emits. Both were silent.
  *
@@ -11,7 +11,14 @@
  * touches a small, fixed set of DOM APIs, so they are stubbed below rather than
  * pulled in as jsdom.
  *
- * Run: node tests/js/test_schedule_card.js
+ * **The harness renders the whole card on purpose.** An earlier version left
+ * `_showQuickRun` false and `hass.states` empty, so the Quick Run panel
+ * returned '' and the grid took its empty branch in every test -- the entire
+ * single-event UI could be deleted outright with the suite still green. A stub
+ * that never reaches the code is indistinguishable from no test at all, so
+ * `makeCard()` seeds real layer states and opens the panel.
+ *
+ * Run: node tests/js/test_schedule_card.js   (or: make test-js)
  */
 
 'use strict';
@@ -42,6 +49,14 @@ function assertEqual(actual, expected, what) {
   assert(actual === expected, `${what} (expected ${JSON.stringify(expected)}, got ${JSON.stringify(actual)})`);
 }
 
+function assertIncludes(haystack, needle, what) {
+  assert(String(haystack).includes(needle), `${what} (missing ${JSON.stringify(needle)})`);
+}
+
+function assertExcludes(haystack, needle, what) {
+  assert(!String(haystack).includes(needle), `${what} (unexpectedly contains ${JSON.stringify(needle)})`);
+}
+
 async function test(name, fn) {
   currentTest = name;
   const before = failures;
@@ -62,11 +77,12 @@ async function test(name, fn) {
 
 /** A shadow root that swallows markup but keeps it inspectable.
  *
- * Element queries return nothing, which is what the card's own event wiring
- * tolerates (`querySelectorAll(...).forEach`) -- these tests drive the card's
- * methods directly rather than through synthesised clicks, so the markup only
- * has to be *produced* without throwing, and readable afterwards for the
- * escaping test.
+ * Element queries return nothing, which the card's own event wiring tolerates
+ * (`querySelectorAll(...).forEach`). These tests drive the card's methods
+ * directly rather than through synthesised clicks, so the markup has to be
+ * *produced* without throwing and is then asserted on as a string -- which is
+ * how the button wiring (`data-action`, `data-slot`, `disabled`) gets covered
+ * despite nothing being clickable here.
  */
 function makeShadowRoot() {
   return {
@@ -118,6 +134,9 @@ function soonestTimerDelay() {
   return soonest === null ? null : soonest - fakeNow;
 }
 
+/** How many timers are outstanding -- a stray one is a leak, not a backstop. */
+function timerCount() { return timers.size; }
+
 /* ─── Load the card ─── */
 
 const CARD_PATH = path.join(__dirname, '..', '..', 'homeassistant', 'www',
@@ -152,10 +171,24 @@ vm.runInContext(fs.readFileSync(CARD_PATH, 'utf8'), sandbox, { filename: CARD_PA
 const CardClass = registry.get('alpha-hwr-schedule-card');
 if (!CardClass) throw new Error('card did not register alpha-hwr-schedule-card');
 
+/* ─── Firmware constants, restated so a drift shows up as a failure ─── */
+
+const SCHED_ENTRY_MS = 20000;   // WATCHDOG_SCHED_ENTRY_MS
+const SINGLE_EVENT_MS = 60000;  // WATCHDOG_SINGLE_EVENT_MS
+const QUEUE_HEAD_MS = 150000;   // WATCHDOG_UPLOAD_MS -- worst case ahead of us
+const MARGIN_MS = 5000;         // SETTLE_MARGIN_MS
+
+const schedBackstop = (n) => n * SCHED_ENTRY_MS + QUEUE_HEAD_MS + MARGIN_MS;
+const singleBackstop = (n) => n * SINGLE_EVENT_MS + QUEUE_HEAD_MS + MARGIN_MS;
+
 /* ─── Harness ─── */
 
-/** A card wired to a fake hass, with every service call and event recorded. */
-function makeCard() {
+/** A card wired to a fake hass, with every service call and event recorded.
+ *
+ * States are seeded so `_rebuildSchedule` produces a real grid and the Quick
+ * Run panel is opened, so `_render` walks the markup these tests assert on.
+ */
+function makeCard(opts = {}) {
   const calls = [];
   let settleHandler = null;
   let unsubscribed = 0;
@@ -164,8 +197,23 @@ function makeCard() {
   const card = new CardClass();
   card.setConfig({ device: 'hwr_pump' });
 
+  const layer0 = JSON.stringify([[360, 480], 0, 0, 0, 0, 0, 0]);
+  const empty = JSON.stringify([0, 0, 0, 0, 0, 0, 0]);
+
   const hass = {
-    states: {},
+    states: {
+      'sensor.hwr_pump_schedule_layer_0': { state: layer0 },
+      'sensor.hwr_pump_schedule_layer_1': { state: empty },
+      'sensor.hwr_pump_schedule_layer_2': { state: empty },
+      'sensor.hwr_pump_schedule_layer_3': { state: empty },
+      'sensor.hwr_pump_schedule_layer_4': { state: empty },
+      'switch.hwr_pump_schedule_enabled': { state: 'on' },
+      'sensor.hwr_pump_single_events': {
+        state: opts.singleEvents !== undefined
+          ? opts.singleEvents
+          : '[0] 2026-08-15 06:00 - 07:30 (run)',
+      },
+    },
     connection: {
       subscribeEvents(cb, type) {
         settleHandler = { cb, type };
@@ -183,21 +231,35 @@ function makeCard() {
   };
 
   card.hass = hass;
+  // Open the Quick Run panel so the single-event UI actually renders. Without
+  // this, _renderQuickRunPanel returns '' and every assertion about the event
+  // rows would pass against a deleted implementation.
+  card._showQuickRun = true;
+  card._render();
 
   return {
     card,
+    hass,
     calls,
     get unsubscribed() { return unsubscribed; },
     get subscribedType() { return settleHandler && settleHandler.type; },
+    get html() { return card.shadowRoot.innerHTML; },
     rejectOn(service) { rejectNext = service; },
     /** The op_ids the card issued, oldest first. */
     opIds() { return calls.filter(c => c.data && c.data.op_id).map(c => c.data.op_id); },
+    /** op_ids for one service only -- untracked refreshes share the counter. */
+    opIdsFor(service) {
+      return calls.filter(c => c.service === `hwr_pump_${service}`).map(c => c.data.op_id);
+    },
     /** Deliver a settle event the way HA would. */
     settle(opId, status, detail) {
       settleHandler.cb({ data: { op_id: opId, status, detail: detail || '', node: 'hwr_pump' } });
     },
     countOf(service) {
       return calls.filter(c => c.service === `hwr_pump_${service}`).length;
+    },
+    payloadsOf(service) {
+      return calls.filter(c => c.service === `hwr_pump_${service}`).map(c => c.data.data);
     },
   };
 }
@@ -234,30 +296,33 @@ async function main() {
     assertEqual(h.countOf('set_schedule_entry'), 1, 'one write issued');
     assertEqual(h.card._pendingChanges.size, 1, 'edit is held while the write is out');
 
-    h.settle(h.opIds()[0], 'accepted');
+    h.settle(h.opIdsFor('set_schedule_entry')[0], 'accepted');
     assertEqual(h.card._pendingChanges.size, 0, 'edit retired on confirmation');
     assertEqual(h.card._writeErrors.length, 0, 'no error reported');
     assertEqual(h.countOf('refresh_schedule'), 1, 'refreshed once the batch drained');
   });
 
-  await test('a rejected write keeps its edit and says so', async () => {
+  await test('a rejected write names the edit that failed', async () => {
     const h = makeCard();
     h.card._pendingChanges.set('2,1', [420, 500]);
     h.card._saveChanges();
-    h.settle(h.opIds()[0], 'rejected', 'pump not connected/synchronized');
+    h.settle(h.opIdsFor('set_schedule_entry')[0], 'rejected', 'pump not connected/synchronized');
 
     assertEqual(h.card._pendingChanges.size, 1, 'the edit survives a failed write');
     assertEqual(h.card._writeErrors.length, 1, 'the failure is reported');
     assertEqual(h.card._writeErrors[0].status, 'rejected', 'status carried through');
-    assert(h.card.shadowRoot.innerHTML.includes('pump not connected'),
-           'the detail reaches the rendered card');
+    // Which edit failed is the entire point of a per-write report; a batch
+    // that says only "rejected" tells the user nothing actionable.
+    assertEqual(h.card._writeErrors[0].label, 'Wed layer 1', 'the failing cell is identified');
+    assertIncludes(h.html, 'Wed layer 1', 'the label reaches the rendered card');
+    assertIncludes(h.html, 'pump not connected', 'so does the device detail');
   });
 
   await test('a clamped write counts as accepted', async () => {
     const h = makeCard();
     h.card._pendingChanges.set('0,0', [360, 480]);
     h.card._saveChanges();
-    h.settle(h.opIds()[0], 'clamped', 'end clamped to 23:59');
+    h.settle(h.opIdsFor('set_schedule_entry')[0], 'clamped', 'end clamped to 23:59');
 
     assertEqual(h.card._pendingChanges.size, 0, 'the device took the write');
     assertEqual(h.card._writeErrors.length, 0, 'a clamp is not a failure');
@@ -282,19 +347,39 @@ async function main() {
     assertEqual(h.countOf('refresh_schedule'), 1, 'exactly one read, after the last settle');
   });
 
-  await test('an edit made during the write outlives its confirmation', async () => {
-    // The user drags the same block again before the first write lands. The
-    // confirmation belongs to the *old* value, so retiring the cell wholesale
-    // would silently throw away the newer intent.
+  await test('every failure in a batch is reported, not just the first', async () => {
     const h = makeCard();
     h.card._pendingChanges.set('0,0', [360, 480]);
+    h.card._pendingChanges.set('1,0', [400, 500]);
+    h.card._pendingChanges.set('2,0', [420, 540]);
     h.card._saveChanges();
-    h.card._pendingChanges.set('0,0', [300, 420]); // re-edited, in flight
 
-    h.settle(h.opIds()[0], 'accepted');
+    const ops = h.opIds();
+    h.settle(ops[0], 'rejected', 'first');
+    h.settle(ops[1], 'accepted');
+    h.settle(ops[2], 'timeout', 'third');
+
+    assertEqual(h.card._writeErrors.length, 2, 'both failures kept');
+    assertEqual(h.card._pendingChanges.size, 2, 'and both edits kept for a retry');
+    assertIncludes(h.html, 'Mon layer 0', 'the first failure is rendered');
+    assertIncludes(h.html, 'Wed layer 0', 'and so is the second');
+  });
+
+  await test('an edit made during the write outlives its confirmation', async () => {
+    // The user drags the same block again before the first write lands. The
+    // confirmation belongs to the *old* array, so the check has to be identity
+    // -- a value comparison would retire the cell whenever the user happened
+    // to drag it back to where it started.
+    const h = makeCard();
+    const original = [360, 480];
+    h.card._pendingChanges.set('0,0', original);
+    h.card._saveChanges();
+    h.card._pendingChanges.set('0,0', [360, 480]); // same value, fresh array
+
+    h.settle(h.opIdsFor('set_schedule_entry')[0], 'accepted');
     assertEqual(h.card._pendingChanges.size, 1, 'the newer edit is still pending');
-    const held = h.card._pendingChanges.get('0,0');
-    assertEqual(held[0], 300, 'and it is the newer value, not the confirmed one');
+    assert(h.card._pendingChanges.get('0,0') !== original,
+           'and it is the newer array, not the confirmed one');
   });
 
   await test('a settle for an op the card did not issue is ignored', async () => {
@@ -317,6 +402,14 @@ async function main() {
     assertEqual(h.countOf('set_schedule_entry'), 1, 'the second save issued nothing');
   });
 
+  await test('saving with nothing pending does nothing at all', async () => {
+    const h = makeCard();
+    h.card._saveChanges();
+
+    assertEqual(h.calls.length, 0, 'no service call');
+    assertEqual(timerCount(), 0, 'and no phantom backstop armed');
+  });
+
   await test('discard is refused while writes are outstanding', async () => {
     const h = makeCard();
     h.card._pendingChanges.set('0,0', [360, 480]);
@@ -327,21 +420,75 @@ async function main() {
                 'the edit stays until its own write settles');
   });
 
+  await test('a retry clears the previous failure report', async () => {
+    const h = makeCard();
+    h.card._pendingChanges.set('0,0', [360, 480]);
+    h.card._saveChanges();
+    h.settle(h.opIdsFor('set_schedule_entry')[0], 'rejected', 'pump not connected');
+    assertEqual(h.card._writeErrors.length, 1, 'reported once');
+    assertIncludes(h.html, 'pump not connected', 'and shown');
+
+    h.card._saveChanges(); // retry
+    assertEqual(h.card._writeErrors.length, 0, 'the stale banner is cleared on retry');
+    assertExcludes(h.html, 'pump not connected', 'and gone from the card');
+  });
+
+  await test('discarding clears the failure report too', async () => {
+    const h = makeCard();
+    h.card._pendingChanges.set('0,0', [360, 480]);
+    h.card._saveChanges();
+    h.settle(h.opIdsFor('set_schedule_entry')[0], 'rejected', 'pump not connected');
+
+    h.card._discardChanges();
+    assertEqual(h.card._pendingChanges.size, 0, 'the edit is dropped');
+    assertEqual(h.card._writeErrors.length, 0, 'and so is the error about it');
+  });
+
+  await test('a single-event action does not erase an unread schedule failure', async () => {
+    // The two surfaces fail independently. A Quick Run is not a retry of a
+    // schedule write, so it must not wipe the report that says which cell
+    // failed and why -- the edit is still pending and the user has not read it.
+    const h = makeCard();
+    h.card._pendingChanges.set('0,0', [360, 480]);
+    h.card._saveChanges();
+    h.settle(h.opIdsFor('set_schedule_entry')[0], 'rejected', 'pump not connected');
+
+    h.card._scheduleQuickRun(30);
+    assertEqual(h.card._writeErrors.length, 1, 'the schedule failure survives');
+    assertEqual(h.card._writeErrors[0].surface, 'schedule', 'and is still attributed');
+    assertIncludes(h.html, 'pump not connected', 'and is still on screen');
+  });
+
   // -------------------------------------------------------------------------
   // The backstop. A settle event can genuinely never arrive -- HA restart,
   // websocket reconnect, node reboot -- and edits pinned on screen forever
   // would be its own bug.
   // -------------------------------------------------------------------------
 
-  await test('the backstop is armed from the firmware watchdog, per write', async () => {
+  await test('the backstop covers the batch and the queue ahead of it', async () => {
     const h = makeCard();
     h.card._pendingChanges.set('0,0', [360, 480]);
     h.card._pendingChanges.set('1,0', [360, 480]);
     h.card._saveChanges();
 
-    // 2 x WATCHDOG_SCHED_ENTRY_MS + SETTLE_MARGIN_MS. Writes queue one at a
-    // time, so a batch's ceiling is per-write x batch size.
-    assertEqual(soonestTimerDelay(), 2 * 20000 + 5000, 'delay scales with the batch');
+    // Per-write budget x batch size, plus the largest budget anything already
+    // at the head of the device queue can hold. A queued operation carries no
+    // watchdog until it reaches the head, so its own budget does not bound the
+    // wait -- and the card's own untracked refresh_schedule (30 s) can be the
+    // thing in front of it.
+    assertEqual(soonestTimerDelay(), schedBackstop(2), 'batch size and queue slack both counted');
+  });
+
+  await test('progress extends the backstop to what is left', async () => {
+    const h = makeCard();
+    h.card._pendingChanges.set('0,0', [360, 480]);
+    h.card._pendingChanges.set('1,0', [400, 500]);
+    h.card._pendingChanges.set('2,0', [420, 540]);
+    h.card._saveChanges();
+    assertEqual(soonestTimerDelay(), schedBackstop(3), 'armed for three');
+
+    h.settle(h.opIds()[0], 'accepted');
+    assertEqual(soonestTimerDelay(), schedBackstop(2), 're-armed for the two still out');
   });
 
   await test('an unanswered write is released by the backstop', async () => {
@@ -349,26 +496,81 @@ async function main() {
     h.card._pendingChanges.set('0,0', [360, 480]);
     h.card._saveChanges();
 
-    advance(20000 + 5000 - 1);
+    advance(schedBackstop(1) - 1);
     assertEqual(h.card._inFlight.size, 1, 'still waiting just before the deadline');
 
     advance(1);
     assertEqual(h.card._inFlight.size, 0, 'released at the deadline');
     assertEqual(h.card._writeErrors.length, 1, 'and reported rather than silently dropped');
     assertEqual(h.card._writeErrors[0].status, 'no confirmation', 'named for what happened');
+    assertEqual(h.card._writeErrors[0].label, 'Mon layer 0', 'and attributed to its cell');
     assertEqual(h.card._pendingChanges.size, 1, 'the unconfirmed edit is kept');
     assertEqual(h.countOf('refresh_schedule'), 1, 'device state is re-read');
+  });
+
+  await test('the backstop reports every write still outstanding', async () => {
+    const h = makeCard();
+    h.card._pendingChanges.set('0,0', [360, 480]);
+    h.card._pendingChanges.set('1,0', [400, 500]);
+    h.card._saveChanges();
+
+    advance(schedBackstop(2));
+    assertEqual(h.card._writeErrors.length, 2, 'both are named, not just one');
   });
 
   await test('the backstop is disarmed once the batch settles', async () => {
     const h = makeCard();
     h.card._pendingChanges.set('0,0', [360, 480]);
     h.card._saveChanges();
-    h.settle(h.opIds()[0], 'accepted');
+    h.settle(h.opIdsFor('set_schedule_entry')[0], 'accepted');
 
-    assertEqual(soonestTimerDelay(), null, 'no timer left armed');
-    advance(60000);
+    assertEqual(timerCount(), 0, 'no timer left armed');
+    advance(600000);
     assertEqual(h.countOf('refresh_schedule'), 1, 'and no second refresh fires later');
+  });
+
+  await test('a re-attach mid-write does not strand the card', async () => {
+    // Lovelace re-appends an existing card element when a masonry view
+    // re-columns -- a resize, the sidebar toggling, entering edit mode. That
+    // fires disconnectedCallback + connectedCallback on the same instance.
+    // Teardown cancels the backstop, and _armBackstop is reachable only from
+    // _saveChanges and _trackSingleEvent, both of which refuse to run while
+    // _inFlight is populated -- so without a re-arm the card renders "saving…"
+    // forever with Save and Discard disabled, recoverable only by reload.
+    const h = makeCard();
+    h.card._pendingChanges.set('0,0', [360, 480]);
+    h.card._saveChanges();
+
+    h.card.disconnectedCallback();
+    assertEqual(timerCount(), 0, 'teardown does cancel the timer');
+    h.card.connectedCallback();
+    assert(timerCount() > 0, 're-attach restores it');
+
+    advance(schedBackstop(1));
+    assertEqual(h.card._inFlight.size, 0, 'and it still releases the write');
+    assertEqual(h.card._isSaving(), false, 'so the card is usable again');
+    assertEqual(h.card._writeErrors[0].status, 'no confirmation', 'with the reason given');
+  });
+
+  await test('a re-attach resumes the deadline rather than restarting it', async () => {
+    // A view that re-columns every few seconds would otherwise never reach a
+    // deadline that keeps being reset to full.
+    const h = makeCard();
+    h.card._pendingChanges.set('0,0', [360, 480]);
+    h.card._saveChanges();
+    const armed = soonestTimerDelay();
+
+    h.card.disconnectedCallback();
+    h.card.connectedCallback();
+    assert(soonestTimerDelay() <= armed,
+           'the resumed deadline is no later than the original');
+  });
+
+  await test('a re-attach with nothing in flight arms nothing', async () => {
+    const h = makeCard();
+    h.card.disconnectedCallback();
+    h.card.connectedCallback();
+    assertEqual(timerCount(), 0, 'no phantom backstop');
   });
 
   await test('a call Home Assistant itself rejects is reported', async () => {
@@ -385,6 +587,7 @@ async function main() {
     assertEqual(h.card._inFlight.size, 0, 'the write is not left outstanding');
     assertEqual(h.card._writeErrors.length, 1, 'the rejection is surfaced');
     assertEqual(h.card._writeErrors[0].status, 'call rejected', 'named for what happened');
+    assertEqual(h.card._writeErrors[0].label, 'Mon layer 0', 'and attributed');
     assertEqual(h.card._pendingChanges.size, 1, 'the edit is kept for a retry');
   });
 
@@ -395,83 +598,146 @@ async function main() {
   // -------------------------------------------------------------------------
 
   await test('a cleared event is held, not removed on faith', async () => {
-    const h = makeCard();
-    h.card._singleEvents = [{ slot: 2, begin: new Date(), end: new Date(), action: 'run' }];
+    const h = makeCard({
+      singleEvents: '[2] 2026-08-15 06:00 - 07:30 (run)\n[4] 2026-08-15 20:00 - 21:00 (run)',
+    });
     h.card._clearSingleEvent(2);
 
     assertEqual(h.countOf('clear_single_event'), 1, 'the clear was issued');
-    assertEqual(h.card._singleEvents.length, 1, 'the row is still shown while unconfirmed');
-    assert(h.card._slotInFlight(2), 'and marked as in flight');
+    assertEqual(h.payloadsOf('clear_single_event')[0], '2', 'addressed to the slot asked for');
+    assertEqual(h.card._singleEvents.length, 2, 'the row is still shown while unconfirmed');
+    assert(h.card._slotInFlight(2), 'the cleared slot is marked in flight');
+    assert(!h.card._slotInFlight(4), 'and the untouched one is not');
 
-    h.settle(h.opIds()[0], 'accepted');
+    h.settle(h.opIdsFor('clear_single_event')[0], 'accepted');
     assertEqual(h.countOf('refresh_single_events'), 1, 'the event list is re-read on settle');
-    assert(!h.card._slotInFlight(2), 'and the in-flight mark is cleared');
+    assertEqual(h.countOf('refresh_schedule'), 0, 'and the schedule is not, it did not change');
+    assert(!h.card._slotInFlight(2), 'the in-flight mark is cleared');
   });
 
   await test('a failed clear reports instead of vanishing the row', async () => {
     const h = makeCard();
-    h.card._singleEvents = [{ slot: 2, begin: new Date(), end: new Date(), action: 'run' }];
-    h.card._clearSingleEvent(2);
-    h.settle(h.opIds()[0], 'timeout', 'no response');
+    h.card._clearSingleEvent(0);
+    h.settle(h.opIdsFor('clear_single_event')[0], 'timeout', 'no response');
 
     assertEqual(h.card._singleEvents.length, 1, 'the event is still listed');
     assertEqual(h.card._writeErrors.length, 1, 'and the failure is visible');
+    assertEqual(h.card._writeErrors[0].surface, 'single', 'attributed to the right surface');
   });
 
   await test('a single-event write waits on its own 60 s watchdog', async () => {
     const h = makeCard();
     h.card._scheduleQuickRun(30);
     assertEqual(h.countOf('set_single_event'), 1, 'the write was issued');
-    assertEqual(soonestTimerDelay(), 60000 + 5000, 'backstop matches the firmware budget');
+    assertEqual(soonestTimerDelay(), singleBackstop(1), 'backstop matches the firmware budget');
+  });
+
+  await test('a single-event write leaves no timer behind once it settles', async () => {
+    const h = makeCard();
+    h.card._scheduleQuickRun(30);
+    h.settle(h.opIdsFor('set_single_event')[0], 'accepted');
+    assertEqual(timerCount(), 0, 'no blind refresh timer survives');
+  });
+
+  await test('a Quick Run asks for the duration it was given', async () => {
+    const h = makeCard();
+    h.card._scheduleQuickRun(30);
+    const [begin, end] = h.payloadsOf('set_single_event')[0].split(',').map(Number);
+    assertEqual(end - begin, 30 * 60, 'the window is the requested duration');
+    const now = Math.floor(Date.now() / 1000);
+    assert(begin > now && begin <= now + 61, 'and it starts about a minute out');
+  });
+
+  await test('a second single-event write is refused while one is out', async () => {
+    const h = makeCard();
+    h.card._scheduleQuickRun(30);
+    h.card._scheduleQuickRun(60);
+    assertEqual(h.countOf('set_single_event'), 1, 'only the first was issued');
   });
 
   // -------------------------------------------------------------------------
-  // Regression guards for bugs this card has already shipped.
+  // Rendered state. The card refuses a second write while one is outstanding;
+  // a button that still looks live and silently swallows the click is its own
+  // bug, so the constraint has to reach the markup.
   // -------------------------------------------------------------------------
 
-  await test('the event parser matches the format the firmware emits', async () => {
-    // format_single_events_display appends " (run)"/" (off)"; the card's regex
-    // was anchored on the end time, so every line failed to match and the
-    // Quick Run list rendered empty -- indistinguishable from "no events".
+  await test('the toolbar reports saving and blocks both buttons', async () => {
     const h = makeCard();
-    h.card._parseSingleEvents(
-      '[0] 2026-08-15 06:00 - 07:30 (run)\n[3] 2026-08-15 22:00 - 23:30 (off)');
+    h.card._pendingChanges.set('0,0', [360, 480]);
+    h.card._render();
+    assertIncludes(h.html, 'data-action="save"', 'the Save button is wired');
+    assertIncludes(h.html, 'unsaved', 'and the edit is flagged');
 
-    assertEqual(h.card._singleEvents.length, 2, 'both lines parsed');
-    assertEqual(h.card._singleEvents[0].slot, 0, 'slot read');
-    assertEqual(h.card._singleEvents[0].action, 'run', 'action read');
-    assertEqual(h.card._singleEvents[1].action, 'off', 'vacation action read');
-    assertEqual(h.card._singleEvents[0].begin.getHours(), 6, 'begin hour');
-    assertEqual(h.card._singleEvents[0].end.getMinutes(), 30, 'end minute');
+    h.card._saveChanges();
+    assertIncludes(h.html, 'Saving…', 'the button says what is happening');
+    assertIncludes(h.html, 'saving 1…', 'and the badge counts the writes out');
+    assertIncludes(h.html, 'data-action="save" disabled', 'Save is disabled');
+    assertIncludes(h.html, 'data-action="discard" disabled', 'and so is Discard');
+
+    h.settle(h.opIdsFor('set_schedule_entry')[0], 'accepted');
+    assertExcludes(h.html, 'Saving…', 'and the state clears when it settles');
   });
 
-  await test('the sentinel and unavailable states parse to no events', async () => {
+  await test('the Quick Run controls are disabled while a write is out', async () => {
     const h = makeCard();
-    for (const s of ['No single events', 'unavailable', 'unknown', '']) {
-      h.card._parseSingleEvents(s);
-      assertEqual(h.card._singleEvents.length, 0, `"${s}" yields no events`);
-    }
+    assertIncludes(h.html, 'data-action="quick-run-preset"', 'presets render');
+    assertIncludes(h.html, 'data-action="clear-single-event" data-slot="0"',
+                   'and the clear button addresses its slot');
+    assertExcludes(h.html, 'data-minutes="30" disabled', 'live when idle');
+
+    h.card._pendingChanges.set('0,0', [360, 480]);
+    h.card._saveChanges();
+    assertIncludes(h.html, 'data-minutes="30" disabled', 'presets go dead while saving');
+    assertIncludes(h.html, 'data-slot="0"', 'the clear button is still addressed');
+    assertIncludes(h.html, 'disabled', 'and disabled rather than silently inert');
+  });
+
+  await test('the row being removed says so', async () => {
+    const h = makeCard();
+    h.card._clearSingleEvent(0);
+    assertIncludes(h.html, 'qr-event-row pending', 'the row is marked');
+    assertIncludes(h.html, 'mdi:timer-sand', 'with a waiting icon');
+    assertIncludes(h.html, 'Removing…', 'and a reason');
+  });
+
+  // -------------------------------------------------------------------------
+  // Wire format. This is the bug class that shipped twice.
+  // -------------------------------------------------------------------------
+
+  await test('set_schedule_entry serialises layer, day, then times', async () => {
+    // Day 3 / layer 2 on purpose: the fields are distinguishable only when
+    // they differ, so a 0,0 fixture cannot catch a transposition.
+    const h = makeCard();
+    h.card._pendingChanges.set('3,2', [7 * 60 + 15, 9 * 60 + 45]);
+    h.card._saveChanges();
+    assertEqual(h.payloadsOf('set_schedule_entry')[0], '2,3,7,15,9,45', 'layer,day,sh,sm,eh,em');
+  });
+
+  await test('clear_schedule_entry serialises layer then day', async () => {
+    const h = makeCard();
+    h.card._pendingChanges.set('5,1', null);
+    h.card._saveChanges();
+    assertEqual(h.payloadsOf('clear_schedule_entry')[0], '1,5', 'layer,day');
   });
 
   await test('a block at the right edge is clamped below hour 24', async () => {
     // api_bridge.cpp rejects hour > 23, so end === 1440 could never be saved.
     const h = makeCard();
-    h.card._pendingChanges.set('0,0', [1380, 1440]);
+    h.card._pendingChanges.set('3,2', [1380, 1440]);
     h.card._saveChanges();
-
-    const write = h.calls.find(c => c.service === 'hwr_pump_set_schedule_entry');
-    assertEqual(write.data.data, '0,0,23,0,23,59', 'serialised as 23:59, not 24:00');
+    assertEqual(h.payloadsOf('set_schedule_entry')[0], '2,3,23,0,23,59',
+                'serialised as 23:59, not 24:00');
   });
 
-  await test('every service call carries an op_id', async () => {
+  await test('every service call carries a unique op_id', async () => {
     const h = makeCard();
     h.card._pendingChanges.set('0,0', [360, 480]);
     h.card._saveChanges();
-    h.settle(h.opIds()[0], 'accepted');
+    h.settle(h.opIdsFor('set_schedule_entry')[0], 'accepted');
     h.card._scheduleQuickRun(30);
 
-    assert(h.calls.length >= 3, 'several calls were made');
     for (const c of h.calls) {
+      assert(c.domain === 'esphome', `${c.service} goes to the esphome domain`);
       assert(c.data && typeof c.data.op_id === 'string' && c.data.op_id.length > 0,
              `${c.service} carries an op_id`);
     }
@@ -480,21 +746,125 @@ async function main() {
   });
 
   // -------------------------------------------------------------------------
+  // The event parser. Regression guard for a bug that rendered the whole Quick
+  // Run list empty, indistinguishably from "no events exist".
+  // -------------------------------------------------------------------------
+
+  await test('the event parser matches the format the firmware emits', async () => {
+    // format_single_events_display appends " (run)"/" (off)"; the card's regex
+    // was anchored on the end time, so every line failed to match.
+    const h = makeCard();
+    h.card._parseSingleEvents(
+      '[0] 2026-08-15 06:15 - 07:30 (run)\n[3] 2026-08-16 22:05 - 23:45 (off)');
+
+    assertEqual(h.card._singleEvents.length, 2, 'both lines parsed');
+    const [a, b] = h.card._singleEvents;
+    assertEqual(a.slot, 0, 'slot read');
+    assertEqual(a.action, 'run', 'action read');
+    assertEqual(a.begin.getHours(), 6, 'begin hour');
+    assertEqual(a.begin.getMinutes(), 15, 'begin minute');
+    assertEqual(a.end.getHours(), 7, 'end hour');
+    assertEqual(a.end.getMinutes(), 30, 'end minute');
+    assertEqual(a.begin.getMonth(), 7, 'month is zero-based on the Date');
+    assertEqual(a.begin.getDate(), 15, 'day of month');
+    assertEqual(b.slot, 3, 'second slot read');
+    assertEqual(b.action, 'off', 'vacation action read');
+    assertEqual(b.end.getHours(), 23, 'second end hour');
+  });
+
+  await test('a line without the action suffix still parses, as run', async () => {
+    const h = makeCard();
+    h.card._parseSingleEvents('[1] 2026-08-15 06:00 - 07:30');
+    assertEqual(h.card._singleEvents.length, 1, 'parsed');
+    assertEqual(h.card._singleEvents[0].action, 'run', 'defaulted to run');
+  });
+
+  await test('the sentinel and unavailable states clear the list', async () => {
+    const h = makeCard();
+    for (const s of ['No single events', 'unavailable', 'unknown', '']) {
+      h.card._parseSingleEvents('[0] 2026-08-15 06:00 - 07:30 (run)');
+      assertEqual(h.card._singleEvents.length, 1, 'seeded');
+      h.card._parseSingleEvents(s);
+      // The list must be *reset*, not merely left unextended -- this runs on
+      // every state change, so without the reset events accumulate forever.
+      assertEqual(h.card._singleEvents.length, 0, `"${s}" clears the list`);
+    }
+  });
+
+  await test('a malformed line is skipped without taking the others with it', async () => {
+    const h = makeCard();
+    h.card._parseSingleEvents(
+      '[0] 2026-08-15 06:00 - 07:30 (run)\ngarbage\n[1] 2026-08-15 08:00 - 09:00 (off)');
+    assertEqual(h.card._singleEvents.length, 2, 'the two good lines survive');
+  });
+
+  // -------------------------------------------------------------------------
   // Trust boundary and lifetime.
   // -------------------------------------------------------------------------
 
-  await test('a detail string from the device cannot inject markup', async () => {
+  await test('device strings cannot inject markup', async () => {
     // `detail` echoes the failed request ("parse error: <payload>"), so it is
     // influenced by anyone who can call the service, and it lands in innerHTML.
+    // The payload repeats every metacharacter: an escaper that handles only the
+    // first occurrence of each -- a non-global replace -- is a live XSS, and a
+    // single-occurrence payload cannot tell the two apart.
     const h = makeCard();
     h.card._pendingChanges.set('0,0', [360, 480]);
     h.card._saveChanges();
-    h.settle(h.opIds()[0], 'invalid', 'parse error: <img src=x onerror="alert(1)">');
+    h.settle(h.opIdsFor('set_schedule_entry')[0], 'invalid',
+             '<b>x</b><img src=x onerror="alert(1)"><i a=\'b\'>&amp;');
 
-    const html = h.card.shadowRoot.innerHTML;
-    assert(!html.includes('<img src=x'), 'the tag is not emitted raw');
-    assert(!html.includes('onerror="alert(1)"'), 'nor is the handler');
-    assert(html.includes('&lt;img'), 'it is escaped and still readable');
+    assertIncludes(
+      h.html,
+      '&lt;b&gt;x&lt;/b&gt;&lt;img src=x onerror=&quot;alert(1)&quot;&gt;'
+        + '&lt;i a=&#39;b&#39;&gt;&amp;amp;',
+      'every metacharacter is escaped, not just the first of each');
+    assertExcludes(h.html, '<img', 'no tag is emitted raw');
+    assertExcludes(h.html, 'onerror=&quot;alert(1)&quot;>', 'nor a handler that could close');
+  });
+
+  await test('a hostile status string is escaped too', async () => {
+    // `status` comes off the same wire as `detail` and lands in the same
+    // innerHTML; only `detail` being escaped would still be exploitable.
+    const h = makeCard();
+    h.card._pendingChanges.set('0,0', [360, 480]);
+    h.card._saveChanges();
+    h.settle(h.opIdsFor('set_schedule_entry')[0], '<script>alert(1)</script><script>');
+
+    assertExcludes(h.html, '<script>', 'the tag is not emitted raw');
+    assertIncludes(h.html, '&lt;script&gt;alert(1)&lt;/script&gt;&lt;script&gt;',
+                   'both occurrences escaped');
+  });
+
+  await test('the error label is escaped, whatever its source', async () => {
+    // Labels are card-generated today ("Mon layer 0"), so this is not
+    // currently reachable with hostile data -- which is exactly why it needs a
+    // test. It asserts the *contract* of the renderer, so that a later change
+    // making labels data-driven cannot quietly turn the panel into a sink.
+    const h = makeCard();
+    h.card._writeErrors = [
+      { surface: 'schedule', label: '<img src=x onerror=alert(1)>', status: 'rejected', detail: '' },
+    ];
+    h.card._render();
+    assertExcludes(h.html, '<img src=x', 'the label is not emitted raw');
+    assertIncludes(h.html, '&lt;img src=x onerror=alert(1)&gt;', 'it is escaped');
+  });
+
+  await test('a settled surface stops being refreshed by the next one', async () => {
+    // _refreshOnDrain is a set of surfaces to re-read when the batch drains.
+    // If it is not cleared after firing, it leaks: a later single-event write
+    // would drag a schedule re-read along with it, forever.
+    const h = makeCard();
+    h.card._pendingChanges.set('0,0', [360, 480]);
+    h.card._saveChanges();
+    h.settle(h.opIdsFor('set_schedule_entry')[0], 'accepted');
+    assertEqual(h.countOf('refresh_schedule'), 1, 'the schedule was re-read');
+
+    h.card._clearSingleEvent(0);
+    h.settle(h.opIdsFor('clear_single_event')[0], 'accepted');
+    assertEqual(h.countOf('refresh_single_events'), 1, 'the event list was re-read');
+    assertEqual(h.countOf('refresh_schedule'), 1,
+                'and the schedule was not re-read a second time');
   });
 
   await test('the card subscribes once and releases on teardown', async () => {
@@ -502,7 +872,7 @@ async function main() {
     assertEqual(h.subscribedType, 'esphome.alpha_hwr_write_settled', 'subscribed to the right event');
 
     const sub = h.card._settleSub;
-    h.card.hass = h.card._hass; // a second hass update must not re-subscribe
+    h.card.hass = h.hass; // a second hass update must not re-subscribe
     assert(h.card._settleSub === sub, 'the subscription is not duplicated');
 
     h.card.disconnectedCallback();
@@ -517,7 +887,7 @@ async function main() {
     h.card._saveChanges();
     h.card.disconnectedCallback();
 
-    assertEqual(soonestTimerDelay(), null, 'no timer survives the card');
+    assertEqual(timerCount(), 0, 'no timer survives the card');
   });
 
   console.log('');

@@ -534,10 +534,45 @@ Clears `_pendingChanges` before confirmation; issues up to 35 independent writes
 > whatever that layer holds on the device. The batched path would trade a display bug for data
 > loss; the per-entry path writes only what changed.
 
-**Tests.** 22 tests / 68 assertions in `tests/js/test_schedule_card.js` — the card's first
-automated coverage of any kind. All 8 mutations of the new logic are caught (optimistic clear
-restored, identity check dropped, refresh ungated, escaping removed, backstop leaked past
-teardown, subscription never released, failure treated as success, backstop as a flat guess).
+> **Two defects in the fix itself, both found by the skeptic pass, both mine.**
+>
+> *The backstop could fire while the write was still in progress.* The per-command watchdog
+> budgets bound an operation's time at the *head* of the device queue — `arm_watchdog_` runs from
+> `start_front_`, so a queued operation carries no timer until it gets there — and the queue is
+> shared with every other write source, including the card's own untracked `refresh_schedule`
+> (30 s). A one-cell save behind a refresh would hit its 25 s backstop first, report "no
+> confirmation" for a write the device went on to accept, and then discard the real settle. Fixed
+> with the worst foreign budget as slack plus re-arming on progress; erring long is correct here,
+> since a late backstop only delays a message while an early one manufactures a false failure.
+>
+> *A re-attach mid-write stranded the card permanently.* Lovelace re-appends an existing card
+> element whenever a masonry view re-columns — a resize, the sidebar, entering edit mode — firing
+> `disconnectedCallback` then `connectedCallback` on the same instance. Teardown cancelled the
+> backstop, and `_armBackstop` was reachable only from `_saveChanges` and `_trackSingleEvent`,
+> both of which refuse to run while writes are outstanding. The card rendered "saving…" forever
+> with Save *and* Discard disabled, recoverable only by reloading. The deadline is now absolute
+> and resumed on re-attach.
+>
+> A third, smaller one: a Quick Run wiped an unread schedule failure, because `_writeErrors` was
+> cleared wholesale rather than per surface. And the guard that refuses a second single-event
+> write was invisible — the buttons still looked live and swallowed the click. Both fixed.
+
+**Tests.** 46 tests / 145 assertions in `tests/js/test_schedule_card.js` — the card's first
+automated coverage of any kind.
+
+> **The first version of this suite was unsound, and only an adversarial pass found it.** My own
+> 8 mutations all died, which proved nothing: a third skeptic ran 116 and buried ~50. The harness
+> left `_showQuickRun` false and `hass.states` empty, so `_renderQuickRunPanel` returned `''` in
+> every test — the entire single-event UI could be deleted with the suite green, and so could the
+> Save button's `data-action`. The XSS test was worse than useless: its payload had exactly one
+> `<`, one `>` and one `"`, so it passed against a non-global `replace` that is a live injection,
+> demonstrated by rendering a two-tag payload through the mutant. Both are fixed, along with
+> untestable-by-construction fixtures (a `0,0` cell cannot catch a layer/day transposition) and a
+> stale "identity, not equality" test whose newer value also differed in content.
+>
+> This is the same lesson as finding 3, one layer up: **a test suite's own mutations are chosen by
+> the person who wrote the blind spot.** The 26 mutations that now die were almost all somebody
+> else's idea.
 
 ### 13. README §5 fails `esphome config` two independent ways
 `packages/dhw_demand_detector.yaml`, `README.md` — **CONFIRMED by execution, P1 → P2**
@@ -576,10 +611,20 @@ release, and no CI job runs `esphome config`.
 > bug: reintroducing the `rpm: id: motor_speed_sensor` rename fails with `Couldn't find ID
 > 'motor_speed'`.
 >
-> *Correction to the finding's framing:* §1–§3 do **not** "validate clean" for the reason implied.
-> They validate because no `alpha_hwr` config key has been added since v0.15.0 — each loads an
-> `@main` package whose self-declared `external_components` still points at `@v0.15.0`, the same
-> mismatch §4 and §5 had to patch around. They are one new key away from the identical failure.
+> Being release-pinned, it covers the ID-collision class but **not** the pin-mismatch class — it
+> is internally consistent by construction, so it cannot reproduce the `@main`-package against
+> release-pinned-component failure at all. That half is addressed by the README change below, not
+> by this file.
+>
+> *Correction to the finding's framing:* §1–§3 do **not** "validate clean" for the reason implied,
+> and the fix is not deferrable. Each loads an `@main` package whose self-declared
+> `external_components` still points at `@v0.15.0` — the same mismatch §4 and §5 patch around.
+> They validate only because the packages they load never *set* a post-release key; an added
+> optional key with a default breaks nothing merely by existing. So they are **not** "one new key
+> away" — the key already exists. `data_timeout` landed after v0.15.0 and is documented as
+> user-settable in `docs/configuration.md`, so a user following that page hits the failure today.
+> Verified by execution: §1 as previously written rejects `data_timeout` as an invalid option, and
+> accepts it once the `@main` override is added. §1–§3 now carry that override.
 
 ---
 

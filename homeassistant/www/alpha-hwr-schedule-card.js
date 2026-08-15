@@ -86,6 +86,20 @@ const MAX_LAYERS = 5; // pump supports layers 0-4
 const WATCHDOG_SCHED_ENTRY_MS = 20000;
 const WATCHDOG_SINGLE_EVENT_MS = 60000;
 const SETTLE_MARGIN_MS = 5000; // event delivery through HA, on top of the budget
+// Slack for whatever is ahead of us in the device's queue. The budgets above
+// bound an operation's time *at the head*: arm_watchdog_ is called from
+// start_front_, so a queued operation carries no timer at all until it gets
+// there. The queue is shared with every other write source -- including the
+// card's own untracked refreshes (30 s) and any entity write -- so the wait a
+// tracked write actually faces is not bounded by its own budget. This is the
+// largest budget anything ahead of it can hold (WATCHDOG_UPLOAD_MS).
+//
+// Erring long is deliberate: the backstop is the last resort, not the normal
+// path, and a backstop that fires early is worse than one that fires late. It
+// reports "no confirmation" for a write the device is still working on, drops
+// the real settle when it arrives, and leaves the edit pending -- reporting
+// failure for a write that succeeded.
+const WATCHDOG_QUEUE_HEAD_MS = 150000;
 const QUICK_RUN_PRESETS = [
   { label: '30m', minutes: 30 },
   { label: '1h', minutes: 60 },
@@ -122,6 +136,8 @@ class AlphaHwrScheduleCard extends HTMLElement {
     this._refreshOnDrain = new Set(); // 'schedule' | 'single'
     this._settleSub = null; // subscription promise, or null when unsubscribed
     this._settleBackstop = null;
+    this._settleDeadline = 0; // absolute, so a re-attach resumes it
+    this._backstopUnitMs = WATCHDOG_SCHED_ENTRY_MS; // per-write budget of the current batch
   }
 
   setConfig(config) {
@@ -156,6 +172,15 @@ class AlphaHwrScheduleCard extends HTMLElement {
 
   connectedCallback() {
     if (this._config.device) this._render();
+    // Lovelace re-appends an existing card element when a masonry view
+    // re-columns -- a window resize, the sidebar toggling, entering edit mode
+    // -- which fires disconnectedCallback and connectedCallback on the *same*
+    // instance. Teardown cancels the backstop, so without this a write that is
+    // in flight across a re-attach loses the only thing that would ever
+    // release it: _armBackstop is reached only from _saveChanges and
+    // _trackSingleEvent, and both refuse to run while _inFlight is non-empty.
+    // The card would render "saving…" forever with Save and Discard disabled.
+    this._rearmBackstop();
     // Update current-time line every minute
     this._nowInterval = setInterval(() => {
       const line = this.shadowRoot?.querySelector('.now-line');
@@ -260,6 +285,7 @@ class AlphaHwrScheduleCard extends HTMLElement {
       this._resolvePending(op);
     } else {
       this._writeErrors.push({
+        surface: op.surface,
         label: op.label,
         status: data.status || 'unknown',
         detail: data.detail || '',
@@ -281,9 +307,16 @@ class AlphaHwrScheduleCard extends HTMLElement {
 
   /** Called after every settle, and by the backstop timer. */
   _afterSettle() {
-    if (this._inFlight.size > 0) { this._render(); return; }
+    if (this._inFlight.size > 0) {
+      // Progress extends the deadline: what is left to wait for is what is
+      // still outstanding, not what the batch started as.
+      this._armBackstopForInFlight();
+      this._render();
+      return;
+    }
     if (this._settleBackstop) clearTimeout(this._settleBackstop);
     this._settleBackstop = null;
+    this._settleDeadline = 0;
     if (this._refreshOnDrain.has('schedule')) this._callRefresh();
     if (this._refreshOnDrain.has('single')) this._callRefreshSingleEvents();
     this._refreshOnDrain.clear();
@@ -299,14 +332,34 @@ class AlphaHwrScheduleCard extends HTMLElement {
    */
   _armBackstop(ms) {
     if (this._settleBackstop) clearTimeout(this._settleBackstop);
+    // Absolute, so a re-attach resumes the original deadline rather than
+    // restarting it -- a card that re-columns every few seconds would
+    // otherwise never reach one.
+    this._settleDeadline = Date.now() + ms;
     this._settleBackstop = setTimeout(() => {
       this._settleBackstop = null;
+      this._settleDeadline = 0;
       for (const op of this._inFlight.values()) {
-        this._writeErrors.push({ label: op.label, status: 'no confirmation', detail: '' });
+        this._writeErrors.push({
+          surface: op.surface, label: op.label, status: 'no confirmation', detail: '',
+        });
       }
       this._inFlight.clear();
       this._afterSettle();
     }, ms);
+  }
+
+  /** Arm the backstop for the work still outstanding, plus queue slack. */
+  _armBackstopForInFlight() {
+    this._armBackstop(this._inFlight.size * this._backstopUnitMs +
+                      WATCHDOG_QUEUE_HEAD_MS + SETTLE_MARGIN_MS);
+  }
+
+  /** Restore the backstop after a re-attach, honouring the original deadline. */
+  _rearmBackstop() {
+    if (this._settleBackstop || this._inFlight.size === 0) return;
+    if (!this._settleDeadline) return;
+    this._armBackstop(Math.max(0, this._settleDeadline - Date.now()));
   }
 
   /** Rebuild the internal schedule model { e, s:{ layer: [7 cells] } } from the
@@ -774,6 +827,9 @@ class AlphaHwrScheduleCard extends HTMLElement {
   _renderQuickRunPanel() {
     if (!this._showQuickRun) return '';
     const now = new Date();
+    // Only one write may be outstanding at a time. Render that, rather than
+    // letting a live-looking button swallow the click.
+    const busy = this._isSaving();
 
     // Custom time picker defaults
     const defStartH = now.getHours();
@@ -799,10 +855,14 @@ class AlphaHwrScheduleCard extends HTMLElement {
       const eStr = `${String(ev.end.getHours()).padStart(2, '0')}:${String(ev.end.getMinutes()).padStart(2, '0')}`;
       const dStr = `${String(ev.begin.getMonth() + 1).padStart(2, '0')}/${String(ev.begin.getDate()).padStart(2, '0')}`;
       const removing = this._slotInFlight(ev.slot);
+      // Disabled for *any* outstanding write, not just this row's: a second
+      // clear would be refused, and a button that looks live but does nothing
+      // is worse than one that says why.
       return `<div class="qr-event-row ${removing ? 'pending' : ''}">
             <span class="qr-event-time">${dStr} ${bStr}–${eStr}</span>
             <button class="qr-event-clear" data-action="clear-single-event" data-slot="${ev.slot}"
-                    title="${removing ? 'Removing…' : 'Remove'}" ${removing ? 'disabled' : ''}>
+                    title="${removing ? 'Removing…' : busy ? 'Waiting for the current write' : 'Remove'}"
+                    ${busy ? 'disabled' : ''}>
               <ha-icon icon="${removing ? 'mdi:timer-sand' : 'mdi:close'}" style="--mdc-icon-size:14px"></ha-icon>
             </button>
           </div>`;
@@ -825,7 +885,8 @@ class AlphaHwrScheduleCard extends HTMLElement {
           <span class="time-colon">:</span>
           <select class="time-sel" data-field="qrEndM">${minOpts(defEndM)}</select>
         </div>
-        <button class="btn btn-sm btn-primary" data-action="schedule-custom-run" style="margin-top:6px">
+        <button class="btn btn-sm btn-primary" data-action="schedule-custom-run" style="margin-top:6px"
+                ${busy ? 'disabled' : ''}>
           <ha-icon icon="mdi:calendar-plus" style="--mdc-icon-size:15px;margin-right:4px"></ha-icon> Schedule
         </button>
       </div>` : '';
@@ -839,7 +900,7 @@ class AlphaHwrScheduleCard extends HTMLElement {
         </div>
         <div class="qr-presets">
           ${QUICK_RUN_PRESETS.map(p => `
-            <button class="qr-preset" data-action="quick-run-preset" data-minutes="${p.minutes}">${p.label}</button>
+            <button class="qr-preset" data-action="quick-run-preset" data-minutes="${p.minutes}" ${busy ? 'disabled' : ''}>${p.label}</button>
           `).join('')}
           <button class="qr-preset qr-preset-custom ${this._quickRunCustom ? 'active' : ''}" data-action="toggle-quick-run-custom">
             <ha-icon icon="mdi:clock-edit-outline" style="--mdc-icon-size:15px;margin-right:3px"></ha-icon>Custom
@@ -1864,7 +1925,10 @@ class AlphaHwrScheduleCard extends HTMLElement {
       .catch((err) => {
         console.error(`[alpha-hwr-card] ${service} failed:`, err);
         if (track && this._inFlight.delete(opId)) {
-          this._writeErrors.push({ label: track.label, status: 'call rejected', detail: String(err) });
+          this._writeErrors.push({
+            surface: track.surface, label: track.label,
+            status: 'call rejected', detail: String(err),
+          });
           this._afterSettle();
         }
       });
@@ -1878,7 +1942,10 @@ class AlphaHwrScheduleCard extends HTMLElement {
 
     const batch = [...this._pendingChanges];
     if (batch.length === 0) return;
-    this._writeErrors = [];
+    // Clear only this surface's errors. These writes are the retry for them; a
+    // Quick Run is not, and must not wipe a schedule failure the user has not
+    // read yet.
+    this._writeErrors = this._writeErrors.filter(e => e.surface !== 'schedule');
     this._refreshOnDrain.add('schedule');
 
     for (const [key, entry] of batch) {
@@ -1909,7 +1976,8 @@ class AlphaHwrScheduleCard extends HTMLElement {
     this._showApplyTo = false;
     this._editingTime = false;
 
-    this._armBackstop(batch.length * WATCHDOG_SCHED_ENTRY_MS + SETTLE_MARGIN_MS);
+    this._backstopUnitMs = WATCHDOG_SCHED_ENTRY_MS;
+    this._armBackstopForInFlight();
     this._render();
   }
 
@@ -1974,11 +2042,17 @@ class AlphaHwrScheduleCard extends HTMLElement {
 
   /** Issue a single-event write and wait for its settle, like _saveChanges. */
   _trackSingleEvent(service, data, label, extra = {}) {
+    // One outstanding write at a time: the backstop is a single timer, so a
+    // second op would either inherit the first's deadline or overwrite it. The
+    // constraint is rendered -- every button that reaches here is disabled
+    // while _isSaving() -- so this guard is a backstop against a stale click,
+    // not the mechanism the user sees.
     if (this._inFlight.size > 0) return;
-    this._writeErrors = [];
+    this._writeErrors = this._writeErrors.filter(e => e.surface !== 'single');
     this._refreshOnDrain.add('single');
     this._callService(service, data, { surface: 'single', label, ...extra });
-    this._armBackstop(WATCHDOG_SINGLE_EVENT_MS + SETTLE_MARGIN_MS);
+    this._backstopUnitMs = WATCHDOG_SINGLE_EVENT_MS;
+    this._armBackstopForInFlight();
     this._render();
   }
 
