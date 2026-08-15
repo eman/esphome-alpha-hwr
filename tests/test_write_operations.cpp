@@ -1794,9 +1794,12 @@ static void test_command_strings() {
 
   // Uniqueness matters more since #159 than it did before: two commands sharing
   // a string would now register two Home Assistant services under one name.
+  // Inserting what the function RETURNS rather than what the table above says
+  // is the whole point -- over the table's own literals this would only catch a
+  // typo in the fixture, which is not a property of the shipped code.
   std::set<std::string> unique;
   for (const auto &e : EXPECTED)
-    unique.insert(e.name);
+    unique.insert(to_string(e.cmd));
   TEST_ASSERT(unique.size() == expected_count,
               "command strings are unique (duplicates would collide as service names)");
 }

@@ -40,9 +40,11 @@
   semantics, statuses and every field of `esphome.alpha_hwr_write_settled` are
   untouched.
 
-  If a call is missed, the automation fails with `Service ... not found` and
-  Home Assistant lists the services the node does register, so the replacement
-  is readable off the error.
+  If a call is missed, the automation fails with `Action ... not found` — which
+  names the service you called but not its replacement, so the table above is
+  the thing to check against. Note also that Home Assistant does not validate
+  service names when an automation is reloaded, only when it fires: a rarely
+  triggered automation can go on looking healthy until the next time it runs.
 
   The schedule services were already correct (`set_schedule_entry`,
   `upload_schedule`, `clear_single_event` and the rest all matched their command
