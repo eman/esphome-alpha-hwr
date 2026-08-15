@@ -49,11 +49,20 @@ inline bool subscribe_failed(SubscribeOutcome o) {
 ///
 /// These are the four paths that return before subscribed_callback_(). Nothing
 /// else advances the session out of SUBSCRIBING, so on these the link is
-/// finished -- it will sit connected, idle and useless until something recycles
-/// it. Note the BLE supervision timeout does *not* rescue it: at 4 s
+/// finished -- it will sit connected, idle and useless until the data watchdog
+/// recycles it. Note the BLE supervision timeout does *not* rescue it: at 4 s
 /// (conn_params.timeout = 400) it measures link-layer loss, and an idle-but-
 /// healthy link keeps exchanging empty PDUs every connection interval, so it
-/// never trips. Only the data watchdog gets it back, 60 s later.
+/// never trips.
+///
+/// This deliberately does NOT trigger an immediate forced disconnect, which an
+/// earlier version of this change did. The subscribe decision point is ~2-3 s
+/// after connection-open, and a forced disconnect on a bonded pump re-arms in
+/// ~2 s, so recycling here would run a ~6-8 s cycle against the watchdog's
+/// ~66 s -- roughly a ninefold increase in passes through the encryption-on-
+/// open window where a failure can erase the bond (issue #14). Naming the
+/// cause is the safe half of this change and the half worth having; choosing
+/// the recycle cadence belongs to the watchdog, which backs off.
 inline bool subscribe_outcome_blocks_session(SubscribeOutcome o) {
   return o == SubscribeOutcome::NO_CLIENT ||
          o == SubscribeOutcome::NO_SERVICE ||
@@ -61,30 +70,19 @@ inline bool subscribe_outcome_blocks_session(SubscribeOutcome o) {
          o == SubscribeOutcome::REGISTER_FAILED;
 }
 
-/// True when the caller should recycle the link immediately rather than wait
-/// for the data watchdog to notice.
+/// True when this outcome should be latched as a HELD fault reason.
 ///
-/// This is deliberately NOT "every failure". It is exactly the set that already
-/// fails closed:
+/// The blocking outcomes are terminal for the session: nothing else will
+/// produce a reason, so theirs must survive the reconnect that follows.
 ///
-///  - The four blocking outcomes cannot get better by waiting. The session
-///    cannot advance, no notification can arrive to reset the watchdog, and the
-///    watchdog's remedy in 60 s is this same forced disconnect. Acting now
-///    changes only how long the node spends useless, and how specific the fault
-///    string is while it does.
-///
-///  - CCCD_WRITE_FAILED is excluded on purpose, and this is the interesting
-///    half. The write failing locally does not prove notifications will not
-///    arrive: the pump is bonded, and a bonded peer retains its CCCD value
-///    across reconnections, so a link whose CCCD write we could not issue may
-///    already be subscribed from a previous session. Recycling on that
-///    prediction would tear down links that work. The watchdog decides it
-///    instead, on the only evidence that settles it -- whether data actually
-///    arrived. That is the same fail-open trade link_watchdog.h argues for
-///    where it declines to gate READY on the asynchronous
-///    ESP_GATTC_WRITE_DESCR_EVT status, and it is declined here for the same
-///    reason: predicting deafness is worse than observing it.
-inline bool subscribe_outcome_should_recycle(SubscribeOutcome o) {
+/// CCCD_WRITE_FAILED is excluded, and not for symmetry. One documented
+/// synchronous failure of esp_ble_gattc_write_char_descr is ESP_ERR_INVALID_
+/// STATE when the connection is already gone -- i.e. the write failed *because*
+/// the link dropped. Holding "CCCD write failed" over that would relabel a link
+/// loss as a subscribe fault and suppress the real disconnect reason for the
+/// whole reconnect episode, which is the exact inversion of what this change is
+/// for. It is still recorded; it just does not outrank a genuine reason.
+inline bool subscribe_outcome_holds_fault(SubscribeOutcome o) {
   return subscribe_outcome_blocks_session(o);
 }
 

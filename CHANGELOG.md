@@ -350,17 +350,24 @@
   one timer covers every cause, including a link that goes deaf later, which no
   return code can see. What it could not do is say *which* thing failed, or say
   anything at all for a minute. Each failure now latches its own reason on the
-  Pump Link Fault surface at the moment it happens, and the four that cannot
-  recover recycle the link immediately rather than waiting for a timeout whose
-  remedy is the same forced disconnect.
+  Pump Link Fault surface at the moment it happens, so a missing characteristic
+  reads as one instead of as "No data from pump (60s)".
 
-  The CCCD failure is deliberately excluded from that: the pump is bonded, a
-  bonded peer retains its CCCD across reconnections, so a link whose CCCD write
-  could not be issued may already be subscribed from an earlier session.
-  Recycling on that prediction would tear down links that work — and each
-  recycle re-enters the encryption-on-open path where a failure can erase the
-  bond. It is reported, and the watchdog settles it on the only evidence that
-  can: whether data arrives.
+  The reporting is wired at the sites where those causes actually arise — the
+  service-discovery and characteristic-lookup paths — not only inside the
+  subscribe call, which those paths pre-empt with the same lookups.
+
+  It does **not** force an early disconnect. The subscribe decision point is
+  ~2–3 s after connection-open and a bonded reconnect re-arms in ~2 s, so
+  recycling there would run a ~6–8 s cycle against the watchdog's ~66 s — around
+  nine times more passes through the encryption-on-open window where a failure
+  can erase the bond. Naming the cause is the safe half; choosing the recycle
+  cadence belongs to the watchdog, which now backs off.
+
+  A failed CCCD write is recorded but does not *hold* its reason over the
+  disconnect that may follow: one of its documented synchronous causes is the
+  link already being gone, and holding would relabel a link loss as a subscribe
+  fault for the whole reconnect.
 
   The decision lives in `subscribe_outcome.h` with host tests, following
   `link_watchdog.h`, because `ble_connection_manager.cpp` is compiled by no host

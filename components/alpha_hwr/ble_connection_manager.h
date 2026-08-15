@@ -117,6 +117,10 @@ class BLEConnectionManager {
   /// is a decision over a value (subscribe_outcome.h) rather than five
   /// scattered early returns that each dropped what they knew (issue #175).
   SubscribeOutcome attempt_subscribe_();
+  /// Latch a failed subscribe on the Pump Link Fault surface. Called both from
+  /// subscribe_to_notifications() and from the discovery paths above it, which
+  /// is where three of the outcomes actually originate.
+  void report_subscribe_outcome_(SubscribeOutcome outcome);
   void handle_connection_opened(const esp_ble_gattc_cb_param_t *param);
   static void handle_service_discovered(const esp_ble_gattc_cb_param_t *param);
   void handle_service_discovery_complete(esp_gatt_if_t gattc_if);

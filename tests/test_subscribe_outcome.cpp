@@ -24,7 +24,7 @@
 using esphome::alpha_hwr::core::SubscribeOutcome;
 using esphome::alpha_hwr::core::subscribe_failed;
 using esphome::alpha_hwr::core::subscribe_outcome_blocks_session;
-using esphome::alpha_hwr::core::subscribe_outcome_should_recycle;
+using esphome::alpha_hwr::core::subscribe_outcome_holds_fault;
 using esphome::alpha_hwr::core::subscribe_outcome_to_string;
 
 int tests_passed = 0;
@@ -89,42 +89,93 @@ void test_the_four_blocking_outcomes_are_exactly_the_early_returns() {
       "callback, so the session still advances");
 }
 
-void test_the_cccd_failure_is_deliberately_not_recycled() {
-  std::cout << "\n=== A failed CCCD write is reported but not acted on ==="
+void test_the_cccd_failure_is_reported_but_does_not_hold() {
+  std::cout << "\n=== A failed CCCD write is reported but does not hold ==="
             << std::endl;
 
-  // This is the judgement call in the whole change, so it is asserted rather
-  // than left to the comment. The pump is bonded; a bonded peer retains its
-  // CCCD across reconnections, so a link whose CCCD write could not be issued
-  // may already be subscribed from an earlier session. Recycling on that
-  // prediction tears down links that work. The watchdog settles it on the only
-  // evidence that can — whether data actually arrives.
+  // The judgement call, asserted rather than left to the comment. One
+  // documented synchronous cause of a CCCD write failure is the connection
+  // already being gone -- so holding its reason would relabel a link loss as a
+  // subscribe fault and suppress the real disconnect reason for the whole
+  // reconnect episode. It is recorded; it just does not outrank a genuine one.
   TEST_ASSERT(subscribe_failed(SubscribeOutcome::CCCD_WRITE_FAILED),
               "A failed CCCD write is a failure, and names itself as one");
-  TEST_ASSERT(
-      !subscribe_outcome_should_recycle(SubscribeOutcome::CCCD_WRITE_FAILED),
-      "...but it does not recycle the link: predicting deafness is worse than "
-      "observing it, and a bonded peer may already be subscribed");
+  TEST_ASSERT(!subscribe_outcome_holds_fault(SubscribeOutcome::CCCD_WRITE_FAILED),
+              "...but does not hold, so a real disconnect reason still wins");
+  TEST_ASSERT(!subscribe_outcome_blocks_session(SubscribeOutcome::CCCD_WRITE_FAILED),
+              "...and the session still advances: a bonded peer may already be "
+              "subscribed, and the dominant cause is transient congestion");
 
-  TEST_ASSERT(!subscribe_outcome_should_recycle(SubscribeOutcome::OK),
-              "Success certainly does not recycle the link");
+  TEST_ASSERT(!subscribe_outcome_holds_fault(SubscribeOutcome::OK),
+              "Success holds nothing");
 }
 
-void test_recycling_is_confined_to_paths_that_cannot_recover() {
-  std::cout << "\n=== Only unrecoverable outcomes recycle the link ==="
+void test_holding_is_confined_to_paths_that_cannot_recover() {
+  std::cout << "\n=== Only unrecoverable outcomes hold the fault ==="
             << std::endl;
 
-  // A forced disconnect is not free -- issue #176 records that each recycle
-  // re-enters the encryption-on-open path on a bonded pump, where a failure can
-  // erase the bond (issue #14). So the set that triggers one must be exactly
-  // the set that has nothing to lose, i.e. the ones already stuck.
+  // Holding is not free: it suppresses the next disconnect reason. So the set
+  // that holds must be exactly the set for which no other reason is coming.
   for (auto o : ALL) {
-    const bool recycles = subscribe_outcome_should_recycle(o);
+    const bool holds = subscribe_outcome_holds_fault(o);
     const bool blocked = subscribe_outcome_blocks_session(o);
-    TEST_ASSERT(recycles == blocked,
+    TEST_ASSERT(holds == blocked,
                 std::string("\"") + subscribe_outcome_to_string(o) +
-                    "\" recycles the link only if it is stuck without one");
+                    "\" holds its reason only if nothing else will produce one");
   }
+}
+
+void test_the_enum_cannot_grow_without_landing_in_the_tables() {
+  std::cout << "\n=== A new enumerator cannot slip past these tables ==="
+            << std::endl;
+
+  // The previous version of this file CLAIMED ALL[] made that true. It did not:
+  // ALL[] is hand-written, so a seventh enumerator with a to_string() case
+  // passed the whole suite while silently defaulting to failed / non-blocking /
+  // non-holding. -Wswitch forces the to_string case; this forces the table.
+  //
+  // Same trick test_write_operations.cpp uses for WriteCommand: scan the whole
+  // underlying range and count how many values to_string() recognises.
+  int recognised = 0;
+  for (int i = 0; i < 256; i++) {
+    const auto o = static_cast<SubscribeOutcome>(i);
+    if (std::string(subscribe_outcome_to_string(o)) != "Subscribe: unknown")
+      recognised++;
+  }
+  const int table_size = static_cast<int>(sizeof(ALL) / sizeof(ALL[0]));
+  TEST_ASSERT(recognised == table_size,
+              "Every enumerator to_string() knows about is also in ALL[] — add "
+              "one without the other and this fails");
+}
+
+void test_each_fault_string_matches_its_own_enumerator() {
+  std::cout << "\n=== Fault strings correspond to their outcomes ==="
+            << std::endl;
+
+  // Distinctness is not correspondence. Swapping the NO_SERVICE and
+  // NO_CHARACTERISTIC strings passed every assertion in the earlier version of
+  // this file -- while pointing the operator at the wrong cause, which defeats
+  // the entire purpose of the change.
+  struct Pair { SubscribeOutcome o; const char *needle; };
+  static const Pair EXPECT[] = {
+      {SubscribeOutcome::OK, "ok"},
+      {SubscribeOutcome::NO_CLIENT, "client"},
+      {SubscribeOutcome::NO_SERVICE, "service"},
+      {SubscribeOutcome::NO_CHARACTERISTIC, "characteristic"},
+      {SubscribeOutcome::REGISTER_FAILED, "register"},
+      {SubscribeOutcome::CCCD_WRITE_FAILED, "CCCD"},
+  };
+  for (const auto &e : EXPECT) {
+    const std::string got = subscribe_outcome_to_string(e.o);
+    TEST_ASSERT(got.find(e.needle) != std::string::npos,
+                std::string("\"") + got + "\" names its own cause (\"" +
+                    e.needle + "\")");
+  }
+
+  // The confusable pair, checked the other way round too.
+  TEST_ASSERT(std::string(subscribe_outcome_to_string(SubscribeOutcome::NO_SERVICE))
+                  .find("characteristic") == std::string::npos,
+              "The service string does not also claim the characteristic");
 }
 
 void test_every_outcome_names_itself_distinctly() {
@@ -164,9 +215,11 @@ int main() {
 
   test_only_ok_is_a_success();
   test_the_four_blocking_outcomes_are_exactly_the_early_returns();
-  test_the_cccd_failure_is_deliberately_not_recycled();
-  test_recycling_is_confined_to_paths_that_cannot_recover();
+  test_the_cccd_failure_is_reported_but_does_not_hold();
+  test_holding_is_confined_to_paths_that_cannot_recover();
   test_every_outcome_names_itself_distinctly();
+  test_each_fault_string_matches_its_own_enumerator();
+  test_the_enum_cannot_grow_without_landing_in_the_tables();
 
   std::cout << "\n==========================================" << std::endl;
   std::cout << "Results: " << tests_passed << " passed, " << tests_failed

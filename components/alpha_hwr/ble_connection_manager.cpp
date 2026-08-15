@@ -218,38 +218,44 @@ SubscribeOutcome BLEConnectionManager::attempt_subscribe_() {
   return SubscribeOutcome::OK;
 }
 
+void BLEConnectionManager::report_subscribe_outcome_(SubscribeOutcome outcome) {
+  if (!subscribe_failed(outcome))
+    return;
+
+  // Name the cause at the moment it happens. Before issue #175 all five
+  // failures were logged and dropped, so the operator learned only what the
+  // watchdog says 60 s later -- "No data from pump", the symptom every one of
+  // them shares.
+  //
+  // The hold is what makes a blocking failure's reason survive the reconnect
+  // that follows. A CCCD write failure does not take it: one of its documented
+  // synchronous causes is the link already being gone, and holding over that
+  // would relabel a link loss as a subscribe fault for the whole episode.
+  last_failure_ = subscribe_outcome_to_string(outcome);
+  if (subscribe_outcome_holds_fault(outcome))
+    failure_hold_ = FailureHold::DATA;
+
+  ESP_LOGW(TAG, "Notification subscribe failed: %s",
+           subscribe_outcome_to_string(outcome));
+}
+
 void BLEConnectionManager::subscribe_to_notifications() {
   const SubscribeOutcome outcome = attempt_subscribe_();
+  report_subscribe_outcome_(outcome);
 
-  // Every failure names itself on the fault surface, at the moment it happens.
-  // Before issue #175 all five were logged and dropped, so the operator learned
-  // only what the watchdog says 60 s later -- "No data from pump", which is the
-  // symptom every one of them shares. The hold is DATA because that is the
-  // watchdog's own class of fault and this is the same link being declared
-  // unusable, just earlier and by name.
-  if (subscribe_failed(outcome)) {
-    last_failure_ = subscribe_outcome_to_string(outcome);
-    failure_hold_ = FailureHold::DATA;
-  }
-
-  // The four outcomes that return before the callback leave the session stuck
-  // in SUBSCRIBING: nothing else advances it, so no notification can arrive to
-  // reset the watchdog and the watchdog's own remedy in 60 s is this same
-  // forced disconnect. Doing it now cannot make the outcome worse -- there is
-  // no path from here to a working link -- and it starts recovery a minute
-  // earlier with the actual cause on the fault sensor.
-  if (subscribe_outcome_should_recycle(outcome)) {
-    force_disconnect(subscribe_outcome_to_string(outcome));
-    return;
-  }
-
-  // Reached on OK and on CCCD_WRITE_FAILED alike. The failed write is
-  // deliberately not treated as fatal here: the pump is bonded, a bonded peer
-  // retains its CCCD across reconnections, and so a link whose CCCD write we
-  // could not issue may already be subscribed from an earlier session.
-  // Recycling on that prediction would tear down links that work. The watchdog
-  // settles it on the only evidence that can -- whether data arrives.
+  // Reached on OK and on CCCD_WRITE_FAILED alike, and on nothing else: the four
+  // blocking outcomes return before this point and leave the session short of
+  // READY, which is what the data watchdog is for.
+  //
+  // The failed CCCD write is deliberately not treated as fatal. The pump may be
+  // bonded, and a bonded peer retains its CCCD across reconnections, so a link
+  // whose CCCD write could not be issued may already be subscribed from an
+  // earlier session. The dominant synchronous cause is ATT congestion, which is
+  // transient. Recycling on either prediction would tear down links that work.
   // See subscribe_outcome.h.
+  if (subscribe_outcome_blocks_session(outcome))
+    return;
+
   if (subscribed_callback_) {
     subscribed_callback_();
   }
@@ -375,6 +381,12 @@ void BLEConnectionManager::handle_service_discovery_complete(esp_gatt_if_t gattc
       } else {
         char uuid_buf[esphome::esp32_ble::UUID_STR_LEN];
         ESP_LOGW(TAG, "Characteristic NOT found: %s", characteristic_uuid_.to_str(uuid_buf));
+        // This, not attempt_subscribe_(), is where a missing characteristic
+        // actually surfaces -- the checks above run the same lookups, so the
+        // outcome of the same name inside attempt_subscribe_() is unreachable
+        // from here. Reporting only there would have put the whole benefit of
+        // issue #175 on a dead branch.
+        report_subscribe_outcome_(SubscribeOutcome::NO_CHARACTERISTIC);
       }
     } else {
       // Service NOT found - implement retry logic
@@ -397,8 +409,12 @@ void BLEConnectionManager::handle_service_discovery_complete(esp_gatt_if_t gattc
         }
       } else {
         ESP_LOGE(TAG, "Failed to find service after %d attempts", MAX_DISCOVERY_RETRIES);
+        // Retries exhausted: this is where a missing service really ends up.
+        report_subscribe_outcome_(SubscribeOutcome::NO_SERVICE);
       }
     }
+  } else {
+    report_subscribe_outcome_(SubscribeOutcome::NO_CLIENT);
   }
 }
 
