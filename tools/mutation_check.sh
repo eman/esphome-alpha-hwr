@@ -16,8 +16,16 @@
 # this check.
 #
 # Usage:
-#   ./tools/mutation_check.sh          # run every mutation
-#   ./tools/mutation_check.sh --list   # just show them
+#   ./tools/mutation_check.sh              # run every mutation
+#   ./tools/mutation_check.sh --list       # just show them
+#   ./tools/mutation_check.sh continuation # only names containing "continuation"
+#   JOBS=8 ./tools/mutation_check.sh       # more parallel build jobs (default 4)
+#
+# The filter exists because a full sweep rebuilds and re-runs the whole suite
+# once per mutation and takes the better part of an hour. Use it while adding
+# or repairing entries; the unfiltered run is what CI and a merge want, and the
+# summary says loudly when a filter was in force so a partial run cannot be
+# mistaken for a clean sweep.
 #
 # ==============================================================================
 
@@ -28,6 +36,13 @@ PROJECT_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
 TESTS_DIR="$PROJECT_DIR/tests"
 
 RED='\033[0;31m'; GREEN='\033[0;32m'; YELLOW='\033[1;33m'; NC='\033[0m'
+
+# Parallel build jobs. Each mutation does a full clean rebuild of all 22 test
+# binaries and that build, not the mutation, is where the wall-clock goes: the
+# `test` target lists them as prerequisites and only *runs* them in its recipe,
+# so -j parallelises compilation while leaving execution serial and ordered.
+# Override with JOBS=1 to serialise if a build ever looks order-dependent.
+JOBS="${JOBS:-4}"
 
 # Each mutation: name | file | python-repr search | python-repr replace
 # The search string must appear exactly once; the script fails loudly if not,
@@ -67,6 +82,28 @@ MUTATIONS=(
 "initial-read-caches-alone-count-as-success|components/alpha_hwr/initial_read_retry.h|if (caches_synchronized && chain_products_complete) {|if (caches_synchronized) {"
 "initial-read-rollover-unsafe|components/alpha_hwr/initial_read_retry.h|return (now_ms - attempt_started_ms) >= timeout_ms;|return now_ms >= attempt_started_ms + timeout_ms;"
 "initial-read-backoff-never-grows|components/alpha_hwr/initial_read_retry.h|  const uint32_t doubled = current_ms * 2u;|  const uint32_t doubled = current_ms;"
+# Pump-on continuation release (audit finding 10: the tier's only exit was raw
+# meter flow above threshold, which cannot go false while the pump runs, so a
+# draw that stopped mid-run kept publishing demand until the pump did).
+"continuation-never-releases-on-measurement|components/dhw_demand/dhw_demand_logic.h|    if (in.demand_gpm <= in.release_gpm) {\n      const uint32_t seen = (uint32_t) in.measured_stopped_ticks + 1u;\n      return seen >= (uint32_t) in.release_ticks\n                 ? ContinuationVerdict::MEASURED_STOPPED\n                 : ContinuationVerdict::STOPPING;\n    }|"
+"continuation-releases-on-any-measurement|components/dhw_demand/dhw_demand_logic.h|    if (in.demand_gpm <= in.release_gpm) {|    if (true) {"
+"continuation-release-threshold-off-by-one|components/dhw_demand/dhw_demand_logic.h|    if (in.demand_gpm <= in.release_gpm) {|    if (in.demand_gpm < in.release_gpm) {"
+"continuation-falsifies-on-the-firing-threshold|components/dhw_demand/dhw_demand_logic.h|    if (in.demand_gpm <= in.release_gpm) {|    if (in.demand_gpm <= in.demand_flow_threshold) {"
+"continuation-releases-on-one-tick|components/dhw_demand/dhw_demand_logic.h|      return seen >= (uint32_t) in.release_ticks|      return seen >= 1u"
+"continuation-never-releases-on-a-streak|components/dhw_demand/dhw_demand_logic.h|      return seen >= (uint32_t) in.release_ticks\n                 ? ContinuationVerdict::MEASURED_STOPPED\n                 : ContinuationVerdict::STOPPING;|      return ContinuationVerdict::STOPPING;"
+"continuation-stopping-tick-drops-demand|components/dhw_demand/dhw_demand_logic.h|  return v == ContinuationVerdict::ACTIVE ||\n         v == ContinuationVerdict::CONFIRMED ||\n         v == ContinuationVerdict::STOPPING;|  return v == ContinuationVerdict::ACTIVE ||\n         v == ContinuationVerdict::CONFIRMED;"
+"continuation-confirmation-never-reported|components/dhw_demand/dhw_demand_logic.h|    if (in.demand_gpm > in.demand_flow_threshold)\n      return ContinuationVerdict::CONFIRMED;|"
+"dhw-confirmation-does-not-refresh-expiry|components/dhw_demand/dhw_demand.cpp|    if (result.continuation == ContinuationVerdict::CONFIRMED) {\n      pre_pump_on_flow_since_ms_ = now;\n    }|"
+"dhw-stopping-streak-never-resets|components/dhw_demand/dhw_demand.cpp|    } else {\n      continuation_stopping_ticks_ = 0;\n    }|    }"
+"meter-provenance-guard-removed|components/dhw_demand/dhw_demand_logic.h|      !reading_predates_pump_start(in.flow_last_update_ms, in.pump_on_since_ms,\n                                   in.now_ms);|      true;"
+"continuation-never-expires|components/dhw_demand/dhw_demand_logic.h|  if ((in.now_ms - in.continuation_since_ms) >= in.max_ms)\n    return ContinuationVerdict::EXPIRED;|"
+"continuation-expiry-rollover-unsafe|components/dhw_demand/dhw_demand_logic.h|  if ((in.now_ms - in.continuation_since_ms) >= in.max_ms)|  if (in.now_ms >= in.continuation_since_ms + in.max_ms)"
+"continuation-unstamped-arm-holds|components/dhw_demand/dhw_demand_logic.h|  if (in.continuation_since_ms == 0)\n    return ContinuationVerdict::EXPIRED;|"
+"continuation-dropped-meter-sample-falsifies|components/dhw_demand/dhw_demand_logic.h|    return ContinuationVerdict::METER_QUIET;|    return ContinuationVerdict::MEASURED_STOPPED;"
+"continuation-meter-quiet-masks-the-real-exits|components/dhw_demand/dhw_demand_logic.h|  if (!std::isnan(in.demand_gpm)) {|  if (std::isnan(in.flow) || in.flow <= in.flow_threshold)\n    return ContinuationVerdict::METER_QUIET;\n  if (!std::isnan(in.demand_gpm)) {"
+"dhw-falsified-capture-not-retired|components/dhw_demand/dhw_demand.cpp|      pre_pump_on_flow_ = NAN;\n      pre_pump_on_flow_since_ms_ = 0;\n      continuation_stopping_ticks_ = 0;\n    } else if (result.continuation == ContinuationVerdict::EXPIRED &&|    } else if (result.continuation == ContinuationVerdict::EXPIRED &&"
+"dhw-expired-capture-not-retired|components/dhw_demand/dhw_demand.cpp|               pump_on_continuation_max_seconds_);\n      pre_pump_on_flow_ = NAN;\n      pre_pump_on_flow_since_ms_ = 0;|               pump_on_continuation_max_seconds_);"
+"dhw-continuation-arm-never-stamped|components/dhw_demand/dhw_demand.cpp|      pre_pump_on_flow_since_ms_ = now;\n      continuation_stopping_ticks_ = 0;\n|      continuation_stopping_ticks_ = 0;\n"
 "frozen-motor-asserts-pump-off|components/dhw_demand/dhw_demand_logic.h|  } else if (out.motor_frozen) {\n    out.pump_on = true;|  } else if (out.motor_frozen) {\n    out.pump_on = false;"
 "motor-staleness-mask-removed|components/dhw_demand/dhw_demand_logic.h|  out.speed_used = reading_is_fresh(in.motor_speed_last_update_ms, in.now_ms, in.motor_max_stale_ms)\n                       ? in.motor_speed\n                       : NAN;|  out.speed_used = in.motor_speed;"
 "motor-current-staleness-mask-removed|components/dhw_demand/dhw_demand_logic.h|  out.current_used =\n      reading_is_fresh(in.motor_current_last_update_ms, in.now_ms, in.motor_max_stale_ms)\n          ? in.motor_current\n          : NAN;|  out.current_used = in.motor_current;"
@@ -90,6 +127,22 @@ if [[ "${1:-}" == "--list" ]]; then
   echo "Mutations:"
   for m in "${MUTATIONS[@]}"; do echo "  - ${m%%|*}"; done
   exit 0
+fi
+
+# Optional name filter. Applied to the whole array up front rather than skipped
+# inside the loop, so the "Caught: n / total" line below counts what was
+# actually run instead of reporting most of the suite as missing.
+FILTER="${1:-}"
+if [[ -n "$FILTER" ]]; then
+  SELECTED=()
+  for m in "${MUTATIONS[@]}"; do
+    [[ "${m%%|*}" == *"$FILTER"* ]] && SELECTED+=("$m")
+  done
+  if [[ ${#SELECTED[@]} -eq 0 ]]; then
+    echo "No mutation name contains '$FILTER'. Try --list." >&2
+    exit 2
+  fi
+  MUTATIONS=("${SELECTED[@]}")
 fi
 
 echo "=========================================="
@@ -169,7 +222,7 @@ trap 'echo; echo -e "${YELLOW}Interrupted — restoring sources.${NC}"; restore_
 # while proving nothing. That is the same false-confidence failure this script
 # exists to detect, so it must not be able to produce it.
 echo -n "baseline (unmutated suite)  "
-if (cd "$TESTS_DIR" && make clean >/dev/null 2>&1 && make test >/tmp/mutation_baseline.log 2>&1); then
+if (cd "$TESTS_DIR" && make clean >/dev/null 2>&1 && make -j"$JOBS" test >/tmp/mutation_baseline.log 2>&1); then
   echo -e "${GREEN}✓ passes${NC}"
 else
   echo -e "${RED}✗ FAILS${NC}"
@@ -213,7 +266,7 @@ PY
     continue
   fi
 
-  if (cd "$TESTS_DIR" && make clean >/dev/null 2>&1 && make test >/dev/null 2>&1); then
+  if (cd "$TESTS_DIR" && make clean >/dev/null 2>&1 && make -j"$JOBS" test >/dev/null 2>&1); then
     echo -e "${RED}✗ SURVIVED — the suite passed with this broken${NC}"
     SURVIVORS+=("$name")
   else
@@ -229,6 +282,9 @@ echo ""
 echo "=========================================="
 echo "  Results"
 echo "=========================================="
+if [[ -n "$FILTER" ]]; then
+  echo -e "  ${YELLOW}PARTIAL RUN — only mutations matching '$FILTER'${NC}"
+fi
 echo "  Caught:   $CAUGHT / ${#MUTATIONS[@]}"
 if [[ ${#SURVIVORS[@]} -gt 0 ]]; then
   echo -e "  ${RED}Survived: ${#SURVIVORS[@]}${NC}"

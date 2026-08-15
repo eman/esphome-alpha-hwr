@@ -212,6 +212,77 @@
 
 ### Fixed
 
+- **A DHW draw that stopped mid-recirculation went on being reported until the
+  pump stopped.** The pump-on continuation tier presumes a draw established
+  just before the pump started is still running, and its only test for "still
+  drawing?" was household flow above 0.3 GPM. While the pump runs that meter is
+  reading the recirculation loop, and every pump-on value recorded here clears
+  0.3 by more than 2x -- 0.71 GPM at the pump's 1650 RPM clamp floor, a 1.31
+  no-draw median, 2.22 at the no-draw p90 -- so the exit was unreachable. A
+  1.80 GPM draw stopping five minutes into a thirty-minute run held
+  `dhw_demand` true at 0.85 confidence for the remaining twenty-five, with
+  `session_duration` reporting 1870 s against a 360 s draw, while the
+  subtraction sat there reading 0.00 GPM.
+
+  This was not a regression and not a rule violation -- the code implemented
+  the spec as written, and `AGENTS.md` §11.4 documented the raw-flow term
+  verbatim, complete with its own exemption from the "no pump-on rule may key
+  off raw meter flow" prohibition. The hole was in the spec, and the evidence
+  for the prohibition is the same evidence that condemns the exit: if no
+  threshold on raw meter flow can separate a draw from recirculation, none can
+  detect one *ending* either.
+
+  The tier now releases when the subtraction -- the only pump-on measurement of
+  household draw there is, under its own existing guards -- reads at or below
+  `pump_on_demand_flow_threshold`. That release also retires the stored
+  evidence, so a later loss of the subtraction cannot resurrect a claim that
+  has already been disproved. Because the subtraction goes silent below
+  `pump_on_demand_min_speed_rpm`, and a pump clamped under that floor never
+  produces one at all, an expiry bounds the case where nothing can contradict
+  the tier: new `pump_on_continuation_max_seconds`, default 300, `0` to disable
+  the tier outright. A draw that is real *and* measurable is picked straight
+  back up by the subtraction, so the expiry costs recall only where nothing
+  could see the draw anyway.
+
+  Both retirements log at `INFO`. They are once-per-continuation by
+  construction, and the default level is `INFO` (issue #127 keeps `DEBUG` off) --
+  which is exactly the configuration in which a field report of "demand stayed
+  on" would otherwise be undiagnosable.
+
+  Found by the 2026-08-12 audit (finding 10). The test that claimed to cover
+  this exit passed only because it used a 0.1 GPM meter reading -- below every
+  value the repo has ever recorded with the pump running.
+
+  Verified on hardware. A full draw armed the tier and closing the tap released
+  it, the log naming the subtraction as what ended it, with the pump still
+  turning -- so the meter was still reading loop flow above threshold, the
+  condition under which the tier previously held for the rest of the run.
+
+  The small-draw case was then measured directly, which is the run that
+  matters. A 0.60 GPM draw armed the tier; reduced mid-run without being
+  closed, the subtraction settled at **+0.226 GPM for 26 s** -- inside the 0 to
+  0.3 band where the first version of this fix retired the capture -- and the
+  tier held throughout, publishing no method change for 3 m 48 s until the tap
+  was actually closed, at which point the subtraction went to -1.09 GPM and it
+  released. That run also put the steady residual at -0.08 GPM (tap 0.602,
+  difference 0.52), inside the documented -0.10 +/- 0.06, confirming the -0.47
+  seen earlier was a deceleration transient rather than bias -- the case the
+  tick count covers.
+
+  One finding from that bench is recorded rather than fixed here. A steady
+  household draw metering 0.11-0.16 GPM produced `deterministic_idle`
+  throughout: it never cleared `flow_threshold` (0.3 GPM), so nothing detected
+  it at all. Across 14 h of one installation, 24 sub-threshold samples fell in
+  `0 < flow < 0.30` **with the pump confirmed off** -- readings where the meter
+  sees only genuine demand. The meter reports a hard `0.0` at rest rather than
+  dithering, so this is real signal below the floor rather than noise, and the
+  obstacle to lowering it is recirculation decay passing through any threshold
+  after a pump-off edge rather than sensor resolution. That needs the same kind
+  of edge-proximity measurement that placed
+  `latch_pump_off_suppression_seconds`, so the floor is unchanged and the
+  limitation is now documented in `AGENTS.md` §11.4 and
+  `docs/configuration.md`. Issue #180.
+
 - **Device information and the operating statistics could silently never be
   read.** The one-time chain that fetches them is latched by a flag that only a
   BLE disconnect clears. It normally runs after authentication, but it also

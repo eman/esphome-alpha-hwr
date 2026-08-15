@@ -168,6 +168,14 @@ dhw_demand:
   # Measured across 296 starts: 0-10 s is p90 0.820 GPM with 26.6 % above
   # threshold, against a flat 6-9 % from 10 s out. 0 disables.
   pump_on_demand_settle_seconds: 10
+  # How long the continuation tier may keep asserting a draw that no
+  # measurement has *supported* for that long. A subtraction clearing
+  # pump_on_demand_flow_threshold re-stamps the support time, so this is not
+  # a ceiling on the pump run -- a draw measured tick after tick never
+  # expires. It bounds the blind case: a pump turning below
+  # pump_on_demand_min_speed_rpm, where no measurement of household draw
+  # exists to support or contradict the claim. 0 disables the tier.
+  pump_on_continuation_max_seconds: 300
   session_gap_tolerance_seconds: 60
   # How long demand stays latched after the last positive tick. Stops an input
   # dithering around its threshold from chattering the demand binary sensor.

@@ -80,11 +80,21 @@ two are normally paired, with pump telemetry feeding the detector.
   a corroborating signal, or by the flow having been present on the previous tick.
   See `pump_off_flow_onset_is_confirmed()`.
 - **Pump-on branch**: continuation first (demand was already active when the pump
-  started and flow persists → 0.85), then the *subtraction* — `flow − pump_flow`
+  started, and nothing since has ended it → 0.85), then the *subtraction* — `flow − pump_flow`
   is household demand directly, because the meter reads everything leaving the
   mains and the pump reports its own loop. Confidence rises with how far the
   measured draw clears the threshold, capped at 0.90. Otherwise
   `pump_on_uncertain`.
+- **Ending the continuation is the hard part.** Its original exit was "and flow
+  is still above threshold now", which cannot go false while the pump runs — the
+  meter is reading the recirculation loop, which clears the threshold by at
+  more than 2x at every speed recorded here. A draw that stopped mid-run therefore
+  kept publishing demand until the pump did. It now ends on the subtraction
+  measuring the draw as over (which also retires the stored evidence, so a later
+  loss of the subtraction cannot resurrect a disproved claim), or on an expiry
+  for the case where the subtraction is never available at all — a pump turning
+  below its speed floor offers no measurement of household draw for the whole
+  run. See `pump_on_continuation_verdict()` and audit finding 10.
 - **The subtraction's three guards are all load-bearing**: both channels present;
   both readings current (30 s for the pump, 60 s for the meter — they do not
   report alike); and the pump turning above `pump_on_demand_min_speed_rpm`,
