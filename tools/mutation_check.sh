@@ -59,6 +59,16 @@ JOBS="${JOBS:-4}"
 # this check flagged the single-point version as surviving; the redundancy is
 # defence in depth and was left in production rather than trimmed to suit the
 # tooling.
+#
+# Also deliberately absent: deleting the `if (current_ms == 0) return 0;` guard
+# from link_data_timeout_next(). It is an equivalent mutant, verified by
+# experiment after this check flagged it as surviving: with current_ms == 0 the
+# remaining arithmetic already returns 0 (0 >= cap is false, doubled is 0, and
+# 0 > cap is false), so removing the guard changes no output for any cap. The
+# guard is kept because it states the intent -- a disabled watchdog stays
+# disabled -- and because it keeps that property true independently of the
+# arithmetic below it, which a later edit could change. Listing it here would
+# be an uncatchable entry rather than a coverage gap.
 MUTATIONS=(
 "crc-initial-value|components/alpha_hwr/codec.cpp|uint16_t crc = init;|uint16_t crc = init ^ 0x0001;"
 "crc-byte-order|components/alpha_hwr/frame_builder.cpp|packet_out[9] = (crc >> 8) & 0xFF;|packet_out[9] = crc & 0xFF;"
@@ -88,7 +98,6 @@ MUTATIONS=(
 "backoff-never-grows|components/alpha_hwr/link_watchdog.h|  const uint32_t doubled = current_ms * 2u;|  const uint32_t doubled = current_ms;"
 "backoff-ignores-the-cap|components/alpha_hwr/link_watchdog.h|  return doubled > cap_ms ? cap_ms : doubled;|  return doubled;"
 "backoff-shrinks-a-large-budget|components/alpha_hwr/link_watchdog.h|  if (current_ms >= cap_ms)\n    return current_ms;|"
-"backoff-arms-a-disabled-watchdog|components/alpha_hwr/link_watchdog.h|  if (current_ms == 0)\n    return 0;|"
 
 # Initial-read re-arm (bench regression: a stalled one-shot read chain left the
 # node with device info and the operating statistics unread for as long as the
