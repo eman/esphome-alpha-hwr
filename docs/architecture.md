@@ -33,7 +33,9 @@ components/alpha_hwr/
 ## Layers
 
 - **`alpha_hwr`** — Thin facade. Delegates all work to services. No direct protocol manipulation.
-- **`api_bridge`** — Home Assistant surface of the programmatic write interface: registers the `pump_*` and schedule services and fires the terminal `esphome.alpha_hwr_write_settled` event. Compiled only when the `api:` component enables `custom_services` + `homeassistant_services`.
+- **`api_bridge`** — Home Assistant surface of the programmatic write interface: registers the pump and schedule write services — each named after the
+  `WriteCommand` it settles as, so the service you call and the event's
+  `command` field are one string (issue #159) — and fires the terminal `esphome.alpha_hwr_write_settled` event. Compiled only when the `api:` component enables `custom_services` + `homeassistant_services`.
 - **`core::`** — Manages BLE I/O, connection state, and authentication. The transport uses a command queue and 3-state FSM (`IDLE` → `SENDING_CHUNKS` → `AWAITING_RESPONSE`) to stay non-blocking inside ESPHome's event loop.
 - **`protocol::`** — Stateless frame builders and parsers. Pure functions with no side effects. Fully unit-testable on host without hardware.
 - **`services::`** — One service per domain. Each owns all operations for its area (telemetry, control, schedules, etc.).

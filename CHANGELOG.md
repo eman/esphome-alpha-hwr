@@ -2,62 +2,6 @@
 
 ## [Unreleased]
 
-### Fixed
-
-- **The schedule card treated every write as successful.** `_saveChanges`
-  discarded the user's pending edits at call time, then re-read the device on a
-  3 s timer. A `set_schedule_entry` carries a 20 s watchdog and writes are
-  queued, so the read returned pre-write state and overwrote the edit with the
-  value it was meant to replace — and a write the device *rejected* looked
-  exactly like one it accepted, because the edit was gone either way. The card
-  already generated a unique `op_id` per call and the device already answers
-  every write with exactly one `esphome.alpha_hwr_write_settled` carrying it;
-  the card simply never subscribed. It does now: an edit stays on the grid
-  until its own write settles, failures are named on the card with the device's
-  own detail string, and the refresh fires when the batch drains rather than on
-  a timer. An edit re-made while its write is in flight survives the older
-  write's confirmation.
-
-  A settle event can legitimately never arrive — a Home Assistant restart, a
-  websocket reconnect, a node reboot — so a backstop releases the wait after
-  the firmware's own watchdog budget has had time to fire, and says that is
-  what happened rather than reporting success. It errs long on purpose. The
-  per-command budgets bound an operation's time *at the head* of the device
-  queue — `arm_watchdog_` runs from `start_front_`, so a queued operation
-  carries no timer until it gets there — and the queue is shared with every
-  other write source, including the card's own untracked refreshes. A backstop
-  that fires early is the worse failure: it reports "no confirmation" for a
-  write still in progress, then discards the real settle when it arrives. The
-  wait also re-arms as writes confirm, so it tracks what is still outstanding
-  rather than what the batch started as.
-
-  The fixed slack is not a bound on the queue, and cannot be: the queue has no
-  depth limit and a queued operation carries no watchdog until it reaches the
-  head, so enough foreign writes in front would outlast any constant. What
-  closes that is a signal rather than a bigger number — every operation that
-  completes on the node fires a settle event, so the deadline re-arms on
-  observed queue progress and the slack only has to cover a single long
-  operation that has not finished yet.
-
-  A card that is re-attached mid-write — which Lovelace does whenever a masonry
-  view re-columns — restores both its backstop, on the original deadline, and
-  its settle subscription. Without the first, teardown cancelled the only timer
-  that could ever release the write and the card rendered "saving…"
-  permanently with Save and Discard both disabled. Without the second, a write
-  settling before Home Assistant's next state push would land on a card that
-  had stopped listening, and be reported as a failure.
-
-  The single-event paths had the same defect against a 60 s watchdog, plus an
-  optimistic local delete that made a failed clear look like a success for the
-  better part of a minute. Both are fixed the same way.
-
-  Not changed, deliberately: the card still writes one entry per changed cell
-  rather than batching through `upload_schedule`. `build_layer_image` clears
-  every cell an upload does not list, and the card silently skips a layer
-  sensor that is malformed or not yet cached — so batching would turn a stale
-  read-back into data loss. Ordinary edits are one to three writes, fewer than
-  an upload costs.
-
 ### Added
 
 - **The Lovelace card has host tests** — `tests/js/test_schedule_card.js`, run
@@ -86,6 +30,70 @@
 
 ### Changed
 
+- **BREAKING — the six pump services are renamed to match the `command` their
+  settle event reports** ([#159](https://github.com/eman/esphome-alpha-hwr/issues/159)):
+
+  | Old service | New service |
+  | --- | --- |
+  | `pump_set_enabled` | `set_pump_enabled` |
+  | `pump_set_mode` | `set_mode` |
+  | `pump_set_setpoint` | `set_setpoint` |
+  | `pump_set_temperature_range` | `set_temperature_range` |
+  | `pump_set_cycle_times` | `set_cycle_times` |
+  | `pump_set_state` | `set_pump_state` |
+
+  You called `pump_set_state` and got `command: "set_pump_state"` back, so the
+  one field meant to tell you which write had settled named it differently from
+  the thing you called — you could not grep a call to its own event, and the
+  transposition reads as a typo in either direction.
+
+  **The event payloads do not change.** Only the service names move, and they
+  move onto the names the events were already using. This is the direction that
+  breaks loudly: a renamed service fails the automation with `Action ... not
+  found`, whereas renaming the event field would have left every
+  automation filtering on `command` silently never firing again. Same rule as
+  the keys retired in #149 — a surface that validates but does nothing is a
+  trap.
+
+  **Migration:** rename the service in each automation per the table above.
+  There is no single rewrite rule to apply — `pump` is *dropped* where the verb
+  alone is unambiguous (`pump_set_mode` → `set_mode`) and *kept* only where it
+  says which thing is being set (`pump_set_state` → `set_pump_state`, since the
+  schedule has a state too). Read the table rather than transposing by hand.
+  Note the rename also removes a stutter for anyone whose node is named after
+  the pump: `esphome.hwr_pump_pump_set_state` becomes
+  `esphome.hwr_pump_set_pump_state`. Nothing else changes — arguments,
+  semantics, statuses and every field of `esphome.alpha_hwr_write_settled` are
+  untouched.
+
+  If a call is missed, the automation fails with `Action ... not found` — which
+  names the service you called but not its replacement, so the table above is
+  the thing to check against. Note also that Home Assistant does not validate
+  service names when an automation is reloaded, only when it fires: a rarely
+  triggered automation can go on looking healthy until the next time it runs.
+
+  The schedule services were already correct (`set_schedule_entry`,
+  `upload_schedule`, `clear_single_event` and the rest all matched their command
+  already) and do not move; they are also the names inherited from the original
+  schedule-editor services, which is why the pump family was the side that had
+  to give. **`api_bridge.cpp` now registers each service *by* its command name**
+  instead of spelling the name a second time, so the two surfaces can no longer
+  disagree — the drift was possible only because each side named the write
+  independently and nothing compared them. `set_vacation` / `clear_vacation`
+  remain the deliberate exception: they compose the single-event slots rather
+  than being commands of their own, so they settle as `set_single_event` /
+  `clear_single_event`. That is now stated in the docs, along with the two
+  services themselves, which were registered but undocumented.
+
+  Fourteen of the fifteen command strings are consequently public API on two
+  counts — as the event's `command` field and as a service name. The fifteenth,
+  `set_remote_mode`, has no service and never had one: the Remote Mode switch is
+  an entity-only write that still emits its settle event, so do not go looking
+  for a service by that name. `test_write_operations.cpp::test_command_strings()`
+  pins all fifteen regardless — including a count check, so a newly added command
+  fails the test until it is pinned too, and a uniqueness check, because two
+  commands sharing a string would now register two services under one name.
+
 - **README recipes §1–§3 now declare `external_components` at `@main`**, as §4
   and §5 already did. A package fetched at `@main` self-declares its component
   source pinned to the release it shipped with, so without a top-level
@@ -103,8 +111,6 @@
   that reboots the node it is measuring. Note that the service-list encode in
   that crash's backtrace was the *victim*, not the cause: the failing
   allocation was at most ~48 bytes, so the heap was already gone.
-
-### Changed
 
 - **`dhw_demand.cpp` is now compiled and driven by the host test suite.**
   `esphome compile` was the only thing in the toolchain that compiled it at
@@ -303,6 +309,61 @@
   they change nothing at build time.
 
 ### Fixed
+
+- **The schedule card treated every write as successful.** `_saveChanges`
+  discarded the user's pending edits at call time, then re-read the device on a
+  3 s timer. A `set_schedule_entry` carries a 20 s watchdog and writes are
+  queued, so the read returned pre-write state and overwrote the edit with the
+  value it was meant to replace — and a write the device *rejected* looked
+  exactly like one it accepted, because the edit was gone either way. The card
+  already generated a unique `op_id` per call and the device already answers
+  every write with exactly one `esphome.alpha_hwr_write_settled` carrying it;
+  the card simply never subscribed. It does now: an edit stays on the grid
+  until its own write settles, failures are named on the card with the device's
+  own detail string, and the refresh fires when the batch drains rather than on
+  a timer. An edit re-made while its write is in flight survives the older
+  write's confirmation.
+
+  A settle event can legitimately never arrive — a Home Assistant restart, a
+  websocket reconnect, a node reboot — so a backstop releases the wait after
+  the firmware's own watchdog budget has had time to fire, and says that is
+  what happened rather than reporting success. It errs long on purpose. The
+  per-command budgets bound an operation's time *at the head* of the device
+  queue — `arm_watchdog_` runs from `start_front_`, so a queued operation
+  carries no timer until it gets there — and the queue is shared with every
+  other write source, including the card's own untracked refreshes. A backstop
+  that fires early is the worse failure: it reports "no confirmation" for a
+  write still in progress, then discards the real settle when it arrives. The
+  wait also re-arms as writes confirm, so it tracks what is still outstanding
+  rather than what the batch started as.
+
+  The fixed slack is not a bound on the queue, and cannot be: the queue has no
+  depth limit and a queued operation carries no watchdog until it reaches the
+  head, so enough foreign writes in front would outlast any constant. What
+  closes that is a signal rather than a bigger number — every operation that
+  completes on the node fires a settle event, so the deadline re-arms on
+  observed queue progress and the slack only has to cover a single long
+  operation that has not finished yet.
+
+  A card that is re-attached mid-write — which Lovelace does whenever a masonry
+  view re-columns — restores both its backstop, on the original deadline, and
+  its settle subscription. Without the first, teardown cancelled the only timer
+  that could ever release the write and the card rendered "saving…"
+  permanently with Save and Discard both disabled. Without the second, a write
+  settling before Home Assistant's next state push would land on a card that
+  had stopped listening, and be reported as a failure.
+
+  The single-event paths had the same defect against a 60 s watchdog, plus an
+  optimistic local delete that made a failed clear look like a success for the
+  better part of a minute. Both are fixed the same way.
+
+  Not changed, deliberately: the card still writes one entry per changed cell
+  rather than batching through `upload_schedule`. `build_layer_image` clears
+  every cell an upload does not list, and the card silently skips a layer
+  sensor that is malformed or not yet cached — so batching would turn a stale
+  read-back into data loss. Ordinary edits are one to three writes, fewer than
+  an upload costs.
+
 
 - **A DHW draw that stopped mid-recirculation went on being reported until the
   pump stopped.** The pump-on continuation tier presumes a draw established
@@ -549,7 +610,7 @@
   serialised as hour 24, which the API rejects, so "run until midnight" could
   never be saved.
 
-- **A timed-out `pump_set_enabled` could stop a running pump on the next
+- **A timed-out `set_pump_enabled` could stop a running pump on the next
   unrelated setpoint write.** The commanded run state was cached as
   authoritative with no pending marker, and nothing rolled it back on timeout,
   so `with_resolved_enabled_state()` short-circuited on an unverified value and
@@ -651,7 +712,7 @@
 - **README brought current with v0.15.0** — documents the card's optional
   `forecast_entity` / `desired_entity` overlays, the `dhw_in_use` detector input
   and its `dhw_in_use_min_seconds` guard, the `upload_schedule` / `set_vacation`
-  / `clear_vacation` services, and `pump_set_state`. All were already
+  / `clear_vacation` services, and `set_pump_state`. All were already
   implemented and covered in `docs/`; only the README summary lagged.
 
 ## [0.15.0] - 2026-07-30

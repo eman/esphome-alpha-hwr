@@ -155,13 +155,13 @@ stalled nor repaired — otherwise the repair would run the pump through your
 vacation.
 
 To hold the pump off deliberately, turn the **schedule** off (`Schedule Enabled`
-off, or `pump_set_state: off`); your weekly windows are retained. Stopping the
+off, or `set_pump_state: off`); your weekly windows are retained. Stopping the
 pump while leaving the schedule enabled is not a way to pause it — that is the
 stalled state, and it will be repaired.
 
-From an automation, the `pump_set_state` service (`off` | `engaged` |
+From an automation, the `set_pump_state` service (`off` | `engaged` |
 `scheduled`) gives you these same three states in one safe call. The raw
-`pump_set_enabled` / `set_schedule_enabled` services stay available for writing
+`set_pump_enabled` / `set_schedule_enabled` services stay available for writing
 a single flag deliberately — see
 [programmatic-interface.md](programmatic-interface.md#run-state-and-the-schedule).
 

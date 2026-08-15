@@ -23,31 +23,67 @@ using services::WriteStatus;
 void AlphaHwrApiBridge::setup(AlphaHwrComponent *component) {
   component_ = component;
 
-  register_service(&AlphaHwrApiBridge::on_set_enabled, "pump_set_enabled", {"enabled", "op_id"});
-  register_service(&AlphaHwrApiBridge::on_set_mode, "pump_set_mode", {"mode", "op_id"});
-  register_service(&AlphaHwrApiBridge::on_set_setpoint, "pump_set_setpoint",
-                   {"mode", "value", "op_id"});
-  register_service(&AlphaHwrApiBridge::on_set_temperature_range, "pump_set_temperature_range",
-                   {"min_c", "max_c", "autoadapt", "op_id"});
-  register_service(&AlphaHwrApiBridge::on_set_cycle_times, "pump_set_cycle_times",
-                   {"on_minutes", "off_minutes", "flow", "op_id"});
-  register_service(&AlphaHwrApiBridge::on_set_pump_state, "pump_set_state", {"state", "op_id"});
+  // Service names are not spelled here. Each one is the *same string the
+  // settle event reports in `command`*, read from the single function that
+  // spells it (issue #159). Both surfaces used to name the write
+  // independently, and they disagreed: calling `pump_set_state` settled as
+  // `set_pump_state`, so no automation could correlate a call to its own
+  // event by name. Deriving one from the other means they can now only
+  // disagree by passing the wrong enumerator — visible right here, at the
+  // call site, rather than at a user's event listener.
+  //
+  // Every command string that is registered below is therefore public API on
+  // two counts, and test_write_operations.cpp::test_command_strings() pins all
+  // fifteen: editing one of those strings in write_command_to_string() renames
+  // a Home Assistant service along with the event field. SET_REMOTE_MODE is the
+  // one command with no service here — the Remote Mode switch is entity-only —
+  // so its string moves the event field alone.
+  //
+  // What that test cannot reach: this file is compiled only against the real
+  // ESPHome API headers, so no host test builds it and the mutation check has
+  // no target here. Pairing a handler with the wrong enumerator below compiles,
+  // passes the whole suite and passes the firmware build -- it surfaces only on
+  // a bench service listing or in somebody's automation. The pairings are
+  // one-per-line and adjacent to their argument lists for that reason; a
+  // service listing from a real node is the check.
+  const auto name = services::write_command_to_string;
 
-  register_service(&AlphaHwrApiBridge::on_upload_schedule, "upload_schedule",
+  register_service(&AlphaHwrApiBridge::on_set_enabled, name(WriteCommand::SET_PUMP_ENABLED),
+                   {"enabled", "op_id"});
+  register_service(&AlphaHwrApiBridge::on_set_mode, name(WriteCommand::SET_MODE),
+                   {"mode", "op_id"});
+  register_service(&AlphaHwrApiBridge::on_set_setpoint, name(WriteCommand::SET_SETPOINT),
+                   {"mode", "value", "op_id"});
+  register_service(&AlphaHwrApiBridge::on_set_temperature_range,
+                   name(WriteCommand::SET_TEMPERATURE_RANGE),
+                   {"min_c", "max_c", "autoadapt", "op_id"});
+  register_service(&AlphaHwrApiBridge::on_set_cycle_times, name(WriteCommand::SET_CYCLE_TIMES),
+                   {"on_minutes", "off_minutes", "flow", "op_id"});
+  register_service(&AlphaHwrApiBridge::on_set_pump_state, name(WriteCommand::SET_PUMP_STATE),
+                   {"state", "op_id"});
+
+  register_service(&AlphaHwrApiBridge::on_upload_schedule, name(WriteCommand::UPLOAD_SCHEDULE),
                    {"data", "op_id"});
-  register_service(&AlphaHwrApiBridge::on_set_schedule_entry, "set_schedule_entry",
-                   {"data", "op_id"});
-  register_service(&AlphaHwrApiBridge::on_clear_schedule_entry, "clear_schedule_entry",
-                   {"data", "op_id"});
-  register_service(&AlphaHwrApiBridge::on_set_schedule_enabled, "set_schedule_enabled",
-                   {"data", "op_id"});
-  register_service(&AlphaHwrApiBridge::on_refresh_schedule, "refresh_schedule", {"op_id"});
-  register_service(&AlphaHwrApiBridge::on_set_single_event, "set_single_event",
-                   {"data", "op_id"});
-  register_service(&AlphaHwrApiBridge::on_clear_single_event, "clear_single_event",
-                   {"data", "op_id"});
-  register_service(&AlphaHwrApiBridge::on_refresh_single_events, "refresh_single_events",
+  register_service(&AlphaHwrApiBridge::on_set_schedule_entry,
+                   name(WriteCommand::SET_SCHEDULE_ENTRY), {"data", "op_id"});
+  register_service(&AlphaHwrApiBridge::on_clear_schedule_entry,
+                   name(WriteCommand::CLEAR_SCHEDULE_ENTRY), {"data", "op_id"});
+  register_service(&AlphaHwrApiBridge::on_set_schedule_enabled,
+                   name(WriteCommand::SET_SCHEDULE_ENABLED), {"data", "op_id"});
+  register_service(&AlphaHwrApiBridge::on_refresh_schedule, name(WriteCommand::REFRESH_SCHEDULE),
                    {"op_id"});
+  register_service(&AlphaHwrApiBridge::on_set_single_event, name(WriteCommand::SET_SINGLE_EVENT),
+                   {"data", "op_id"});
+  register_service(&AlphaHwrApiBridge::on_clear_single_event,
+                   name(WriteCommand::CLEAR_SINGLE_EVENT), {"data", "op_id"});
+  register_service(&AlphaHwrApiBridge::on_refresh_single_events,
+                   name(WriteCommand::REFRESH_SINGLE_EVENTS), {"op_id"});
+
+  // The two exceptions, and the only services whose name is written out: a
+  // vacation is a composition over the single-event slots rather than a
+  // command of its own, so these settle as `set_single_event` /
+  // `clear_single_event`. Documented in docs/programmatic-interface.md so the
+  // mismatch is stated rather than discovered.
   register_service(&AlphaHwrApiBridge::on_set_vacation, "set_vacation",
                    {"data", "op_id"});
   register_service(&AlphaHwrApiBridge::on_clear_vacation, "clear_vacation", {"op_id"});

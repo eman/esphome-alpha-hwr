@@ -285,9 +285,9 @@ That is the pattern used in `dhw-demand-example.yaml`.
 ## Programmatic control (services + `write_settled` event)
 
 For automations, scripts, or any program driving the pump, the component
-registers write services (`pump_set_enabled`, `pump_set_state`,
-`pump_set_mode`, `pump_set_setpoint`, `pump_set_temperature_range`,
-`pump_set_cycle_times`, plus the schedule services below). Every write — service- or
+registers write services (`set_pump_enabled`, `set_pump_state`,
+`set_mode`, `set_setpoint`, `set_temperature_range`,
+`set_cycle_times`, plus the schedule services below). Every write — service- or
 entity-originated — is serialized, verified against a pump readback, and
 settles with exactly one `esphome.alpha_hwr_write_settled` event reporting
 whether it was `accepted`, `clamped`, `rejected`, `timeout`, or `superseded`,

@@ -25,9 +25,12 @@ class AlphaHwrComponent;
 /**
  * Home Assistant surface of the programmatic write interface (issue #92).
  *
- * Registers the pump_* services (surfacing in HA as
- * esphome.<node>_pump_set_enabled etc.) and fires the terminal
- * esphome.alpha_hwr_write_settled event for every write operation.
+ * Registers the write services (surfacing in HA as
+ * esphome.<node>_set_setpoint etc.) and fires the terminal
+ * esphome.alpha_hwr_write_settled event for every write operation. A service
+ * is named by its WriteCommand, so the name you call is the name the event
+ * reports back in `command` (issue #159); see the comment on the
+ * registrations in setup().
  *
  * The bridge is the single owner of the service/event contract: argument
  * parse failures become an immediate terminal `rejected` event here, before

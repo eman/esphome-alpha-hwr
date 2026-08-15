@@ -590,7 +590,7 @@ public:
     write_op_service_.submit_set_schedule_enabled(enabled, op_id);
   }
 
-  // Coupled `pump_set_state` service: a single selector over the three-state
+  // Coupled `set_pump_state` service: a single selector over the three-state
   // machine (off / engaged / scheduled), the programmatic sibling of the two
   // switches. Composed from the raw SET_PUMP_ENABLED + SET_SCHEDULE_ENABLED
   // writes (so each keeps its own pump-verified readback), then reports ONE

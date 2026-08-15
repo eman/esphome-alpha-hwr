@@ -1735,6 +1735,86 @@ static void test_mode_strings() {
 }
 
 // ---------------------------------------------------------------------------
+// Command strings (issue #159)
+//
+// Every string write_command_to_string() returns is the `command` field of an
+// esphome.alpha_hwr_write_settled event. Fourteen of the fifteen are *also* the
+// name api_bridge.cpp registers a Home Assistant service under, so editing one
+// of those renames a service somebody's automation calls. Either way the rename
+// should come with a failing test rather than arriving silently.
+//
+// SET_REMOTE_MODE is the exception: the Remote Mode switch is an entity-only
+// write with no service, so `set_remote_mode` is an event string only. It is
+// pinned here all the same — it is still public API, just on one surface.
+//
+// Before #159 the two surfaces spelled the name independently and disagreed:
+// the service was `pump_set_state`, the event said `set_pump_state`. Nothing
+// caught it because nothing asserted either spelling.
+// ---------------------------------------------------------------------------
+
+static void test_command_strings() {
+  std::cout << "\n=== command strings (event field AND service name) ===" << std::endl;
+  const auto to_string = esphome::alpha_hwr::services::write_command_to_string;
+
+  struct Expected {
+    WriteCommand cmd;
+    const char *name;
+  };
+  static const Expected EXPECTED[] = {
+      {WriteCommand::SET_PUMP_ENABLED, "set_pump_enabled"},
+      {WriteCommand::SET_MODE, "set_mode"},
+      {WriteCommand::SET_SETPOINT, "set_setpoint"},
+      {WriteCommand::SET_TEMPERATURE_RANGE, "set_temperature_range"},
+      {WriteCommand::SET_CYCLE_TIMES, "set_cycle_times"},
+      {WriteCommand::SET_SCHEDULE_ENTRY, "set_schedule_entry"},
+      {WriteCommand::CLEAR_SCHEDULE_ENTRY, "clear_schedule_entry"},
+      {WriteCommand::SET_SCHEDULE_ENABLED, "set_schedule_enabled"},
+      {WriteCommand::SET_REMOTE_MODE, "set_remote_mode"},
+      {WriteCommand::SET_SINGLE_EVENT, "set_single_event"},
+      {WriteCommand::CLEAR_SINGLE_EVENT, "clear_single_event"},
+      {WriteCommand::REFRESH_SCHEDULE, "refresh_schedule"},
+      {WriteCommand::REFRESH_SINGLE_EVENTS, "refresh_single_events"},
+      {WriteCommand::UPLOAD_SCHEDULE, "upload_schedule"},
+      {WriteCommand::SET_PUMP_STATE, "set_pump_state"},
+  };
+  const size_t expected_count = sizeof(EXPECTED) / sizeof(EXPECTED[0]);
+
+  for (const auto &e : EXPECTED) {
+    TEST_ASSERT(strcmp(to_string(e.cmd), e.name) == 0,
+                std::string("command string is \"") + e.name + "\"");
+  }
+
+  // Exhaustiveness: a new enumerator returns its own string, so the count of
+  // named commands stops matching the table above and this fails until the new
+  // command is pinned here too. Without it the table only proves that the
+  // commands somebody remembered to list are right.
+  //
+  // It covers one of the two ways to add a command. An enumerator added with
+  // no case in write_command_to_string() returns "unknown", leaving the count
+  // at 15, so this assert stays green -- that half is caught by -Wswitch and
+  // CI's warnings-are-errors build, not here. Weakening either leaves the gap
+  // uncovered.
+  size_t named = 0;
+  for (int v = 0; v < 256; v++) {
+    if (strcmp(to_string(static_cast<WriteCommand>(v)), "unknown") != 0)
+      named++;
+  }
+  TEST_ASSERT(named == expected_count,
+              "every WriteCommand is pinned above (pin new commands here too)");
+
+  // Uniqueness matters more since #159 than it did before: two commands sharing
+  // a string would now register two Home Assistant services under one name.
+  // Inserting what the function RETURNS rather than what the table above says
+  // is the whole point -- over the table's own literals this would only catch a
+  // typo in the fixture, which is not a property of the shipped code.
+  std::set<std::string> unique;
+  for (const auto &e : EXPECTED)
+    unique.insert(to_string(e.cmd));
+  TEST_ASSERT(unique.size() == expected_count,
+              "command strings are unique (duplicates would collide as service names)");
+}
+
+// ---------------------------------------------------------------------------
 // upload_schedule (bulk full-state grid upload)
 // ---------------------------------------------------------------------------
 
@@ -2094,6 +2174,7 @@ int main() {
   test_refresh_single_events_all_slots_fail();
   test_single_event_read_failure_blocks_slot_allocation();
   test_mode_strings();
+  test_command_strings();
   test_upload_accepted();
   test_upload_skip_identical();
   test_upload_partial();

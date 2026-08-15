@@ -74,7 +74,7 @@ inline PumpScheduleTarget engage_pump_off_target() { return {/*pump*/ false, /*s
 inline PumpScheduleTarget schedule_on_target()     { return {/*pump*/ true,  /*schedule*/ true};  }  // Scheduled (AUTO so never dead)
 inline PumpScheduleTarget schedule_off_target()    { return {/*pump*/ false, /*schedule*/ false}; }  // Off (stop pump)
 
-// ---- The three legal states as first-class targets, for the `pump_set_state`
+// ---- The three legal states as first-class targets, for the `set_pump_state`
 // service (a single selector over the same three-state machine the two switches
 // express jointly). off = STOP; engaged = AUTO + schedule off; scheduled =
 // AUTO + schedule on.
@@ -82,7 +82,7 @@ inline PumpScheduleTarget state_off_target()       { return {/*pump*/ false, /*s
 inline PumpScheduleTarget state_engaged_target()   { return {/*pump*/ true,  /*schedule*/ false}; }
 inline PumpScheduleTarget state_scheduled_target() { return {/*pump*/ true,  /*schedule*/ true};  }
 
-// Parse a `pump_set_state` value ("off" | "engaged" | "scheduled") into a
+// Parse a `set_pump_state` value ("off" | "engaged" | "scheduled") into a
 // target. Returns false on an unknown string (caller settles `invalid`).
 inline bool parse_pump_state(const char *s, PumpScheduleTarget *out) {
   if (std::strcmp(s, "off") == 0)       { *out = state_off_target();       return true; }
@@ -100,7 +100,7 @@ inline const char *state_name(bool pump_auto, bool schedule_on) {
 
 // Display value for the "Pump Run State" diagnostic sensor. Same vocabulary as
 // state_name() plus a distinct "stalled" for the dead schedule, which
-// state_name() must keep reporting as "off" (that is the pump_set_state service
+// state_name() must keep reporting as "off" (that is the set_pump_state service
 // contract — off/engaged/scheduled — and callers parse it). Publishing this is
 // what makes a dead schedule visible in Home Assistant at all: "Engage Pump"
 // reads off for both AUTO and STOP once the schedule is on, so before this the
