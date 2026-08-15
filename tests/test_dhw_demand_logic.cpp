@@ -603,10 +603,12 @@ void test_pump_on_tier_ordering() {
   // is turning at 2402 rpm, so the subtraction is available and reads 0.00 --
   // a measured no-draw. The flag does not get to overrule it (issue #173).
   //
-  // This is B1-INSIDE's no-draw phase, the bench case the gate is really
-  // about: the pump running, the loop quiet, a human holding the tap shut, and
-  // the heater's flag high anyway. The measurement is the only thing in the
-  // system that knows there is no water moving.
+  // The bench case the gate is really about: the pump running, the loop quiet,
+  // a human holding the tap shut, and the heater's flag high anyway. The
+  // measurement is the only thing in the system that knows there is no water
+  // moving. (Recorded in the companion detector's bench corpus, which is not
+  // tracked in this repo — the shape is reproduced here from its description
+  // rather than replayed from it.)
   PumpOnInputs flag_over_quiet_loop = live_tick();
   flag_over_quiet_loop.dhw_in_use_sustained = true;
   r = decide_pump_on(flag_over_quiet_loop, t);
@@ -639,6 +641,24 @@ void test_pump_on_tier_ordering() {
   TEST_ASSERT(!r.demand,
               "...so no demand is published on the strength of the flag alone");
 
+  // The shape the gate mostly meets in the field, and the one the first version
+  // of these tests missed entirely: a *negative* subtraction. Every case here
+  // used to sit at 0.00, 0.20 or 0.29, all non-negative, while the cited median
+  // of the suppressed population is −0.021 GPM — the loop reading slightly
+  // above the meter, which is instrument mismatch, not water. A gate written as
+  // `isnan(gpm) || gpm < 0` would have passed the whole suite and reopened the
+  // most common suppressed cell; it does not pass this.
+  PumpOnInputs flag_over_negative_subtraction = live_tick();
+  flag_over_negative_subtraction.dhw_in_use_sustained = true;
+  flag_over_negative_subtraction.flow = 1.319f;  // 1.319 - 1.34 = -0.021 GPM
+  r = decide_pump_on(flag_over_negative_subtraction, t);
+  TEST_ASSERT(r.demand_gpm < 0.0f,
+              "The fixture really does produce a negative subtraction");
+  TEST_ASSERT(std::string(r.method) == "pump_on_uncertain",
+              "A negative subtraction is a measurement like any other, and "
+              "suppresses the flag — this is the median suppressed cell");
+  TEST_ASSERT(!r.demand, "...and declares no demand");
+
   // Just under the threshold is still "tier 2 looked and declined", so the flag
   // stays suppressed there too. Pinning near the edge because the gate keys off
   // tier 2's own comparison; an inverted one would reopen the whole population.
@@ -654,7 +674,17 @@ void test_pump_on_tier_ordering() {
 
   // The recall case the tier actually exists for, and the one the gate must
   // leave alone: a stale loop channel means there is no measurement, so
-  // nothing contradicts the flag and it is the only signal left. Every one of
+  // nothing contradicts the flag and it is the only signal left.
+  //
+  // Worth knowing that this is not the *common* way to reach the tier. The
+  // subtraction also declines whenever either channel's reading predates the
+  // pump start, and for the first pump_on_settle_ms of every run — neither is a
+  // fault, both happen at every startup, and the meter reports on change at a
+  // median 28 s, so the pre-start-stamp path is routine. The surviving
+  // no-measurement population is therefore dominated by ordinary startup
+  // windows rather than by the stale-channel and slow-pump faults these two
+  // cases represent. Pre-existing behaviour, unchanged by the gate, but the
+  // tier's recall is mostly earned there. Every one of
   // the tier's corpus-confirmed true positives lives in cells shaped like this
   // one -- the gate above costs it none of them.
   PumpOnInputs flag_with_stale = live_tick();
