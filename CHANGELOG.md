@@ -253,13 +253,18 @@
   this exit passed only because it used a 0.1 GPM meter reading -- below every
   value the repo has ever recorded with the pump running.
 
-  Verified on hardware with a real draw: tap open with the pump off gave
-  `deterministic_flow` at 08:14:00, the pump started at 3308 RPM and armed
-  `deterministic_continuation` at 08:15:20, and closing the tap released it at
-  08:16:00 -- 40 s, against the 300 s expiry, so the subtraction is what ended
-  it. The pump was still turning at 2378 RPM when demand went `OFF`, which is
-  the whole point: the meter was still reading loop flow well above threshold,
-  and before this change the tier would have held for the rest of the run.
+  Verified on hardware with a real draw, twice. A tap opened with the pump off
+  gave `deterministic_flow`; starting the pump armed
+  `deterministic_continuation` at 3667 RPM; closing the tap released it 20 s
+  later with
+
+      Continuation retired: subtraction measured -0.47 GPM,
+      at or below the 0.30 GPM threshold
+
+  -- the quiet-loop negative residual, and the release naming the tier that
+  ended it. The pump was still turning at 2499 RPM at that moment, which is the
+  whole point: the meter was still reading loop flow far above threshold, and
+  before this change the tier would have held for the rest of the run.
 
 - **Device information and the operating statistics could silently never be
   read.** The one-time chain that fetches them is latched by a flag that only a
