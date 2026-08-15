@@ -1737,11 +1737,15 @@ static void test_mode_strings() {
 // ---------------------------------------------------------------------------
 // Command strings (issue #159)
 //
-// What write_command_to_string() returns is public API on two counts: it is the
-// `command` field of every esphome.alpha_hwr_write_settled event, and it is the
-// name api_bridge.cpp registers the matching Home Assistant service under.
-// Editing a string here renames a service somebody's automation calls, so the
-// rename should come with a failing test rather than arriving silently.
+// Every string write_command_to_string() returns is the `command` field of an
+// esphome.alpha_hwr_write_settled event. Fourteen of the fifteen are *also* the
+// name api_bridge.cpp registers a Home Assistant service under, so editing one
+// of those renames a service somebody's automation calls. Either way the rename
+// should come with a failing test rather than arriving silently.
+//
+// SET_REMOTE_MODE is the exception: the Remote Mode switch is an entity-only
+// write with no service, so `set_remote_mode` is an event string only. It is
+// pinned here all the same — it is still public API, just on one surface.
 //
 // Before #159 the two surfaces spelled the name independently and disagreed:
 // the service was `pump_set_state`, the event said `set_pump_state`. Nothing

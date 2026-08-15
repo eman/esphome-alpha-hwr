@@ -32,10 +32,12 @@ void AlphaHwrApiBridge::setup(AlphaHwrComponent *component) {
   // disagree by passing the wrong enumerator — visible right here, at the
   // call site, rather than at a user's event listener.
   //
-  // The command strings are therefore a public API on two counts, and
-  // test_write_operations.cpp::test_command_strings() pins every one of them:
-  // editing a string in write_command_to_string() renames a Home Assistant
-  // service along with the event field.
+  // Every command string that is registered below is therefore public API on
+  // two counts, and test_write_operations.cpp::test_command_strings() pins all
+  // fifteen: editing one of those strings in write_command_to_string() renames
+  // a Home Assistant service along with the event field. SET_REMOTE_MODE is the
+  // one command with no service here — the Remote Mode switch is entity-only —
+  // so its string moves the event field alone.
   //
   // What that test cannot reach: this file is compiled only against the real
   // ESPHome API headers, so no host test builds it and the mutation check has

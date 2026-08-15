@@ -302,7 +302,7 @@ The layered architecture is now in place. When adding new features:
 Any feature that WRITES to the pump must be a `WriteCommand` in
 `services::WriteOperationService` — never a standalone write path:
 
-1. **Define the command**: add it to `WriteCommand`, the `Operation` fields, and `write_command_to_string()`. That string is public API twice over — it is the event's `command` field *and* the name `api_bridge` registers the HA service under (#159) — so pin it in `test_command_strings()`, which fails until you do.
+1. **Define the command**: add it to `WriteCommand`, the `Operation` fields, and `write_command_to_string()`. That string is public API: it is the event's `command` field, and — if the command gets a service in step 5 — also the name `api_bridge` registers it under, since registration derives the name from the command (#159). An entity-only command like `SET_REMOTE_MODE` is event-surface only. Either way, pin it in `test_command_strings()`, which fails until you do.
 2. **Wire steps**: implement `run_<command>_()` composing wire primitives from `ControlService`/`ScheduleService` (add a primitive there if the write needs a new APDU; keep it side-effect-free beyond the wire write).
 3. **Confirm comparator**: implement `confirm_<command>_()` — read the value back from the pump and decide accepted/clamped/rejected; overwrite the operation's fields with the SETTLED values before finishing so the event reports what the pump holds.
 4. **Resource key + budget**: add a supersede key in `resource_keys_()` and a watchdog budget in `start_front_()`.

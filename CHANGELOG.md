@@ -141,11 +141,14 @@
   `clear_single_event`. That is now stated in the docs, along with the two
   services themselves, which were registered but undocumented.
 
-  The command strings are consequently public API on two counts, and
-  `test_write_operations.cpp::test_command_strings()` pins all fifteen —
-  including a count check, so a newly added command fails the test until it is
-  pinned too, and a uniqueness check, because two commands sharing a string
-  would now register two services under one name.
+  Fourteen of the fifteen command strings are consequently public API on two
+  counts — as the event's `command` field and as a service name. The fifteenth,
+  `set_remote_mode`, has no service and never had one: the Remote Mode switch is
+  an entity-only write that still emits its settle event, so do not go looking
+  for a service by that name. `test_write_operations.cpp::test_command_strings()`
+  pins all fifteen regardless — including a count check, so a newly added command
+  fails the test until it is pinned too, and a uniqueness check, because two
+  commands sharing a string would now register two services under one name.
 
 - **README recipes §1–§3 now declare `external_components` at `@main`**, as §4
   and §5 already did. A package fetched at `@main` self-declares its component
