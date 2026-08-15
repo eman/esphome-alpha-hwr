@@ -251,7 +251,9 @@ PumpOnThresholds DhwDemandComponent::pump_on_thresholds_() const {
       (uint32_t) pump_on_demand_max_stale_seconds_ * 1000,
       (uint32_t) flow_max_stale_seconds_ * 1000,
       (uint32_t) pump_on_demand_settle_seconds_ * 1000,
-      (uint32_t) pump_on_continuation_max_seconds_ * 1000};
+      (uint32_t) pump_on_continuation_max_seconds_ * 1000,
+      kDefaultPumpOnThresholds.continuation_release,
+      kDefaultPumpOnThresholds.continuation_release_ticks};
 }
 
 // ── Publish & session helpers ─────────────────────────────────────────────────
@@ -405,6 +407,7 @@ void DhwDemandComponent::update() {
     observed_pump_off_ = true;
     pre_pump_on_flow_ = NAN;  // Clear stale transition state
     pre_pump_on_flow_since_ms_ = 0;
+    continuation_stopping_ticks_ = 0;
   }
 
   // Stamp both regime boundaries. Only ever from a *known* pump state: a
@@ -442,12 +445,14 @@ void DhwDemandComponent::update() {
       // would inherit either a zero (tier abstains) or the previous run's edge
       // (tier expires instantly). The continuation's own age is what expires.
       pre_pump_on_flow_since_ms_ = now;
+      continuation_stopping_ticks_ = 0;
       ESP_LOGD(TAG, "Pump turned ON; pre-pump flow: %.2f GPM",
                std::isnan(pre_pump_on_flow_) ? -1.0f
                                              : pre_pump_on_flow_);
     } else {
       pre_pump_on_flow_ = NAN;
       pre_pump_on_flow_since_ms_ = 0;
+      continuation_stopping_ticks_ = 0;
       ESP_LOGD(TAG, "Pump turned ON without confirmed pre-pump demand evidence");
     }
   }
@@ -493,6 +498,7 @@ void DhwDemandComponent::update() {
     in.pump_flow_last_update_ms = pump_flow_last_update_ms_;
     in.pump_on_since_ms = pump_on_since_ms_;
     in.continuation_since_ms = pre_pump_on_flow_since_ms_;
+    in.measured_stopped_ticks = continuation_stopping_ticks_;
     in.dhw_in_use_sustained = dhw_in_use_sustained;
 
     PumpOnResult result = decide_pump_on(in, pump_on_thresholds_());
@@ -517,19 +523,44 @@ void DhwDemandComponent::update() {
     // METER_QUIET is the one release that leaves the capture alone: a single
     // dropped meter sample must not permanently end a continuation that is
     // still true.
+    // Track how many consecutive ticks the subtraction has called the draw
+    // over. Anything that is not such a tick resets it: a measurement that
+    // confirms the draw, a NaN meter, a subtraction that went unavailable.
+    // Only a *run* of them retires the capture, because the retirement cannot
+    // be undone within a pump run and the channels produce isolated bad
+    // differences at every mid-run speed change.
+    if (result.continuation == ContinuationVerdict::STOPPING ||
+        result.continuation == ContinuationVerdict::MEASURED_STOPPED) {
+      if (continuation_stopping_ticks_ < 255)
+        continuation_stopping_ticks_++;
+    } else {
+      continuation_stopping_ticks_ = 0;
+    }
+
+    // A subtraction that positively confirms the draw re-stamps the support
+    // time, which is what makes the expiry mean "unsupported for N seconds"
+    // rather than "N seconds since the pump started". Without this a draw
+    // being measured on every single tick still expires mid-run, and the log
+    // line below would print a plain falsehood.
+    if (result.continuation == ContinuationVerdict::CONFIRMED) {
+      pre_pump_on_flow_since_ms_ = now;
+    }
+
     // Both retirements log at INFO rather than DEBUG. They are once-per-
     // continuation by construction — retiring the capture makes the next tick
     // NOT_ARMED, so neither can repeat until a new pump start re-arms it — so
     // this is not a per-tick cost, and the default level is INFO (issue #127
     // keeps DEBUG off, which is exactly when a field report of "demand stayed
-    // on" would be impossible to diagnose). The tier ending a demand claim is a
-    // state transition, which is what AGENTS §3 reserves ESP_LOGI for.
+    // on" would be impossible to diagnose). AGENTS §11.8 rule 7 puts state
+    // transitions at LOGD; these two are the exception it does not cover,
+    // because they are the only place the tier's *reason* for stopping exists.
     if (result.continuation == ContinuationVerdict::MEASURED_STOPPED) {
       ESP_LOGI(TAG, "Continuation retired: subtraction measured %.2f GPM, at "
                     "or below the %.2f GPM threshold",
                result.demand_gpm, pump_on_demand_flow_threshold_);
       pre_pump_on_flow_ = NAN;
       pre_pump_on_flow_since_ms_ = 0;
+      continuation_stopping_ticks_ = 0;
     } else if (result.continuation == ContinuationVerdict::EXPIRED &&
                pre_pump_on_flow_since_ms_ != 0) {
       ESP_LOGI(TAG, "Continuation expired: nothing has measured the draw for "
@@ -537,6 +568,7 @@ void DhwDemandComponent::update() {
                pump_on_continuation_max_seconds_);
       pre_pump_on_flow_ = NAN;
       pre_pump_on_flow_since_ms_ = 0;
+      continuation_stopping_ticks_ = 0;
     }
 
     if (std::isnan(result.demand_gpm)) {

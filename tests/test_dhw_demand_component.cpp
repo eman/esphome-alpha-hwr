@@ -584,6 +584,18 @@ void test_a_stopped_draw_ends_the_continuation() {
   r.pump_flow.publish_state(1.31f);
   r.flow.publish_state(1.31f);
   r.tick(stopped);
+  TEST_ASSERT(r.demand.state == true,
+              "One stopped tick does not yet end it -- the retirement cannot "
+              "be undone, and isolated bad differences are measured");
+  TEST_ASSERT(r.method_state() == "deterministic_continuation",
+              "...and the tier still decides that tick");
+
+  uint32_t stopped2 = stopped + TICK_MS;
+  r.at(stopped2);
+  r.motor_speed.publish_state(2400.0f);
+  r.pump_flow.publish_state(1.31f);
+  r.flow.publish_state(1.31f);
+  r.tick(stopped2);
   TEST_ASSERT(r.demand.state == false,
               "The draw stopping ends the demand, meter flow notwithstanding");
   TEST_ASSERT(r.method_state() == "pump_on_uncertain",
@@ -593,7 +605,7 @@ void test_a_stopped_draw_ends_the_continuation() {
   // The disproved capture must not come back on the strength of the meter
   // reading that never fell.
   for (int i = 1; i <= 3; i++) {
-    uint32_t slow = stopped + i * TICK_MS;
+    uint32_t slow = stopped2 + i * TICK_MS;
     r.at(slow);
     r.motor_speed.publish_state(1650.0f);
     r.pump_flow.publish_state(0.25f);

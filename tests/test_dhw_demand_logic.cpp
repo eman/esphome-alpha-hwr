@@ -299,6 +299,11 @@ static ContinuationInputs armed_continuation() {
   in.flow_threshold = kDefaultPumpOnThresholds.flow;
   in.demand_gpm = NAN;  // no usable subtraction, the tier's normal habitat
   in.demand_flow_threshold = kDefaultPumpOnThresholds.demand_flow;
+  // Seeded from the shipped thresholds, not left at the struct defaults: the
+  // struct defaults are a 1-tick release, so a test that forgot these would
+  // quietly assert against a debounce the firmware does not have.
+  in.release_gpm = kDefaultPumpOnThresholds.continuation_release;
+  in.release_ticks = kDefaultPumpOnThresholds.continuation_release_ticks;
   in.now_ms = 1000000;
   in.continuation_since_ms = 1000000 - 60000;
   in.max_ms = kDefaultPumpOnThresholds.continuation_max_ms;
@@ -687,6 +692,25 @@ void test_pump_on_continuation_predicate() {
                   ContinuationVerdict::METER_QUIET,
               "A NaN current reading does not continue a draw");
 
+  // The *other* half of METER_QUIET, and it needs its own case: the assertion
+  // below it looks like it covers the meter comparison but does not, because
+  // the arm check runs first and returns NOT_ARMED before the meter is ever
+  // read. A dead or genuinely zero meter is the reachable input here -- the one
+  // thing raw meter flow can still decide while the pump runs -- so this is the
+  // branch AGENTS §11.4 keeps in the exit table, and dropping the comparison
+  // must not pass.
+  in = armed_continuation();
+  in.flow = 0.0f;
+  TEST_ASSERT(pump_on_continuation_verdict(in) ==
+                  ContinuationVerdict::METER_QUIET,
+              "A meter reading zero releases the tier");
+
+  in = armed_continuation();
+  in.flow = in.flow_threshold;
+  TEST_ASSERT(pump_on_continuation_verdict(in) ==
+                  ContinuationVerdict::METER_QUIET,
+              "...and one exactly at the threshold does too");
+
   in = armed_continuation();
   in.pre_pump_on_flow = 0.3f;
   in.flow = 0.3f;
@@ -723,12 +747,14 @@ void test_continuation_releases_when_the_draw_stops() {
                 "unreachable while the pump runs, which is the bug");
 
     // The subtraction is what can tell these apart: the same meter reading
-    // against a loop accounting for all of it is no draw at all.
+    // against a loop accounting for all of it is no draw at all. Two ticks,
+    // because one is not enough to retire a capture that cannot be restored.
     ContinuationInputs measured = raw;
     measured.demand_gpm = 0.0f;
+    measured.measured_stopped_ticks = 1;
     TEST_ASSERT(pump_on_continuation_verdict(measured) ==
                     ContinuationVerdict::MEASURED_STOPPED,
-                "A subtraction reading zero releases it");
+                "A sustained subtraction reading zero releases it");
   }
 
   // The audit's own repro: a 1.80 GPM draw stops five minutes into a run, the
@@ -737,8 +763,23 @@ void test_continuation_releases_when_the_draw_stops() {
   stopped.pre_pump_on_flow = 1.80f;
   stopped.flow = 1.31f;
   stopped.demand_gpm = 0.00f;
+  stopped.measured_stopped_ticks = 1;
   TEST_ASSERT(!pump_on_continuation_is_active(stopped),
               "The draw stopping ends the continuation");
+
+  // ...but not on the first tick of it. The retirement is irreversible within
+  // a pump run, and isolated bad differences are measured, not hypothetical:
+  // the meter led the pump channel by 13 s at one recorded start, so a mid-run
+  // speed change lets the meter follow the loop down while the pump's own last
+  // report is still high and inside its freshness bound.
+  ContinuationInputs first_tick = stopped;
+  first_tick.measured_stopped_ticks = 0;
+  TEST_ASSERT(pump_on_continuation_verdict(first_tick) ==
+                  ContinuationVerdict::STOPPING,
+              "One tick of a stopped reading is not yet a release");
+  TEST_ASSERT(pump_on_continuation_is_active(first_tick),
+              "...and the tier still decides that tick, so a transient costs "
+              "no demand at all");
 
   // Still drawing, and measured: the tier holds. Without this the release
   // could be implemented as "any usable subtraction ends it", which would pass
@@ -747,26 +788,68 @@ void test_continuation_releases_when_the_draw_stops() {
   still_drawing.demand_gpm = 1.24f;
   TEST_ASSERT(pump_on_continuation_is_active(still_drawing),
               "A subtraction that still measures a draw does not release it");
+  TEST_ASSERT(pump_on_continuation_verdict(still_drawing) ==
+                  ContinuationVerdict::CONFIRMED,
+              "...and reports it as positive support, not a bare hold");
+}
 
-  // Exactly on the threshold releases, matching the subtraction tier's own
-  // strictly-greater comparison. The two must not disagree about a reading
-  // sitting on the boundary: tier 1 holding where tier 2 would decline is how
-  // a stuck continuation would survive this fix.
-  ContinuationInputs on_threshold = armed_continuation();
-  on_threshold.demand_gpm = kDefaultPumpOnThresholds.demand_flow;
-  TEST_ASSERT(pump_on_continuation_verdict(on_threshold) ==
+// The band that the first version of this fix got wrong, and the reason the
+// release threshold is not the firing threshold.
+//
+// Borrowing tier 2's 0.3 GPM firing threshold to *falsify* inverts the safety
+// argument in pump_on_demand_flow: the loop estimate's residual is negative
+// (-0.10 +/- 0.06 GPM steady, -0.14 at 2398 rpm in the ground-truth table),
+// which is conservative while it can only suppress a claim and becomes a
+// false-negative generator the moment it can retire one. A real draw smaller
+// than residual + 0.3 computed below 0.3 and killed the continuation for the
+// rest of the run with the tap still open.
+void test_a_small_but_real_draw_is_not_read_as_stopped() {
+  std::cout << "\n=== Testing Small-Draw Release Band ===" << std::endl;
+
+  // Sustained, so the consecutive-tick guard is not what is being tested here.
+  for (float residual : {-0.10f, -0.14f}) {
+    for (float draw : {0.35f, 0.50f, 0.70f}) {
+      ContinuationInputs in = armed_continuation();
+      in.pre_pump_on_flow = draw;
+      in.flow = 1.31f + draw;  // loop plus the draw
+      in.demand_gpm = draw + residual;
+      in.measured_stopped_ticks = 4;
+      TEST_ASSERT(pump_on_continuation_is_active(in),
+                  "A real draw inside the estimator's error band is held, not "
+                  "read as stopped");
+    }
+  }
+
+  // The line itself. Zero is where the meter reads no more than the pump says
+  // its own loop is moving, which is the only unambiguous statement that no
+  // household draw exists.
+  ContinuationInputs at_zero = armed_continuation();
+  at_zero.demand_gpm = 0.0f;
+  at_zero.measured_stopped_ticks = 1;
+  TEST_ASSERT(pump_on_continuation_verdict(at_zero) ==
                   ContinuationVerdict::MEASURED_STOPPED,
-              "A subtraction exactly on the threshold releases");
+              "Exactly zero computed demand is a release");
 
-  ContinuationInputs just_above = armed_continuation();
-  just_above.demand_gpm = kDefaultPumpOnThresholds.demand_flow + 0.01f;
-  TEST_ASSERT(pump_on_continuation_is_active(just_above),
-              "...and one just above it does not");
+  ContinuationInputs just_above_zero = armed_continuation();
+  just_above_zero.demand_gpm = 0.01f;
+  just_above_zero.measured_stopped_ticks = 4;
+  TEST_ASSERT(pump_on_continuation_is_active(just_above_zero),
+              "...and the smallest positive difference is not");
 
-  // A negative difference -- the quiet-loop residual is -0.10 +/- 0.06 GPM --
-  // is a release, not a NaN and not a hold.
+  // A reading between the release line and the firing threshold supports
+  // nothing either way: the tier holds, but the expiry clock keeps running so
+  // an indefinite hold is still bounded.
+  ContinuationInputs ambiguous = armed_continuation();
+  ambiguous.demand_gpm = 0.2f;
+  TEST_ASSERT(pump_on_continuation_verdict(ambiguous) ==
+                  ContinuationVerdict::ACTIVE,
+              "A reading inside the band is neither confirmation nor release");
+
+  // The quiet-loop residual with the tap genuinely shut still releases -- that
+  // is the case the whole tier turns on.
   ContinuationInputs quiet_residual = armed_continuation();
   quiet_residual.demand_gpm = -0.10f;
+  quiet_residual.measured_stopped_ticks = 1;
   TEST_ASSERT(pump_on_continuation_verdict(quiet_residual) ==
                   ContinuationVerdict::MEASURED_STOPPED,
               "The quiet-loop negative residual releases the tier");
@@ -820,7 +903,9 @@ void test_continuation_expires_when_nothing_can_measure_it() {
 
   // Rollover. The arm stamp sits 60 s before the wrap and `now` 60 s after it,
   // so the continuation is 120 s old across the boundary and must still hold.
-  // Signed or absolute-difference arithmetic reads this as ~49 days.
+  // An absolute-difference or max-minus-min form reads this as ~49 days.
+  // (Signed arithmetic does not -- both int32 and int64 differences give the
+  // correct +120 001 here, so the claim is narrower than it looks.)
   ContinuationInputs wrapped = armed_continuation();
   wrapped.continuation_since_ms = 0xFFFFFFFFu - 60000u;
   wrapped.now_ms = 60000u;
@@ -875,6 +960,7 @@ void test_continuation_release_is_visible_to_the_component() {
   stopped.pre_pump_on_flow = 1.80f;
   stopped.flow = 1.34f;
   stopped.pump_flow = 1.34f;  // 0.00 GPM of demand
+  stopped.measured_stopped_ticks = 1;  // one earlier stopped tick
   PumpOnResult r = decide_pump_on(stopped, t);
   TEST_ASSERT(r.continuation == ContinuationVerdict::MEASURED_STOPPED,
               "The falsifying release is reported to the caller");
@@ -882,16 +968,41 @@ void test_continuation_release_is_visible_to_the_component() {
   TEST_ASSERT(std::string(r.method) == "pump_on_uncertain",
               "...and falls through to the fallback");
 
-  // A hold reports ACTIVE, so the component leaves the capture alone.
+  // The same tick without the earlier one still decides, and reports STOPPING
+  // so the component knows to count rather than retire.
+  PumpOnInputs first_stop = stopped;
+  first_stop.measured_stopped_ticks = 0;
+  r = decide_pump_on(first_stop, t);
+  TEST_ASSERT(r.continuation == ContinuationVerdict::STOPPING,
+              "The first stopped tick counts rather than retiring");
+  TEST_ASSERT(std::string(r.method) == "deterministic_continuation",
+              "...and the tier still decides it");
+
+  // A hold on positive evidence reports CONFIRMED, which is what re-stamps the
+  // support time so the expiry means "unsupported for N s" and not "N s since
+  // the pump started".
   PumpOnInputs holding = live_tick();
   holding.pre_pump_on_flow = 1.80f;
   holding.flow = 2.58f;
   holding.pump_flow = 1.34f;  // 1.24 GPM, still drawing
   r = decide_pump_on(holding, t);
-  TEST_ASSERT(r.continuation == ContinuationVerdict::ACTIVE,
-              "A holding continuation reports ACTIVE");
+  TEST_ASSERT(r.continuation == ContinuationVerdict::CONFIRMED,
+              "A measured, still-running draw reports CONFIRMED");
   TEST_ASSERT(std::string(r.method) == "deterministic_continuation",
               "...and decides the tick");
+
+  // The regression the first version of this fix shipped: a subtraction
+  // confirming the draw on every single tick did not stop the tier expiring,
+  // because the clock ran from the pump start rather than from the last
+  // support. The verdict above is what the component acts on to prevent it.
+  PumpOnInputs long_confirmed = holding;
+  long_confirmed.continuation_since_ms =
+      long_confirmed.now_ms - t.continuation_max_ms;
+  r = decide_pump_on(long_confirmed, t);
+  TEST_ASSERT(r.continuation == ContinuationVerdict::CONFIRMED,
+              "A confirming measurement outranks the expiry");
+  TEST_ASSERT(std::string(r.method) == "deterministic_continuation",
+              "...so a continuously measured draw does not expire mid-run");
 
   // A meter that has gone NaN reports METER_QUIET rather than
   // MEASURED_STOPPED: one dropped sample must not retire a capture that is
@@ -1289,6 +1400,7 @@ int main() {
   test_threshold_jitter_does_not_chatter();
   test_pump_on_continuation_predicate();
   test_continuation_releases_when_the_draw_stops();
+  test_a_small_but_real_draw_is_not_read_as_stopped();
   test_continuation_expires_when_nothing_can_measure_it();
   test_continuation_release_is_visible_to_the_component();
   test_reading_freshness();
