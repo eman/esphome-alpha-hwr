@@ -517,15 +517,22 @@ void DhwDemandComponent::update() {
     // METER_QUIET is the one release that leaves the capture alone: a single
     // dropped meter sample must not permanently end a continuation that is
     // still true.
+    // Both retirements log at INFO rather than DEBUG. They are once-per-
+    // continuation by construction — retiring the capture makes the next tick
+    // NOT_ARMED, so neither can repeat until a new pump start re-arms it — so
+    // this is not a per-tick cost, and the default level is INFO (issue #127
+    // keeps DEBUG off, which is exactly when a field report of "demand stayed
+    // on" would be impossible to diagnose). The tier ending a demand claim is a
+    // state transition, which is what AGENTS §3 reserves ESP_LOGI for.
     if (result.continuation == ContinuationVerdict::MEASURED_STOPPED) {
-      ESP_LOGD(TAG, "Continuation retired: subtraction measured %.2f GPM, at "
+      ESP_LOGI(TAG, "Continuation retired: subtraction measured %.2f GPM, at "
                     "or below the %.2f GPM threshold",
                result.demand_gpm, pump_on_demand_flow_threshold_);
       pre_pump_on_flow_ = NAN;
       pre_pump_on_flow_since_ms_ = 0;
     } else if (result.continuation == ContinuationVerdict::EXPIRED &&
                pre_pump_on_flow_since_ms_ != 0) {
-      ESP_LOGD(TAG, "Continuation expired: nothing has measured the draw for "
+      ESP_LOGI(TAG, "Continuation expired: nothing has measured the draw for "
                     "%d s",
                pump_on_continuation_max_seconds_);
       pre_pump_on_flow_ = NAN;

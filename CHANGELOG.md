@@ -244,9 +244,22 @@
   back up by the subtraction, so the expiry costs recall only where nothing
   could see the draw anyway.
 
+  Both retirements log at `INFO`. They are once-per-continuation by
+  construction, and the default level is `INFO` (issue #127 keeps `DEBUG` off) --
+  which is exactly the configuration in which a field report of "demand stayed
+  on" would otherwise be undiagnosable.
+
   Found by the 2026-08-12 audit (finding 10). The test that claimed to cover
   this exit passed only because it used a 0.1 GPM meter reading -- below every
   value the repo has ever recorded with the pump running.
+
+  Verified on hardware with a real draw: tap open with the pump off gave
+  `deterministic_flow` at 08:14:00, the pump started at 3308 RPM and armed
+  `deterministic_continuation` at 08:15:20, and closing the tap released it at
+  08:16:00 -- 40 s, against the 300 s expiry, so the subtraction is what ended
+  it. The pump was still turning at 2378 RPM when demand went `OFF`, which is
+  the whole point: the meter was still reading loop flow well above threshold,
+  and before this change the tier would have held for the rest of the run.
 
 - **Device information and the operating statistics could silently never be
   read.** The one-time chain that fetches them is latched by a flag that only a
