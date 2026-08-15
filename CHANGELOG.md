@@ -337,6 +337,29 @@
 
 ### Fixed
 
+- **`dhw_demand`: the `dhw_in_use` tier no longer overrules a measured
+  no-draw.** The heater's in-use flag fired whenever the tiers above it
+  declined — including when the subtraction had declined *because it measured
+  no household draw*. A tier returning without setting demand is not a veto,
+  but the effect on what gets published is identical to one, so a flag was
+  outranking a measurement.
+
+  Replaying 30 days of stored sensor data through the companion detector: of
+  1007 cells with the flag sustained, 937 had the subtraction available and
+  **all 937 measured no draw** (median −0.021 GPM, max +0.134 against a 0.30
+  cut). Not one real draw reached this tier with a measurement in hand, because
+  the subtraction already answers those — so what the tier was adding there was
+  recirculation. Downstream that removed 176 minutes of published demand and 61
+  sessions, and un-backdated 13 more that phantom pump-on demand had bridged
+  into. Every corpus-confirmed true positive survived; they all live in the
+  no-measurement cells the tier still fires on, which is what it exists for.
+
+  Past the gate the subtraction is by definition unavailable, so the
+  measurement-derived intensity arm goes with the cells it applied to. It could
+  only ever run on a value at or under the threshold, publishing levels as low
+  as 0.08 — an order of magnitude *below* the no-claim constant, which asserts
+  near-zero draw rather than declining to assert (issue #173).
+
 - **The schedule card treated every write as successful.** `_saveChanges`
   discarded the user's pending edits at call time, then re-read the device on a
   3 s timer. A `set_schedule_entry` carries a 20 s watchdog and writes are
