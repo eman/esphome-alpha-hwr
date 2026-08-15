@@ -1067,6 +1067,51 @@ void test_continuation_release_is_visible_to_the_component() {
               "An unmeasured continuation that ran out is EXPIRED");
 }
 
+// The meter needs the same provenance test as the loop, and did not have it.
+// Harmless while the subtraction could only *fire* -- a pre-start meter value
+// understates the difference, which merely fails to raise a claim -- and not
+// harmless once that same number can retire a continuation.
+void test_meter_flow_from_before_the_pump_start_is_not_subtracted() {
+  std::cout << "\n=== Testing Meter Provenance Across A Pump Start ==="
+            << std::endl;
+  const PumpOnThresholds &t = kDefaultPumpOnThresholds;
+
+  // A 1.00 GPM draw, established while the pump was off. The pump starts; the
+  // meter's last report is the pre-start 1.00 (20 s old, well inside its 60 s
+  // bound) while the pump has since reported its own 1.31 GPM loop.
+  // 1.00 - 1.31 = -0.31, which is at or below the release line -- so without
+  // the guard this reads as "the draw stopped" on a tap that never closed.
+  PumpOnInputs in;
+  in.now_ms = 200000;
+  in.pump_on_since_ms = 180000;         // pump started 20 s ago
+  in.flow_last_update_ms = 179000;      // meter last reported BEFORE that
+  in.pump_flow_last_update_ms = 195000; // pump has reported since
+  in.motor_speed = 2400.0f;
+  in.flow = 1.00f;
+  in.pump_flow = 1.31f;
+  in.pre_pump_on_flow = 1.00f;
+  in.continuation_since_ms = 180000;
+
+  PumpOnResult r = decide_pump_on(in, t);
+  TEST_ASSERT(std::isnan(r.demand_gpm),
+              "A meter reading stamped before the pump start is not "
+              "differenced");
+  TEST_ASSERT(r.continuation != ContinuationVerdict::MEASURED_STOPPED,
+              "...so it cannot retire the continuation");
+  TEST_ASSERT(std::string(r.method) == "deterministic_continuation",
+              "...and the draw in progress is still reported");
+
+  // Once the meter reports after the start, the same difference is trusted.
+  PumpOnInputs current = in;
+  current.flow_last_update_ms = 195000;
+  current.flow = 2.31f;  // loop plus the 1.00 GPM draw
+  r = decide_pump_on(current, t);
+  TEST_ASSERT(!std::isnan(r.demand_gpm),
+              "A meter reading from this pump run is differenced");
+  TEST_ASSERT_NEAR(r.demand_gpm, 1.00f, 0.0001f,
+                   "...and measures the draw that is actually running");
+}
+
 void test_loop_flow_from_before_the_pump_start_is_not_subtracted() {
   std::cout << "\n=== Testing Subtraction Across A Pump Start ==="
             << std::endl;
@@ -1450,6 +1495,7 @@ int main() {
   test_dhw_in_use_sustain_never_arms_without_the_sensor();
   test_pump_on_tier_ordering();
   test_loop_flow_from_before_the_pump_start_is_not_subtracted();
+  test_meter_flow_from_before_the_pump_start_is_not_subtracted();
   test_flow_latch_is_disarmed_after_a_shutdown();
   test_the_loop_estimate_must_settle_before_it_is_differenced();
 

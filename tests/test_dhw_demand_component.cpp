@@ -622,6 +622,153 @@ void test_a_stopped_draw_ends_the_continuation() {
 // can ever contradict the tier. A pump clamped below its speed floor is the
 // real case. The expiry is the only thing that ends it there, and without one
 // this run publishes demand for its entire length.
+// The expiry means "unsupported for N seconds", not "N seconds since the pump
+// started" -- and the difference lives entirely in the component, which
+// re-stamps the support time on a CONFIRMED verdict. Without that re-stamp a
+// draw measured on every single tick still expires mid-run, which is the P1
+// three reviewers found in the first version of this fix.
+void test_a_continuously_measured_draw_never_expires() {
+  std::cout << "\n=== Testing Expiry Refresh On Confirmation ===" << std::endl;
+  Rig r;
+  r.det.set_demand_release_seconds(0);
+  r.det.set_pump_on_continuation_max_seconds(300);
+  r.det.setup();
+
+  for (int i = 0; i < 2; i++) {
+    uint32_t now = T0 + i * TICK_MS;
+    r.at(now);
+    r.motor_speed.publish_state(0.0f);
+    r.flow.publish_state(1.80f);
+    r.tick(now);
+  }
+  TEST_ASSERT(r.method_state() == "deterministic_flow", "Draw established");
+
+  // Pump runs fast enough to subtract, and the draw keeps measuring at
+  // 1.80 GPM on every tick, for well past the 300 s ceiling.
+  //
+  // Note what this half does NOT test: a CONFIRMED verdict returns before the
+  // age check, so the tier cannot expire while the subtraction is confirming
+  // whether or not the support time is re-stamped. The mutation check caught
+  // an earlier version of this test asserting exactly that and proving
+  // nothing. The re-stamp only shows up in the *second* half below.
+  const uint32_t on = T0 + 2 * TICK_MS;
+  int continuation_ticks = 0;
+  const int kConfirmTicks = 40;  // 400 s, past the 300 s ceiling
+  for (int i = 0; i <= kConfirmTicks; i++) {
+    uint32_t now = on + i * TICK_MS;
+    r.at(now);
+    r.motor_speed.publish_state(2400.0f);
+    r.pump_flow.publish_state(1.31f);
+    r.flow.publish_state(3.11f);  // 1.80 GPM of measured demand
+    r.tick(now);
+    if (r.method_state() == "deterministic_continuation")
+      continuation_ticks++;
+  }
+  TEST_ASSERT(continuation_ticks == kConfirmTicks + 1,
+              "A draw confirmed on every tick never expires, however long the "
+              "pump runs");
+
+  // Now the subtraction goes away -- the pump drops below its speed floor with
+  // the draw still running. This is where the re-stamp is load-bearing: the
+  // age must run from the last confirmation, not from the pump-on edge 400 s
+  // ago. Without it the very first blind tick is already past the ceiling and
+  // the tier expires on the spot.
+  const uint32_t blind = on + (kConfirmTicks + 1) * TICK_MS;
+  r.at(blind);
+  r.motor_speed.publish_state(1650.0f);
+  r.pump_flow.publish_state(0.25f);
+  r.flow.publish_state(0.71f);
+  r.tick(blind);
+  TEST_ASSERT(r.method_state() == "deterministic_continuation",
+              "Losing the subtraction after 400 s of confirmation does not "
+              "expire the tier immediately -- the clock runs from the last "
+              "confirmation, not from the pump start");
+  TEST_ASSERT(r.demand.state == true, "...and demand is unbroken");
+
+  // It still expires eventually: 300 s after that last confirmation.
+  int blind_continuation = 0;
+  for (int i = 1; i <= 40; i++) {
+    uint32_t now = blind + i * TICK_MS;
+    r.at(now);
+    r.motor_speed.publish_state(1650.0f);
+    r.pump_flow.publish_state(0.25f);
+    r.flow.publish_state(0.71f);
+    r.tick(now);
+    if (r.method_state() == "deterministic_continuation")
+      blind_continuation++;
+  }
+  // 28, not 30: the last confirmation was one tick before `blind`, so the
+  // first blind tick already carries 10 s of age. 300 s of ceiling minus that
+  // tick and the `blind` tick itself leaves 28 inside the window.
+  TEST_ASSERT(blind_continuation == 28,
+              "...and it expires 300 s after the last confirmation, not never");
+  TEST_ASSERT(r.demand.state == false, "The unsupported claim ends");
+}
+
+// One stopped reading followed by a confirming one must not accumulate toward
+// the two-tick release: the streak counts *consecutive* ticks. Without the
+// reset, two isolated bad differences minutes apart would retire a capture
+// that a measurement confirmed in between.
+void test_an_isolated_stopped_tick_does_not_accumulate() {
+  std::cout << "\n=== Testing Stopped-Streak Reset ===" << std::endl;
+  Rig r;
+  r.det.set_demand_release_seconds(0);
+  r.det.setup();
+
+  for (int i = 0; i < 2; i++) {
+    uint32_t now = T0 + i * TICK_MS;
+    r.at(now);
+    r.motor_speed.publish_state(0.0f);
+    r.flow.publish_state(1.80f);
+    r.tick(now);
+  }
+
+  const uint32_t on = T0 + 2 * TICK_MS;
+  // Arm, then get past the settle window with the draw measuring.
+  for (int i = 0; i <= 1; i++) {
+    uint32_t now = on + i * TICK_MS;
+    r.at(now);
+    r.motor_speed.publish_state(2400.0f);
+    r.pump_flow.publish_state(1.31f);
+    r.flow.publish_state(3.11f);
+    r.tick(now);
+  }
+  TEST_ASSERT(r.method_state() == "deterministic_continuation", "Armed");
+
+  // A single transient: the meter follows the loop down while the pump's own
+  // reading is still high, so the difference goes negative for one tick.
+  uint32_t bad = on + 2 * TICK_MS;
+  r.at(bad);
+  r.motor_speed.publish_state(2400.0f);
+  r.pump_flow.publish_state(1.31f);
+  r.flow.publish_state(1.20f);  // -0.11 GPM
+  r.tick(bad);
+  TEST_ASSERT(r.method_state() == "deterministic_continuation",
+              "One transient does not release");
+
+  // The draw measures again -- this must clear the streak.
+  uint32_t good = bad + TICK_MS;
+  r.at(good);
+  r.motor_speed.publish_state(2400.0f);
+  r.pump_flow.publish_state(1.31f);
+  r.flow.publish_state(3.11f);
+  r.tick(good);
+
+  // A second isolated transient. With the streak reset this is the *first*
+  // consecutive stopped tick and must not retire the capture; without the
+  // reset it is the second and does.
+  uint32_t bad2 = good + TICK_MS;
+  r.at(bad2);
+  r.motor_speed.publish_state(2400.0f);
+  r.pump_flow.publish_state(1.31f);
+  r.flow.publish_state(1.20f);
+  r.tick(bad2);
+  TEST_ASSERT(r.method_state() == "deterministic_continuation",
+              "Two isolated transients with a confirmation between them do "
+              "not add up to a release");
+  TEST_ASSERT(r.demand.state == true, "...and demand is unbroken throughout");
+}
+
 void test_an_unmeasurable_continuation_expires() {
   std::cout << "\n=== An unmeasured continuation expires ===" << std::endl;
   Rig r;
@@ -714,6 +861,8 @@ int main() {
   test_session_duration_tracks_the_draw();
   test_session_follows_the_held_demand();
   test_a_stopped_draw_ends_the_continuation();
+  test_a_continuously_measured_draw_never_expires();
+  test_an_isolated_stopped_tick_does_not_accumulate();
   test_an_unmeasurable_continuation_expires();
   test_unwired_component_is_inert();
 

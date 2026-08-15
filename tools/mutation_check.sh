@@ -19,6 +19,7 @@
 #   ./tools/mutation_check.sh              # run every mutation
 #   ./tools/mutation_check.sh --list       # just show them
 #   ./tools/mutation_check.sh continuation # only names containing "continuation"
+#   JOBS=8 ./tools/mutation_check.sh       # more parallel build jobs (default 4)
 #
 # The filter exists because a full sweep rebuilds and re-runs the whole suite
 # once per mutation and takes the better part of an hour. Use it while adding
@@ -35,6 +36,13 @@ PROJECT_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
 TESTS_DIR="$PROJECT_DIR/tests"
 
 RED='\033[0;31m'; GREEN='\033[0;32m'; YELLOW='\033[1;33m'; NC='\033[0m'
+
+# Parallel build jobs. Each mutation does a full clean rebuild of all 22 test
+# binaries and that build, not the mutation, is where the wall-clock goes: the
+# `test` target lists them as prerequisites and only *runs* them in its recipe,
+# so -j parallelises compilation while leaving execution serial and ordered.
+# Override with JOBS=1 to serialise if a build ever looks order-dependent.
+JOBS="${JOBS:-4}"
 
 # Each mutation: name | file | python-repr search | python-repr replace
 # The search string must appear exactly once; the script fails loudly if not,
@@ -93,7 +101,7 @@ MUTATIONS=(
 "continuation-unstamped-arm-holds|components/dhw_demand/dhw_demand_logic.h|  if (in.continuation_since_ms == 0)\n    return ContinuationVerdict::EXPIRED;|"
 "continuation-dropped-meter-sample-falsifies|components/dhw_demand/dhw_demand_logic.h|    return ContinuationVerdict::METER_QUIET;|    return ContinuationVerdict::MEASURED_STOPPED;"
 "continuation-meter-quiet-masks-the-real-exits|components/dhw_demand/dhw_demand_logic.h|  if (!std::isnan(in.demand_gpm)) {|  if (std::isnan(in.flow) || in.flow <= in.flow_threshold)\n    return ContinuationVerdict::METER_QUIET;\n  if (!std::isnan(in.demand_gpm)) {"
-"dhw-falsified-capture-not-retired|components/dhw_demand/dhw_demand.cpp|      pre_pump_on_flow_ = NAN;\n      pre_pump_on_flow_since_ms_ = 0;\n    } else if (result.continuation == ContinuationVerdict::EXPIRED &&|    } else if (result.continuation == ContinuationVerdict::EXPIRED &&"
+"dhw-falsified-capture-not-retired|components/dhw_demand/dhw_demand.cpp|      pre_pump_on_flow_ = NAN;\n      pre_pump_on_flow_since_ms_ = 0;\n      continuation_stopping_ticks_ = 0;\n    } else if (result.continuation == ContinuationVerdict::EXPIRED &&|    } else if (result.continuation == ContinuationVerdict::EXPIRED &&"
 "dhw-expired-capture-not-retired|components/dhw_demand/dhw_demand.cpp|               pump_on_continuation_max_seconds_);\n      pre_pump_on_flow_ = NAN;\n      pre_pump_on_flow_since_ms_ = 0;|               pump_on_continuation_max_seconds_);"
 "dhw-continuation-arm-never-stamped|components/dhw_demand/dhw_demand.cpp|      pre_pump_on_flow_since_ms_ = now;\n      continuation_stopping_ticks_ = 0;\n|      continuation_stopping_ticks_ = 0;\n"
 "frozen-motor-asserts-pump-off|components/dhw_demand/dhw_demand_logic.h|  } else if (out.motor_frozen) {\n    out.pump_on = true;|  } else if (out.motor_frozen) {\n    out.pump_on = false;"
@@ -214,7 +222,7 @@ trap 'echo; echo -e "${YELLOW}Interrupted — restoring sources.${NC}"; restore_
 # while proving nothing. That is the same false-confidence failure this script
 # exists to detect, so it must not be able to produce it.
 echo -n "baseline (unmutated suite)  "
-if (cd "$TESTS_DIR" && make clean >/dev/null 2>&1 && make test >/tmp/mutation_baseline.log 2>&1); then
+if (cd "$TESTS_DIR" && make clean >/dev/null 2>&1 && make -j"$JOBS" test >/tmp/mutation_baseline.log 2>&1); then
   echo -e "${GREEN}✓ passes${NC}"
 else
   echo -e "${RED}✗ FAILS${NC}"
@@ -258,7 +266,7 @@ PY
     continue
   fi
 
-  if (cd "$TESTS_DIR" && make clean >/dev/null 2>&1 && make test >/dev/null 2>&1); then
+  if (cd "$TESTS_DIR" && make clean >/dev/null 2>&1 && make -j"$JOBS" test >/dev/null 2>&1); then
     echo -e "${RED}✗ SURVIVED — the suite passed with this broken${NC}"
     SURVIVORS+=("$name")
   else
