@@ -563,9 +563,20 @@ pump_on_continuation_verdict(const ContinuationInputs &in) {
   if (std::isnan(in.pre_pump_on_flow) ||
       in.pre_pump_on_flow <= in.flow_threshold)
     return ContinuationVerdict::NOT_ARMED;
-  if (std::isnan(in.flow) || in.flow <= in.flow_threshold)
-    return ContinuationVerdict::METER_QUIET;
 
+  // Order matters, and METER_QUIET goes LAST of the three releases rather than
+  // first. It is the only one that keeps the capture, so testing it first lets
+  // it mask both of the others: a quiet meter alongside a subtraction that has
+  // measured the draw as over would keep a falsified capture alive, and -- the
+  // worse half -- a meter that stays NaN or quiet would never reach the age
+  // test at all, so the tier could sit armed indefinitely and resume claiming
+  // demand whenever the meter came back. That is the stuck-on bug this whole
+  // change exists to remove, reached by a different door.
+  //
+  // The two authoritative exits therefore run first. This costs nothing in the
+  // NaN case: pump_on_demand_flow returns NaN when the meter does, so a NaN
+  // meter cannot produce a subtraction verdict here and falls through to the
+  // age test, which is exactly what it should reach.
   if (!std::isnan(in.demand_gpm)) {
     // Exit 1, in two stages. See continuation_release for why the falsifying
     // threshold is not the firing one, and continuation_release_ticks for why
@@ -595,6 +606,15 @@ pump_on_continuation_verdict(const ContinuationInputs &in) {
   // millis() rollover, the same as reading_is_fresh's.
   if ((in.now_ms - in.continuation_since_ms) >= in.max_ms)
     return ContinuationVerdict::EXPIRED;
+
+  // Last of the three releases, and the only one that keeps the capture: a
+  // single dropped meter sample must not permanently end a continuation that
+  // is still true. Reaching here means neither authoritative exit fired, so
+  // this is the raw-flow test doing the one job it can still do while the pump
+  // runs -- deciding a dead or genuinely zero meter.
+  if (std::isnan(in.flow) || in.flow <= in.flow_threshold)
+    return ContinuationVerdict::METER_QUIET;
+
   return ContinuationVerdict::ACTIVE;
 }
 

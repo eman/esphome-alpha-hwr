@@ -719,6 +719,45 @@ void test_pump_on_continuation_predicate() {
               "The comparison is strictly greater on both sides");
 }
 
+// METER_QUIET is the only release that keeps the capture, so it must be tested
+// LAST of the three. Testing it first lets it mask the two authoritative exits,
+// and the masking is not cosmetic: it reopens the stuck-on bug by a second
+// door.
+void test_a_quiet_meter_does_not_mask_the_authoritative_exits() {
+  std::cout << "\n=== Testing Release Ordering ===" << std::endl;
+
+  // A quiet meter alongside a subtraction that has measured the draw as over.
+  // The subtraction is the authority; keeping the capture here would leave a
+  // *falsified* claim alive to resume the moment the meter came back.
+  ContinuationInputs both = armed_continuation();
+  both.flow = 0.0f;
+  both.demand_gpm = -1.31f;  // meter zero against a 1.31 GPM loop
+  both.measured_stopped_ticks = 1;
+  TEST_ASSERT(pump_on_continuation_verdict(both) ==
+                  ContinuationVerdict::MEASURED_STOPPED,
+              "A measured stop outranks a quiet meter, so the capture is "
+              "retired rather than kept");
+
+  // The worse half: a meter that stays NaN can never produce a subtraction, so
+  // if METER_QUIET short-circuits it the age test is never reached and the
+  // capture sits armed forever -- resuming demand whenever the meter returns.
+  ContinuationInputs aged_and_quiet = armed_continuation();
+  aged_and_quiet.flow = NAN;
+  aged_and_quiet.demand_gpm = NAN;
+  aged_and_quiet.now_ms =
+      aged_and_quiet.continuation_since_ms + aged_and_quiet.max_ms;
+  TEST_ASSERT(pump_on_continuation_verdict(aged_and_quiet) ==
+                  ContinuationVerdict::EXPIRED,
+              "A continuation whose meter went away still expires");
+
+  // ...and inside the window it is still just a dropped sample, kept.
+  ContinuationInputs fresh_and_quiet = armed_continuation();
+  fresh_and_quiet.flow = NAN;
+  TEST_ASSERT(pump_on_continuation_verdict(fresh_and_quiet) ==
+                  ContinuationVerdict::METER_QUIET,
+              "...but a young one is only a dropped sample");
+}
+
 void test_continuation_releases_when_the_draw_stops() {
   std::cout << "\n=== Testing Continuation Release ===" << std::endl;
 
@@ -1399,6 +1438,7 @@ int main() {
   test_sustained_demand_accrues_session();
   test_threshold_jitter_does_not_chatter();
   test_pump_on_continuation_predicate();
+  test_a_quiet_meter_does_not_mask_the_authoritative_exits();
   test_continuation_releases_when_the_draw_stops();
   test_a_small_but_real_draw_is_not_read_as_stopped();
   test_continuation_expires_when_nothing_can_measure_it();
