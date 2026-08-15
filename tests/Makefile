@@ -15,7 +15,7 @@ MOCK_HDRS = $(shell find mocks -name '*.h' 2>/dev/null)
 DEPS = $(COMPONENT_HDRS) $(MOCK_HDRS)
 
 # Test executables
-TESTS = test_protocol test_frame_parser test_read_chain_lifetime test_control_service test_control_state test_dhw_demand_logic test_dhw_demand_component test_transport_matching test_transport_fsm test_schedule_service test_write_operations test_schedule_codec test_telemetry_units test_pump_schedule_ux test_publish_gate test_dhw_publish_gate test_link_watchdog test_auth test_sensor_publisher test_telemetry_service test_device_info_service test_initial_read_retry
+TESTS = test_protocol test_frame_parser test_read_chain_lifetime test_control_service test_control_state test_dhw_demand_logic test_dhw_demand_component test_transport_matching test_transport_fsm test_schedule_service test_write_operations test_schedule_codec test_telemetry_units test_pump_schedule_ux test_publish_gate test_dhw_publish_gate test_link_watchdog test_auth test_sensor_publisher test_telemetry_service test_device_info_service test_initial_read_retry test_subscribe_outcome
 
 # Default target
 all: $(TESTS)
@@ -48,6 +48,9 @@ test_link_watchdog: test_link_watchdog.cpp ../components/alpha_hwr/link_watchdog
 
 test_initial_read_retry: test_initial_read_retry.cpp ../components/alpha_hwr/initial_read_retry.h $(DEPS)
 	$(CXX) $(CXXFLAGS) test_initial_read_retry.cpp -o test_initial_read_retry $(LDFLAGS)
+
+test_subscribe_outcome: test_subscribe_outcome.cpp ../components/alpha_hwr/subscribe_outcome.h $(DEPS)
+	$(CXX) $(CXXFLAGS) test_subscribe_outcome.cpp -o test_subscribe_outcome $(LDFLAGS)
 
 test_dhw_publish_gate: test_dhw_publish_gate.cpp ../components/dhw_demand/publish_gate.h $(DEPS)
 	$(CXX) $(CXXFLAGS) test_dhw_publish_gate.cpp -o test_dhw_publish_gate $(LDFLAGS)
@@ -160,6 +163,7 @@ test: $(TESTS)
 	@echo "=========================================="
 	@./test_link_watchdog
 	@./test_initial_read_retry
+	@./test_subscribe_outcome
 	@echo ""
 	@echo "=========================================="
 	@echo "Running Transport Matching Tests..."

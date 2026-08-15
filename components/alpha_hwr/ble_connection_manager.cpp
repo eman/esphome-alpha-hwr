@@ -164,42 +164,42 @@ void BLEConnectionManager::dump_services() {
   }
 }
 
-void BLEConnectionManager::subscribe_to_notifications() {
+SubscribeOutcome BLEConnectionManager::attempt_subscribe_() {
   if (!client_) {
     ESP_LOGW(TAG, "BLE client not available");
-    return;
+    return SubscribeOutcome::NO_CLIENT;
   }
-  
+
   auto *service = client_->get_service(service_uuid_);
   if (!service) {
     ESP_LOGW(TAG, "Service not found for notification subscription");
-    return;
+    return SubscribeOutcome::NO_SERVICE;
   }
-  
+
   auto *chr = client_->get_characteristic(service->uuid, characteristic_uuid_);
   if (!chr) {
     ESP_LOGW(TAG, "Characteristic not found");
-    return;
+    return SubscribeOutcome::NO_CHARACTERISTIC;
   }
-  
+
   // Register for notifications (tells ESP-IDF we want to receive them)
-  auto status = esp_ble_gattc_register_for_notify(client_->get_gattc_if(), 
-                                                   client_->get_remote_bda(), 
+  auto status = esp_ble_gattc_register_for_notify(client_->get_gattc_if(),
+                                                   client_->get_remote_bda(),
                                                    chr->handle);
   if (status) {
     ESP_LOGW(TAG, "Failed to register for notifications: %d", status);
-    return;
+    return SubscribeOutcome::REGISTER_FAILED;
   }
-  
+
   ESP_LOGI(TAG, "Registered for notifications (local)");
-  
+
   // Now write to the CCCD descriptor to enable notifications on the server side
   // CCCD handle is typically characteristic handle + 1
   uint16_t cccd_handle = chr->handle + 1;
   uint8_t notify_enable[] = {0x01, 0x00};  // 0x0001 = enable notifications
-  
+
   ESP_LOGI(TAG, "Writing to CCCD descriptor (handle 0x%04x) to enable notifications...", cccd_handle);
-  
+
   status = esp_ble_gattc_write_char_descr(
       client_->get_gattc_if(),
       client_->get_conn_id(),
@@ -208,14 +208,48 @@ void BLEConnectionManager::subscribe_to_notifications() {
       notify_enable,
       ESP_GATT_WRITE_TYPE_RSP,
       ESP_GATT_AUTH_REQ_NONE);
-  
+
   if (status) {
     ESP_LOGW(TAG, "Failed to write CCCD descriptor: %d", status);
-  } else {
-    ESP_LOGI(TAG, "CCCD write successful - notifications should now be enabled");
+    return SubscribeOutcome::CCCD_WRITE_FAILED;
   }
-  
-  // Notify component that subscription is complete
+
+  ESP_LOGI(TAG, "CCCD write successful - notifications should now be enabled");
+  return SubscribeOutcome::OK;
+}
+
+void BLEConnectionManager::subscribe_to_notifications() {
+  const SubscribeOutcome outcome = attempt_subscribe_();
+
+  // Every failure names itself on the fault surface, at the moment it happens.
+  // Before issue #175 all five were logged and dropped, so the operator learned
+  // only what the watchdog says 60 s later -- "No data from pump", which is the
+  // symptom every one of them shares. The hold is DATA because that is the
+  // watchdog's own class of fault and this is the same link being declared
+  // unusable, just earlier and by name.
+  if (subscribe_failed(outcome)) {
+    last_failure_ = subscribe_outcome_to_string(outcome);
+    failure_hold_ = FailureHold::DATA;
+  }
+
+  // The four outcomes that return before the callback leave the session stuck
+  // in SUBSCRIBING: nothing else advances it, so no notification can arrive to
+  // reset the watchdog and the watchdog's own remedy in 60 s is this same
+  // forced disconnect. Doing it now cannot make the outcome worse -- there is
+  // no path from here to a working link -- and it starts recovery a minute
+  // earlier with the actual cause on the fault sensor.
+  if (subscribe_outcome_should_recycle(outcome)) {
+    force_disconnect(subscribe_outcome_to_string(outcome));
+    return;
+  }
+
+  // Reached on OK and on CCCD_WRITE_FAILED alike. The failed write is
+  // deliberately not treated as fatal here: the pump is bonded, a bonded peer
+  // retains its CCCD across reconnections, and so a link whose CCCD write we
+  // could not issue may already be subscribed from an earlier session.
+  // Recycling on that prediction would tear down links that work. The watchdog
+  // settles it on the only evidence that can -- whether data arrives.
+  // See subscribe_outcome.h.
   if (subscribed_callback_) {
     subscribed_callback_();
   }

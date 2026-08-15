@@ -337,6 +337,35 @@
 
 ### Fixed
 
+- **A failed notification subscribe now names itself instead of being
+  rediscovered as a timeout.** `subscribe_to_notifications()` has six terminal
+  paths and discarded the answer on five. Four returned early after logging —
+  no client, no service, no characteristic, `esp_ble_gattc_register_for_notify`
+  failed — and since `subscribed_callback_()` is the only thing that advances
+  the session out of `SUBSCRIBING`, those four parked it there. The fifth, a
+  CCCD write that failed synchronously, fell through to the *same* callback as
+  success, so a failed subscribe was indistinguishable from a good one.
+
+  All five were caught by the 60 s data watchdog, and that design is unchanged:
+  one timer covers every cause, including a link that goes deaf later, which no
+  return code can see. What it could not do is say *which* thing failed, or say
+  anything at all for a minute. Each failure now latches its own reason on the
+  Pump Link Fault surface at the moment it happens, and the four that cannot
+  recover recycle the link immediately rather than waiting for a timeout whose
+  remedy is the same forced disconnect.
+
+  The CCCD failure is deliberately excluded from that: the pump is bonded, a
+  bonded peer retains its CCCD across reconnections, so a link whose CCCD write
+  could not be issued may already be subscribed from an earlier session.
+  Recycling on that prediction would tear down links that work — and each
+  recycle re-enters the encryption-on-open path where a failure can erase the
+  bond. It is reported, and the watchdog settles it on the only evidence that
+  can: whether data arrives.
+
+  The decision lives in `subscribe_outcome.h` with host tests, following
+  `link_watchdog.h`, because `ble_connection_manager.cpp` is compiled by no host
+  test and anything expressed there is unverifiable (issue #175).
+
 - **The schedule card treated every write as successful.** `_saveChanges`
   discarded the user's pending edits at call time, then re-read the device on a
   3 s timer. A `set_schedule_entry` carries a 20 s watchdog and writes are

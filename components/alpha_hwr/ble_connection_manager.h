@@ -2,6 +2,7 @@
 
 #include "esphome/components/ble_client/ble_client.h"
 #include "esphome/components/binary_sensor/binary_sensor.h"
+#include "subscribe_outcome.h"
 #include <esp_gattc_api.h>
 #include <esp_gap_ble_api.h>
 #include <functional>
@@ -111,6 +112,11 @@ class BLEConnectionManager {
   
  private:
   void subscribe_to_notifications();
+  /// The subscribe attempt itself, reduced to its outcome. Split out from
+  /// subscribe_to_notifications() so that what the caller does about a failure
+  /// is a decision over a value (subscribe_outcome.h) rather than five
+  /// scattered early returns that each dropped what they knew (issue #175).
+  SubscribeOutcome attempt_subscribe_();
   void handle_connection_opened(const esp_ble_gattc_cb_param_t *param);
   static void handle_service_discovered(const esp_ble_gattc_cb_param_t *param);
   void handle_service_discovery_complete(esp_gatt_if_t gattc_if);
