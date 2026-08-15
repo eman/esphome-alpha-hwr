@@ -75,7 +75,7 @@ int main() {
   TEST_ASSERT(schedule_off_target().pump_enabled == false,
               "Schedule OFF stops the pump");
 
-  // ---- pump_set_state service: three-state targets ----------------------
+  // ---- set_pump_state service: three-state targets ----------------------
   TEST_ASSERT(!state_off_target().pump_enabled && !state_off_target().schedule_enabled,
               "state 'off' -> STOP + schedule off");
   TEST_ASSERT(state_engaged_target().pump_enabled && !state_engaged_target().schedule_enabled,

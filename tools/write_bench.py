@@ -44,10 +44,10 @@ Run with a Python that has aioesphomeapi available; the esphome venv works:
   venv/bin/python tools/write_bench.py --host hwr-pump.local --secrets secrets.yaml services
 
 Examples:
-  write_bench.py call pump_set_setpoint mode=constant_speed value=2000
+  write_bench.py call set_setpoint mode=constant_speed value=2000
   write_bench.py call set_schedule_entry data=3,1,6,0,8,0
   write_bench.py upload 1 0,0,6,54,7,0 0,1,7,24,7,30 1,0,17,54,18,0
-  write_bench.py burst pump_set_setpoint mode=constant_speed \\
+  write_bench.py burst set_setpoint mode=constant_speed \\
       --each value=1800 --each value=1900 --each value=2100
 """
 

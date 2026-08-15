@@ -70,7 +70,7 @@ const char *write_status_to_string(WriteStatus status);
 
 // Severity ordering used to fold several sub-write results into one terminal
 // status (higher = worse / more informative to surface). ACCEPTED/CLAMPED are
-// "ok"; a coupled op like pump_set_state reports its most-severe leg so an
+// "ok"; a coupled op like set_pump_state reports its most-severe leg so an
 // automation can still tell TIMEOUT from REJECTED from SUPERSEDED.
 inline int write_status_severity(WriteStatus s) {
   switch (s) {
@@ -334,7 +334,7 @@ class WriteOperationService {
     uint8_t attempts{0};
     std::function<void(bool)> done;
     // Like `done` but carries the full terminal WriteStatus (not just
-    // accepted/not). Used by the coupled pump_set_state composition so it can
+    // accepted/not). Used by the coupled set_pump_state composition so it can
     // report TIMEOUT / SUPERSEDED / REJECTED distinctly instead of flattening
     // every failure to one bool.
     std::function<void(WriteStatus)> status_done;

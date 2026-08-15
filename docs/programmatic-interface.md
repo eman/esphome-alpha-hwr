@@ -37,16 +37,27 @@ api:
 ESPHome prefixes each service with the node name: `esphome.<node_name>_<service>`
 (`-` becomes `_`).
 
+**A service's name is the `command` its settle event reports.** Call
+`set_setpoint` and the event comes back with `command: "set_setpoint"`, so you
+can correlate a call to its own result by the name you already used, and grep a
+log for one string rather than two. The component registers each service *by*
+its command name rather than spelling the name twice, so the two cannot drift
+apart ([#159](https://github.com/eman/esphome-alpha-hwr/issues/159)).
+
+The one exception is deliberate: `set_vacation` and `clear_vacation` are
+compositions over the single-event slots rather than commands of their own, so
+they settle as `set_single_event` / `clear_single_event`.
+
 ### Pump control
 
 | Service | Arguments | What it writes |
 | --- | --- | --- |
-| `pump_set_enabled` | `enabled: bool`, `op_id: string` | Run state only, via the pump's unfused Class 3 START/STOP commands — carries no mode and no setpoint at all. A pump-rejected command settles `rejected`; the run state is always confirmed by readback (Class 3 produces no notification of its own). |
-| `pump_set_mode` | `mode: string`, `op_id: string` | Control mode only, via the pump's unfused mode-change object — touches neither the run state nor any mode's stored setpoint. |
-| `pump_set_setpoint` | `mode: string`, `value: float`, `op_id: string` | **Switches the pump into `mode` AND sets that mode's setpoint** — `mode` is not merely selecting which stored setpoint to edit; after this call the pump is running (or armed) in that mode. This is exactly the pair the pump fuses in one write. Use `pump_set_mode` to switch modes without touching a setpoint. The pump stores an independent setpoint per mode, so setpoint writes to different modes never supersede each other. |
-| `pump_set_temperature_range` | `min_c: float`, `max_c: float`, `autoadapt: bool`, `op_id: string` | The temperature-range config object (its own fused write), after switching to temperature-range mode. |
-| `pump_set_cycle_times` | `on_minutes: float`, `off_minutes: float`, `flow: float`, `op_id: string` | The cycle-time config object, after switching to cycle-time mode. Minutes are whole, 1–60 (float-typed for platform reasons; fractional values settle `invalid`). `flow` is the flow the pump targets during ON periods, in m³/h (0.1–10.0). **Each field accepts `0` = keep existing**: kept fields are resolved from a fresh read of the pump's stored config (a kept flow is echoed back byte-for-byte, no float round trip), so flow-only or single-period writes are safe. All three at `0` settles `invalid`. |
-| `pump_set_state` | `state: string` (`off`\|`engaged`\|`scheduled`), `op_id: string` | **Coupled run-state + schedule selector** — the safe, one-call way to reach a legal state (see [Run state and the schedule](#run-state-and-the-schedule)). Writes only the flags that differ from the current state, in an order that never passes through the dead `STOP`+schedule combo. Unknown `state` settles `invalid`. |
+| `set_pump_enabled` | `enabled: bool`, `op_id: string` | Run state only, via the pump's unfused Class 3 START/STOP commands — carries no mode and no setpoint at all. A pump-rejected command settles `rejected`; the run state is always confirmed by readback (Class 3 produces no notification of its own). |
+| `set_mode` | `mode: string`, `op_id: string` | Control mode only, via the pump's unfused mode-change object — touches neither the run state nor any mode's stored setpoint. |
+| `set_setpoint` | `mode: string`, `value: float`, `op_id: string` | **Switches the pump into `mode` AND sets that mode's setpoint** — `mode` is not merely selecting which stored setpoint to edit; after this call the pump is running (or armed) in that mode. This is exactly the pair the pump fuses in one write. Use `set_mode` to switch modes without touching a setpoint. The pump stores an independent setpoint per mode, so setpoint writes to different modes never supersede each other. |
+| `set_temperature_range` | `min_c: float`, `max_c: float`, `autoadapt: bool`, `op_id: string` | The temperature-range config object (its own fused write), after switching to temperature-range mode. |
+| `set_cycle_times` | `on_minutes: float`, `off_minutes: float`, `flow: float`, `op_id: string` | The cycle-time config object, after switching to cycle-time mode. Minutes are whole, 1–60 (float-typed for platform reasons; fractional values settle `invalid`). `flow` is the flow the pump targets during ON periods, in m³/h (0.1–10.0). **Each field accepts `0` = keep existing**: kept fields are resolved from a fresh read of the pump's stored config (a kept flow is echoed back byte-for-byte, no float round trip), so flow-only or single-period writes are safe. All three at `0` settles `invalid`. |
+| `set_pump_state` | `state: string` (`off`\|`engaged`\|`scheduled`), `op_id: string` | **Coupled run-state + schedule selector** — the safe, one-call way to reach a legal state (see [Run state and the schedule](#run-state-and-the-schedule)). Writes only the flags that differ from the current state, in an order that never passes through the dead `STOP`+schedule combo. Unknown `state` settles `invalid`. |
 
 `mode` strings: `constant_pressure`, `proportional_pressure`, `constant_speed`,
 `constant_flow`, `auto_adapt_radiator`, `auto_adapt_underfloor`,
@@ -57,20 +68,20 @@ Setpoint units and ranges: pressure modes in meters (0.5–10.0),
 
 ### Run state and the schedule
 
-`pump_set_enabled` and `set_schedule_enabled` are **independent, uncoupled**
+`set_pump_enabled` and `set_schedule_enabled` are **independent, uncoupled**
 writes — each does exactly what it says and never touches the other. The pump's
 *behavior*, however, couples them (bench-verified, motor RPM as ground truth):
 
 > the motor runs only when the run state is **on** (operation mode `AUTO`,
-> `pump_set_enabled true`) **and** the schedule is disabled (runs continuously)
+> `set_pump_enabled true`) **and** the schedule is disabled (runs continuously)
 > **or** a schedule window is currently active (runs only in windows).
 
 Consequences for automations calling these raw services:
 
 - **A stopped pump ignores the schedule.** `set_schedule_enabled 1` while the
-  run state is `STOP` (`pump_set_enabled false`) leaves a *dead* schedule: the
+  run state is `STOP` (`set_pump_enabled false`) leaves a *dead* schedule: the
   enable flag is set, but the pump stays idle through every window. To run on
-  schedule the pump must be `AUTO` — also call `pump_set_enabled true`.
+  schedule the pump must be `AUTO` — also call `set_pump_enabled true`.
   The services stay uncoupled, but this end *state* does not persist: the
   component detects `STOP` + schedule-on with its periodic state poll and
   converges it to `AUTO` + schedule-on (attempts spaced at least five minutes
@@ -81,7 +92,7 @@ Consequences for automations calling these raw services:
   `sensor.<node_name>_pump_run_state` = `stalled` — see
   [schedule-management.md](schedule-management.md#the-stalled-schedule-and-how-it-repairs-itself).
   To hold the pump off from an automation, clear the schedule flag too
-  (`pump_set_state: off`) rather than stopping the pump under an enabled schedule.
+  (`set_pump_state: off`) rather than stopping the pump under an enabled schedule.
 - **Started + schedule disabled** → runs continuously (its control mode, 24/7).
 - **Started + schedule enabled** → runs only inside windows, idle between them.
 
@@ -89,7 +100,7 @@ The `Engage Pump` and `Schedule Enabled` **entities** hide this by enforcing a
 coupled three-state model (Off / Engaged / Scheduled) — see
 [schedule-management.md](schedule-management.md#run-state-and-the-schedule).
 
-**For automations, use `pump_set_state`** — the programmatic equivalent, which
+**For automations, use `set_pump_state`** — the programmatic equivalent, which
 gives you the same safety in one call:
 
 | `state` | Result | Legal? |
@@ -105,24 +116,24 @@ state. The settle event reports the actual `enabled` / `schedule_enabled` flags
 and the resulting `state`, so a partial failure surfaces the real end state.
 
 ```yaml
-service: esphome.hwr_pump_pump_set_state
+service: esphome.hwr_pump_set_pump_state
 data:
   state: engaged        # off | engaged | scheduled
   op_id: "run-now"
 ```
 
-Because `pump_set_state` composes two underlying flag writes, those surface as
+Because `set_pump_state` composes two underlying flag writes, those surface as
 their own `op_id: ""` settle events (exactly like an entity toggle); your
 `op_id` still gets **exactly one** terminal event with the aggregate result.
 
-The raw `pump_set_enabled` / `set_schedule_enabled` services **stay** as escape
+The raw `set_pump_enabled` / `set_schedule_enabled` services **stay** as escape
 hatches for when you deliberately want to write a single flag without the
 coupling.
 
 ### Remote Mode has no service, but does emit the event
 
 The Remote Mode switch (Remote/Digital vs Local/Panel control source) is an
-entity-only write — there is no `pump_set_remote_mode` service yet. It still
+entity-only write — there is no `set_remote_mode` service yet. It still
 runs through the same operation layer as everything else, so toggling it emits
 a `set_remote_mode` settle event with `op_id: ""` and `origin: "entity"`, and
 it is confirmed from a readback of the pump's `control_source` rather than
@@ -145,6 +156,8 @@ working); `op_id` is a new optional argument.
 | `clear_single_event` | `slot` | Clear one single-event slot |
 | `refresh_single_events` | *(no data)* | Re-read all single-event slots |
 | `upload_schedule` | v1 payload (below) | **Bulk full-state upload** of the entire 7×5 grid in one call |
+| `set_vacation` | `begin_ts,end_ts` (epoch seconds) | A multi-day Stop event overriding the weekly schedule. Settles as `set_single_event` — a vacation *is* a single-event slot, not a command of its own |
+| `clear_vacation` | *(no data)* | End the active vacation. Settles as `clear_single_event` |
 
 Schedule writes are **verified**: after the write and commit, the component
 reads the schedule back from the pump and compares before reporting. (They
@@ -209,7 +222,7 @@ Every service call — and every entity write — ends in exactly one event:
 event_type: esphome.alpha_hwr_write_settled
 data:
   op_id: "restore-speed-1"   # the id you passed; may be empty
-  command: "set_setpoint"    # which write this was
+  command: "set_setpoint"    # which write this was — the service name you called
   status: "clamped"          # accepted | clamped | rejected | invalid | timeout | superseded
   detail: "pump stored 1650" # short reason when relevant
   origin: "service"          # service (API call) | entity (dashboard write)
@@ -233,7 +246,7 @@ data:
 prefixes its service calls, `esphome.<node_name>_...`, but not always
 byte-identical: Home Assistant slugifies the name for service registration, so
 a hyphenated node like `recirc-controller` appears here verbatim yet becomes
-`recirc_controller` in `esphome.recirc_controller_pump_set_enabled`. Use `node`
+`recirc_controller` in `esphome.recirc_controller_set_pump_enabled`. Use `node`
 to attribute an event to a controller when several report to the same event
 bus: it's stable and human-readable, unlike Home Assistant's `device_id`,
 which is opaque and regenerated if the device is removed and re-added. Because
@@ -292,7 +305,7 @@ The pattern is: call, wait for your `op_id`, check `status`. In pyscript:
 
 ```python
 op_id = "restore-speed-1"
-esphome.hwr_pump_pump_set_setpoint(mode="constant_speed", value=2500, op_id=op_id)
+esphome.hwr_pump_set_setpoint(mode="constant_speed", value=2500, op_id=op_id)
 
 result = task.wait_until(
     event_trigger=["esphome.alpha_hwr_write_settled", f"op_id == '{op_id}'"],
@@ -309,7 +322,7 @@ automation:
   - alias: "Set speed and alert on clamp"
     trigger: ...
     action:
-      - service: esphome.hwr_pump_pump_set_setpoint
+      - service: esphome.hwr_pump_set_setpoint
         data: {mode: "constant_speed", value: 2500, op_id: "auto-speed"}
       - wait_for_trigger:
           - platform: event

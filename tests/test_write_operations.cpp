@@ -1735,6 +1735,73 @@ static void test_mode_strings() {
 }
 
 // ---------------------------------------------------------------------------
+// Command strings (issue #159)
+//
+// What write_command_to_string() returns is public API on two counts: it is the
+// `command` field of every esphome.alpha_hwr_write_settled event, and it is the
+// name api_bridge.cpp registers the matching Home Assistant service under.
+// Editing a string here renames a service somebody's automation calls, so the
+// rename should come with a failing test rather than arriving silently.
+//
+// Before #159 the two surfaces spelled the name independently and disagreed:
+// the service was `pump_set_state`, the event said `set_pump_state`. Nothing
+// caught it because nothing asserted either spelling.
+// ---------------------------------------------------------------------------
+
+static void test_command_strings() {
+  std::cout << "\n=== command strings (event field AND service name) ===" << std::endl;
+  const auto to_string = esphome::alpha_hwr::services::write_command_to_string;
+
+  struct Expected {
+    WriteCommand cmd;
+    const char *name;
+  };
+  static const Expected EXPECTED[] = {
+      {WriteCommand::SET_PUMP_ENABLED, "set_pump_enabled"},
+      {WriteCommand::SET_MODE, "set_mode"},
+      {WriteCommand::SET_SETPOINT, "set_setpoint"},
+      {WriteCommand::SET_TEMPERATURE_RANGE, "set_temperature_range"},
+      {WriteCommand::SET_CYCLE_TIMES, "set_cycle_times"},
+      {WriteCommand::SET_SCHEDULE_ENTRY, "set_schedule_entry"},
+      {WriteCommand::CLEAR_SCHEDULE_ENTRY, "clear_schedule_entry"},
+      {WriteCommand::SET_SCHEDULE_ENABLED, "set_schedule_enabled"},
+      {WriteCommand::SET_REMOTE_MODE, "set_remote_mode"},
+      {WriteCommand::SET_SINGLE_EVENT, "set_single_event"},
+      {WriteCommand::CLEAR_SINGLE_EVENT, "clear_single_event"},
+      {WriteCommand::REFRESH_SCHEDULE, "refresh_schedule"},
+      {WriteCommand::REFRESH_SINGLE_EVENTS, "refresh_single_events"},
+      {WriteCommand::UPLOAD_SCHEDULE, "upload_schedule"},
+      {WriteCommand::SET_PUMP_STATE, "set_pump_state"},
+  };
+  const size_t expected_count = sizeof(EXPECTED) / sizeof(EXPECTED[0]);
+
+  for (const auto &e : EXPECTED) {
+    TEST_ASSERT(strcmp(to_string(e.cmd), e.name) == 0,
+                std::string("command string is \"") + e.name + "\"");
+  }
+
+  // Exhaustiveness: a new enumerator returns its own string, so the count of
+  // named commands stops matching the table above and this fails until the new
+  // command is pinned here too. Without it the table only proves that the
+  // commands somebody remembered to list are right.
+  size_t named = 0;
+  for (int v = 0; v < 256; v++) {
+    if (strcmp(to_string(static_cast<WriteCommand>(v)), "unknown") != 0)
+      named++;
+  }
+  TEST_ASSERT(named == expected_count,
+              "every WriteCommand is pinned above (pin new commands here too)");
+
+  // Uniqueness matters more since #159 than it did before: two commands sharing
+  // a string would now register two Home Assistant services under one name.
+  std::set<std::string> unique;
+  for (const auto &e : EXPECTED)
+    unique.insert(e.name);
+  TEST_ASSERT(unique.size() == expected_count,
+              "command strings are unique (duplicates would collide as service names)");
+}
+
+// ---------------------------------------------------------------------------
 // upload_schedule (bulk full-state grid upload)
 // ---------------------------------------------------------------------------
 
@@ -2094,6 +2161,7 @@ int main() {
   test_refresh_single_events_all_slots_fail();
   test_single_event_read_failure_blocks_slot_allocation();
   test_mode_strings();
+  test_command_strings();
   test_upload_accepted();
   test_upload_skip_identical();
   test_upload_partial();

@@ -230,7 +230,7 @@ ID strings + statistics), `time_service` (RTC sync), `event_log_service`,
 
 * [x] `WriteOperationService`: one serialized write path with confirm readbacks and terminal statuses (accepted/clamped/rejected/timeout/superseded)
 * [x] Entity writes routed through the operation layer (anti-clobber for the dashboard too)
-* [x] HA services (`pump_set_enabled`, `pump_set_mode`, `pump_set_setpoint`, `pump_set_temperature_range`, `pump_set_cycle_times`) registered in C++ (`api_bridge`)
+* [x] HA services (`set_pump_enabled`, `set_mode`, `set_setpoint`, `set_temperature_range`, `set_cycle_times`) registered in C++ (`api_bridge`)
 * [x] Schedule services migrated from YAML to `api_bridge` with verify readbacks (previously they reported success unconditionally)
 * [x] `esphome.alpha_hwr_write_settled` event: exactly one terminal event per write, self-identifying via caller-supplied `op_id`
 * [x] Host test suite `tests/test_write_operations.cpp` (pump simulator driving every terminal status)

@@ -2,6 +2,59 @@
 
 ## [Unreleased]
 
+### Changed
+
+- **BREAKING — the six pump services are renamed to match the `command` their
+  settle event reports** ([#159](https://github.com/eman/esphome-alpha-hwr/issues/159)):
+
+  | Old service | New service |
+  | --- | --- |
+  | `pump_set_enabled` | `set_pump_enabled` |
+  | `pump_set_mode` | `set_mode` |
+  | `pump_set_setpoint` | `set_setpoint` |
+  | `pump_set_temperature_range` | `set_temperature_range` |
+  | `pump_set_cycle_times` | `set_cycle_times` |
+  | `pump_set_state` | `set_pump_state` |
+
+  You called `pump_set_state` and got `command: "set_pump_state"` back, so the
+  one field meant to tell you which write had settled named it differently from
+  the thing you called — you could not grep a call to its own event, and the
+  transposition reads as a typo in either direction.
+
+  **The event payloads do not change.** Only the service names move, and they
+  move onto the names the events were already using. This is the direction that
+  breaks loudly: a renamed service fails the automation with `Service
+  ... not found`, whereas renaming the event field would have left every
+  automation filtering on `command` silently never firing again. Same rule as
+  the keys retired in #149 — a surface that validates but does nothing is a
+  trap.
+
+  **Migration:** in each automation calling `esphome.<node>_pump_set_X`, move
+  the `pump_` to where the verb is. Note this also removes a stutter for anyone
+  whose node is named after the pump: `esphome.hwr_pump_pump_set_state` becomes
+  `esphome.hwr_pump_set_pump_state`. Nothing else changes — arguments,
+  semantics, statuses and every field of `esphome.alpha_hwr_write_settled` are
+  untouched.
+
+  The schedule services were already correct (`set_schedule_entry`,
+  `upload_schedule`, `clear_single_event` and the rest all matched their command
+  already) and do not move; they are also the names inherited from the original
+  schedule-editor services, which is why the pump family was the side that had
+  to give. **`api_bridge.cpp` now registers each service *by* its command name**
+  instead of spelling the name a second time, so the two surfaces can no longer
+  disagree — the drift was possible only because each side named the write
+  independently and nothing compared them. `set_vacation` / `clear_vacation`
+  remain the deliberate exception: they compose the single-event slots rather
+  than being commands of their own, so they settle as `set_single_event` /
+  `clear_single_event`. That is now stated in the docs, along with the two
+  services themselves, which were registered but undocumented.
+
+  The command strings are consequently public API on two counts, and
+  `test_write_operations.cpp::test_command_strings()` pins all fifteen —
+  including a count check, so a newly added command fails the test until it is
+  pinned too, and a uniqueness check, because two commands sharing a string
+  would now register two services under one name.
+
 ### Fixed
 
 - **The schedule card treated every write as successful.** `_saveChanges`
