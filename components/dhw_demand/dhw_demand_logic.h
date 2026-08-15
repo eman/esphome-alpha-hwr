@@ -104,8 +104,16 @@ struct PumpOnThresholds {
   // Zero is the defensible line. The meter reading no more than the pump says
   // its own loop is moving is the only unambiguous statement that no household
   // draw exists; any positive difference is evidence of *something*, and the
-  // expiry below is what handles the cases this cannot decide. A no-draw tick
-  // reads −0.10 and releases; a 0.35 GPM draw reads +0.25 and is held.
+  // expiry below is what handles the cases this cannot decide.
+  //
+  // The band this rescues is bounded on both sides, which is worth stating so
+  // the fix is not oversold. Below 0.3 GPM a draw never arms the tier at all
+  // (the capture needs a pump-off reading above `flow`), and above
+  // 0.3 − residual the old comparison held anyway — so steadily it is roughly
+  // 0.3 to 0.4 GPM, widening only during the transients the tick count covers.
+  // Measured on hardware: a 0.60 GPM draw reduced mid-run held at +0.226 GPM
+  // of computed demand for 26 s with water still running, where the old
+  // comparison would have retired the capture.
   float continuation_release;  // GPM of computed demand
 
   // How many consecutive ticks must measure the draw as stopped before the
