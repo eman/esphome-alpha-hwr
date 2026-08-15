@@ -20,6 +20,7 @@
 #   ./tools/mutation_check.sh --list       # just show them
 #   ./tools/mutation_check.sh continuation # only names containing "continuation"
 #   JOBS=8 ./tools/mutation_check.sh       # more parallel build jobs (default 4)
+#   SCOPED=0 ./tools/mutation_check.sh     # rebuild/run everything per mutation
 #
 # The filter exists because a full sweep rebuilds and re-runs the whole suite
 # once per mutation and takes the better part of an hour. Use it while adding
@@ -222,6 +223,27 @@ trap 'echo; echo -e "${YELLOW}Interrupted — restoring sources.${NC}"; restore_
 # while proving nothing. That is the same false-confidence failure this script
 # exists to detect, so it must not be able to produce it.
 echo -n "baseline (unmutated suite)  "
+# Which test targets compile which file. Built once; the per-mutation lookup is
+# a dict hit. SCOPED=0 falls back to rebuilding and running everything, which is
+# what this check did before and remains the definition of correct -- use it if
+# a scoped result ever looks wrong.
+SCOPED="${SCOPED:-1}"
+DEPMAP="$(mktemp -t mutation_depmap)"
+# Extend the EXIT trap rather than calling `trap ... EXIT` again: bash replaces
+# a trap, it does not add to one, so a second `trap ... EXIT` here would
+# silently disarm the restore_all installed above -- and restoring mutated
+# sources is this script's entire safety contract. (Learned the hard way: the
+# first version of this line did exactly that and left a production header
+# mutated in the working tree after an abort.)
+trap 'restore_all; rm -f "$DEPMAP"' EXIT
+trap 'echo; echo -e "${YELLOW}Interrupted — restoring sources.${NC}"; restore_all; rm -f "$DEPMAP"; exit 130' INT TERM
+if [[ "$SCOPED" == "1" ]]; then
+  if ! python3 "$SCRIPT_DIR/mutation_targets.py" --build-map "$DEPMAP"; then
+    echo -e "${RED}Could not map files to test targets; falling back to full runs.${NC}"
+    SCOPED=0
+  fi
+fi
+
 if (cd "$TESTS_DIR" && make clean >/dev/null 2>&1 && make -j"$JOBS" test >/tmp/mutation_baseline.log 2>&1); then
   echo -e "${GREEN}✓ passes${NC}"
 else
@@ -266,7 +288,54 @@ PY
     continue
   fi
 
-  if (cd "$TESTS_DIR" && make clean >/dev/null 2>&1 && make -j"$JOBS" test >/dev/null 2>&1); then
+  # Only the targets that actually compile this file. A mutation to
+  # dhw_demand_logic.h cannot change what test_auth decides, and rebuilding it
+  # 54 times was most of this check's wall-clock. See tools/mutation_targets.py
+  # for why the map comes from the compiler rather than the Makefile, and for
+  # why mis-selection can only cause a false SURVIVED, never a false caught.
+  if [[ "$SCOPED" == "1" ]]; then
+    # Not mapfile: that is bash 4 and macOS ships 3.2, where the failure mode
+    # is an unbound SEL under `set -u` killing the script mid-loop.
+    SEL=()
+    while IFS= read -r line; do
+      [[ -n "$line" ]] && SEL+=("$line")
+    done < <(python3 "$SCRIPT_DIR/mutation_targets.py" --lookup "$DEPMAP" "$PROJECT_DIR/$file")
+  else
+    SEL=()
+  fi
+
+  if [[ "$SCOPED" == "1" && ${#SEL[@]} -eq 0 ]]; then
+    echo -e "${RED}✗ no test target compiles $file${NC}"
+    echo "    Nothing in tests/ builds that file, so no mutation of it can be"
+    echo "    caught. That is a coverage hole in itself -- host-compile the file"
+    echo "    (AGENTS §4) rather than dropping the mutation."
+    SURVIVORS+=("$name (no target builds $file)")
+    restore_or_die
+    continue
+  fi
+
+  if [[ "$SCOPED" == "1" ]]; then
+    # Remove the selected binaries first. make decides staleness by mtime at
+    # 1 s granularity, and a mutate/revert pair inside the same second would
+    # otherwise leave a stale binary and report a mutation as caught or
+    # survived on the *previous* build. Cheap insurance against the exact
+    # stale-binary artifact that has produced false survivors here before.
+    ( cd "$TESTS_DIR" && rm -f "${SEL[@]}" )
+    if (cd "$TESTS_DIR" && make -j"$JOBS" "${SEL[@]}" >/dev/null 2>&1) && \
+       (cd "$TESTS_DIR" && for t in "${SEL[@]}"; do ./"$t" >/dev/null 2>&1 || exit 1; done); then
+      SURVIVED=1
+    else
+      SURVIVED=0
+    fi
+  else
+    if (cd "$TESTS_DIR" && make clean >/dev/null 2>&1 && make -j"$JOBS" test >/dev/null 2>&1); then
+      SURVIVED=1
+    else
+      SURVIVED=0
+    fi
+  fi
+
+  if [[ "$SURVIVED" == "1" ]]; then
     echo -e "${RED}✗ SURVIVED — the suite passed with this broken${NC}"
     SURVIVORS+=("$name")
   else
