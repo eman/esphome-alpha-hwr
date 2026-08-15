@@ -493,11 +493,86 @@ Symptom: **silently empty**, indistinguishable from "no events exist." And an ef
 missed — `_clearSingleEvent` is reachable only from a rendered row, so single-event deletion is
 dead in the UI *before* the `op_id` bug would break it.
 
+> **Resolved in `7f5037a` (2026-08-13)**, in the same commit as finding 1 — the `op_id` fix had to
+> parse the event list to reach the delete path at all. The regex now takes an optional
+> ` (run)`/` (off)` suffix and carries the action through. Re-verified by execution against the
+> exact `format_single_events_display` output, and now pinned by a host test
+> (`tests/js/test_schedule_card.js`) so it cannot regress unnoticed a third time.
+
 ### 12. `_saveChanges` is structurally unsafe
 `alpha-hwr-schedule-card.js:1653` — **P2, unverified in detail**
 
 Clears `_pendingChanges` before confirmation; issues up to 35 independent writes where
 `upload_schedule` exists to replace them; refreshes on a blind 3 s timer against a 150 s watchdog.
+
+> **Resolved in PR #182 (2026-08-15).** Verification split the three claims apart, and only two of
+> them survived.
+>
+> **Claim 1 (the optimistic clear) is the bug, and worse than stated.** Nothing waited for
+> anything: the edit was dropped at call time, so a `rejected`, `invalid` or `timeout` write was
+> indistinguishable from an accepted one — both ended with the user's change gone from the grid
+> and no message anywhere. The card had the correlation handle all along (`_callService` generates
+> a unique `op_id` and the device answers every write with exactly one
+> `esphome.alpha_hwr_write_settled` carrying it), and simply did not subscribe. It does now: edits
+> stay pending until their own op settles, failures are named on the card, and an edit re-made
+> while its write is in flight survives the older write's confirmation (identity check, not
+> equality — every edit path stores a fresh array).
+>
+> **Claim 3 (the blind timer) is real, and the number quoted is the wrong one.** 150 s is
+> `WATCHDOG_UPLOAD_MS`, which this path never uses; `set_schedule_entry` carries
+> `WATCHDOG_SCHED_ENTRY_MS` = 20 s, and writes are queued, so a batch's ceiling is 20 s × batch
+> size. The 3 s read still lands inside it and returns pre-write state. The refresh now fires when
+> the batch drains, with a backstop derived from the firmware's own budget rather than a guess.
+> The single-event paths had the same defect against a *60 s* watchdog, plus an optimistic local
+> delete; both fixed the same way.
+>
+> **Claim 2 (use `upload_schedule`) is rejected.** "Up to 35 writes" is reachable only by editing
+> every cell — the loop iterates `_pendingChanges`, not the grid, so ordinary use is one to three
+> writes, *fewer* than an upload. And `build_layer_image` memsets each layer before filling it, so
+> an upload clears every (layer, day) cell not listed. `_rebuildSchedule` silently skips a layer
+> sensor that is malformed or not yet cached, so uploading the card's merged view would erase
+> whatever that layer holds on the device. The batched path would trade a display bug for data
+> loss; the per-entry path writes only what changed.
+
+> **Two defects in the fix itself, both found by the skeptic pass, both mine.**
+>
+> *The backstop could fire while the write was still in progress.* The per-command watchdog
+> budgets bound an operation's time at the *head* of the device queue — `arm_watchdog_` runs from
+> `start_front_`, so a queued operation carries no timer until it gets there — and the queue is
+> shared with every other write source, including the card's own untracked `refresh_schedule`
+> (30 s). A one-cell save behind a refresh would hit its 25 s backstop first, report "no
+> confirmation" for a write the device went on to accept, and then discard the real settle. Fixed
+> with the worst foreign budget as slack plus re-arming on progress; erring long is correct here,
+> since a late backstop only delays a message while an early one manufactures a false failure.
+>
+> *A re-attach mid-write stranded the card permanently.* Lovelace re-appends an existing card
+> element whenever a masonry view re-columns — a resize, the sidebar, entering edit mode — firing
+> `disconnectedCallback` then `connectedCallback` on the same instance. Teardown cancelled the
+> backstop, and `_armBackstop` was reachable only from `_saveChanges` and `_trackSingleEvent`,
+> both of which refuse to run while writes are outstanding. The card rendered "saving…" forever
+> with Save *and* Discard disabled, recoverable only by reloading. The deadline is now absolute
+> and resumed on re-attach.
+>
+> A third, smaller one: a Quick Run wiped an unread schedule failure, because `_writeErrors` was
+> cleared wholesale rather than per surface. And the guard that refuses a second single-event
+> write was invisible — the buttons still looked live and swallowed the click. Both fixed.
+
+**Tests.** 46 tests / 145 assertions in `tests/js/test_schedule_card.js` — the card's first
+automated coverage of any kind.
+
+> **The first version of this suite was unsound, and only an adversarial pass found it.** My own
+> 8 mutations all died, which proved nothing: a third skeptic ran 116 and buried ~50. The harness
+> left `_showQuickRun` false and `hass.states` empty, so `_renderQuickRunPanel` returned `''` in
+> every test — the entire single-event UI could be deleted with the suite green, and so could the
+> Save button's `data-action`. The XSS test was worse than useless: its payload had exactly one
+> `<`, one `>` and one `"`, so it passed against a non-global `replace` that is a live injection,
+> demonstrated by rendering a two-tag payload through the mutant. Both are fixed, along with
+> untestable-by-construction fixtures (a `0,0` cell cannot catch a layer/day transposition) and a
+> stale "identity, not equality" test whose newer value also differed in content.
+>
+> This is the same lesson as finding 3, one layer up: **a test suite's own mutations are chosen by
+> the person who wrote the blind spot.** The 26 mutations that now die were almost all somebody
+> else's idea.
 
 ### 13. README §5 fails `esphome config` two independent ways
 `packages/dhw_demand_detector.yaml`, `README.md` — **CONFIRMED by execution, P1 → P2**
@@ -523,6 +598,33 @@ fixing.
 *Downgraded* because it is 1 of 5 recipes, aborts loudly with a self-explanatory error, and
 `bump_version.sh` heals the pin at the next tag — though it recurs on the first new key after every
 release, and no CI job runs `esphome config`.
+
+> **Both halves resolved in `dbb9335`**; re-verified by execution (`esphome config` 2026.7.3) on
+> the §5 recipe assembled in full, which now validates. §5 carries its own `external_components`
+> at `@main`, overriding the package's release pin, and no longer renames the rpm sensor.
+>
+> **The recurrence, however, was not fixed** — and that was the part with teeth. The recipe broke
+> because nothing machine-checked it: the four committed examples are validated in CI, and §5 was
+> the one combination (paired pump + control UI + `dhw_demand`) with no file behind it.
+> `hwr-pump-dhw-example.yaml` is that file, release-pinned like its siblings, added to the CI
+> validation loop and to `bump_version.sh`'s pin list. Confirmed it catches the original bonus
+> bug: reintroducing the `rpm: id: motor_speed_sensor` rename fails with `Couldn't find ID
+> 'motor_speed'`.
+>
+> Being release-pinned, it covers the ID-collision class but **not** the pin-mismatch class — it
+> is internally consistent by construction, so it cannot reproduce the `@main`-package against
+> release-pinned-component failure at all. That half is addressed by the README change below, not
+> by this file.
+>
+> *Correction to the finding's framing:* §1–§3 do **not** "validate clean" for the reason implied,
+> and the fix is not deferrable. Each loads an `@main` package whose self-declared
+> `external_components` still points at `@v0.15.0` — the same mismatch §4 and §5 patch around.
+> They validate only because the packages they load never *set* a post-release key; an added
+> optional key with a default breaks nothing merely by existing. So they are **not** "one new key
+> away" — the key already exists. `data_timeout` landed after v0.15.0 and is documented as
+> user-settable in `docs/configuration.md`, so a user following that page hits the failure today.
+> Verified by execution: §1 as previously written rejects `data_timeout` as an invalid option, and
+> accepts it once the `@main` override is added. §1–§3 now carry that override.
 
 ---
 

@@ -1,0 +1,104 @@
+esphome:
+  name: hwr-pump
+  friendly_name: HWR Pump
+
+# ==============================================================================
+# Alpha HWR pump + control UI + DHW demand detection — Example Configuration
+# ==============================================================================
+#
+# The combined recipe: pump telemetry, the full control UI, and on-device DHW
+# demand detection in one node. This is README §5 as a file you can flash.
+#
+# Setup Instructions:
+# 1. Replace the MAC address below with your ALPHA HWR pump's BLE MAC address
+# 2. Set the three HA entity substitutions to match your installation
+# 3. Update WiFi credentials (or copy secrets-example.yaml to secrets.yaml)
+# 4. Flash to your ESP32
+#
+# Why this file exists rather than only the README: the three packages here
+# interact in ways the other examples do not exercise. alpha_hwr_controls.yaml
+# reads `id(motor_speed)` directly, so the rpm sensor cannot be renamed the way
+# dhw-demand-example.yaml renames it -- a collision that only appears when the
+# controls and dhw_demand packages are loaded together. Validating the
+# combination in CI is the only thing that keeps the recipe honest.
+# ==============================================================================
+
+substitutions:
+  mac_address: "AA:BB:CC:DD:EE:FF"  # ← CHANGE THIS to your pump's MAC
+
+  # ── Home Assistant entity IDs for supplementary sensors ────────────────────
+  flow_entity:            sensor.your_flow_sensor             # ← CHANGE to your flow meter entity
+  tank_lower_temp_entity: sensor.your_tank_lower_temperature  # ← CHANGE to your tank temp entity
+  dhw_charge_entity:      sensor.your_dhw_charge              # ← CHANGE to your DHW charge entity
+
+# The packages declare their own matching `external_components` at the same tag,
+# so no separate block is needed here. Do not add one pointing at a local
+# checkout: a release-pinned package against a working-tree component disagree
+# whenever a config key changes between releases, and the config stops
+# validating.
+packages:
+  alpha_hwr: github://eman/esphome-alpha-hwr/packages/alpha_hwr_pairing.yaml@v0.15.0
+  alpha_hwr_controls: github://eman/esphome-alpha-hwr/packages/alpha_hwr_controls.yaml@v0.15.0
+  dhw_demand: github://eman/esphome-alpha-hwr/packages/dhw_demand_detector.yaml@v0.15.0
+
+esp32:
+  board: esp32-c3-devkitm-1
+  variant: esp32c3
+  framework:
+    type: esp-idf
+
+wifi:
+  ssid: !secret wifi_ssid
+  password: !secret wifi_password
+
+api:
+  encryption:
+    key: !secret api_key
+
+logger:
+
+ota:
+  - platform: esphome
+    password: !secret ota_password
+
+# ── Alpha HWR sensor IDs ───────────────────────────────────────────────────────
+#
+# Give the pump sensors stable IDs so dhw_demand: can reference them below.
+# These merge with the sensor declarations already made by alpha_hwr_pairing.yaml.
+#
+# Note what is NOT here: `rpm:`. alpha_hwr_controls.yaml refers to the speed
+# sensor as `id(motor_speed)`, which is the id alpha_hwr_pairing.yaml assigns.
+# Renaming it here -- as dhw-demand-example.yaml does, since it loads no
+# controls package -- fails validation with "Couldn't find ID 'motor_speed'".
+alpha_hwr:
+  current:
+    id: motor_current_sensor
+  flow:
+    id: flow_rate_sensor
+
+# ── Unit-converted pump sensor intermediates ──────────────────────────────────
+#
+# alpha_hwr reports flow in m³/h; the detector expects GPM, so we create a
+# converted copy. Do not reference flow_rate_sensor directly or the thresholds
+# will be wrong by a factor of 4.4.
+sensor:
+  # Pump flow: m³/h → GPM  (1 m³/h = 4.40287 GPM)
+  - platform: copy
+    source_id: flow_rate_sensor
+    id: dhw_pump_flow_gpm
+    name: ""
+    internal: true
+    unit_of_measurement: "GPM"
+    filters:
+      - multiply: 4.40287
+
+# ── DHW Demand Detector — pump telemetry wiring ────────────────────────────────
+#
+# motor_speed and pump_flow are what pump-on detection runs on: household demand
+# while the pump is running is measured as (flow - pump_flow), gated on
+# motor_speed. Without both, the detector still works while the pump is off and
+# reports pump_on_uncertain whenever it is running.
+dhw_demand:
+  motor_speed:   motor_speed
+  motor_current: motor_current_sensor
+  pump_flow:     dhw_pump_flow_gpm

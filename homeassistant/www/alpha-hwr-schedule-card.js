@@ -78,6 +78,28 @@ const HOUR_LABELS = [0, 3, 6, 9, 12, 15, 18, 21, 24];
 const SNAP_MINUTES = 15;
 const MIN_BLOCK_MINUTES = 15;
 const MAX_LAYERS = 5; // pump supports layers 0-4
+// Mirrors of the firmware's per-command watchdog budgets
+// (write_operation_service.h). They bound how long a write can legitimately
+// take, so they -- not a guessed interval -- are what the card waits before
+// concluding a settle event is never coming. Writes are queued one at a time,
+// so a batch's ceiling is per-write x batch size.
+const WATCHDOG_SCHED_ENTRY_MS = 20000;
+const WATCHDOG_SINGLE_EVENT_MS = 60000;
+const SETTLE_MARGIN_MS = 5000; // event delivery through HA, on top of the budget
+// Slack for whatever is ahead of us in the device's queue. The budgets above
+// bound an operation's time *at the head*: arm_watchdog_ is called from
+// start_front_, so a queued operation carries no timer at all until it gets
+// there. The queue is shared with every other write source -- including the
+// card's own untracked refreshes (30 s) and any entity write -- so the wait a
+// tracked write actually faces is not bounded by its own budget. This is the
+// largest budget anything ahead of it can hold (WATCHDOG_UPLOAD_MS).
+//
+// Erring long is deliberate: the backstop is the last resort, not the normal
+// path, and a backstop that fires early is worse than one that fires late. It
+// reports "no confirmation" for a write the device is still working on, drops
+// the real settle when it arrives, and leaves the edit pending -- reporting
+// failure for a write that succeeded.
+const WATCHDOG_QUEUE_HEAD_MS = 150000;
 const QUICK_RUN_PRESETS = [
   { label: '30m', minutes: 30 },
   { label: '1h', minutes: 60 },
@@ -105,6 +127,17 @@ class AlphaHwrScheduleCard extends HTMLElement {
     this._quickRunCustom = false;
     this._singleEvents = []; // parsed: [{slot, begin, end}]
     this._lastSingleEventsState = '';
+    // Write tracking. Every service call the card makes carries an op_id, and
+    // the device answers each one with exactly one esphome.alpha_hwr_write_settled
+    // event (AGENTS §8.4 rule 4). _inFlight is op_id -> { key, entry, surface },
+    // so a pending edit survives on screen until its own write is confirmed.
+    this._inFlight = new Map();
+    this._writeErrors = []; // [{ label, status, detail }] from the last save
+    this._refreshOnDrain = new Set(); // 'schedule' | 'single'
+    this._settleSub = null; // subscription promise, or null when unsubscribed
+    this._settleBackstop = null;
+    this._settleDeadline = 0; // absolute, so a re-attach resumes it
+    this._backstopUnitMs = WATCHDOG_SCHED_ENTRY_MS; // per-write budget of the current batch
   }
 
   setConfig(config) {
@@ -139,6 +172,23 @@ class AlphaHwrScheduleCard extends HTMLElement {
 
   connectedCallback() {
     if (this._config.device) this._render();
+    // Lovelace re-appends an existing card element when a masonry view
+    // re-columns -- a window resize, the sidebar toggling, entering edit mode
+    // -- which fires disconnectedCallback and connectedCallback on the *same*
+    // instance. Teardown cancels the backstop, so without this a write that is
+    // in flight across a re-attach loses the only thing that would ever
+    // release it: _armBackstop is reached only from _saveChanges and
+    // _trackSingleEvent, and both refuse to run while _inFlight is non-empty.
+    // The card would render "saving…" forever with Save and Discard disabled.
+    //
+    // Re-subscribe first. Teardown removed the settle subscription, and the
+    // only other place it is restored is the `hass` setter -- so between
+    // re-attach and whenever Home Assistant next pushes a state update, a
+    // write could settle into a card that is no longer listening, and the
+    // backstop below would eventually report "no confirmation" for a write the
+    // device accepted.
+    this._subscribeSettled(this._hass);
+    this._rearmBackstop();
     // Update current-time line every minute
     this._nowInterval = setInterval(() => {
       const line = this.shadowRoot?.querySelector('.now-line');
@@ -152,10 +202,20 @@ class AlphaHwrScheduleCard extends HTMLElement {
 
   disconnectedCallback() {
     if (this._nowInterval) clearInterval(this._nowInterval);
+    this._nowInterval = null;
+    if (this._settleBackstop) clearTimeout(this._settleBackstop);
+    this._settleBackstop = null;
+    // subscribeEvents resolves to an unsubscribe function. Teardown can beat
+    // that resolution, so unsubscribe through the promise rather than storing
+    // the function -- otherwise a card removed quickly leaks its subscription.
+    const sub = this._settleSub;
+    this._settleSub = null;
+    if (sub) Promise.resolve(sub).then(unsub => { if (unsub) unsub(); }).catch(() => {});
   }
 
   set hass(hass) {
     this._hass = hass;
+    this._subscribeSettled(hass);
     let needRender = false;
 
     // The schedule grid + enabled flag come from the per-layer read-back sensors
@@ -184,6 +244,174 @@ class AlphaHwrScheduleCard extends HTMLElement {
       needRender = true;
     }
     if (needRender) this._render();
+  }
+
+  /* ─── Write confirmation ─── */
+
+  /** Subscribe to the device's terminal write events.
+   *
+   * The card used to fire its writes and immediately drop the edits that
+   * produced them, then re-read the device on a 3 s timer. Neither number was
+   * connected to anything: a `set_schedule_entry` carries a 20 s watchdog
+   * (WATCHDOG_SCHED_ENTRY_MS) and writes are queued, so N edits can take N x
+   * 20 s to settle. The 3 s read therefore returned the pre-write schedule,
+   * which overwrote the user's edits with stale values -- and a write that
+   * failed outright looked identical to one that succeeded, because the edit
+   * had already been discarded either way.
+   *
+   * Every write answers with exactly one esphome.alpha_hwr_write_settled
+   * event carrying the op_id the card generated, so correlate on that: an
+   * op_id we did not issue is simply not in _inFlight, and no node matching is
+   * needed to reject it. (The event's `node` is used only as a queue-progress
+   * hint, where guessing wrong is free -- see _isOurNode.)
+   */
+  _subscribeSettled(hass) {
+    if (this._settleSub || !hass || !hass.connection ||
+        typeof hass.connection.subscribeEvents !== 'function') return;
+    try {
+      const sub = hass.connection.subscribeEvents(
+        (ev) => this._onWriteSettled(ev), 'esphome.alpha_hwr_write_settled');
+      this._settleSub = sub;
+      Promise.resolve(sub).catch((err) => {
+        console.error('[alpha-hwr-card] write_settled subscribe failed:', err);
+        // Only if it is still ours. A detach/re-attach while this promise was
+        // pending installs a newer subscription, and clearing the handle
+        // unconditionally would strand it -- leaking the new subscription and
+        // letting the next _subscribeSettled add a duplicate on top.
+        if (this._settleSub === sub) this._settleSub = null;
+      });
+    } catch (err) {
+      console.error('[alpha-hwr-card] write_settled subscribe failed:', err);
+      this._settleSub = null;
+    }
+  }
+
+  _onWriteSettled(ev) {
+    const data = (ev && ev.data) || {};
+    const op = this._inFlight.get(data.op_id);
+    if (!op) {
+      // Not ours: another card, an entity write, or one we already resolved.
+      // It is still evidence, though. If it came from our device while we are
+      // waiting, the queue is draining -- which is the one thing the backstop
+      // cannot otherwise know. See _armBackstopForInFlight for why a fixed
+      // slack is not a bound on queue depth.
+      if (this._inFlight.size > 0 && this._isOurNode(data.node)) {
+        this._armBackstopForInFlight();
+      }
+      return;
+    }
+    this._inFlight.delete(data.op_id);
+
+    // CLAMPED means the device took the write and adjusted it -- the edit is
+    // spent either way, and the refresh below shows what actually landed.
+    if (data.status === 'accepted' || data.status === 'clamped') {
+      this._resolvePending(op);
+    } else {
+      this._writeErrors.push({
+        surface: op.surface,
+        label: op.label,
+        status: data.status || 'unknown',
+        detail: data.detail || '',
+      });
+    }
+    this._afterSettle();
+  }
+
+  /** Drop a confirmed edit -- but only if it is still the edit we wrote.
+   *
+   * Identity, not equality: every edit path stores a fresh array, so if the
+   * user moved the same block again while the write was in flight, the map
+   * now holds a different object and the newer intent must survive.
+   */
+  _resolvePending(op) {
+    if (op.surface !== 'schedule') return;
+    if (this._pendingChanges.get(op.key) === op.entry) this._pendingChanges.delete(op.key);
+  }
+
+  /** Called after every settle, and by the backstop timer. */
+  _afterSettle() {
+    if (this._inFlight.size > 0) {
+      // Progress extends the deadline: what is left to wait for is what is
+      // still outstanding, not what the batch started as.
+      this._armBackstopForInFlight();
+      this._render();
+      return;
+    }
+    if (this._settleBackstop) clearTimeout(this._settleBackstop);
+    this._settleBackstop = null;
+    this._settleDeadline = 0;
+    if (this._refreshOnDrain.has('schedule')) this._callRefresh();
+    if (this._refreshOnDrain.has('single')) this._callRefreshSingleEvents();
+    this._refreshOnDrain.clear();
+    this._render();
+  }
+
+  /** Give up waiting.
+   *
+   * A settle event can genuinely never arrive -- HA restarts, the websocket
+   * drops and reconnects, the node reboots mid-write. Rather than pin the
+   * user's edits on screen forever, release them after the device's own
+   * watchdog has had time to fire, and say so.
+   */
+  _armBackstop(ms) {
+    if (this._settleBackstop) clearTimeout(this._settleBackstop);
+    // Absolute, so a re-attach resumes the original deadline rather than
+    // restarting it -- a card that re-columns every few seconds would
+    // otherwise never reach one.
+    this._settleDeadline = Date.now() + ms;
+    this._settleBackstop = setTimeout(() => {
+      this._settleBackstop = null;
+      this._settleDeadline = 0;
+      for (const op of this._inFlight.values()) {
+        this._writeErrors.push({
+          surface: op.surface, label: op.label, status: 'no confirmation', detail: '',
+        });
+      }
+      this._inFlight.clear();
+      this._afterSettle();
+    }, ms);
+  }
+
+  /** Is this settle event from the device this card is bound to?
+   *
+   * Used only as a progress hint, never for correlation -- correlation is by
+   * op_id, which needs no node matching. `node` is App.get_name() while the
+   * card's `device` is the HA device name service ids are built from, and HA
+   * slugifies independently, so compare normalised. A false negative here
+   * costs nothing: the backstop simply is not extended.
+   */
+  _isOurNode(node) {
+    if (!node) return false;
+    const norm = (s) => String(s).toLowerCase().replace(/[^a-z0-9]+/g, '_');
+    return norm(node) === norm(this._config.device);
+  }
+
+  /** Arm the backstop for the work still outstanding, plus queue slack.
+   *
+   * WATCHDOG_QUEUE_HEAD_MS is the largest budget a *single* operation ahead of
+   * us can hold. It is deliberately not a bound on the whole queue: the queue
+   * has no depth limit, queued operations carry no watchdog until they reach
+   * the head, and different (layer, day) cells do not collide, so an arbitrary
+   * number of foreign writes can sit in front of ours. Nine 20 s entry writes
+   * already exceed this slack.
+   *
+   * What closes that gap is not a bigger number but a better signal: every
+   * operation that completes on our node fires a settle event, and
+   * _onWriteSettled re-arms from any of them. So the deadline tracks the queue
+   * actually draining rather than a guess at how deep it is, and the fixed
+   * slack only has to cover the case where the thing ahead of us is a single
+   * long operation that has not finished yet.
+   */
+  _armBackstopForInFlight() {
+    this._armBackstop(this._inFlight.size * this._backstopUnitMs +
+                      WATCHDOG_QUEUE_HEAD_MS + SETTLE_MARGIN_MS);
+  }
+
+  /** Restore the backstop after a re-attach, honouring the original deadline. */
+  _rearmBackstop() {
+    if (this._settleBackstop || this._inFlight.size === 0) return;
+    if (!this._settleDeadline) return;
+    this._armBackstop(Math.max(0, this._settleDeadline - Date.now()));
   }
 
   /** Rebuild the internal schedule model { e, s:{ layer: [7 cells] } } from the
@@ -308,11 +536,25 @@ class AlphaHwrScheduleCard extends HTMLElement {
     return this._pendingChanges.size > 0;
   }
 
+  /** True while at least one write is out and unconfirmed. */
+  _isSaving() {
+    return this._inFlight.size > 0;
+  }
+
+  /** True if a clear_single_event for this slot is out and unconfirmed. */
+  _slotInFlight(slot) {
+    for (const op of this._inFlight.values()) {
+      if (op.clearedSlot === slot) return true;
+    }
+    return false;
+  }
+
   /* ─── Render ─── */
 
   _render() {
     const enabled = this._schedule ? this._schedule.e : 0;
     const hasPending = this._hasPendingChanges();
+    const saving = this._isSaving();
     const now = new Date();
     const nowMins = now.getHours() * 60 + now.getMinutes();
     const nowPct = (nowMins / MINUTES_IN_DAY) * 100;
@@ -336,7 +578,8 @@ class AlphaHwrScheduleCard extends HTMLElement {
             <button class="quick-run-chip ${this._showQuickRun ? 'active' : ''}" data-action="toggle-quick-run">
               <ha-icon icon="mdi:flash" style="--mdc-icon-size:14px;margin-right:3px"></ha-icon>Quick Run
             </button>
-            ${hasPending ? '<span class="unsaved-badge">unsaved</span>' : ''}
+            ${saving ? `<span class="unsaved-badge saving">saving ${this._inFlight.size}…</span>`
+    : hasPending ? '<span class="unsaved-badge">unsaved</span>' : ''}
           </div>
         </div>
 
@@ -367,18 +610,52 @@ class AlphaHwrScheduleCard extends HTMLElement {
               <ha-icon icon="mdi:refresh" style="--mdc-icon-size:18px"></ha-icon>
             </button>
             ${hasPending ? `
-              <button class="btn btn-outline" data-action="discard">Discard</button>
-              <button class="btn btn-primary btn-save" data-action="save">
+              <button class="btn btn-outline" data-action="discard" ${saving ? 'disabled' : ''}>Discard</button>
+              <button class="btn btn-primary btn-save" data-action="save" ${saving ? 'disabled' : ''}>
                 <ha-icon icon="mdi:content-save" style="--mdc-icon-size:16px;margin-right:4px"></ha-icon>
-                Save
+                ${saving ? 'Saving…' : 'Save'}
               </button>
             ` : ''}
           </div>
         </div>
+        ${this._renderWriteErrors()}
       </ha-card>
     `;
 
     this._attachEvents();
+  }
+
+  /** Escape for interpolation into the innerHTML template.
+   *
+   * `detail` on a settle event is built by the device and echoes the request
+   * that failed ("parse error: <payload>"), so it is attacker-influenced by
+   * anyone who can call the service. Everything from the wire gets escaped
+   * before it reaches innerHTML.
+   */
+  _esc(s) {
+    return String(s === undefined || s === null ? '' : s)
+      .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
+      .replace(/"/g, '&quot;').replace(/'/g, '&#39;');
+  }
+
+  /** Report writes the device did not accept.
+   *
+   * The point of the whole settle path: a failed write used to be
+   * indistinguishable from a successful one, because the edit was discarded
+   * before either answer arrived.
+   */
+  _renderWriteErrors() {
+    if (this._writeErrors.length === 0) return '';
+    return `
+      <div class="write-errors">
+        <ha-icon icon="mdi:alert-circle-outline" style="--mdc-icon-size:16px"></ha-icon>
+        <div class="write-errors-list">
+          ${this._writeErrors.map(e => `<div class="write-error">
+            <strong>${this._esc(e.label)}</strong>: ${this._esc(e.status)}${e.detail ? ` — ${this._esc(e.detail)}` : ''}
+          </div>`).join('')}
+          <div class="write-error-hint">Edits are still pending; press Save to retry.</div>
+        </div>
+      </div>`;
   }
 
   /** Fold dated intervals onto the card's (weekday, minute-of-day) grid.
@@ -602,6 +879,9 @@ class AlphaHwrScheduleCard extends HTMLElement {
   _renderQuickRunPanel() {
     if (!this._showQuickRun) return '';
     const now = new Date();
+    // Only one write may be outstanding at a time. Render that, rather than
+    // letting a live-looking button swallow the click.
+    const busy = this._isSaving();
 
     // Custom time picker defaults
     const defStartH = now.getHours();
@@ -626,10 +906,16 @@ class AlphaHwrScheduleCard extends HTMLElement {
       const bStr = `${String(ev.begin.getHours()).padStart(2, '0')}:${String(ev.begin.getMinutes()).padStart(2, '0')}`;
       const eStr = `${String(ev.end.getHours()).padStart(2, '0')}:${String(ev.end.getMinutes()).padStart(2, '0')}`;
       const dStr = `${String(ev.begin.getMonth() + 1).padStart(2, '0')}/${String(ev.begin.getDate()).padStart(2, '0')}`;
-      return `<div class="qr-event-row">
+      const removing = this._slotInFlight(ev.slot);
+      // Disabled for *any* outstanding write, not just this row's: a second
+      // clear would be refused, and a button that looks live but does nothing
+      // is worse than one that says why.
+      return `<div class="qr-event-row ${removing ? 'pending' : ''}">
             <span class="qr-event-time">${dStr} ${bStr}–${eStr}</span>
-            <button class="qr-event-clear" data-action="clear-single-event" data-slot="${ev.slot}" title="Remove">
-              <ha-icon icon="mdi:close" style="--mdc-icon-size:14px"></ha-icon>
+            <button class="qr-event-clear" data-action="clear-single-event" data-slot="${ev.slot}"
+                    title="${removing ? 'Removing…' : busy ? 'Waiting for the current write' : 'Remove'}"
+                    ${busy ? 'disabled' : ''}>
+              <ha-icon icon="${removing ? 'mdi:timer-sand' : 'mdi:close'}" style="--mdc-icon-size:14px"></ha-icon>
             </button>
           </div>`;
     }).join('')}
@@ -651,7 +937,8 @@ class AlphaHwrScheduleCard extends HTMLElement {
           <span class="time-colon">:</span>
           <select class="time-sel" data-field="qrEndM">${minOpts(defEndM)}</select>
         </div>
-        <button class="btn btn-sm btn-primary" data-action="schedule-custom-run" style="margin-top:6px">
+        <button class="btn btn-sm btn-primary" data-action="schedule-custom-run" style="margin-top:6px"
+                ${busy ? 'disabled' : ''}>
           <ha-icon icon="mdi:calendar-plus" style="--mdc-icon-size:15px;margin-right:4px"></ha-icon> Schedule
         </button>
       </div>` : '';
@@ -665,7 +952,7 @@ class AlphaHwrScheduleCard extends HTMLElement {
         </div>
         <div class="qr-presets">
           ${QUICK_RUN_PRESETS.map(p => `
-            <button class="qr-preset" data-action="quick-run-preset" data-minutes="${p.minutes}">${p.label}</button>
+            <button class="qr-preset" data-action="quick-run-preset" data-minutes="${p.minutes}" ${busy ? 'disabled' : ''}>${p.label}</button>
           `).join('')}
           <button class="qr-preset qr-preset-custom ${this._quickRunCustom ? 'active' : ''}" data-action="toggle-quick-run-custom">
             <ha-icon icon="mdi:clock-edit-outline" style="--mdc-icon-size:15px;margin-right:3px"></ha-icon>Custom
@@ -739,9 +1026,36 @@ class AlphaHwrScheduleCard extends HTMLElement {
         border-radius: 10px;
         animation: pulse-badge 2s infinite;
       }
+      .unsaved-badge.saving {
+        background: var(--secondary-text-color, #888);
+      }
       @keyframes pulse-badge {
         0%, 100% { opacity: 1; }
         50% { opacity: 0.6; }
+      }
+      .btn[disabled] {
+        opacity: 0.55;
+        cursor: default;
+        pointer-events: none;
+      }
+      .write-errors {
+        display: flex;
+        gap: 8px;
+        align-items: flex-start;
+        margin: 0 12px 12px;
+        padding: 8px 10px;
+        border-radius: 8px;
+        color: var(--danger);
+        background: color-mix(in srgb, var(--danger) 10%, transparent);
+        font-size: 0.82em;
+      }
+      .write-error strong { font-weight: 600; }
+      .write-error-hint {
+        margin-top: 4px;
+        color: var(--secondary-text-color, #888);
+      }
+      .qr-event-row.pending {
+        opacity: 0.5;
       }
 
       /* ─ Grid ─ */
@@ -1627,6 +1941,8 @@ class AlphaHwrScheduleCard extends HTMLElement {
   }
 
   _discardChanges() {
+    if (this._isSaving()) return; // writes are already out; let them settle
+    this._writeErrors = [];
     this._pendingChanges.clear();
     this._selectedBlock = null;
     this._showApplyTo = false;
@@ -1646,23 +1962,54 @@ class AlphaHwrScheduleCard extends HTMLElement {
    *
    * The rejection surfaces only as an unhandled promise rejection, so failures
    * were invisible; catch and log them.
+   *
+   * `track`, when given, registers the call in _inFlight under its op_id so
+   * the write is not treated as done until the device says it is. A call HA
+   * itself rejects never produces a settle event, so drop it here too.
    */
-  _callService(service, data = {}) {
+  _callService(service, data = {}, track = null) {
     const device = this._config.device;
     this._opSeq = (this._opSeq || 0) + 1;
-    const opId = `card-${Date.now()}-${this._opSeq}`;
+    // The sequence counter is per card instance, and settle events are global:
+    // two cards -- two dashboard views, two browser tabs -- that issue their
+    // Nth call in the same millisecond would mint the same id, and each would
+    // then consume the other's result and retire the wrong edit. A random
+    // component makes the id unique across instances rather than within one.
+    const opId = `card-${Date.now()}-${this._opSeq}-${Math.random().toString(36).slice(2, 10)}`;
+    if (track) this._inFlight.set(opId, track);
     return this._hass
       .callService('esphome', `${device}_${service}`, { ...data, op_id: opId })
       .catch((err) => {
         console.error(`[alpha-hwr-card] ${service} failed:`, err);
+        if (track && this._inFlight.delete(opId)) {
+          this._writeErrors.push({
+            surface: track.surface, label: track.label,
+            status: 'call rejected', detail: String(err),
+          });
+          this._afterSettle();
+        }
       });
   }
 
   _saveChanges() {
-    for (const [key, entry] of this._pendingChanges) {
+    // One save at a time. Re-issuing writes for edits already in flight would
+    // put two op_ids on one cell, and the loser's settle would resolve an edit
+    // the winner is still carrying.
+    if (this._inFlight.size > 0) return;
+
+    const batch = [...this._pendingChanges];
+    if (batch.length === 0) return;
+    // Clear only this surface's errors. These writes are the retry for them; a
+    // Quick Run is not, and must not wipe a schedule failure the user has not
+    // read yet.
+    this._writeErrors = this._writeErrors.filter(e => e.surface !== 'schedule');
+    this._refreshOnDrain.add('schedule');
+
+    for (const [key, entry] of batch) {
       const [day, layer] = key.split(',').map(Number);
+      const track = { surface: 'schedule', key, entry, label: `${DAYS[day]} layer ${layer}` };
       if (entry === null) {
-        this._callService('clear_schedule_entry', { data: `${layer},${day}` });
+        this._callService('clear_schedule_entry', { data: `${layer},${day}` }, track);
       } else {
         const [start, end] = entry;
         // A block dragged to the right edge yields end === 1440, which
@@ -1676,16 +2023,18 @@ class AlphaHwrScheduleCard extends HTMLElement {
         const em = endClamped % 60;
         this._callService('set_schedule_entry', {
           data: `${layer},${day},${sh},${sm},${eh},${em}`,
-        });
+        }, track);
       }
     }
 
-    this._pendingChanges.clear();
+    // The edits stay in _pendingChanges until their own settle arrives; the
+    // grid keeps showing what the user asked for rather than snapping back.
     this._selectedBlock = null;
     this._showApplyTo = false;
     this._editingTime = false;
 
-    setTimeout(() => this._callRefresh(), 3000);
+    this._backstopUnitMs = WATCHDOG_SCHED_ENTRY_MS;
+    this._armBackstopForInFlight();
     this._render();
   }
 
@@ -1713,9 +2062,8 @@ class AlphaHwrScheduleCard extends HTMLElement {
     const now = Math.floor(Date.now() / 1000);
     const begin = now + 60; // start 1 minute from now
     const end = begin + durationMinutes * 60;
-    this._callService('set_single_event', { data: `${begin},${end}` });
-    // Refresh after a delay to see the new event
-    setTimeout(() => this._callRefreshSingleEvents(), 3000);
+    this._trackSingleEvent('set_single_event', { data: `${begin},${end}` },
+                           `Quick Run ${durationMinutes} min`);
   }
 
   _scheduleCustomRun() {
@@ -1736,17 +2084,33 @@ class AlphaHwrScheduleCard extends HTMLElement {
 
     if (endTs <= beginTs) return;
 
-    this._callService('set_single_event', { data: `${beginTs},${endTs}` });
     this._quickRunCustom = false;
-    setTimeout(() => this._callRefreshSingleEvents(), 3000);
+    this._trackSingleEvent('set_single_event', { data: `${beginTs},${endTs}` },
+                           'Custom run');
   }
 
   _clearSingleEvent(slot) {
-    this._callService('clear_single_event', { data: `${slot}` });
-    // Optimistic removal from local state
-    this._singleEvents = this._singleEvents.filter(e => e.slot !== slot);
+    // No optimistic removal: a single-event write carries a 60 s watchdog, so
+    // a row deleted on faith would sit gone for up to a minute and then
+    // reappear if the write failed. Mark it pending and let the settle decide.
+    this._trackSingleEvent('clear_single_event', { data: `${slot}` }, `Event ${slot}`,
+                           { clearedSlot: slot });
+  }
+
+  /** Issue a single-event write and wait for its settle, like _saveChanges. */
+  _trackSingleEvent(service, data, label, extra = {}) {
+    // One outstanding write at a time: the backstop is a single timer, so a
+    // second op would either inherit the first's deadline or overwrite it. The
+    // constraint is rendered -- every button that reaches here is disabled
+    // while _isSaving() -- so this guard is a backstop against a stale click,
+    // not the mechanism the user sees.
+    if (this._inFlight.size > 0) return;
+    this._writeErrors = this._writeErrors.filter(e => e.surface !== 'single');
+    this._refreshOnDrain.add('single');
+    this._callService(service, data, { surface: 'single', label, ...extra });
+    this._backstopUnitMs = WATCHDOG_SINGLE_EVENT_MS;
+    this._armBackstopForInFlight();
     this._render();
-    setTimeout(() => this._callRefreshSingleEvents(), 3000);
   }
 
   _callRefreshSingleEvents() {
