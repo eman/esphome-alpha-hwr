@@ -30,6 +30,33 @@
 
 ### Changed
 
+- **The 0.3 GPM `flow_threshold` floor is settled by measurement, and stays**
+  ([#180](https://github.com/eman/esphome-alpha-hwr/issues/180)). `AGENTS.md`
+  §11.4 asked for one specific analysis before anyone touched the floor: the
+  distribution of pump-off meter readings in the 0.05-0.30 band, split by
+  proximity to a pump-off edge. That analysis now exists, over 10.4 days of one
+  installation - 2,646 household-meter samples, 1,306 with the pump confirmed
+  off, 81 pump-off edges, against the 14 h that opened the issue.
+
+  Both halves of the original hypothesis hold, and together they argue for
+  leaving the floor alone. Shutdown decay is real: the sub-threshold band is
+  3.2x enriched within 30 s of a pump-off edge (33.1 % against a 10.3 % base
+  rate), while the bands *above* the floor are depleted near edges at 0.71x and
+  0.49x - decay lands below 0.3 specifically, which is what the floor is
+  keeping out. But the genuine remainder turns out to be almost entirely
+  demand that is already detected: **89 % of it falls within 60 s of a reading
+  that already exceeds 0.30**, the ramp-up and tail-off shoulders of draws the
+  detector has already declared. Truly isolated sub-threshold draws run to one
+  episode in 10.4 days, and a lower floor buys a median of 0 s in onset lead.
+
+  So the issue's premise - 24 sub-threshold pump-off samples read as discarded
+  demand - was a sample-count argument. At episode level over 18x the window,
+  lowering the floor would admit a measurable false-positive population to
+  recover roughly one short draw per ten days. No code changes; the floor stays
+  at 0.3 on evidence rather than by default, and both the AGENTS.md note and the
+  `docs/configuration.md` row now record the numbers so this is not re-litigated
+  on intuition.
+
 - **BREAKING — the six pump services are renamed to match the `command` their
   settle event reports** ([#159](https://github.com/eman/esphome-alpha-hwr/issues/159)):
 
