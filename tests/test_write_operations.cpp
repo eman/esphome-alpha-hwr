@@ -1784,6 +1784,12 @@ static void test_command_strings() {
   // named commands stops matching the table above and this fails until the new
   // command is pinned here too. Without it the table only proves that the
   // commands somebody remembered to list are right.
+  //
+  // It covers one of the two ways to add a command. An enumerator added with
+  // no case in write_command_to_string() returns "unknown", leaving the count
+  // at 15, so this assert stays green -- that half is caught by -Wswitch and
+  // CI's warnings-are-errors build, not here. Weakening either leaves the gap
+  // uncovered.
   size_t named = 0;
   for (int v = 0; v < 256; v++) {
     if (strcmp(to_string(static_cast<WriteCommand>(v)), "unknown") != 0)

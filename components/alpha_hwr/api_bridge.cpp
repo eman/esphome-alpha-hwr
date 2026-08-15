@@ -36,6 +36,14 @@ void AlphaHwrApiBridge::setup(AlphaHwrComponent *component) {
   // test_write_operations.cpp::test_command_strings() pins every one of them:
   // editing a string in write_command_to_string() renames a Home Assistant
   // service along with the event field.
+  //
+  // What that test cannot reach: this file is compiled only against the real
+  // ESPHome API headers, so no host test builds it and the mutation check has
+  // no target here. Pairing a handler with the wrong enumerator below compiles,
+  // passes the whole suite and passes the firmware build -- it surfaces only on
+  // a bench service listing or in somebody's automation. The pairings are
+  // one-per-line and adjacent to their argument lists for that reason; a
+  // service listing from a real node is the check.
   const auto name = services::write_command_to_string;
 
   register_service(&AlphaHwrApiBridge::on_set_enabled, name(WriteCommand::SET_PUMP_ENABLED),
