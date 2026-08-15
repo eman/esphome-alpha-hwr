@@ -640,7 +640,7 @@ void test_an_unmeasurable_continuation_expires() {
 
   // Pump starts and stays at 1650 rpm -- below pump_on_demand_min_speed_rpm,
   // where the pump's own flow estimate is not trustworthy enough to subtract.
-  // The meter reads 0.71 GPM of loop flow throughout, still 2.4x threshold.
+  // The meter reads 0.71 GPM of loop flow throughout, still more than 2x threshold.
   const uint32_t on = T0 + 2 * TICK_MS;
   int continuation_ticks = 0;
   for (int i = 0; i <= 180; i++) {  // 30 minutes

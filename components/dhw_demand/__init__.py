@@ -235,13 +235,12 @@ CONFIG_SCHEMA = (
             # Bounded for the uint32_t wrap reason; 0 disables.
             cv.Optional(CONF_PUMP_ON_SETTLE_SECONDS, default=10):
                 cv.int_range(min=0, max=3600),
-            # How long the continuation tier may keep asserting a draw that
-            # nothing has measured since. It only ever runs out while the
-            # subtraction is unavailable, because a subtraction below threshold
-            # releases the tier on the spot; the case it bounds is a pump
-            # turning below pump_on_demand_min_speed_rpm, where no measurement
-            # of household draw exists at all and the claim would otherwise
-            # stand for the whole run.
+            # How long the continuation tier may keep asserting a draw that no
+            # measurement has *supported* for that long. A subtraction above
+            # threshold re-stamps the support time, so this is not a ceiling on
+            # the pump run; it bounds the blind case, a pump turning below
+            # pump_on_demand_min_speed_rpm, where no measurement of household
+            # draw exists to support or contradict the claim.
             #
             # Bounded for the same uint32_t wrap reason as the staleness keys.
             # 0 disables the tier outright rather than making it unbounded --

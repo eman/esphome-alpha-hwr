@@ -217,7 +217,7 @@
   just before the pump started is still running, and its only test for "still
   drawing?" was household flow above 0.3 GPM. While the pump runs that meter is
   reading the recirculation loop, and every pump-on value recorded here clears
-  0.3 by at least 2.4x -- 0.71 GPM at the pump's 1650 RPM clamp floor, a 1.31
+  0.3 by more than 2x -- 0.71 GPM at the pump's 1650 RPM clamp floor, a 1.31
   no-draw median, 2.22 at the no-draw p90 -- so the exit was unreachable. A
   1.80 GPM draw stopping five minutes into a thirty-minute run held
   `dhw_demand` true at 0.85 confidence for the remaining twenty-five, with
@@ -253,18 +253,17 @@
   this exit passed only because it used a 0.1 GPM meter reading -- below every
   value the repo has ever recorded with the pump running.
 
-  Verified on hardware with a real draw, twice. A tap opened with the pump off
-  gave `deterministic_flow`; starting the pump armed
-  `deterministic_continuation` at 3667 RPM; closing the tap released it 20 s
-  later with
+  Verified on hardware with a real draw. A tap opened with the pump off gave
+  `deterministic_flow`; starting the pump armed `deterministic_continuation`;
+  closing the tap released it 20 s later, the log naming the subtraction as
+  what ended it. The pump was still turning when demand went `OFF`, so the
+  meter was still reading loop flow above threshold -- the condition under
+  which the tier previously held for the rest of the run.
 
-      Continuation retired: subtraction measured -0.47 GPM,
-      at or below the 0.30 GPM threshold
-
-  -- the quiet-loop negative residual, and the release naming the tier that
-  ended it. The pump was still turning at 2499 RPM at that moment, which is the
-  whole point: the meter was still reading loop flow far above threshold, and
-  before this change the tier would have held for the rest of the run.
+  That run predates the zero-threshold and two-tick changes above, which came
+  out of an adversarial review of the first version. It establishes that the
+  tier releases on a stopped draw; it does not exercise the released
+  thresholds. The small-draw and transient cases are covered by host tests.
 
 - **Device information and the operating statistics could silently never be
   read.** The one-time chain that fetches them is latched by a flag that only a

@@ -88,7 +88,7 @@ two are normally paired, with pump telemetry feeding the detector.
 - **Ending the continuation is the hard part.** Its original exit was "and flow
   is still above threshold now", which cannot go false while the pump runs — the
   meter is reading the recirculation loop, which clears the threshold by at
-  least 2.4× at every speed recorded here. A draw that stopped mid-run therefore
+  more than 2x at every speed recorded here. A draw that stopped mid-run therefore
   kept publishing demand until the pump did. It now ends on the subtraction
   measuring the draw as over (which also retires the stored evidence, so a later
   loss of the subtraction cannot resurrect a disproved claim), or on an expiry

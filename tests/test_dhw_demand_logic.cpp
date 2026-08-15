@@ -725,7 +725,7 @@ void test_continuation_releases_when_the_draw_stops() {
   // Audit finding 10. Until this fix the tier's only "still drawing?" test was
   // raw meter flow above 0.3 GPM, which cannot go false while the pump runs:
   // the meter sees the recirculation loop, and every pump-on reading this repo
-  // records clears 0.3 by at least 2.4x. So a draw that stopped five minutes
+  // records clears 0.3 by more than 2x. So a draw that stopped five minutes
   // into a thirty-minute run kept publishing demand at confidence 0.85 for the
   // remaining twenty-five.
   //

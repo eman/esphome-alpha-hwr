@@ -552,8 +552,8 @@ void DhwDemandComponent::update() {
     // this is not a per-tick cost, and the default level is INFO (issue #127
     // keeps DEBUG off, which is exactly when a field report of "demand stayed
     // on" would be impossible to diagnose). AGENTS §11.8 rule 7 puts state
-    // transitions at LOGD; these two are the exception it does not cover,
-    // because they are the only place the tier's *reason* for stopping exists.
+    // transitions at LOGD and names these two as its one documented exception,
+    // because they are the only record of *why* the tier stopped.
     if (result.continuation == ContinuationVerdict::MEASURED_STOPPED) {
       ESP_LOGI(TAG, "Continuation retired: subtraction measured %.2f GPM, at "
                     "or below the %.2f GPM threshold",
