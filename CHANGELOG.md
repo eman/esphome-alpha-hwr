@@ -253,17 +253,21 @@
   this exit passed only because it used a 0.1 GPM meter reading -- below every
   value the repo has ever recorded with the pump running.
 
-  Verified on hardware with a real draw. A tap opened with the pump off gave
-  `deterministic_flow`; starting the pump armed `deterministic_continuation`;
-  closing the tap released it 20 s later, the log naming the subtraction as
-  what ended it. The pump was still turning when demand went `OFF`, so the
-  meter was still reading loop flow above threshold -- the condition under
-  which the tier previously held for the rest of the run.
+  Verified on hardware. A full draw armed the tier and closing the tap released
+  it, the log naming the subtraction as what ended it, with the pump still
+  turning -- so the meter was still reading loop flow above threshold, the
+  condition under which the tier previously held for the rest of the run.
 
-  That run predates the zero-threshold and two-tick changes above, which came
-  out of an adversarial review of the first version. It establishes that the
-  tier releases on a stopped draw; it does not exercise the released
-  thresholds. The small-draw and transient cases are covered by host tests.
+  The small-draw case was then measured directly, which is the run that
+  matters. A 0.60 GPM draw armed the tier; reduced mid-run without being
+  closed, the subtraction settled at **+0.226 GPM for 26 s** -- inside the 0 to
+  0.3 band where the first version of this fix retired the capture -- and the
+  tier held throughout, publishing no method change for 3 m 48 s until the tap
+  was actually closed, at which point the subtraction went to -1.09 GPM and it
+  released. That run also put the steady residual at -0.08 GPM (tap 0.602,
+  difference 0.52), inside the documented -0.10 +/- 0.06, confirming the -0.47
+  seen earlier was a deceleration transient rather than bias -- the case the
+  tick count covers.
 
 - **Device information and the operating statistics could silently never be
   read.** The one-time chain that fetches them is latched by a flag that only a
