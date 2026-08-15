@@ -248,7 +248,7 @@ the node's own connection state for availability instead.
 | Option | Type | Default | Description |
 | --- | --- | --- | --- |
 | `pump_off_current_threshold` | float | `0.03` | A — below this the pump counts as off |
-| `flow_threshold` | float | `0.3` | GPM — flow above this is a draw |
+| `flow_threshold` | float | `0.3` | GPM. Also the no-flow guard, the detector's primary false-positive filter. **Known limitation:** draws below this are not detected at all — a steady 0.11–0.16 GPM draw measures as `deterministic_idle`. Lowering it is a measurement question rather than a preference, because recirculation collapses through any floor after a pump-off edge; see `AGENTS.md` §11.4. |
 | `thermal_collapse_rate` | float | `0.05` | °F/s — tank cooling faster than this signals a draw |
 | `dhw_charge_drop_rate` | float | `0.005` | %/s — charge falling faster than this signals a draw |
 | `pump_on_demand_flow_threshold` | float | `0.3` | GPM of **computed** demand (`flow − pump_flow`) above which a pump-on draw is declared. Shares `flow_threshold`'s value deliberately, so both pump regimes agree on what counts as flow |

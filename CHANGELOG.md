@@ -269,6 +269,20 @@
   seen earlier was a deceleration transient rather than bias -- the case the
   tick count covers.
 
+  One finding from that bench is recorded rather than fixed here. A steady
+  household draw metering 0.11-0.16 GPM produced `deterministic_idle`
+  throughout: it never cleared `flow_threshold` (0.3 GPM), so nothing detected
+  it at all. Across 14 h of one installation, 24 sub-threshold samples fell in
+  `0 < flow < 0.30` **with the pump confirmed off** -- readings where the meter
+  sees only genuine demand. The meter reports a hard `0.0` at rest rather than
+  dithering, so this is real signal below the floor rather than noise, and the
+  obstacle to lowering it is recirculation decay passing through any threshold
+  after a pump-off edge rather than sensor resolution. That needs the same kind
+  of edge-proximity measurement that placed
+  `latch_pump_off_suppression_seconds`, so the floor is unchanged and the
+  limitation is now documented in `AGENTS.md` §11.4 and
+  `docs/configuration.md`. Issue #180.
+
 - **Device information and the operating statistics could silently never be
   read.** The one-time chain that fetches them is latched by a flag that only a
   BLE disconnect clears. It normally runs after authentication, but it also
