@@ -472,6 +472,8 @@ private:
 #endif
 
   // Operating statistics sensors
+  // Link diagnostics (issue #176) — not operating statistics; the comment above
+  // labels start_count_/operating_hours_ further down.
   sensor::Sensor *link_recycles_sensor_{nullptr};
   sensor::Sensor *link_max_gap_sensor_{nullptr};
   // Last values published to the two above, for the change gate. Sentinels

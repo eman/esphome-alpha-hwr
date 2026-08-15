@@ -80,6 +80,15 @@ void AlphaHwrComponent::setup() {
     // subscribe paths that never call subscribed_callback_() leave the session
     // short of READY forever, and those need recycling too.
     this->link_last_inbound_ms_ = this->link_last_open_ms_;
+    // ...and re-arm the gap sampler with it. Without this the first
+    // notification of the *second* and every later connection measures the
+    // handshake as an inter-notification gap -- link_watchdog.h budgets 17.2 s
+    // worst case from open to first inbound data -- and since link_max_gap_ms_
+    // is a running maximum it never comes back down. The statistic that is
+    // supposed to choose a data_timeout default would then be biased upward by
+    // its own reconnects, which argues for a longer timeout: exactly the
+    // self-serving direction.
+    this->link_had_inbound_ = false;
     this->evaluate_link_status();
   });
 
@@ -200,12 +209,23 @@ void AlphaHwrComponent::setup() {
         }
         this->link_had_inbound_ = true;
 
-        // Data arrived, so whatever the link was doing, it is doing it again.
-        // Both the backoff and its counter reset here and only here -- the
-        // window must return to the configured budget for a pump that comes
-        // back hours later, or it would be served by an hour-wide window.
-        this->link_data_timeout_current_ms_ = this->link_data_timeout_ms_;
-        this->link_recycles_without_data_ = 0;
+        // Data arrived, so whatever the link was doing, it is doing it again --
+        // but only frames received while the session is READY count as that
+        // proof. A pump that answers the handshake and then goes silent
+        // delivers one frame per session, and link_watchdog.h records that
+        // control-mode notifications *are* received during the handshake on
+        // this specimen. Resetting on those would clear the window and the
+        // counter once per session forever: the backoff would never engage, and
+        // the counter an automation is supposed to threshold on would read 0
+        // while the node recycled ~1,200 times a day. Simulated at exactly that.
+        //
+        // Post-READY frames are the poll responses, which are what "the link
+        // works" actually means. A pump that comes back after hours reaches
+        // READY and resets from there.
+        if (this->session_.is_ready()) {
+          this->link_data_timeout_current_ms_ = this->link_data_timeout_ms_;
+          this->link_recycles_without_data_ = 0;
+        }
 
         this->link_last_inbound_ms_ = inbound_now;
 

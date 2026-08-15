@@ -70,6 +70,15 @@ That matters because a recycle is not free: each one re-enters the
 encryption-on-open path on a bonded pump, taking one more run at the window
 where an encryption request can fail and erase the bond.
 
+The cost is a slower recovery in one case. The window only governs a session
+that is *connected but silent* — a pump that loses power drops the link, and the
+node reconnects on its own cadence with the window reset — but a pump that stays
+connected and mute for over an hour will have grown the window to the ceiling,
+and if it starts answering just after a check it waits up to a further hour to
+be noticed. Worst case is 60 minutes against roughly 66 seconds before. That is
+the trade for bounding the recycle count; set `data_timeout: 0s` to opt out of
+the watchdog altogether if it is the wrong one for your setup.
+
 Two optional diagnostic sensors expose the state:
 
 | Entity | Reads |

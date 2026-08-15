@@ -301,9 +301,16 @@ void test_backoff_cannot_wrap_into_a_tiny_window() {
               "can overflow");
 
   // And with a cap above it, the doubling itself is what must not wrap.
+  // Pinned exactly, not as an inequality. `out2 >= huge` let the overflow
+  // clamp be mutated to `return current_ms;` with the suite still green -- the
+  // two differ for real inputs (2147483648 with a 4294967295 cap gives
+  // 4294967295 against 2147483648) even though the shipped 1-hour cap makes the
+  // branch unreachable in production. A dead branch is still worth pinning if
+  // it is the one standing between a doubling and a wrap.
   const uint32_t out2 = link_data_timeout_next(huge, 0xFFFFFFFFu);
-  TEST_ASSERT(out2 >= huge,
-              "Doubling toward a huge cap never produces a smaller window");
+  TEST_ASSERT(out2 == 0xFFFFFFFFu,
+              "Doubling toward a huge cap clamps to the cap rather than "
+              "wrapping to a tiny window");
 }
 
 int main() {
