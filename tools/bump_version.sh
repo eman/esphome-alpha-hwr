@@ -67,6 +67,7 @@ FILES=(
     "hwr-pairing-example.yaml"
     "hwr-pump-schedule-example.yaml"
     "dhw-demand-example.yaml"
+    "hwr-pump-dhw-example.yaml"
     "packages/alpha_hwr_base.yaml"
     "packages/alpha_hwr_pairing.yaml"
     "packages/dhw_demand_detector.yaml"

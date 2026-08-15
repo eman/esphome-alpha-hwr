@@ -240,6 +240,20 @@ test-gcc: clean test
 test-clang: CXX = clang++
 test-clang: clean test
 
+# The Lovelace card. Plain node against a stubbed DOM -- no npm, no lockfile,
+# nothing to install. Kept out of `test` so the mutation check (which drives
+# `make test`) keeps running only what a C++ mutation can reach; `test-all`
+# runs both. Absent node is a skip, not a failure: a C++-only checkout should
+# still get a green suite.
+test-js:
+	@if command -v node >/dev/null 2>&1; then \
+	  node js/test_schedule_card.js; \
+	else \
+	  echo "node not found; skipping the Lovelace card tests"; \
+	fi
+
+test-all: test test-js
+
 # Clean build artifacts
 clean:
 	rm -f $(TESTS) *.o
@@ -254,6 +268,8 @@ help:
 	@echo "  test-asan   - Build and run under ASan/UBSan (+LSan on Linux)"
 	@echo "  test-gcc    - Build and run tests with GCC"
 	@echo "  test-clang  - Build and run tests with Clang"
+	@echo "  test-js     - Run the Lovelace card tests (node, no deps)"
+	@echo "  test-all    - Run the C++ suite and the card tests"
 	@echo "  clean       - Remove build artifacts"
 	@echo "  help        - Show this help message"
 	@echo ""
@@ -262,4 +278,4 @@ help:
 	@echo "  CXXFLAGS    - Compiler flags"
 	@echo "  LDFLAGS     - Linker flags"
 
-.PHONY: all test test-asan test-gcc test-clang clean help
+.PHONY: all test test-asan test-gcc test-clang test-js test-all clean help

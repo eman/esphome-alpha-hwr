@@ -191,6 +191,7 @@ jobs:
           status=0
           for f in hwr-pump-example.yaml hwr-pairing-example.yaml \
                    hwr-pump-schedule-example.yaml dhw-demand-example.yaml \
+                   hwr-pump-dhw-example.yaml \
                    components/alpha_hwr/discovery_example.yaml; do
             echo "::group::$f"
             if ! esphome config "$f"; then
@@ -289,6 +290,12 @@ jobs:
 
       - name: Syntax check
         run: node --check homeassistant/www/alpha-hwr-schedule-card.js
+
+      # Behaviour, not just parseability. Plain node against a stubbed DOM --
+      # no npm install, nothing to keep current.
+      - name: Card tests
+        run: make test-js
+        working-directory: tests
 
       # Every alpha_hwr service declares an op_id argument and Home Assistant
       # registers those as required, so a call without one is rejected before it

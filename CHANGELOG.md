@@ -2,7 +2,63 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- **The schedule card treated every write as successful.** `_saveChanges`
+  discarded the user's pending edits at call time, then re-read the device on a
+  3 s timer. A `set_schedule_entry` carries a 20 s watchdog and writes are
+  queued, so the read returned pre-write state and overwrote the edit with the
+  value it was meant to replace — and a write the device *rejected* looked
+  exactly like one it accepted, because the edit was gone either way. The card
+  already generated a unique `op_id` per call and the device already answers
+  every write with exactly one `esphome.alpha_hwr_write_settled` carrying it;
+  the card simply never subscribed. It does now: an edit stays on the grid
+  until its own write settles, failures are named on the card with the device's
+  own detail string, and the refresh fires when the batch drains rather than on
+  a timer. An edit re-made while its write is in flight survives the older
+  write's confirmation.
+
+  A settle event can legitimately never arrive — a Home Assistant restart, a
+  websocket reconnect, a node reboot — so a backstop releases the wait after
+  the firmware's own watchdog budget has had time to fire, and says that is
+  what happened rather than reporting success.
+
+  The single-event paths had the same defect against a 60 s watchdog, plus an
+  optimistic local delete that made a failed clear look like a success for the
+  better part of a minute. Both are fixed the same way.
+
+  Not changed, deliberately: the card still writes one entry per changed cell
+  rather than batching through `upload_schedule`. `build_layer_image` clears
+  every cell an upload does not list, and the card silently skips a layer
+  sensor that is malformed or not yet cached — so batching would turn a stale
+  read-back into data loss. Ordinary edits are one to three writes, fewer than
+  an upload costs.
+
 ### Added
+
+- **The Lovelace card has host tests** — `tests/js/test_schedule_card.js`, run
+  by `make test-js` and in CI. 1,800 lines that had shipped broken twice for
+  want of one (every service call omitted the required `op_id`; the
+  single-event regex could not match the format the firmware emits) now have 22
+  tests over the write path, the event parser, the escaping of device-supplied
+  strings, and subscription lifetime. Plain node against a stubbed DOM: no npm,
+  no lockfile, nothing to install or keep current.
+
+- **`hwr-pump-dhw-example.yaml`** — the paired pump + control UI + `dhw_demand`
+  combination, validated in CI alongside the other examples. It was the one
+  documented recipe with no file behind it, which is why it broke unnoticed:
+  `alpha_hwr_controls.yaml` reads `id(motor_speed)` directly, so this is the
+  only configuration where renaming the rpm sensor fails.
+
+### Changed
+
+- **README recipes §1–§3 now declare `external_components` at `@main`**, as §4
+  and §5 already did. A package fetched at `@main` self-declares its component
+  source pinned to the release it shipped with, so without a top-level
+  override the component stays at that tag while the package config moves ahead
+  — and any key added since the release is rejected as an invalid option. This
+  was already latent rather than theoretical: §1 as previously documented
+  cannot accept `data_timeout`, which has existed since v0.15.0.
 
 - **`write_bench.py chain`** runs several services over a single connection,
   resolving every service once up front. Each connection costs an

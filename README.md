@@ -66,6 +66,16 @@ esphome:
 substitutions:
   mac_address: "AA:BB:CC:DD:EE:FF"
 
+# Required whenever the packages track @main. Each package self-declares an
+# `external_components` block pinned to the release it shipped with, so without
+# this the component source stays at that tag while the package config moves
+# ahead — and any key added since the release is rejected as "an invalid option
+# for [alpha_hwr]". ESPHome does not dedupe these blocks; the last merged entry
+# wins, so a top-level declaration overrides the package's.
+external_components:
+  - source: github://eman/esphome-alpha-hwr@main
+    components: [alpha_hwr]
+
 packages:
   alpha_hwr: github://eman/esphome-alpha-hwr/packages/alpha_hwr_base.yaml@main
 
@@ -98,6 +108,11 @@ esphome:
 substitutions:
   mac_address: "AA:BB:CC:DD:EE:FF"
 
+# See §1 — required whenever the packages track @main.
+external_components:
+  - source: github://eman/esphome-alpha-hwr@main
+    components: [alpha_hwr]
+
 packages:
   alpha_hwr: github://eman/esphome-alpha-hwr/packages/alpha_hwr_pairing.yaml@main
   alpha_hwr_controls: github://eman/esphome-alpha-hwr/packages/alpha_hwr_controls.yaml@main
@@ -126,6 +141,11 @@ ota:
 Add the schedule editor package on top of the paired pump config:
 
 ```yaml
+# See §1 — required whenever the packages track @main.
+external_components:
+  - source: github://eman/esphome-alpha-hwr@main
+    components: [alpha_hwr]
+
 packages:
   alpha_hwr: github://eman/esphome-alpha-hwr/packages/alpha_hwr_pairing.yaml@main
   alpha_hwr_controls: github://eman/esphome-alpha-hwr/packages/alpha_hwr_controls.yaml@main
@@ -242,7 +262,10 @@ pump-on draw after holding continuously for `dhw_in_use_min_seconds` (70 s by
 default). It never displaces a stronger tier and only ever adds demand. It is
 entirely optional; leave it out and the other two tiers are unaffected.
 
-For a complete working version, see `dhw-demand-example.yaml`.
+For a complete working version of this combined recipe, see
+`hwr-pump-dhw-example.yaml` — it is release-pinned and validated by CI, so it
+cannot drift out of step with the packages the way an untested snippet can. For
+the detector without the control UI, see `dhw-demand-example.yaml`.
 
 ## Local development override
 
@@ -323,8 +346,9 @@ After that, reconnects reuse the stored bond.
 - `hwr-pump-example.yaml` — basic read-only `alpha_hwr`
 - `hwr-pairing-example.yaml` — paired `alpha_hwr`
 - `hwr-pump-schedule-example.yaml` — paired pump with schedule UI/services
-- `dhw-demand-example.yaml` — combined `alpha_hwr` + `dhw_demand` with local
-  component override
+- `dhw-demand-example.yaml` — paired `alpha_hwr` + `dhw_demand`
+- `hwr-pump-dhw-example.yaml` — the §5 combination: paired `alpha_hwr` +
+  control UI + `dhw_demand`
 
 ## Optional Lovelace schedule card
 
