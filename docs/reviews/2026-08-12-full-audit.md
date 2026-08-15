@@ -471,6 +471,17 @@ has no discriminating power. A spec discussion, not a revert.
 stopping ends the continuation" — and passes only because it uses a 0.1 GPM reading below every
 value the repo has recorded with the pump running.
 
+> **Fixed.** The spec hole was closed rather than the tier reverted. `pump_on_continuation_verdict()`
+> now releases on the subtraction — tier 2's own oracle under tier 2's own guards, used to end a
+> claim rather than start one, so the raw-flow prohibition is untouched — reading at or below
+> `pump_on_demand_flow_threshold`, and that release *retires* the capture so a later loss of the
+> subtraction cannot resurrect a disproved claim. Because the subtraction is unavailable below
+> `pump_on_demand_min_speed_rpm` (a pump clamped to 1650 rpm never offers one), a new
+> `pump_on_continuation_max_seconds` (600, `0` disables the tier) bounds the case where nothing can
+> contradict it. `AGENTS.md` §11.4 carries the three exits and why the old one was unreachable. The
+> 0.1 GPM test was replaced with the four measured pump-on meter readings, plus the audit's own
+> 30-minute repro end-to-end through the component: 180/180 continuation ticks before, 60 after.
+
 ### 11. The single-event display regex cannot match the firmware's output
 `alpha-hwr-schedule-card.js:226` — **CONFIRMED, P2-high**
 

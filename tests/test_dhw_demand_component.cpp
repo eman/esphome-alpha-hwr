@@ -648,6 +648,23 @@ void test_an_unmeasurable_continuation_expires() {
               "The run ends with no demand claimed");
   TEST_ASSERT(r.method_state() == "pump_on_uncertain",
               "...and the fallback has taken over");
+
+  // The expiry retires the capture as well as declining, and that is what keeps
+  // it from coming back ~49 days later. The age is `now - arm_stamp` on
+  // uint32_t: it grows for a full lap of millis() and then wraps through zero,
+  // so an expired continuation whose stamp was left in place reads as brand new
+  // again. The lap is simulated by setting the clock just past the arm stamp --
+  // modulo 2^32 that state is identical to 49 days on, which is the only way to
+  // reach it without 424 000 ticks.
+  const uint32_t lapped = on + 1000u;
+  r.at(lapped);
+  r.motor_speed.publish_state(1650.0f);
+  r.pump_flow.publish_state(0.25f);
+  r.flow.publish_state(0.71f);
+  r.tick(lapped);
+  TEST_ASSERT(r.method_state() == "pump_on_uncertain",
+              "An expired continuation does not return at the millis() wrap");
+  TEST_ASSERT(r.demand.state == false, "...and claims no demand there either");
 }
 
 // ── 9. Nothing wired ─────────────────────────────────────────────────────────

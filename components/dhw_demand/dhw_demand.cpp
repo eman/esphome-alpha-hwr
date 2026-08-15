@@ -85,6 +85,8 @@ void DhwDemandComponent::dump_config() {
   ESP_LOGCONFIG(TAG, "    flow_max_stale: %d s", flow_max_stale_seconds_);
   ESP_LOGCONFIG(TAG, "    dhw_in_use_min: %d s", dhw_in_use_min_seconds_);
   ESP_LOGCONFIG(TAG, "    flow_latch: %d s", flow_latch_seconds_);
+  ESP_LOGCONFIG(TAG, "    pump_on_continuation_max: %d s",
+                pump_on_continuation_max_seconds_);
   ESP_LOGCONFIG(TAG, "    session_gap_tolerance: %d s",
                 session_gap_tolerance_seconds_);
   ESP_LOGCONFIG(TAG, "    demand_release: %d s", demand_release_seconds_);
@@ -499,13 +501,22 @@ void DhwDemandComponent::update() {
     demand_level = result.demand_level;
     method = result.method;
 
-    // A subtraction that reads below threshold has *measured* the draw as
-    // over, which is the one release that falsifies the stored evidence rather
-    // than merely failing to confirm it. Retire the capture so a later loss of
-    // the subtraction — the pump dropping below its speed floor, say — cannot
-    // resurrect a claim that has already been disproved. Every other release
-    // leaves it alone: a NaN meter reading for one tick must not permanently
-    // end a continuation that is still true.
+    // Two of the three releases retire the capture, for different reasons.
+    //
+    // MEASURED_STOPPED falsifies it: the subtraction is the only pump-on
+    // reading of household draw there is, and it says the draw is over.
+    // Retiring stops a later *loss* of the subtraction — the pump dropping
+    // below its speed floor, say — from resurrecting a disproved claim.
+    //
+    // EXPIRED cannot come back on the strength of anything, since the age only
+    // grows, so retiring it changes no verdict today. It is done anyway for two
+    // reasons: the log below fires once instead of every tick for the rest of
+    // the run, and `now - since` is unsigned, so ~49 days after arming the age
+    // wraps to zero and an expired continuation would spring back to life.
+    //
+    // METER_QUIET is the one release that leaves the capture alone: a single
+    // dropped meter sample must not permanently end a continuation that is
+    // still true.
     if (result.continuation == ContinuationVerdict::MEASURED_STOPPED) {
       ESP_LOGD(TAG, "Continuation retired: subtraction measured %.2f GPM, at "
                     "or below the %.2f GPM threshold",
@@ -517,6 +528,8 @@ void DhwDemandComponent::update() {
       ESP_LOGD(TAG, "Continuation expired: nothing has measured the draw for "
                     "%d s",
                pump_on_continuation_max_seconds_);
+      pre_pump_on_flow_ = NAN;
+      pre_pump_on_flow_since_ms_ = 0;
     }
 
     if (std::isnan(result.demand_gpm)) {

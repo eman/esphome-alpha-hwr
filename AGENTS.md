@@ -439,7 +439,19 @@ Confidence = highest-weight signal + 0.05 per additional corroborating signal, c
 
 When the pump is running the household flow meter sees recirculation flow in addition to any demand, so it cannot be read directly. The ordering below is `decide_pump_on()` in `dhw_demand_logic.h`, not inline in `update()` — it is a pure function so the host test can assert tier priority, which it could not while the composition lived in the `.cpp` (issue #144).
 
-1. **Continuation detection** — if household flow was above threshold on the last pump-off tick and is still above threshold now, confidence = 0.85. This handles draws already in progress when the pump turned on.
+1. **Continuation detection** — if household flow was above threshold on the last pump-off tick, the draw is presumed still running at confidence 0.85 until something ends it. This handles draws already in progress when the pump turned on.
+
+   **Releasing it is the hard part, and the spec used to have a hole here.** The only exit was "and household flow is still above threshold now", a raw-meter test that cannot go false while the pump runs: every pump-on meter reading recorded here — 0.71 GPM at the 1650 rpm clamp floor, 1.31 no-draw median, 1.45 pre-shutdown, 2.22 no-draw p90 — clears the 0.3 threshold by at least 2.4×. So a draw that stopped five minutes into a thirty-minute run went on publishing demand for the remaining twenty-five, with the subtraction sitting there reading 0.00 GPM. The no-draw distribution quoted in the warning below is itself the proof: if no threshold on raw meter flow can *detect* a draw, none can detect one *ending* either. Three exits now, and the raw-flow test survives only for what it can still decide (a dead or genuinely zero meter):
+
+   | Exit | When | Effect |
+   |---|---|---|
+   | Measured stop | The subtraction is available (all of tier 2's own guards) and reads at or below `pump_on_demand_flow_threshold` | Releases **and retires the capture** — a measurement falsifies the claim, so a later loss of the subtraction must not resurrect it |
+   | Expiry | Nothing has measured the draw for `pump_on_continuation_max_seconds` (600) | Releases, capture kept |
+   | Meter quiet | Household flow is NaN or at/below threshold | Releases, capture kept — one dropped sample must not permanently end a continuation that is still true |
+
+   The expiry is not belt-and-braces: the subtraction goes silent below `pump_on_demand_min_speed_rpm`, so on a pump clamped under that floor no measurement of household draw exists at all and the claim would otherwise stand for the whole run. It costs recall only in that regime — where nothing can see the draw anyway — because a real draw that is *measurable* is picked straight back up by tier 2. `0` disables the tier rather than unbounding it.
+
+   Note what this is not: releasing on the subtraction is tier 2's own oracle under tier 2's own guards, used to end a claim rather than to start one. It adds no signal and does not touch the raw-flow prohibition below. The decision, including which exit fired, lives in `pump_on_continuation_verdict()`; the component acts on the verdict rather than re-deriving it from `detection_method`.
 
 2. **Subtraction** — `flow − pump_flow` is household demand directly: the meter reads everything leaving the mains, the pump reports its own loop, and the difference is what the house drew. No RPM term, no fitted curve. Fires above `pump_on_demand_flow_threshold` (0.3 GPM of *computed* demand); confidence is `min(0.90, 0.60 + 0.30 × margin)`, rising with how far the draw clears the threshold. Three guards carry it, all load-bearing:
 

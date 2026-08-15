@@ -16,8 +16,15 @@
 # this check.
 #
 # Usage:
-#   ./tools/mutation_check.sh          # run every mutation
-#   ./tools/mutation_check.sh --list   # just show them
+#   ./tools/mutation_check.sh              # run every mutation
+#   ./tools/mutation_check.sh --list       # just show them
+#   ./tools/mutation_check.sh continuation # only names containing "continuation"
+#
+# The filter exists because a full sweep rebuilds and re-runs the whole suite
+# once per mutation and takes the better part of an hour. Use it while adding
+# or repairing entries; the unfiltered run is what CI and a merge want, and the
+# summary says loudly when a filter was in force so a partial run cannot be
+# mistaken for a clean sweep.
 #
 # ==============================================================================
 
@@ -78,6 +85,7 @@ MUTATIONS=(
 "continuation-unstamped-arm-holds|components/dhw_demand/dhw_demand_logic.h|  if (in.continuation_since_ms == 0)\n    return ContinuationVerdict::EXPIRED;|"
 "continuation-dropped-meter-sample-falsifies|components/dhw_demand/dhw_demand_logic.h|    return ContinuationVerdict::METER_QUIET;|    return ContinuationVerdict::MEASURED_STOPPED;"
 "dhw-falsified-capture-not-retired|components/dhw_demand/dhw_demand.cpp|      pre_pump_on_flow_ = NAN;\n      pre_pump_on_flow_since_ms_ = 0;\n    } else if (result.continuation == ContinuationVerdict::EXPIRED &&|    } else if (result.continuation == ContinuationVerdict::EXPIRED &&"
+"dhw-expired-capture-not-retired|components/dhw_demand/dhw_demand.cpp|               pump_on_continuation_max_seconds_);\n      pre_pump_on_flow_ = NAN;\n      pre_pump_on_flow_since_ms_ = 0;|               pump_on_continuation_max_seconds_);"
 "dhw-continuation-arm-never-stamped|components/dhw_demand/dhw_demand.cpp|      pre_pump_on_flow_since_ms_ = now;\n|"
 "frozen-motor-asserts-pump-off|components/dhw_demand/dhw_demand_logic.h|  } else if (out.motor_frozen) {\n    out.pump_on = true;|  } else if (out.motor_frozen) {\n    out.pump_on = false;"
 "motor-staleness-mask-removed|components/dhw_demand/dhw_demand_logic.h|  out.speed_used = reading_is_fresh(in.motor_speed_last_update_ms, in.now_ms, in.motor_max_stale_ms)\n                       ? in.motor_speed\n                       : NAN;|  out.speed_used = in.motor_speed;"
@@ -102,6 +110,22 @@ if [[ "${1:-}" == "--list" ]]; then
   echo "Mutations:"
   for m in "${MUTATIONS[@]}"; do echo "  - ${m%%|*}"; done
   exit 0
+fi
+
+# Optional name filter. Applied to the whole array up front rather than skipped
+# inside the loop, so the "Caught: n / total" line below counts what was
+# actually run instead of reporting most of the suite as missing.
+FILTER="${1:-}"
+if [[ -n "$FILTER" ]]; then
+  SELECTED=()
+  for m in "${MUTATIONS[@]}"; do
+    [[ "${m%%|*}" == *"$FILTER"* ]] && SELECTED+=("$m")
+  done
+  if [[ ${#SELECTED[@]} -eq 0 ]]; then
+    echo "No mutation name contains '$FILTER'. Try --list." >&2
+    exit 2
+  fi
+  MUTATIONS=("${SELECTED[@]}")
 fi
 
 echo "=========================================="
@@ -241,6 +265,9 @@ echo ""
 echo "=========================================="
 echo "  Results"
 echo "=========================================="
+if [[ -n "$FILTER" ]]; then
+  echo -e "  ${YELLOW}PARTIAL RUN — only mutations matching '$FILTER'${NC}"
+fi
 echo "  Caught:   $CAUGHT / ${#MUTATIONS[@]}"
 if [[ ${#SURVIVORS[@]} -gt 0 ]]; then
   echo -e "  ${RED}Survived: ${#SURVIVORS[@]}${NC}"
