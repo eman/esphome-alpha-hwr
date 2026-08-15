@@ -283,8 +283,8 @@ static PumpOnInputs live_tick() {
   in.motor_speed = 2402.0f;
   in.flow = 1.34f;
   in.pump_flow = 1.34f;  // quiet loop: computes to 0 demand
-  // Armed a minute ago, well inside the continuation's 10-minute expiry, so a
-  // test that perturbs one field is testing that field and not the expiry.
+  // Armed a minute ago, well inside the continuation's expiry, so a test that
+  // perturbs one field is testing that field and not the expiry.
   in.continuation_since_ms = in.now_ms - 60000;
   return in;
 }
@@ -799,7 +799,15 @@ void test_continuation_expires_when_nothing_can_measure_it() {
 
   // The audit's repro again, this time with no subtraction available for the
   // whole run: 30 minutes of ticks. Before the fix all 180 fired; the expiry
-  // bounds it to the first 10 minutes.
+  // bounds it to the first five minutes.
+  //
+  // The count is spelled out rather than derived from kMax, so that changing
+  // the shipped default fails here and has to be re-stated deliberately. The
+  // assertion just below is what makes that failure legible instead of
+  // mysterious.
+  TEST_ASSERT(kMax == 300000,
+              "The shipped expiry is 5 minutes -- the tick count below is "
+              "written for it");
   ContinuationInputs blind = armed_continuation();
   int fired = 0;
   for (int tick = 0; tick < 180; tick++) {
@@ -807,8 +815,8 @@ void test_continuation_expires_when_nothing_can_measure_it() {
     if (pump_on_continuation_is_active(blind))
       fired++;
   }
-  TEST_ASSERT(fired == 60,
-              "A blind 30-minute run holds for 10 minutes, not 30");
+  TEST_ASSERT(fired == 30,
+              "A blind 30-minute run holds for 5 minutes, not 30");
 
   // Rollover. The arm stamp sits 60 s before the wrap and `now` 60 s after it,
   // so the continuation is 120 s old across the boundary and must still hold.

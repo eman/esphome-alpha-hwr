@@ -96,7 +96,7 @@ inline constexpr PumpOnThresholds kDefaultPumpOnThresholds{
     /*pump_flow_max_stale_ms=*/30000,
     /*flow_max_stale_ms=*/60000,
     /*pump_on_settle_ms=*/10000,
-    /*continuation_max_ms=*/600000,
+    /*continuation_max_ms=*/300000,
 };
 
 // The intensity a tier publishes when it is confident a draw is happening but

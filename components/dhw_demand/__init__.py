@@ -246,7 +246,7 @@ CONFIG_SCHEMA = (
             # Bounded for the same uint32_t wrap reason as the staleness keys.
             # 0 disables the tier outright rather than making it unbounded --
             # unbounded is the behaviour being removed.
-            cv.Optional(CONF_PUMP_ON_CONTINUATION_MAX_SECONDS, default=600):
+            cv.Optional(CONF_PUMP_ON_CONTINUATION_MAX_SECONDS, default=300):
                 cv.int_range(min=0, max=3600),
             cv.Optional(CONF_SESSION_GAP_TOLERANCE_SECONDS, default=60):
                 cv.positive_int,

@@ -614,7 +614,7 @@ void test_an_unmeasurable_continuation_expires() {
   std::cout << "\n=== An unmeasured continuation expires ===" << std::endl;
   Rig r;
   r.det.set_demand_release_seconds(0);
-  r.det.set_pump_on_continuation_max_seconds(600);
+  r.det.set_pump_on_continuation_max_seconds(300);  // the shipped default
   r.det.setup();
 
   for (int i = 0; i < 2; i++) {
@@ -642,8 +642,8 @@ void test_an_unmeasurable_continuation_expires() {
       continuation_ticks++;
   }
 
-  TEST_ASSERT(continuation_ticks == 60,
-              "A blind 30-minute run holds demand for 10 minutes, not 30");
+  TEST_ASSERT(continuation_ticks == 30,
+              "A blind 30-minute run holds demand for 5 minutes, not 30");
   TEST_ASSERT(r.demand.state == false,
               "The run ends with no demand claimed");
   TEST_ASSERT(r.method_state() == "pump_on_uncertain",

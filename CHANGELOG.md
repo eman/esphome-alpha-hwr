@@ -239,7 +239,7 @@
   has already been disproved. Because the subtraction goes silent below
   `pump_on_demand_min_speed_rpm`, and a pump clamped under that floor never
   produces one at all, an expiry bounds the case where nothing can contradict
-  the tier: new `pump_on_continuation_max_seconds`, default 600, `0` to disable
+  the tier: new `pump_on_continuation_max_seconds`, default 300, `0` to disable
   the tier outright. A draw that is real *and* measurable is picked straight
   back up by the subtraction, so the expiry costs recall only where nothing
   could see the draw anyway.

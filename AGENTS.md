@@ -446,7 +446,7 @@ When the pump is running the household flow meter sees recirculation flow in add
    | Exit | When | Effect |
    |---|---|---|
    | Measured stop | The subtraction is available (all of tier 2's own guards) and reads at or below `pump_on_demand_flow_threshold` | Releases **and retires the capture** — a measurement falsifies the claim, so a later loss of the subtraction must not resurrect it |
-   | Expiry | Nothing has measured the draw for `pump_on_continuation_max_seconds` (600) | Releases, capture kept |
+   | Expiry | Nothing has measured the draw for `pump_on_continuation_max_seconds` (300) | Releases **and retires the capture** — not because the age could fall again on its own, but because the age is an unsigned difference and wraps through zero ~49 days after arming |
    | Meter quiet | Household flow is NaN or at/below threshold | Releases, capture kept — one dropped sample must not permanently end a continuation that is still true |
 
    The expiry is not belt-and-braces: the subtraction goes silent below `pump_on_demand_min_speed_rpm`, so on a pump clamped under that floor no measurement of household draw exists at all and the claim would otherwise stand for the whole run. It costs recall only in that regime — where nothing can see the draw anyway — because a real draw that is *measurable* is picked straight back up by tier 2. `0` disables the tier rather than unbounding it.

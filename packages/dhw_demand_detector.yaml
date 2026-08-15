@@ -175,7 +175,7 @@ dhw_demand:
   # it bounds is a pump turning below pump_on_demand_min_speed_rpm, where
   # no measurement of household draw exists at all and the claim would
   # otherwise stand for the whole run. 0 disables the tier.
-  pump_on_continuation_max_seconds: 600
+  pump_on_continuation_max_seconds: 300
   session_gap_tolerance_seconds: 60
   # How long demand stays latched after the last positive tick. Stops an input
   # dithering around its threshold from chattering the demand binary sensor.

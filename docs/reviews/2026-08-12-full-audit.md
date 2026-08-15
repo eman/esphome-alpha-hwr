@@ -477,10 +477,10 @@ value the repo has recorded with the pump running.
 > `pump_on_demand_flow_threshold`, and that release *retires* the capture so a later loss of the
 > subtraction cannot resurrect a disproved claim. Because the subtraction is unavailable below
 > `pump_on_demand_min_speed_rpm` (a pump clamped to 1650 rpm never offers one), a new
-> `pump_on_continuation_max_seconds` (600, `0` disables the tier) bounds the case where nothing can
+> `pump_on_continuation_max_seconds` (300, `0` disables the tier) bounds the case where nothing can
 > contradict it. `AGENTS.md` §11.4 carries the three exits and why the old one was unreachable. The
 > 0.1 GPM test was replaced with the four measured pump-on meter readings, plus the audit's own
-> 30-minute repro end-to-end through the component: 180/180 continuation ticks before, 60 after.
+> 30-minute repro end-to-end through the component: 180/180 continuation ticks before, 30 after.
 
 ### 11. The single-event display regex cannot match the firmware's output
 `alpha-hwr-schedule-card.js:226` — **CONFIRMED, P2-high**
