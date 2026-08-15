@@ -31,11 +31,21 @@
   wait also re-arms as writes confirm, so it tracks what is still outstanding
   rather than what the batch started as.
 
+  The fixed slack is not a bound on the queue, and cannot be: the queue has no
+  depth limit and a queued operation carries no watchdog until it reaches the
+  head, so enough foreign writes in front would outlast any constant. What
+  closes that is a signal rather than a bigger number — every operation that
+  completes on the node fires a settle event, so the deadline re-arms on
+  observed queue progress and the slack only has to cover a single long
+  operation that has not finished yet.
+
   A card that is re-attached mid-write — which Lovelace does whenever a masonry
-  view re-columns — restores its backstop on the original deadline. Without
-  that, teardown cancelled the only timer that could ever release the write,
-  and the card rendered "saving…" permanently with Save and Discard both
-  disabled.
+  view re-columns — restores both its backstop, on the original deadline, and
+  its settle subscription. Without the first, teardown cancelled the only timer
+  that could ever release the write and the card rendered "saving…"
+  permanently with Save and Discard both disabled. Without the second, a write
+  settling before Home Assistant's next state push would land on a card that
+  had stopped listening, and be reported as a failure.
 
   The single-event paths had the same defect against a 60 s watchdog, plus an
   optimistic local delete that made a failed clear look like a success for the

@@ -190,8 +190,10 @@ const singleBackstop = (n) => n * SINGLE_EVENT_MS + QUEUE_HEAD_MS + MARGIN_MS;
  */
 function makeCard(opts = {}) {
   const calls = [];
+  const pendingRejections = [];
   let settleHandler = null;
   let unsubscribed = 0;
+  let subscribeCount = 0;
   let rejectNext = null;
 
   const card = new CardClass();
@@ -216,7 +218,13 @@ function makeCard(opts = {}) {
     },
     connection: {
       subscribeEvents(cb, type) {
+        subscribeCount++;
         settleHandler = { cb, type };
+        if (opts.subscribeFails) {
+          const p = Promise.reject(new Error('no such event'));
+          pendingRejections.push(p);
+          return p;
+        }
         return Promise.resolve(() => { unsubscribed++; });
       },
     },
@@ -242,7 +250,16 @@ function makeCard(opts = {}) {
     hass,
     calls,
     get unsubscribed() { return unsubscribed; },
+    get subscribeCount() { return subscribeCount; },
     get subscribedType() { return settleHandler && settleHandler.type; },
+    /** Swallow the rejections this fixture created on purpose. */
+    settleRejections() { pendingRejections.forEach(p => p.catch(() => {})); },
+    /** A settle for an op this card never issued. */
+    foreignSettle(node) {
+      settleHandler.cb({
+        data: { op_id: 'other-card-op', status: 'accepted', detail: '', node },
+      });
+    },
     get html() { return card.shadowRoot.innerHTML; },
     rejectOn(service) { rejectNext = service; },
     /** The op_ids the card issued, oldest first. */
@@ -865,6 +882,106 @@ async function main() {
     assertEqual(h.countOf('refresh_single_events'), 1, 'the event list was re-read');
     assertEqual(h.countOf('refresh_schedule'), 1,
                 'and the schedule was not re-read a second time');
+  });
+
+  await test('a re-attach restores the subscription, not just the timer', async () => {
+    // Teardown removes the settle subscription, and the only other place it is
+    // restored is the `hass` setter. Without a re-subscribe here, a write that
+    // settles between re-attach and Home Assistant's next state push lands on
+    // a card that is not listening -- and the backstop then reports "no
+    // confirmation" for a write the device accepted.
+    const h = makeCard();
+    h.card._pendingChanges.set('0,0', [360, 480]);
+    h.card._saveChanges();
+    const opId = h.opIdsFor('set_schedule_entry')[0];
+
+    h.card.disconnectedCallback();
+    await flush();
+    h.card.connectedCallback();
+    assertEqual(h.subscribeCount, 2, 'the card re-subscribed');
+
+    // Delivered through the new subscription, with no `hass` update in between.
+    h.settle(opId, 'accepted');
+    assertEqual(h.card._pendingChanges.size, 0, 'the settle was received');
+    assertEqual(h.card._writeErrors.length, 0, 'and no false failure reported');
+  });
+
+  await test('a stale subscribe rejection does not clear a newer handle', async () => {
+    // The rejection handler used to null _settleSub unconditionally. If a
+    // detach/re-attach installed a newer subscription while the old promise
+    // was still pending, the late rejection stranded it -- leaking that
+    // subscription and letting the next _subscribeSettled stack a duplicate.
+    const h = makeCard({ subscribeFails: true });
+    await quietly(async () => {
+      const stale = h.card._settleSub;
+      h.card._settleSub = 'newer-subscription'; // as a re-attach would install
+      await flush();
+      assert(h.card._settleSub === 'newer-subscription',
+             'the newer handle survives the older promise rejecting');
+      assert(stale !== h.card._settleSub, 'and it is not the stale one');
+      h.settleRejections();
+    });
+  });
+
+  await test('op ids are unique across card instances', async () => {
+    // Settle events are global and the sequence counter is per instance, so
+    // two cards issuing their first call in the same millisecond would mint
+    // the same id -- and each would consume the other's result.
+    const a = makeCard();
+    const b = makeCard();
+    a.card._pendingChanges.set('0,0', [360, 480]);
+    b.card._pendingChanges.set('0,0', [360, 480]);
+    a.card._saveChanges();
+    b.card._saveChanges();
+
+    const idA = a.opIdsFor('set_schedule_entry')[0];
+    const idB = b.opIdsFor('set_schedule_entry')[0];
+    assert(idA !== idB, 'two cards do not mint the same op id');
+
+    // And the consequence that matters: B's settle must not retire A's edit.
+    a.settle(idB, 'accepted');
+    assertEqual(a.card._pendingChanges.size, 1, "the other card's settle is not consumed");
+  });
+
+  await test('queue progress on our node extends the backstop', async () => {
+    // WATCHDOG_QUEUE_HEAD_MS is the largest budget one operation ahead can
+    // hold, not a bound on the queue: it has no depth limit and queued
+    // operations carry no watchdog until they reach the head, so enough
+    // foreign writes in front would outlast any fixed slack. Every completion
+    // on our node fires a settle, so the deadline tracks the queue actually
+    // draining instead.
+    const h = makeCard();
+    h.card._pendingChanges.set('0,0', [360, 480]);
+    h.card._saveChanges();
+
+    advance(schedBackstop(1) - 1000); // nearly out of time
+    h.foreignSettle('hwr-pump');      // something ahead of us finished
+    assertEqual(soonestTimerDelay(), schedBackstop(1), 'the deadline was pushed back out');
+
+    advance(schedBackstop(1) - 1);
+    assertEqual(h.card._inFlight.size, 1, 'still waiting, not falsely failed');
+  });
+
+  await test('progress on a different node does not extend the backstop', async () => {
+    // A second controller in the same install says nothing about our queue,
+    // and letting it hold the deadline open would be a stuck card again.
+    const h = makeCard();
+    h.card._pendingChanges.set('0,0', [360, 480]);
+    h.card._saveChanges();
+
+    advance(schedBackstop(1) - 1000);
+    h.foreignSettle('some-other-pump');
+    assertEqual(soonestTimerDelay(), 1000, 'the deadline is unchanged');
+
+    advance(1000);
+    assertEqual(h.card._inFlight.size, 0, 'and it still fires on time');
+  });
+
+  await test('a foreign settle with nothing in flight changes nothing', async () => {
+    const h = makeCard();
+    h.foreignSettle('hwr-pump');
+    assertEqual(timerCount(), 0, 'no backstop is armed out of nowhere');
+    assertEqual(h.countOf('refresh_schedule'), 0, 'and nothing is refreshed');
   });
 
   await test('the card subscribes once and releases on teardown', async () => {

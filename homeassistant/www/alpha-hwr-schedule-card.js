@@ -180,6 +180,14 @@ class AlphaHwrScheduleCard extends HTMLElement {
     // release it: _armBackstop is reached only from _saveChanges and
     // _trackSingleEvent, and both refuse to run while _inFlight is non-empty.
     // The card would render "saving…" forever with Save and Discard disabled.
+    //
+    // Re-subscribe first. Teardown removed the settle subscription, and the
+    // only other place it is restored is the `hass` setter -- so between
+    // re-attach and whenever Home Assistant next pushes a state update, a
+    // write could settle into a card that is no longer listening, and the
+    // backstop below would eventually report "no confirmation" for a write the
+    // device accepted.
+    this._subscribeSettled(this._hass);
     this._rearmBackstop();
     // Update current-time line every minute
     this._nowInterval = setInterval(() => {
@@ -252,20 +260,25 @@ class AlphaHwrScheduleCard extends HTMLElement {
    * had already been discarded either way.
    *
    * Every write answers with exactly one esphome.alpha_hwr_write_settled
-   * event carrying the op_id the card generated, so correlate on that. No
-   * node-name matching is needed (and none would be reliable -- the event's
-   * `node` is App.get_name(), which HA slugifies independently of the card's
-   * `device`); an op_id we did not issue is simply not in _inFlight.
+   * event carrying the op_id the card generated, so correlate on that: an
+   * op_id we did not issue is simply not in _inFlight, and no node matching is
+   * needed to reject it. (The event's `node` is used only as a queue-progress
+   * hint, where guessing wrong is free -- see _isOurNode.)
    */
   _subscribeSettled(hass) {
     if (this._settleSub || !hass || !hass.connection ||
         typeof hass.connection.subscribeEvents !== 'function') return;
     try {
-      this._settleSub = hass.connection.subscribeEvents(
+      const sub = hass.connection.subscribeEvents(
         (ev) => this._onWriteSettled(ev), 'esphome.alpha_hwr_write_settled');
-      Promise.resolve(this._settleSub).catch((err) => {
+      this._settleSub = sub;
+      Promise.resolve(sub).catch((err) => {
         console.error('[alpha-hwr-card] write_settled subscribe failed:', err);
-        this._settleSub = null;
+        // Only if it is still ours. A detach/re-attach while this promise was
+        // pending installs a newer subscription, and clearing the handle
+        // unconditionally would strand it -- leaking the new subscription and
+        // letting the next _subscribeSettled add a duplicate on top.
+        if (this._settleSub === sub) this._settleSub = null;
       });
     } catch (err) {
       console.error('[alpha-hwr-card] write_settled subscribe failed:', err);
@@ -276,7 +289,17 @@ class AlphaHwrScheduleCard extends HTMLElement {
   _onWriteSettled(ev) {
     const data = (ev && ev.data) || {};
     const op = this._inFlight.get(data.op_id);
-    if (!op) return; // someone else's write, or one we already resolved
+    if (!op) {
+      // Not ours: another card, an entity write, or one we already resolved.
+      // It is still evidence, though. If it came from our device while we are
+      // waiting, the queue is draining -- which is the one thing the backstop
+      // cannot otherwise know. See _armBackstopForInFlight for why a fixed
+      // slack is not a bound on queue depth.
+      if (this._inFlight.size > 0 && this._isOurNode(data.node)) {
+        this._armBackstopForInFlight();
+      }
+      return;
+    }
     this._inFlight.delete(data.op_id);
 
     // CLAMPED means the device took the write and adjusted it -- the edit is
@@ -349,7 +372,36 @@ class AlphaHwrScheduleCard extends HTMLElement {
     }, ms);
   }
 
-  /** Arm the backstop for the work still outstanding, plus queue slack. */
+  /** Is this settle event from the device this card is bound to?
+   *
+   * Used only as a progress hint, never for correlation -- correlation is by
+   * op_id, which needs no node matching. `node` is App.get_name() while the
+   * card's `device` is the HA device name service ids are built from, and HA
+   * slugifies independently, so compare normalised. A false negative here
+   * costs nothing: the backstop simply is not extended.
+   */
+  _isOurNode(node) {
+    if (!node) return false;
+    const norm = (s) => String(s).toLowerCase().replace(/[^a-z0-9]+/g, '_');
+    return norm(node) === norm(this._config.device);
+  }
+
+  /** Arm the backstop for the work still outstanding, plus queue slack.
+   *
+   * WATCHDOG_QUEUE_HEAD_MS is the largest budget a *single* operation ahead of
+   * us can hold. It is deliberately not a bound on the whole queue: the queue
+   * has no depth limit, queued operations carry no watchdog until they reach
+   * the head, and different (layer, day) cells do not collide, so an arbitrary
+   * number of foreign writes can sit in front of ours. Nine 20 s entry writes
+   * already exceed this slack.
+   *
+   * What closes that gap is not a bigger number but a better signal: every
+   * operation that completes on our node fires a settle event, and
+   * _onWriteSettled re-arms from any of them. So the deadline tracks the queue
+   * actually draining rather than a guess at how deep it is, and the fixed
+   * slack only has to cover the case where the thing ahead of us is a single
+   * long operation that has not finished yet.
+   */
   _armBackstopForInFlight() {
     this._armBackstop(this._inFlight.size * this._backstopUnitMs +
                       WATCHDOG_QUEUE_HEAD_MS + SETTLE_MARGIN_MS);
@@ -1918,7 +1970,12 @@ class AlphaHwrScheduleCard extends HTMLElement {
   _callService(service, data = {}, track = null) {
     const device = this._config.device;
     this._opSeq = (this._opSeq || 0) + 1;
-    const opId = `card-${Date.now()}-${this._opSeq}`;
+    // The sequence counter is per card instance, and settle events are global:
+    // two cards -- two dashboard views, two browser tabs -- that issue their
+    // Nth call in the same millisecond would mint the same id, and each would
+    // then consume the other's result and retire the wrong edit. A random
+    // component makes the id unique across instances rather than within one.
+    const opId = `card-${Date.now()}-${this._opSeq}-${Math.random().toString(36).slice(2, 10)}`;
     if (track) this._inFlight.set(opId, track);
     return this._hass
       .callService('esphome', `${device}_${service}`, { ...data, op_id: opId })
