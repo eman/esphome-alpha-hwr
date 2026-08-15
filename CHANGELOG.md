@@ -29,12 +29,20 @@
   the keys retired in #149 — a surface that validates but does nothing is a
   trap.
 
-  **Migration:** in each automation calling `esphome.<node>_pump_set_X`, move
-  the `pump_` to where the verb is. Note this also removes a stutter for anyone
-  whose node is named after the pump: `esphome.hwr_pump_pump_set_state` becomes
+  **Migration:** rename the service in each automation per the table above.
+  There is no single rewrite rule to apply — `pump` is *dropped* where the verb
+  alone is unambiguous (`pump_set_mode` → `set_mode`) and *kept* only where it
+  says which thing is being set (`pump_set_state` → `set_pump_state`, since the
+  schedule has a state too). Read the table rather than transposing by hand.
+  Note the rename also removes a stutter for anyone whose node is named after
+  the pump: `esphome.hwr_pump_pump_set_state` becomes
   `esphome.hwr_pump_set_pump_state`. Nothing else changes — arguments,
   semantics, statuses and every field of `esphome.alpha_hwr_write_settled` are
   untouched.
+
+  If a call is missed, the automation fails with `Service ... not found` and
+  Home Assistant lists the services the node does register, so the replacement
+  is readable off the error.
 
   The schedule services were already correct (`set_schedule_entry`,
   `upload_schedule`, `clear_single_event` and the rest all matched their command
