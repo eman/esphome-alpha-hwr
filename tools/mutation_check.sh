@@ -65,6 +65,12 @@ MUTATIONS=(
 "class-match-equality|components/alpha_hwr/response_match.h|incoming_class == queued_class &&|true &&"
 "frame-length-guard|components/alpha_hwr/frame_parser.cpp|if (len < expected_total) {|if (false) {"
 "schedule-day-bound|components/alpha_hwr/schedule_codec.cpp|if (v[1] > 6) return fail|if (v[1] > 99) return fail"
+# Restores the DST readback defect: resolving the offset from the local value
+# instead of from an approximate UTC. That is the single-line difference between
+# a seven-to-eight-hour error window at both transitions and a one-hour residual
+# at one of them -- and the visible symptom was a write settling REJECTED while
+# the pump held exactly the right value.
+"dst-offset-resolved-from-local|components/alpha_hwr/schedule_service.h|  const int32_t refined = local_utc_offset_seconds(\n      static_cast<time_t>(static_cast<int64_t>(local) - approx));\n  return local_unix_to_utc(local, refined);|  return local_unix_to_utc(local, approx);"
 "ignore-unrelated-gate|components/alpha_hwr/response_match.h|return is_class3_or_7(queued_class) && !is_class3_or_7(incoming_class);|return false;"
 "remote-mode-confirm-fresh|components/alpha_hwr/write_operation_service.cpp|bool confirmed = success && fresh && control_.remote_state_valid_ &&|bool confirmed = success && control_.remote_state_valid_ &&"
 # Restores the exact naming defect issue #159 reported: the service was called

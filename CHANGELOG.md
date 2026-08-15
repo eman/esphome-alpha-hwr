@@ -337,6 +337,30 @@
 
 ### Fixed
 
+- **Single-event readback resolved its timezone offset from the wrong clock,
+  so writes near a DST transition settled REJECTED.** The pump stores
+  single-event timestamps as local Unix time, so both directions shift by the
+  local UTC offset — but the helper that resolves that offset takes a *UTC*
+  instant, and the read path was handing it the local value straight off the
+  wire. That evaluates the offset a whole offset away from the true instant
+  (seven hours early in PDT), so any event within that window resolved to the
+  wrong side of the transition and came back an hour out. The write itself was
+  fine; the readback disagreed with it, and the confirm comparator reported
+  REJECTED while the pump held exactly the right value.
+
+  The read path now resolves the offset from an approximate UTC and refines it.
+  Measured at 15-minute steps across a 24 h window at both 2026 US Pacific
+  transitions: spring-forward goes from 28 of 97 samples wrong to 0, fall-back
+  from 32 to 4.
+
+  The remaining 4 are not a shortfall. Fall-back *repeats* an hour of local
+  time, so two distinct UTC instants encode to the same wire value and no decode
+  can recover which was meant — a property of the pump storing local time, which
+  its own clock program shares. The residual is exactly
+  `[transition, transition+1h)` once a year, against seven-to-eight hours at
+  *both* transitions before. An event inside that hour still settles REJECTED,
+  now correctly reporting a value that genuinely cannot be confirmed.
+
 - **The schedule card treated every write as successful.** `_saveChanges`
   discarded the user's pending edits at call time, then re-read the device on a
   3 s timer. A `set_schedule_entry` carries a 20 s watchdog and writes are

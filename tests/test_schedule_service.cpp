@@ -100,6 +100,98 @@ void test_single_event_tz_shift() {
   TEST_ASSERT(local_unix_to_utc(0, pdt) == 0, "sentinel 0 not shifted (decode)");
 }
 
+// The round trip the component actually performs, across a DST boundary.
+//
+// The test above passes the *same* offset both ways, so it verifies the algebra
+// and nothing else -- which is why it never saw this. In production the two
+// directions resolve their offsets independently: the write path has a real UTC
+// instant to resolve from, and the read path has only the local value the pump
+// returned. Feeding a local value to local_utc_offset_seconds(), which expects
+// UTC, evaluates the offset |offset| seconds away from the true instant -- seven
+// hours early in PDT. Any event inside that window resolved to the wrong side of
+// the transition and came back an hour out, so the confirm comparator settled
+// the write REJECTED while the pump held exactly the right value.
+void test_single_event_tz_shift_across_dst() {
+  using esphome::alpha_hwr::services::utc_to_local_unix;
+  using esphome::alpha_hwr::services::local_utc_offset_seconds;
+  using esphome::alpha_hwr::services::local_unix_to_utc_resolved;
+
+  // US Pacific, with the transition rules given explicitly so the test does not
+  // depend on a tz database being present on the build host.
+  setenv("TZ", "PST8PDT,M3.2.0/2,M11.1.0/2", 1);
+  tzset();
+
+  // Sanity: the fixture must actually straddle a transition, or the scan below
+  // proves nothing.
+  const uint32_t spring_forward = 1772964000;  // 2026-03-08 10:00 UTC, PST->PDT
+  const uint32_t fall_back = 1793523600;       // 2026-11-01 09:00 UTC, PDT->PST
+  TEST_ASSERT(local_utc_offset_seconds((time_t)(spring_forward - 3600)) == -28800,
+              "An hour before spring-forward the offset is PST (-8)");
+  TEST_ASSERT(local_utc_offset_seconds((time_t) spring_forward) == -25200,
+              "At spring-forward it becomes PDT (-7)");
+  TEST_ASSERT(local_utc_offset_seconds((time_t)(fall_back - 3600)) == -25200,
+              "An hour before fall-back the offset is PDT (-7)");
+  TEST_ASSERT(local_utc_offset_seconds((time_t) fall_back) == -28800,
+              "At fall-back it becomes PST (-8)");
+
+  // Walk both transitions at 15-minute steps from 12 h before to 12 h after,
+  // doing exactly what the component does: encode with the offset at the
+  // event's UTC instant, decode with only the local value in hand.
+  //
+  // The two transitions are NOT symmetric, and the difference is the whole
+  // result. Spring-forward is fully recoverable. Fall-back is not: the hour
+  // from the transition onward is *repeated* in local time, so two distinct UTC
+  // instants encode to the same wire value and no decode can tell them apart.
+  // That is a property of storing local time on the wire -- the pump's own
+  // clock program has it -- not something this conversion can fix. What the fix
+  // does is shrink the damage from "the whole offset, seven or eight hours" to
+  // "the one hour that is genuinely ambiguous".
+  struct R { int bad; int32_t first, last; };
+  auto scan = [&](uint32_t base) {
+    R r{0, 0, 0};
+    for (int32_t d = -12 * 3600; d <= 12 * 3600; d += 900) {
+      const uint32_t utc = static_cast<uint32_t>(static_cast<int64_t>(base) + d);
+      const uint32_t wire =
+          utc_to_local_unix(utc, local_utc_offset_seconds((time_t) utc));
+      if (local_unix_to_utc_resolved(wire) != utc) {
+        if (r.bad == 0) r.first = d;
+        r.last = d;
+        r.bad++;
+      }
+    }
+    return r;
+  };
+
+  const R spring = scan(spring_forward);
+  TEST_ASSERT(spring.bad == 0,
+              "Spring-forward round-trips exactly at every instant in a 24 h "
+              "window — the skipped hour produces no ambiguous local values");
+
+  const R fall = scan(fall_back);
+  TEST_ASSERT(fall.bad > 0,
+              "Fall-back keeps a residual: the repeated hour maps two UTC "
+              "instants to one local value, which no decode can undo");
+  TEST_ASSERT(fall.first == 0 && fall.last < 3600,
+              "...and it is confined to exactly that repeated hour, "
+              "[transition, transition+1h)");
+
+  // The bound that matters. Before the fix the read path resolved its offset
+  // from the local value, so the error covered the whole offset — seven hours
+  // at spring-forward, eight at fall-back, at both transitions. 4 of 97
+  // quarter-hour samples is the one ambiguous hour; anything larger means the
+  // offset resolution has regressed rather than the ambiguity showing through.
+  TEST_ASSERT(fall.bad == 4,
+              "The residual is 4 of 97 samples — the ambiguous hour alone, not "
+              "the 32 an unresolved offset produced");
+
+  // The sentinel still survives the resolving path.
+  TEST_ASSERT(local_unix_to_utc_resolved(0) == 0,
+              "sentinel 0 not shifted by the resolving decode");
+
+  unsetenv("TZ");
+  tzset();
+}
+
 // The schedule state poll runs on the telemetry cadence (~10s) and is almost
 // always a no-op confirmation. Its callback republishes the schedule text
 // sensors, so firing it on every poll cost an API state frame per subscriber
@@ -166,6 +258,7 @@ int main() {
 
   test_schedule_write_payload();
   test_single_event_tz_shift();
+  test_single_event_tz_shift_across_dst();
   test_state_change_callback_fires_only_on_change();
   
   std::cout << "\n===========================================================" << std::endl;
