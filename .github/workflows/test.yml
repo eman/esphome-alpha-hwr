@@ -14,6 +14,55 @@ concurrency:
 
 jobs:
   # ---------------------------------------------------------------------------
+  # Does this push touch anything the mutation check could possibly answer
+  # differently about?
+  #
+  # Mutation testing asks "do the tests actually exercise the shipped code",
+  # and that answer cannot change unless production code, the tests, or the
+  # check itself changed. Doc-only pushes were firing a ~20 minute job that was
+  # incapable of finding anything.
+  #
+  # Computed with git rather than a third-party paths-filter action, and it
+  # **fails toward running**: any case where the base cannot be determined (a
+  # brand-new branch, a force-push, a shallow fetch) reports `true`. Skipping a
+  # check that should have run is the expensive mistake; running one that need
+  # not have costs minutes.
+  # ---------------------------------------------------------------------------
+  changes:
+    name: Detect code changes
+    runs-on: ubuntu-latest
+    outputs:
+      code: ${{ steps.filter.outputs.code }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - id: filter
+        run: |
+          set -uo pipefail
+          if [ "${{ github.event_name }}" = "pull_request" ]; then
+            BASE="${{ github.event.pull_request.base.sha }}"
+          else
+            BASE="${{ github.event.before }}"
+          fi
+          # Unknown, all-zero (new branch) or unreachable base -> run it.
+          if [ -z "$BASE" ] || [ "$BASE" = "0000000000000000000000000000000000000000" ] \
+             || ! git cat-file -e "$BASE^{commit}" 2>/dev/null; then
+            echo "code=true" >> "$GITHUB_OUTPUT"
+            echo "Base unavailable; running the mutation check."
+            exit 0
+          fi
+          CHANGED=$(git diff --name-only "$BASE" "${{ github.sha }}")
+          echo "$CHANGED"
+          if echo "$CHANGED" | grep -qE '^(components/|tests/|tools/mutation_|\.github/workflows/)'; then
+            echo "code=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "code=false" >> "$GITHUB_OUTPUT"
+            echo "No code, test or mutation-tooling changes; skipping the mutation check."
+          fi
+
+  # ---------------------------------------------------------------------------
   # Host unit tests, on both compilers. clang and gcc disagree often enough
   # about warnings and about UB in constant expressions to be worth both.
   # ---------------------------------------------------------------------------
@@ -83,6 +132,8 @@ jobs:
   mutation-check:
     name: Mutation check
     runs-on: ubuntu-latest
+    needs: changes
+    if: needs.changes.outputs.code == 'true'
     steps:
       - uses: actions/checkout@v4
 
