@@ -115,5 +115,55 @@ inline bool link_data_timeout_expired(bool connected, uint32_t now_ms, uint32_t 
   return static_cast<uint32_t>(now_ms - last_inbound_ms) > timeout_ms;
 }
 
+/// Default ceiling for the backoff below: one hour.
+static const uint32_t LINK_DATA_TIMEOUT_BACKOFF_CAP_MS = 3600000u;
+
+/// The window to use for the next cycle, after a recycle produced no data.
+///
+/// Without this, a link that stays deaf is recycled every ~66 s forever —
+/// roughly 1,300 passes a day, indefinitely (issue #176). No single recycle is
+/// wrong; the problem is the unbounded repetition, and three costs accumulate
+/// from it:
+///
+///   - **Bond loss.** Each recycle re-enters the encryption-on-open path on a
+///     bonded pump, so it takes one more run at the post-boot window where an
+///     encryption request can fail with 0x61 and erase the bond (issue #14).
+///     1,300 runs a day at that window is the risk, not any one of them.
+///   - **Anything that leaks in the reconnect path.** The audit's P1 closure
+///     leaks measured 150–260 KB/hour under exactly this flapping pattern, OOM
+///     in 1–3 hours. Those are fixed, so this is not live — but it is what this
+///     codebase costs if a leak is ever reintroduced there and the reconnects
+///     never stop.
+///   - Hammering a device already in an odd state, on general principle.
+///
+/// Doubling with a ceiling keeps recovery automatic while bounding all three: a
+/// link that can recover still does on the first or second try, and a
+/// permanently deaf one drops from ~1,300 recycles a day to about 28. The
+/// caller resets to the configured value on any inbound notification, so a pump
+/// that comes back hours later is served by the configured budget again rather
+/// than by an hour-wide window.
+///
+/// @param current_ms The window that just expired.
+/// @param cap_ms     Ceiling; the window never grows past this.
+///
+/// A disabled watchdog (0) stays disabled — backing off from "never" is
+/// meaningless, and returning anything else would silently switch it on. A
+/// window already at or past the cap is returned unchanged rather than
+/// shrunk, so configuring a budget larger than the ceiling is not quietly
+/// overridden.
+inline uint32_t link_data_timeout_next(uint32_t current_ms, uint32_t cap_ms) {
+  if (current_ms == 0)
+    return 0;
+  if (current_ms >= cap_ms)
+    return current_ms;
+  const uint32_t doubled = current_ms * 2u;
+  // Doubling a window past 2^31 ms wraps. Unreachable from any sane
+  // configuration, but the clamp costs one comparison and the alternative is a
+  // watchdog that silently fires almost immediately.
+  if (doubled < current_ms)
+    return cap_ms;
+  return doubled > cap_ms ? cap_ms : doubled;
+}
+
 }  // namespace alpha_hwr
 }  // namespace esphome

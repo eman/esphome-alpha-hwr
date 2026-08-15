@@ -80,6 +80,15 @@ MUTATIONS=(
 "register-read-guard-removed|components/alpha_hwr/transport.cpp|if (is_register_read && wildcard_command && !cmd.allow_register_read) {|if (false) {"
 "link-watchdog-never-fires|components/alpha_hwr/link_watchdog.h|return static_cast<uint32_t>(now_ms - last_inbound_ms) > timeout_ms;|return false;"
 "link-watchdog-rollover-unsafe|components/alpha_hwr/link_watchdog.h|return static_cast<uint32_t>(now_ms - last_inbound_ms) > timeout_ms;|return now_ms > last_inbound_ms + timeout_ms;"
+# data_timeout backoff (issue #176). Without it a deaf link is recycled ~1,300
+# times a day indefinitely, each pass re-entering the encryption-on-open window
+# where a failure can erase the bond (issue #14). The three errors: never
+# growing, growing past the ceiling, and clamping a configured budget that was
+# deliberately set larger than the ceiling.
+"backoff-never-grows|components/alpha_hwr/link_watchdog.h|  const uint32_t doubled = current_ms * 2u;|  const uint32_t doubled = current_ms;"
+"backoff-ignores-the-cap|components/alpha_hwr/link_watchdog.h|  return doubled > cap_ms ? cap_ms : doubled;|  return doubled;"
+"backoff-shrinks-a-large-budget|components/alpha_hwr/link_watchdog.h|  if (current_ms >= cap_ms)\n    return current_ms;|"
+"backoff-arms-a-disabled-watchdog|components/alpha_hwr/link_watchdog.h|  if (current_ms == 0)\n    return 0;|"
 
 # Initial-read re-arm (bench regression: a stalled one-shot read chain left the
 # node with device info and the operating statistics unread for as long as the

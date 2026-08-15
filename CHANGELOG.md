@@ -4,6 +4,18 @@
 
 ### Added
 
+- **`link_recycles` and `link_max_gap`** — two optional diagnostic sensors for
+  the inbound-data watchdog (issue #176). `link_recycles` counts consecutive
+  recycles that produced no data and resets on any inbound notification, so it
+  reads 0 in normal operation and an automation can threshold on it; the Pump
+  Link Fault sensor shows a reason only *during* a reconnect and clears on
+  recovery, which makes repeated recycles a flap cadence somebody has to be
+  watching to notice rather than a value. `link_max_gap` records the longest gap
+  between notifications since boot, which is what a `data_timeout` default
+  chosen from observation rather than from a constants calculation has to be
+  based on. The gap between connection-open and the first notification is
+  excluded — that measures the handshake, not the pump's reporting cadence.
+
 - **The Lovelace card has host tests** — `tests/js/test_schedule_card.js`, run
   by `make test-js` and in CI. 1,800 lines that had shipped broken twice for
   want of one (every service call omitted the required `op_id`; the
@@ -336,6 +348,20 @@
   they change nothing at build time.
 
 ### Fixed
+
+- **`data_timeout` recycles now back off instead of repeating forever.** A link
+  that stayed deaf was recycled every ~66 s indefinitely — roughly 1,300 passes
+  a day, for as long as the condition lasted. No single recycle is wrong; the
+  unbounded repetition is, because each one re-enters the encryption-on-open
+  path on a bonded pump and so takes one more run at the window where an
+  encryption request can fail and erase the bond.
+
+  A recycle that produces no data now doubles the window for the next one, up to
+  a ceiling of one hour, and any inbound notification resets it to the
+  configured value. A link that can recover still does on the first or second
+  try; a permanently deaf one drops to about 28 recycles a day. A `data_timeout`
+  of `0s` stays disabled, and a budget configured larger than the ceiling is
+  returned unchanged rather than clamped down (issue #176).
 
 - **The schedule card treated every write as successful.** `_saveChanges`
   discarded the user's pending edits at call time, then re-read the device on a

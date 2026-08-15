@@ -58,6 +58,37 @@ itself is not answering and reconnecting will not fix it.
 Raise `data_timeout` if your setup has long legitimate quiet periods; set it to
 `0s` to disable the check entirely.
 
+#### Backoff, and the two diagnostics that go with it
+
+A link that stays deaf is not recycled on the configured cadence forever. Each
+recycle that produces no data doubles the window for the next one, up to a
+ceiling of one hour, and **any** inbound notification resets it to the
+configured value. A link that can recover still recovers on the first or second
+try; a permanently deaf one drops from roughly 1,300 recycles a day to about 28.
+
+That matters because a recycle is not free: each one re-enters the
+encryption-on-open path on a bonded pump, taking one more run at the window
+where an encryption request can fail and erase the bond.
+
+Two optional diagnostic sensors expose the state:
+
+| Entity | Reads |
+| --- | --- |
+| `link_recycles` | Consecutive recycles with no data in between. `0` on a healthy link. |
+| `link_max_gap` | Longest gap between notifications since boot, in seconds. |
+
+`link_recycles` is the one to alert on. The Pump Link Fault sensor shows the
+reason *during* a reconnect and clears on recovery, so repeated recycles read as
+a flap you have to be watching to catch; the counter is a value an automation
+can threshold on.
+
+`link_max_gap` exists because the `60s` default is not yet chosen from
+observation. The two requirements pull against each other — clear of every gap
+that happens routinely, short enough not to sit in the stuck state for long —
+and only data from real installations settles it. The gap between
+connection-open and the first notification is excluded, since that measures the
+handshake rather than the pump's reporting cadence.
+
 ## Examples
 
 ### Basic read-only monitoring

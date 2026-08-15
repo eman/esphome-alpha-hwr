@@ -237,6 +237,16 @@ public:
   void set_start_count_sensor(sensor::Sensor *sensor) {
     start_count_sensor_ = sensor;
   }
+  // Link diagnostics (issue #176). Both are gated on change before publishing:
+  // sensor::Sensor::publish_state() does not dedup, so an ungated republish on
+  // the ~1 s link tick would cost a frame per API subscriber per second for a
+  // value that changes at most once per recycle.
+  void set_link_recycles_sensor(sensor::Sensor *sensor) {
+    link_recycles_sensor_ = sensor;
+  }
+  void set_link_max_gap_sensor(sensor::Sensor *sensor) {
+    link_max_gap_sensor_ = sensor;
+  }
   void set_operating_hours_sensor(sensor::Sensor *sensor) {
     operating_hours_sensor_ = sensor;
   }
@@ -258,7 +268,14 @@ public:
   // notifications before it tears the link down; timed from connection-open
   // while nothing has arrived yet. 0 = disabled. See link_watchdog.h for why
   // this is a liveness check rather than a gate on READY.
-  void set_data_timeout(uint32_t ms) { this->link_data_timeout_ms_ = ms; }
+  void set_data_timeout(uint32_t ms) {
+    this->link_data_timeout_ms_ = ms;
+    // The in-force window starts at the configured budget. Set here rather
+    // than in setup() so it cannot be left at the member default by a config
+    // that sets the option -- which would run the first window at 60 s
+    // regardless of what was asked for.
+    this->link_data_timeout_current_ms_ = ms;
+  }
   // Interval (ms) for periodic control state polling to detect out-of-band pump
   // state changes (e.g., internal schedule execution, manual button press).
   // 0 = disabled (default is 30 seconds; fixes issue #54).
@@ -455,6 +472,15 @@ private:
 #endif
 
   // Operating statistics sensors
+  sensor::Sensor *link_recycles_sensor_{nullptr};
+  sensor::Sensor *link_max_gap_sensor_{nullptr};
+  // Last values published to the two above, for the change gate. Sentinels
+  // rather than 0, so the first publish always goes out -- a counter that is
+  // genuinely 0 still has to reach Home Assistant once to be thresholdable.
+  uint32_t link_recycles_published_{0xFFFFFFFFu};
+  uint32_t link_max_gap_published_{0xFFFFFFFFu};
+  void publish_link_diagnostics_();
+
   sensor::Sensor *start_count_sensor_{nullptr};
   sensor::Sensor *operating_hours_sensor_{nullptr};
   sensor::Sensor *clock_diff_sensor_{nullptr};
@@ -532,6 +558,27 @@ private:
   // both a handshake that never produced data and a session that goes deaf.
   void check_link_liveness_();
   uint32_t link_last_inbound_ms_{0};
+
+  // Backoff state for that watchdog (issue #176). link_data_timeout_ms_ is the
+  // configured budget and never changes; this is the window currently in force.
+  // It doubles on every recycle that produced no data and resets to the
+  // configured value on any inbound notification, so a link that can recover is
+  // unaffected while a permanently deaf one stops being recycled ~1,300 times
+  // a day. Initialised from the configured value in setup().
+  uint32_t link_data_timeout_current_ms_{60000};
+
+  // Consecutive recycles with no data in between. Reset by an inbound
+  // notification, so it reads 0 in normal operation and an automation can
+  // threshold on it instead of having to detect a flap cadence live.
+  uint32_t link_recycles_without_data_{0};
+
+  // Longest inter-notification gap observed since boot, for choosing the
+  // data_timeout default from what actually happens on real installations
+  // rather than from a constants calculation. link_had_inbound_ gates the
+  // first sample, whose "gap" would be the handshake rather than the pump's
+  // reporting cadence.
+  uint32_t link_max_gap_ms_{0};
+  bool link_had_inbound_{false};
 
   uint32_t link_boot_ms_{0};
   uint32_t link_last_open_ms_{0};
