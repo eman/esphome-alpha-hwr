@@ -475,13 +475,21 @@ void BLEConnectionManager::handle_auth_complete(const esp_ble_gap_cb_param_t *pa
     // symptom is a link that opens, never subscribes and parks in SUBSCRIBING
     // until the watchdog recycles it -- with nothing in the log to say why. The
     // two addresses side by side name the cause immediately.
+    // "no address" is rendered as <unset> rather than 00:00:00:00:00:00, which
+    // reads as a real address and would send a reader hunting for the device
+    // that owns it. The all-zero case is not hypothetical -- it is exactly what
+    // gap_addr_matches() treats as "no peer configured".
     const uint8_t *ours = client_ != nullptr ? client_->get_remote_bda() : nullptr;
-    ESP_LOGD(TAG, "Ignoring AUTH_CMPL from %02X:%02X:%02X:%02X:%02X:%02X (pump is %02X:%02X:%02X:%02X:%02X:%02X)",
+    char ours_str[18];
+    if (!core::gap_addr_is_set(ours)) {
+      snprintf(ours_str, sizeof(ours_str), "<unset>");
+    } else {
+      snprintf(ours_str, sizeof(ours_str), "%02X:%02X:%02X:%02X:%02X:%02X",
+               ours[0], ours[1], ours[2], ours[3], ours[4], ours[5]);
+    }
+    ESP_LOGD(TAG, "Ignoring AUTH_CMPL from %02X:%02X:%02X:%02X:%02X:%02X (pump is %s)",
              auth_cmpl.bd_addr[0], auth_cmpl.bd_addr[1], auth_cmpl.bd_addr[2],
-             auth_cmpl.bd_addr[3], auth_cmpl.bd_addr[4], auth_cmpl.bd_addr[5],
-             ours != nullptr ? ours[0] : 0, ours != nullptr ? ours[1] : 0,
-             ours != nullptr ? ours[2] : 0, ours != nullptr ? ours[3] : 0,
-             ours != nullptr ? ours[4] : 0, ours != nullptr ? ours[5] : 0);
+             auth_cmpl.bd_addr[3], auth_cmpl.bd_addr[4], auth_cmpl.bd_addr[5], ours_str);
     return;
   }
   char addr_str[18];

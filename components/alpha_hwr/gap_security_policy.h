@@ -50,18 +50,26 @@ constexpr size_t BD_ADDR_LEN = 6;
 /// address is configured yet and matches nothing -- answering security traffic
 /// while we have no idea who our own peer is would be the exact failure this
 /// header exists to prevent.
-inline bool gap_addr_matches(const uint8_t *event_addr, const uint8_t *peer_addr) {
-  if (event_addr == nullptr || peer_addr == nullptr) {
+/// True when @p addr is a real address rather than "none configured".
+///
+/// ESPHome zeroes the remote address when a client is torn down, and it is zero
+/// before codegen assigns one, so all-zero is how "we do not know our own peer"
+/// is spelled. Note this is a property of the *whole* address: a pump on a
+/// 00:xx:xx OUI is perfectly ordinary and must not be mistaken for unset.
+inline bool gap_addr_is_set(const uint8_t *addr) {
+  if (addr == nullptr) {
     return false;
   }
-  bool peer_is_unset = true;
   for (size_t i = 0; i < BD_ADDR_LEN; i++) {
-    if (peer_addr[i] != 0) {
-      peer_is_unset = false;
-      break;
+    if (addr[i] != 0) {
+      return true;
     }
   }
-  if (peer_is_unset) {
+  return false;
+}
+
+inline bool gap_addr_matches(const uint8_t *event_addr, const uint8_t *peer_addr) {
+  if (event_addr == nullptr || !gap_addr_is_set(peer_addr)) {
     return false;
   }
   for (size_t i = 0; i < BD_ADDR_LEN; i++) {

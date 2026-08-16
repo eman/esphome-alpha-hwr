@@ -28,14 +28,20 @@ using esphome::alpha_hwr::core::gap_security_action;
 int tests_passed = 0;
 int tests_failed = 0;
 
+// do/while(0) so the macro is a single statement. The other test files here
+// expand to a bare if/else, which silently steals an `else` from an enclosing
+// `if` -- no call site does that today, in this file or any other, but the
+// failure is invisible when it happens and the wrapper costs nothing.
 #define TEST_ASSERT(condition, message)                                        \
-  if (condition) {                                                             \
-    tests_passed++;                                                            \
-    std::cout << "[PASS] " << message << std::endl;                            \
-  } else {                                                                     \
-    tests_failed++;                                                            \
-    std::cout << "[FAIL] " << message << std::endl;                            \
-  }
+  do {                                                                         \
+    if (condition) {                                                           \
+      tests_passed++;                                                          \
+      std::cout << "[PASS] " << message << std::endl;                          \
+    } else {                                                                   \
+      tests_failed++;                                                          \
+      std::cout << "[FAIL] " << message << std::endl;                          \
+    }                                                                          \
+  } while (0)
 
 // The pump on the bench, and a stranger that differs only in the last octet —
 // the hardest case for a comparison that stops early or compares too few bytes.
@@ -68,6 +74,17 @@ static void test_a_real_address_containing_zeroes_is_not_mistaken_for_unset() {
   TEST_ASSERT(gap_security_action(gap_addr_matches(PUMP_WITH_ZEROS, PUMP_WITH_ZEROS), true) ==
                   GapSecurityAction::ACCEPT,
               "...and its own pairing request is still accepted");
+}
+
+// gap_addr_is_set() is also what the AUTH_CMPL reject path uses to decide
+// whether to print an address or "<unset>", so a wrong answer here is a
+// misleading log line as well as a wrong filter.
+static void test_only_an_all_zero_address_counts_as_unset() {
+  TEST_ASSERT(!esphome::alpha_hwr::core::gap_addr_is_set(UNSET), "all-zero is unset");
+  TEST_ASSERT(!esphome::alpha_hwr::core::gap_addr_is_set(nullptr), "null is unset");
+  TEST_ASSERT(esphome::alpha_hwr::core::gap_addr_is_set(PUMP), "an ordinary address is set");
+  TEST_ASSERT(esphome::alpha_hwr::core::gap_addr_is_set(PUMP_WITH_ZEROS),
+              "an address with zero octets in it is still set");
 }
 
 // The comparison length. Shortening it is caught by the near-miss loop below,
@@ -200,6 +217,7 @@ int main() {
 
   test_the_pump_matches_itself();
   test_a_real_address_containing_zeroes_is_not_mistaken_for_unset();
+  test_only_an_all_zero_address_counts_as_unset();
   test_the_address_length_is_the_address_length();
   test_every_octet_is_compared();
   test_an_unconfigured_peer_matches_nothing();
