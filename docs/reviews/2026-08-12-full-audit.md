@@ -743,6 +743,32 @@ release, and no CI job runs `esphome config`.
   a live vulnerability.
 - **`pump_mode_select` declared by two packages** — fatal ID redefinition, documented as merely
   "duplicate controls".
+
+  > **Confirmed fatal, and there are three collisions rather than one.** Reproduced by validating
+  > a config that includes both packages. In the order ESPHome reports them:
+  >
+  > 1. `Duplicate switch entity with name 'Schedule Enabled'`
+  > 2. `Duplicate select entity with name 'Pump Control Mode'`
+  > 3. `ID pump_mode_select redefined!`
+  >
+  > The ID redefinition this item is named for is real but reports *last* — it only surfaces once
+  > both name collisions are resolved, verified by renaming them in a scratch copy. Anyone
+  > searching the tree for the error the audit names would not find it, and anyone renaming their
+  > way out of the first two still fails on the third. So "avoid combining both unless you want
+  > duplicate controls" understated it twice over: you do not get duplicate controls, you get a
+  > config that does not build, and there is no rename that composes them.
+  >
+  > Fixed as documentation, because mutual exclusivity is the right design — these are two designs
+  > for one UI, and the only way to compose them would be to gut one. The README now says so with
+  > the actual errors.
+  >
+  > **The larger find is what made this invisible.** `alpha_hwr_schedule.yaml` had no working-tree
+  > check of any kind: `tests/ci-compile.yaml` loads `alpha_hwr_controls.yaml`, and the one example
+  > that loads the schedule package pins `@vX.Y.Z`, so CI validated the last *release* of it. And
+  > the gap was not only YAML — `ControlMode::AUTO_ADAPT`, `AUTO_ADAPT_RADIATOR`,
+  > `AUTO_ADAPT_UNDERFLOOR` and `AUTO_ADAPT_COMBINED` are named by that package's lambdas and by
+  > nothing else in the tree, so renaming an enumerator would have left CI green while the package
+  > stopped building for its users. It now has its own config and its own firmware build.
 - **`time_id` is load-bearing but undocumented** — without it the pump clock never syncs, so
   schedule windows run on a drifting RTC.
 

@@ -42,6 +42,27 @@
 
 ### Changed
 
+- **`alpha_hwr_controls.yaml` and `alpha_hwr_schedule.yaml` are documented as
+  mutually exclusive, because they are.** The README said to "avoid combining
+  both unless you want duplicate controls", which reads as a matter of taste. It
+  is not: a config with both does not build. ESPHome stops at
+  `Duplicate switch entity with name 'Schedule Enabled'`; fix that and
+  `Duplicate select entity with name 'Pump Control Mode'` appears; fix that and
+  `ID pump_mode_select redefined!` appears. Three independent collisions, so
+  there is no renaming that composes them — they are two designs for one UI, and
+  the README now says which to pick and why.
+
+  **`alpha_hwr_schedule.yaml` also had no working-tree check at all**, which is
+  why this went unnoticed. `tests/ci-compile.yaml` loads the *other* control UI,
+  and the example that loads this one pins a release tag, so CI was validating
+  the last release of it rather than the branch. The gap was not only YAML:
+  `ControlMode::AUTO_ADAPT`, `AUTO_ADAPT_RADIATOR`, `AUTO_ADAPT_UNDERFLOOR` and
+  `AUTO_ADAPT_COMBINED` are named by that package's lambdas and by nothing else
+  in the tree, so renaming an enumerator would have kept CI green while the
+  package stopped building for whoever uses it. It now has its own config
+  (`tests/ci-compile-schedule.yaml`), validated *and* compiled in CI — a second
+  build, sharing the cached toolchain.
+
 - **The 0.3 GPM `flow_threshold` floor is settled by measurement, and stays**
   ([#180](https://github.com/eman/esphome-alpha-hwr/issues/180)). `AGENTS.md`
   §11.4 asked for one specific analysis before anyone touched the floor: the

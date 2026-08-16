@@ -176,6 +176,13 @@ jobs:
       - name: Validate CI config (working tree)
         run: esphome config tests/ci-compile.yaml
 
+      # alpha_hwr_schedule.yaml is the alternative control UI and cannot share a
+      # config with alpha_hwr_controls.yaml above, so it needs its own. Without
+      # this it has no working-tree check at all: the example that loads it pins
+      # a release tag.
+      - name: Validate CI config, schedule UI (working tree)
+        run: esphome config tests/ci-compile-schedule.yaml
+
       # Some examples reference !secret. secrets.yaml is gitignored, so seed a
       # throwaway one from the committed template. ESPHome resolves !secret
       # relative to the config file, hence the copy beside the nested example.
@@ -226,7 +233,7 @@ jobs:
             ~/.platformio
             ~/.esphome
             ~/.cache/pip
-          key: esp-idf-${{ runner.os }}-${{ hashFiles('tests/ci-compile.yaml') }}
+          key: esp-idf-${{ runner.os }}-${{ hashFiles('tests/ci-compile.yaml', 'tests/ci-compile-schedule.yaml') }}
           restore-keys: |
             esp-idf-${{ runner.os }}-
 
@@ -236,13 +243,26 @@ jobs:
       - name: Compile firmware
         run: esphome compile tests/ci-compile.yaml
 
+      # The schedule UI's lambdas are not a subset of the controls UI's:
+      # ControlMode::AUTO_ADAPT, AUTO_ADAPT_RADIATOR, AUTO_ADAPT_UNDERFLOOR and
+      # AUTO_ADAPT_COMBINED are named by alpha_hwr_schedule.yaml and by nothing
+      # else in the tree. Rename one and the config check above still passes --
+      # it does not compile lambda bodies -- while that package stops building
+      # for whoever uses it. Costs a second app build; the ESP-IDF toolchain is
+      # already cached and shared with the step above.
+      - name: Compile firmware, schedule UI
+        run: esphome compile tests/ci-compile-schedule.yaml
+
       - name: Report image size
         if: always()
         run: |
           # ESPHome writes the build tree beside the config file, so this is
           # tests/.esphome -- not .esphome at the repo root.
-          find tests/.esphome -name 'firmware*.bin' -o -name '*.elf' 2>/dev/null | head -5 || true
-          ls -la tests/.esphome/build/ci-compile/build/ 2>/dev/null || true
+          find tests/.esphome -name 'firmware*.bin' -o -name '*.elf' 2>/dev/null | head -10 || true
+          # Both configs build here now, so report each rather than only the first.
+          for d in ci-compile ci-compile-schedule; do
+            ls -la "tests/.esphome/build/$d/build/" 2>/dev/null || true
+          done
 
   # ---------------------------------------------------------------------------
   # Python: the two config schemas and the bench client. AGENTS §3 asks for
