@@ -129,10 +129,17 @@ void test_the_enum_cannot_grow_without_landing_in_the_tables() {
   std::cout << "\n=== A new enumerator cannot slip past these tables ==="
             << std::endl;
 
-  // The previous version of this file CLAIMED ALL[] made that true. It did not:
+  // The first version of this file CLAIMED ALL[] made that true. It did not:
   // ALL[] is hand-written, so a seventh enumerator with a to_string() case
   // passed the whole suite while silently defaulting to failed / non-blocking /
-  // non-holding. -Wswitch forces the to_string case; this forces the table.
+  // non-holding.
+  //
+  // The scan below closes that half. The other half -- an enumerator added
+  // WITHOUT a to_string() case -- it cannot close: both counts stay put and
+  // the missing switch case is only a -Wswitch warning, which the suite does
+  // not build with -Werror. So this target alone compiles with -Werror=switch
+  // (see tests/Makefile). Neither mechanism is sufficient by itself and the
+  // claim needs both.
   //
   // Same trick test_write_operations.cpp uses for WriteCommand: scan the whole
   // underlying range and count how many values to_string() recognises.

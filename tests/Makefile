@@ -49,8 +49,12 @@ test_link_watchdog: test_link_watchdog.cpp ../components/alpha_hwr/link_watchdog
 test_initial_read_retry: test_initial_read_retry.cpp ../components/alpha_hwr/initial_read_retry.h $(DEPS)
 	$(CXX) $(CXXFLAGS) test_initial_read_retry.cpp -o test_initial_read_retry $(LDFLAGS)
 
+# -Werror=switch on this target only. The exhaustiveness assertion inside can
+# catch an enumerator added without a table entry, but NOT one added without a
+# to_string() case -- that is a -Wswitch warning, and the suite does not build
+# with -Werror, so it scrolls past. The two together make the claim true.
 test_subscribe_outcome: test_subscribe_outcome.cpp ../components/alpha_hwr/subscribe_outcome.h $(DEPS)
-	$(CXX) $(CXXFLAGS) test_subscribe_outcome.cpp -o test_subscribe_outcome $(LDFLAGS)
+	$(CXX) $(CXXFLAGS) -Werror=switch test_subscribe_outcome.cpp -o test_subscribe_outcome $(LDFLAGS)
 
 test_dhw_publish_gate: test_dhw_publish_gate.cpp ../components/dhw_demand/publish_gate.h $(DEPS)
 	$(CXX) $(CXXFLAGS) test_dhw_publish_gate.cpp -o test_dhw_publish_gate $(LDFLAGS)

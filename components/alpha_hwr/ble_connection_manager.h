@@ -192,6 +192,13 @@ class BLEConnectionManager {
     NONE,  // no hold; the next disconnect reason may overwrite last_failure_
     AUTH,  // auth/encryption failure; released by a successful AUTH_CMPL
     DATA,  // inbound-data watchdog; released by any received notification
+    // A subscribe step that failed outright. Outranks DATA: the watchdog's
+    // "No data from pump" is the *symptom* of this cause, and it fires 60 s
+    // later, so without the ranking the forced disconnect would overwrite the
+    // specific reason with the generic one and the operator would end up
+    // exactly where issue #175 started. Released like DATA, by any received
+    // notification.
+    SUBSCRIBE,
   };
   FailureHold failure_hold_{FailureHold::NONE};
 

@@ -233,7 +233,7 @@ void BLEConnectionManager::report_subscribe_outcome_(SubscribeOutcome outcome) {
   // would relabel a link loss as a subscribe fault for the whole episode.
   last_failure_ = subscribe_outcome_to_string(outcome);
   if (subscribe_outcome_holds_fault(outcome))
-    failure_hold_ = FailureHold::DATA;
+    failure_hold_ = FailureHold::SUBSCRIBE;
 
   ESP_LOGW(TAG, "Notification subscribe failed: %s",
            subscribe_outcome_to_string(outcome));
@@ -268,8 +268,14 @@ void BLEConnectionManager::force_disconnect(const char *reason) {
   // Terminated", which is true but says nothing; holding it keeps the actual
   // reason readable through the reconnect loop that follows. Cleared by
   // handle_notification() the moment data flows again.
-  last_failure_ = reason;
-  failure_hold_ = FailureHold::DATA;
+  // ...unless a subscribe step already named the actual cause. The watchdog
+  // reaches here 60 s after such a failure with "No data from pump", which is
+  // that failure's symptom, and overwriting would put the operator back on the
+  // generic string issue #175 exists to replace.
+  if (failure_hold_ != FailureHold::SUBSCRIBE) {
+    last_failure_ = reason;
+    failure_hold_ = FailureHold::DATA;
+  }
   if (client_ != nullptr) {
     client_->disconnect();
   }
@@ -428,7 +434,8 @@ void BLEConnectionManager::handle_notification(const esp_ble_gattc_cb_param_t *p
     // so a watchdog hold would otherwise never be released. Scoped to the
     // watchdog's own hold: see FailureHold for why an auth-failure hold must
     // survive notifications.
-    if (failure_hold_ == FailureHold::DATA)
+    if (failure_hold_ == FailureHold::DATA ||
+        failure_hold_ == FailureHold::SUBSCRIBE)
       failure_hold_ = FailureHold::NONE;
     if (notification_callback_) {
       notification_callback_(notify_evt->value, notify_evt->value_len);
