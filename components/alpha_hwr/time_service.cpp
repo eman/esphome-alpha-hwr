@@ -80,10 +80,7 @@ bool TimeService::current_time(ESPTime &out) const {
     return false;
   }
   ESPTime now = time_id_->now();
-  // is_valid() only bounds the fields and floors the year at 2019; the pump
-  // deserves a clock that SNTP has actually answered, so keep the historical
-  // 2021 floor as the "synced" test.
-  if (!now.is_valid() || now.year < 2021) {
+  if (!clock_is_synced(now)) {
     ESP_LOGD(TAG, "System time not synced yet - nothing to write");
     return false;
   }
@@ -92,6 +89,17 @@ bool TimeService::current_time(ESPTime &out) const {
 #else
   (void) out;
   ESP_LOGD(TAG, "time component not enabled in this build - no wall clock");
+  return false;
+#endif
+}
+
+bool TimeService::wall_clock_is_set() const {
+#ifdef USE_TIME
+  if (time_id_ == nullptr) {
+    return false;
+  }
+  return clock_is_synced(time_id_->now());
+#else
   return false;
 #endif
 }

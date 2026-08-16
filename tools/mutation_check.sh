@@ -283,6 +283,27 @@ MUTATIONS=(
 "gap-addr-unset-first-octet-only|components/alpha_hwr/gap_security_policy.h|  for (size_t i = 0; i < BD_ADDR_LEN; i++) {\n    if (addr[i] != 0) {\n      return true;\n    }\n  }\n  return false;|  return addr[0] != 0;"
 "gap-addr-everything-is-unset|components/alpha_hwr/gap_security_policy.h|    if (addr[i] != 0) {\n      return true;\n    }|    if (addr[i] != 0) {\n      return false;\n    }"
 "gap-addr-len-over-read|components/alpha_hwr/gap_security_policy.h|constexpr size_t BD_ADDR_LEN = 6;|constexpr size_t BD_ADDR_LEN = 7;"
+# Clock sync gate (clock_sync_gate.h). The pump runs schedule windows off its
+# own RTC and nothing else corrects it, so a sync that never happens surfaces
+# days later as a schedule firing at the wrong hour. The first two mutations are
+# the two permanent causes going unreported again -- no time_id, and a time
+# source that never answers, the latter being the likelier one because both
+# entry packages set time_id. The third is the false alarm in the other
+# direction: accusing a node that is merely still booting. The fourth is the
+# boundary, where "settling" turns into "misconfigured". The last collapses
+# blocked and warns into one question, which is how the boot false alarm gets
+# reintroduced. The last three pin the window itself: every other assertion in
+# the suite is written against CLOCK_SOURCE_GRACE_MS, so the constant used to
+# certify itself -- 1 ms and 24 h both passed 34/34, and so did a comparison
+# that ignored its own parameter for any window under a second.
+"clock-gate-grace-far-too-short|components/alpha_hwr/clock_sync_gate.h|constexpr uint32_t CLOCK_SOURCE_GRACE_MS = 15 * 60 * 1000;|constexpr uint32_t CLOCK_SOURCE_GRACE_MS = 1;"
+"clock-gate-grace-far-too-long|components/alpha_hwr/clock_sync_gate.h|constexpr uint32_t CLOCK_SOURCE_GRACE_MS = 15 * 60 * 1000;|constexpr uint32_t CLOCK_SOURCE_GRACE_MS = 24 * 60 * 60 * 1000;"
+"clock-gate-grace-ignored-when-small|components/alpha_hwr/clock_sync_gate.h|  if (uptime_ms < grace_ms) {|  if (uptime_ms < grace_ms && grace_ms >= 1000u) {"
+"clock-gate-missing-time-id-unreported|components/alpha_hwr/clock_sync_gate.h|    return ClockSyncAction::WARN_NO_TIME_ID;\n  }\n  if (wall_clock_set) {|    return ClockSyncAction::WAIT;\n  }\n  if (wall_clock_set) {"
+"clock-gate-silent-source-unreported|components/alpha_hwr/clock_sync_gate.h|  return ClockSyncAction::WARN_NO_SOURCE;\n}|  return ClockSyncAction::WAIT;\n}"
+"clock-gate-accuses-a-booting-node|components/alpha_hwr/clock_sync_gate.h|  if (uptime_ms < grace_ms) {\n    return ClockSyncAction::WAIT;\n  }|  if (false) {\n    return ClockSyncAction::WAIT;\n  }"
+"clock-gate-grace-boundary-off-by-one|components/alpha_hwr/clock_sync_gate.h|  if (uptime_ms < grace_ms) {|  if (uptime_ms <= grace_ms) {"
+"clock-gate-every-block-warns|components/alpha_hwr/clock_sync_gate.h|  return a == ClockSyncAction::WARN_NO_TIME_ID |  return a != ClockSyncAction::SYNC; //"
 "link-watchdog-never-fires|components/alpha_hwr/link_watchdog.h|return static_cast<uint32_t>(now_ms - last_inbound_ms) > timeout_ms;|return false;"
 "link-watchdog-rollover-unsafe|components/alpha_hwr/link_watchdog.h|return static_cast<uint32_t>(now_ms - last_inbound_ms) > timeout_ms;|return now_ms > last_inbound_ms + timeout_ms;"
 # data_timeout backoff (issue #176). Without it a deaf link is recycled ~1,300

@@ -15,7 +15,7 @@ MOCK_HDRS = $(shell find mocks -name '*.h' 2>/dev/null)
 DEPS = $(COMPONENT_HDRS) $(MOCK_HDRS)
 
 # Test executables
-TESTS = test_protocol test_frame_parser test_read_chain_lifetime test_control_service test_control_state test_dhw_demand_logic test_dhw_demand_component test_transport_matching test_transport_fsm test_schedule_service test_write_operations test_schedule_codec test_telemetry_units test_pump_schedule_ux test_publish_gate test_dhw_publish_gate test_link_watchdog test_auth test_sensor_publisher test_telemetry_service test_device_info_service test_initial_read_retry test_subscribe_outcome test_failure_hold test_gap_security_policy
+TESTS = test_protocol test_frame_parser test_read_chain_lifetime test_control_service test_control_state test_dhw_demand_logic test_dhw_demand_component test_transport_matching test_transport_fsm test_schedule_service test_write_operations test_schedule_codec test_telemetry_units test_pump_schedule_ux test_publish_gate test_dhw_publish_gate test_link_watchdog test_auth test_sensor_publisher test_telemetry_service test_device_info_service test_initial_read_retry test_subscribe_outcome test_failure_hold test_gap_security_policy test_clock_sync_gate
 
 # Default target
 all: $(TESTS)
@@ -70,6 +70,15 @@ test_failure_hold: test_failure_hold.cpp ../components/alpha_hwr/failure_hold.h 
 # here too, where it is actually compiled.
 test_gap_security_policy: test_gap_security_policy.cpp ../components/alpha_hwr/gap_security_policy.h $(DEPS)
 	$(CXX) $(CXXFLAGS) -Werror=switch test_gap_security_policy.cpp -o test_gap_security_policy $(LDFLAGS)
+
+# -Werror=switch. check_and_sync_time() switches over ClockSyncAction with no
+# default, so a state added without deciding what that caller does with it is a
+# compiler diagnostic there too -- but ESPHome's build does not use -Werror, so
+# this target is where it is actually fatal. An earlier version of this comment
+# claimed the production caller was covered while it used a ternary, which
+# mapped every non-WARN_NO_TIME_ID state onto the wrong user-facing message.
+test_clock_sync_gate: test_clock_sync_gate.cpp ../components/alpha_hwr/clock_sync_gate.h $(DEPS)
+	$(CXX) $(CXXFLAGS) -Werror=switch test_clock_sync_gate.cpp -o test_clock_sync_gate $(LDFLAGS)
 
 test_dhw_publish_gate: test_dhw_publish_gate.cpp ../components/dhw_demand/publish_gate.h $(DEPS)
 	$(CXX) $(CXXFLAGS) test_dhw_publish_gate.cpp -o test_dhw_publish_gate $(LDFLAGS)
@@ -191,6 +200,7 @@ test: $(TESTS)
 	@./test_subscribe_outcome
 	@./test_failure_hold
 	@./test_gap_security_policy
+	@./test_clock_sync_gate
 	@echo ""
 	@echo "=========================================="
 	@echo "Running Transport Matching Tests..."

@@ -26,6 +26,7 @@
 #include "history_service.h"
 #include "initial_read_retry.h"  // re-arm predicate for the one-shot initial read chain
 #include "link_watchdog.h"  // inbound-data watchdog predicate for a deaf-but-open link
+#include "clock_sync_gate.h"  // whether a clock sync can run, and whether to say so
 #include "publish_gate.h"  // publish-on-change gates for the YAML control entities (#127)
 #include "pump_schedule_ux.h"
 #include "schedule_entry.h"
@@ -556,10 +557,14 @@ private:
   // later would leave the pump running its schedule off a wrong clock for a
   // day; retrying it every 10 s is the write storm above.
   //
-  // Only a submitted sync sets this. When there is nothing to write at all --
-  // no time_id, SNTP silent, or the link not synchronized yet -- no attempt is
-  // stamped and the next update() retries in 10 s, which costs nothing because
-  // that path never reaches the wire.
+  // Only a submitted sync sets this. When the pump is not yet synchronized no
+  // attempt is stamped and the next update() retries in 10 s, which costs
+  // nothing because that path never reaches the wire.
+  //
+  // The other two ways to have nothing to write -- no time_id, and a time
+  // source that never answers -- no longer reach here at all: they are
+  // permanent, and check_and_sync_time() turns them away at the gate rather
+  // than re-arming a retry that can only fail (clock_sync_gate.h).
   uint32_t time_sync_interval_ms_{0};
   static constexpr uint32_t TIME_SYNC_INTERVAL_MS =
       24 * 60 * 60 * 1000; // 24 hours in milliseconds
@@ -568,11 +573,13 @@ private:
   /**
    * Submit a pump clock sync and record its outcome (the "Last Clock Sync"
    * text sensor and the retry interval above). The single place the RTC is
-   * written from; both the boot read-chain leg and the daily check call it.
+   * written from. Called only by check_and_sync_time(); the boot read-chain leg
+   * reads the pump's clock for the drift figure and does not write.
    *
    * @param reason Short label for the logs.
-   * @return False when there is nothing to write -- no time_id, or SNTP has
-   *   not answered yet -- in which case no operation is submitted.
+   * @return False when nothing was submitted. Callers reach this only with a
+   *   usable wall clock in hand (check_and_sync_time() gates on it), so in
+   *   practice that means the pump's state cache is not synchronized yet.
    */
   bool submit_clock_sync_(const char *reason);
 
@@ -581,6 +588,30 @@ private:
    * Called from update() to sync pump RTC with system time once per day.
    */
   void check_and_sync_time();
+
+  /// Report, at most hourly, that the pump's clock is not being kept.
+  /// @param why short phrase completing "Pump clock is not being synced: ..."
+  void warn_clock_not_syncing_(const char *why);
+
+  uint32_t clock_warn_last_ms_{0};
+  static constexpr uint32_t CLOCK_WARN_INTERVAL_MS = 60 * 60 * 1000;  // 1 hour
+
+  /// True when this build has a wall clock the pump can be synced from.
+  ///
+  /// Two distinct ways to have none, and they behave identically: `time_id` was
+  /// not configured, or the firmware was built with no ESPHome time component
+  /// at all. Both are permanent for the life of the run, which is what
+  /// separates them from "SNTP has not answered yet" -- that one resolves on
+  /// its own; the gate answers WAIT for it and returns before the retry loop,
+  /// which now serves only a pump whose state cache is not synchronized yet.
+  /// Keeping the USE_TIME guard here means the callers read as plain questions.
+  bool has_wall_clock_() const {
+#ifdef USE_TIME
+    return time_id_ != nullptr;
+#else
+    return false;
+#endif
+  }
 
   // Pump Link Status evaluator: coarse link-health enum from session/bond/timing,
   // published (plus the latched last-failure string) on change. Driven by the
@@ -1266,8 +1297,9 @@ public:
    *   pump's own clock readback confirmed.
    * @param origin Defaults to INTERNAL: the two shipped callers are the boot
    *   read chain and the daily check, and nobody asked for either.
-   * @return False when the write was not submitted at all: the link is not
-   *   ready, no `time_id` is configured, or SNTP has not answered yet. `done`
+   * @return False when the write was not submitted at all -- the link is not
+   *   ready, or there is no usable wall clock. Internal callers reach this only
+   *   through check_and_sync_time(), which has already established a clock. `done`
    *   is NOT called in that case -- the return value is the answer, and it is
    *   already in the caller's hand. Calling it as well conflates "we did not
    *   try" with "we tried and the pump did not confirm", which are a 10-second
