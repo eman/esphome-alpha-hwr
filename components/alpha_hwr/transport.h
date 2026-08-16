@@ -132,6 +132,12 @@ class Transport {
   using ResponseCallback = std::function<void(const uint8_t* data, size_t len)>;
 
   /**
+   * Callback type for the non-consuming frame observer. See
+   * set_frame_observer().
+   */
+  using FrameObserver = std::function<void(const uint8_t* data, size_t len)>;
+
+  /**
    * Callback for command completion.
    */
   using CommandCallback = std::function<void(bool success, const uint8_t* data, size_t len)>;
@@ -221,6 +227,31 @@ class Transport {
    * @param callback Function to call with complete packets
    */
   void set_packet_callback(PacketCallback callback);
+
+  /**
+   * Watch every CRC-valid frame without consuming any of them.
+   *
+   * The observer runs before response dispatch and cannot affect it: whatever
+   * it does, the frame still goes to a matching command callback or, failing
+   * that, to the packet callback. That is the whole point of it existing
+   * separately from both.
+   *
+   * It exists for the authentication handshake (issue #174), which needs to
+   * see the pump's replies to its ten packets but must not take them. Two
+   * reasons it could not use the paths that were already here:
+   *
+   *   - The command path CONSUMES. A matched response returns true from
+   *     try_dispatch_response() and packet_callback_ never runs, so having the
+   *     handshake await its stage-2 reply as a command response would stop the
+   *     control-mode notification the pump sends during that stage from being
+   *     decoded and published.
+   *   - The packet path is downstream of matching, so it does not see a frame
+   *     that some other in-flight command matched first, and it cannot match
+   *     the Class 2 and 9-byte Class 5/11 replies at all.
+   *
+   * One observer, set once at setup. Frames failing CRC never reach it.
+   */
+  void set_frame_observer(FrameObserver callback) { frame_observer_ = std::move(callback); }
 
   /**
    * Handle incoming BLE notification data.
@@ -417,6 +448,7 @@ class Transport {
   // Callback for complete packets
   PacketCallback packet_callback_;            ///< Called when packet is complete
   WriteCallback write_callback_{nullptr};    ///< Callback for BLE writes
+  FrameObserver frame_observer_{nullptr};    ///< Non-consuming watcher; see set_frame_observer()
 
   // Response handler management
   std::vector<PendingHandler> pending_handlers_;  ///< Registered response handlers
@@ -427,6 +459,10 @@ class Transport {
   static constexpr uint8_t FRAME_START_RESPONSE = 0x24;  ///< Response frame start byte
   static constexpr uint8_t FRAME_START_REQUEST = 0x27;   ///< Request frame start byte (echo)
   static constexpr size_t MAX_PENDING_HANDLERS = 10;     ///< Maximum pending response handlers
+  /// Header bytes shown in the verbose frame dump. Frames shorter than this
+  /// are dumped in full rather than skipped -- see the dump site for why that
+  /// matters.
+  static constexpr size_t FRAME_DUMP_BYTES = 12;
 };
 
 }  // namespace core

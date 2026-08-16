@@ -271,6 +271,14 @@ void AlphaHwrComponent::setup() {
     this->telemetry_service_.on_packet(data, len);
   });
 
+  // Let the handshake watch the pump's replies to its own packets. Observing,
+  // not consuming: this runs ahead of response dispatch and changes nothing
+  // about it, so the Class 10 control-mode notification the pump sends during
+  // stage 2 still reaches the telemetry parser above (issue #174, auth_gate.h).
+  transport_.set_frame_observer([this](const uint8_t *data, size_t len) {
+    this->auth_.on_frame(data, len);
+  });
+
   // Initialize authentication module callbacks
   auth_.set_scheduler_callback(
       [this](uint32_t delay_ms, std::function<void()> callback) {

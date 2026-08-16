@@ -317,6 +317,33 @@ MUTATIONS=(
 "dhw-release-hold-not-reported|components/dhw_demand/dhw_demand.cpp|    method = \"demand_release_hold\";\n    confidence = 0.5f;|    confidence = 0.5f;"
 "dhw-flow-onset-unqualified|components/dhw_demand/dhw_demand.cpp|  bool prev_flow_present_pump_off = prev_tick_confirms_flow_onset(\n      prev_flow_, flow_threshold_, prev_pump_confirmed_off_);|  bool prev_flow_present_pump_off = prev_tick_confirms_flow_onset(\n      prev_flow_, flow_threshold_, true);"
 "control-enabled-from-opmode|components/alpha_hwr/control_service.cpp|  // AUTO (0) or USER_DEFINED (4) = enabled, STOP (1) = disabled\n  pump_enabled_ = (operation_mode != static_cast<uint8_t>(OperationMode::STOP));|  // AUTO (0) or USER_DEFINED (4) = enabled, STOP (1) = disabled\n  pump_enabled_ = true;"
+# Handshake stage gate (issue #174). The first restores the defect exactly: the
+# gate always proceeds, so the handshake is a pure timer chain again and walks
+# past a stage the pump has not answered. The second cuts the observer out of
+# the transport, which is the other way to get the same outcome -- the replies
+# arrive, nothing is told about them, and every stage reads as unanswered.
+"auth-gate-never-waits|components/alpha_hwr/auth_gate.h|  if (replies_seen >= packets_sent)|  if (true)"
+"auth-frame-observer-removed|components/alpha_hwr/transport.cpp|     if (frame_observer_) {|     if (false) {"
+# Both terms of what counts as a reply. Dropping the start-byte test lets the
+# echo of our own request answer itself; dropping the stage test credits a
+# Class 10 telemetry notification arriving during stage 1 to stage 2, which has
+# not sent anything yet.
+"auth-reply-counts-request-echo|components/alpha_hwr/auth_gate.h|  if (data[0] != AUTH_REPLY_FRAME_START)\n    return false;|  if (false)\n    return false;"
+"auth-reply-credited-to-future-stage|components/alpha_hwr/auth_gate.h|  return stage != 0 && stage <= current_stage;|  return stage != 0;"
+# The per-handshake reset. Without it a reconnect onto a dead pump inherits the
+# previous connection's replies and reports a live link -- which would make the
+# zero-replies branch in complete() report deafness only on the very first
+# handshake after boot, i.e. almost never when it matters.
+"auth-replies-carry-across-handshakes|components/alpha_hwr/auth.cpp|  replies_total_ = 0;\n  packets_total_ = 0;|  packets_total_ = 0;"
+#
+# Deliberately absent: removing the gate's ceiling
+# (`waits_used < max_waits` -> `true`). It is catchable in principle, but the
+# mutant does not fail the suite, it hangs it -- gate_stage_() reschedules
+# itself forever and the host rig's run_scheduled() drains a queue that never
+# empties. An entry that wedges the sweep for every later mutation is worse
+# than no entry. The ceiling is covered instead by
+# test_an_unanswered_handshake_stretches_but_still_completes(), which asserts
+# the exact 2700 ms total the three ceilings produce.
 )
 
 if [[ "${1:-}" == "--list" ]]; then

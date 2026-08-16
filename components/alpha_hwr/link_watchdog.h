@@ -5,10 +5,21 @@
 // Inbound-data watchdog for the GENI link.
 //
 // The session FSM tracks the *handshake*, not whether the pump is answering.
-// Authentication is a pure scheduler chain: auth.cpp sends its packets on
-// timers and calls the completion callback 1200 ms later (150 + 100 + 250 + 200
-// + 500) without ever inspecting a reply, so READY is reached whether or not a
-// single byte came back.
+// Authentication *was* a pure scheduler chain: auth.cpp sent its packets on
+// timers and called the completion callback 1200 ms later (150 + 100 + 250 +
+// 200 + 500) without ever inspecting a reply, so READY was reached whether or
+// not a single byte came back.
+//
+// Since issue #174 it inspects them — the pump answers every packet, and the
+// handshake now waits at each stage boundary for those answers before moving
+// on. That does NOT retire this watchdog, and the distinction matters: the
+// gate fails open. After a bounded ceiling an unanswered stage proceeds
+// anyway, so READY is still reached on a completely deaf link, by design (the
+// fail-open reasoning is in auth_gate.h, and it is the same reasoning this
+// file used below when it declined to gate READY on received data). What
+// changed is that the deafness is now named at the moment it happens instead
+// of inferred from silence a minute later — see the zero-replies branch in
+// Authentication::complete(). The teardown is still this watchdog's.
 //
 // Notification subscription has the same shape. Of the six terminal paths
 // through BLEConnectionManager::subscribe_to_notifications(), four return
@@ -59,10 +70,21 @@
 // The worst case is the handshake, not steady state, because the window is
 // timed from connection-open and update() is a free-running poller the
 // handshake does not synchronise with: 500 ms post-connect + 3 x 1000 ms
-// discovery retries + 2000 ms stabilize + ~1200 ms auth chain = 6.7 s to READY,
+// discovery retries + 2000 ms stabilize + the auth chain = 6.7 s to READY,
 // then up to 10 s to the next poll and 500 ms to its schedule read — 17.2 s
 // worst case to first inbound data, leaving ~43 s of slack. Measured on
 // hardware: open to READY was 5.90/6.17/5.94 s across three reconnects.
+//
+// The auth chain in that sum was 1200 ms and is now 1200 ms plus whatever the
+// three stage gates wait for replies, capped at 500 ms each (auth_gate.h). Its
+// worst case is therefore 2700 ms, pushing worst-case-to-first-data to 18.7 s
+// against the same 60 s budget — ~41 s of slack rather than ~43 s. The cap is
+// what keeps this a bounded number: without a ceiling on the gates the
+// handshake could outlast the watchdog that is supposed to catch it. Note the
+// two figures move in opposite directions in the case that matters: the worst
+// case grows by 1.5 s only when the pump is answering slowly, and a pump
+// answering at all is one whose first inbound data arrives during the
+// handshake, far inside the budget.
 //
 // That margin cannot be eroded by configuration: the interval is fixed at
 // PollingComponent(10000) in the constructor, and `update_interval` is not in

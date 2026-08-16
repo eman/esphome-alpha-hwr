@@ -1,7 +1,9 @@
 #pragma once
 
+#include "auth_gate.h"
 #include "esphome/core/component.h"
 #include "esphome/core/log.h"
+#include <cstddef>
 #include <functional>
 
 namespace esphome {
@@ -35,7 +37,14 @@ class Transport;
  *   - Stage 1->2 delay: 100ms (allows stage completion)
  *   - Stage 2->3 delay: 200ms (allows authentication to settle)
  *   - Final stabilization: 500ms (ensures pump is ready)
- * 
+ *
+ * Those four delays are FLOORS, not the whole schedule. Each stage boundary is
+ * gated on the pump having answered the stage's packets, waiting past the floor
+ * if it has not and proceeding anyway at a ceiling. The pump replies to every
+ * packet, in every stage, and until issue #174 none of it reached this class --
+ * auth_gate.h carries the evidence, the reason the replies are observed rather
+ * than matched as command responses, and the reason the ceiling fails open.
+ *
  * Reference:
  *   Python implementation: reference/alpha-hwr/src/alpha_hwr/core/authentication.py
  *   Protocol docs: https://eman.github.io/alpha-hwr/reimplementation/
@@ -103,24 +112,76 @@ class Authentication {
   
   /**
    * @brief Check if authentication is currently in progress
-   * 
+   *
    * @return true if handshake is running
    */
   bool is_running() const { return running_; }
-  
+
+  /**
+   * @brief Offer an inbound frame to the handshake.
+   *
+   * Wired to Transport::set_frame_observer(), so this sees every CRC-valid
+   * frame on its way past and consumes none of them -- dispatch to command
+   * callbacks and to the telemetry parser is unaffected. See auth_gate.h for
+   * why the replies cannot instead be matched as command responses.
+   *
+   * Frames arriving while no handshake is running are ignored.
+   */
+  void on_frame(const uint8_t *data, size_t len);
+
+  /**
+   * @brief Replies counted during the handshake that just ran.
+   *
+   * Zero means the pump answered nothing at all -- the deaf link, known about
+   * a second into the handshake rather than 60 s later via the inbound-data
+   * watchdog. Valid after the completion callback fires; reset by start().
+   */
+  uint16_t replies_seen() const { return replies_total_; }
+
+  /**
+   * @brief Packets the handshake sent, for comparison with replies_seen().
+   *
+   * Ten on a completed handshake, fewer on one cut short.
+   */
+  uint16_t packets_sent() const { return packets_total_; }
+
  private:
   Transport &transport_;  ///< Transport layer
   SchedulerCallback scheduler_callback_;  ///< Callback to schedule delayed tasks
   CompletionCallback completion_callback_;  ///< Callback for completion
   bool running_ = false;  ///< True if authentication is in progress
   uint32_t auth_sequence_ = 0;  ///< Sequence counter to invalidate stale lambdas
-  
+
+  /// Stage whose packets are currently in flight (1-3, 0 before start).
+  /// auth_frame_answers_stage() uses it to refuse crediting a reply to a stage
+  /// that has not sent anything yet.
+  uint8_t current_stage_ = 0;
+  /// Replies counted per stage, indexed by stage - 1.
+  uint8_t stage_replies_[3] = {0, 0, 0};
+  /// Ticks the gate now waiting has already spent past its floor.
+  uint8_t gate_waits_ = 0;
+  uint16_t replies_total_ = 0;
+  uint16_t packets_total_ = 0;
+
   // Authentication stage functions
   void stage1_legacy_burst(int repeat_count);
   void stage2_class10_burst(int repeat_count);
   void stage3_extensions();
   void complete();
-  
+
+  /// Packets stage @p stage sends, and therefore the replies its gate waits
+  /// for.
+  static uint8_t packets_in_stage(uint8_t stage);
+
+  /// Re-evaluate the gate at the end of stage @p stage and either wait another
+  /// tick or run @p advance. Scheduled at the stage's floor delay by the stage
+  /// itself, and re-scheduled at AUTH_GATE_POLL_MS by itself while waiting.
+  void gate_stage_(uint8_t stage, std::function<void()> advance);
+
+  /// Schedule @p fn after @p delay_ms with the stale-callback guard every
+  /// scheduled step in this class needs.
+  void schedule_(uint32_t delay_ms, std::function<void()> fn);
+
   // Helper function to send a packet
   bool send_packet(const uint8_t* data, size_t len);
 };

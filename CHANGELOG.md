@@ -60,6 +60,46 @@
   going out from the failed one being re-sent, so five assertions passed
   against a transport whose queue never advanced. It asserts on the payload
   byte now, and the `pop_front()` has a mutation entry of its own.
+- **The GENI authentication handshake waits for the pump's replies instead of
+  only for the clock** (issue #174). `auth.cpp` sent ten packets on timers and
+  declared success 1200 ms later without ever inspecting a reply — it passed no
+  command callback, so the transport took its "no response expected" branch and
+  every answer the pump sent went to the telemetry parser instead of the
+  handshake. The pump is not silent: two captures show a class-matched reply
+  behind each of the ten packets, ~40 ms behind each. And the race is not
+  hypothetical — in that capture stage 2 was declared complete 81 ms *before*
+  the reply to its fifth packet arrived, on current firmware, with nothing that
+  would have reported it.
+
+  Each stage boundary is now gated on the stage's packets having been answered.
+  The existing delays become floors rather than the whole schedule, so an
+  answered handshake still takes exactly 1200 ms and nothing is ever sent
+  sooner than before; a pump that answers late stretches the handshake to fit
+  instead of being walked past. **The gate fails open**: after 500 ms of extra
+  wait an unanswered stage proceeds anyway, so a pump variant that stays quiet
+  during the handshake authenticates exactly as it does today, only later.
+  Worst case is 2700 ms against the inbound-data watchdog's 60 s budget, whose
+  sizing note is updated for it.
+
+  The replies are *observed*, not consumed — a new non-consuming
+  `Transport::set_frame_observer()` hook that runs ahead of response dispatch
+  and cannot affect it. Matching them as command responses instead would have
+  worked for exactly one of the four reply classes and broken that one: a
+  matched response is consumed, so the Class 10 control-mode notification the
+  pump sends during stage 2 would have stopped being decoded and published.
+
+  A handshake the pump answers not at all is now named as such at the moment it
+  happens, ~1.5 s in, rather than inferred from silence when the data watchdog
+  recycles the link a minute later. It is reported, not acted on: the teardown
+  stays with the watchdog, whose 60 s budget is measured, because recycling on
+  this signal would strand the one pump variant fail-open exists to protect.
+
+  Not addressed, for want of evidence: whether a *rejected* auth step is
+  detectable. The 9- and 11-byte replies sat under the frame dump's 12-byte
+  threshold, so their framing and class are known but their payload is not, and
+  whether the protocol can express a refusal at those lengths is unsettled. The
+  dump now prints short frames instead of skipping them, so the next capture
+  can answer it.
 
 - **`alpha_hwr_controls.yaml` and `alpha_hwr_schedule.yaml` are documented as
   mutually exclusive, because they are.** The README said to "avoid combining

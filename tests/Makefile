@@ -15,7 +15,7 @@ MOCK_HDRS = $(shell find mocks -name '*.h' 2>/dev/null)
 DEPS = $(COMPONENT_HDRS) $(MOCK_HDRS)
 
 # Test executables
-TESTS = test_protocol test_frame_parser test_read_chain_lifetime test_control_service test_control_state test_dhw_demand_logic test_dhw_demand_component test_transport_matching test_transport_fsm test_schedule_service test_write_operations test_schedule_codec test_telemetry_units test_pump_schedule_ux test_publish_gate test_dhw_publish_gate test_link_watchdog test_auth test_sensor_publisher test_telemetry_service test_device_info_service test_initial_read_retry test_subscribe_outcome test_failure_hold
+TESTS = test_protocol test_frame_parser test_read_chain_lifetime test_control_service test_control_state test_dhw_demand_logic test_dhw_demand_component test_transport_matching test_transport_fsm test_schedule_service test_write_operations test_schedule_codec test_telemetry_units test_pump_schedule_ux test_publish_gate test_dhw_publish_gate test_link_watchdog test_auth test_auth_gate test_sensor_publisher test_telemetry_service test_device_info_service test_initial_read_retry test_subscribe_outcome test_failure_hold
 
 # Default target
 all: $(TESTS)
@@ -111,6 +111,13 @@ AUTH_SRCS = ../components/alpha_hwr/auth.cpp ../components/alpha_hwr/transport.c
 
 test_auth: test_auth.cpp $(AUTH_SRCS) $(DEPS)
 	$(CXX) $(CXXFLAGS) test_auth.cpp $(AUTH_SRCS) -o test_auth $(LDFLAGS)
+
+# -Werror=switch here for the same reason as the two targets above: AuthGate's
+# three verdicts are switched over in Authentication::gate_stage_(), and a
+# fourth added without deciding what it does to the handshake must fail the
+# build rather than fall through to "advance anyway".
+test_auth_gate: test_auth_gate.cpp ../components/alpha_hwr/auth_gate.h $(DEPS)
+	$(CXX) $(CXXFLAGS) -Werror=switch test_auth_gate.cpp -o test_auth_gate $(LDFLAGS)
 
 # -DUSE_TEXT_SENSOR is not optional here. The issue #127 publish-on-change
 # guards for the alarm and warning text live inside that ifdef, and the
@@ -226,6 +233,7 @@ test: $(TESTS)
 	@echo "=========================================="
 	@echo "Running Authentication Handshake Tests..."
 	@echo "=========================================="
+	@./test_auth_gate
 	@./test_auth
 	@echo ""
 	@echo "=========================================="

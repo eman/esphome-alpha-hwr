@@ -12,6 +12,7 @@
 #include "response_match.h"
 #include <algorithm>
 #include <cinttypes>
+#include <cstdio>
 
 namespace esphome {
 namespace alpha_hwr {
@@ -261,12 +262,29 @@ void Transport::on_notification(const uint8_t* data, size_t len) {
        reassembly_buffer_.size() >= expected_packet_length_) {
      ESP_LOGV(TAG, "Packet complete: %d bytes", reassembly_buffer_.size());
 
-     // Log first 12 bytes for debugging packet structure
-     if (reassembly_buffer_.size() >= 12) {
-       ESP_LOGV(TAG, "Packet bytes [0-11]: %02X %02X %02X %02X %02X %02X %02X %02X %02X %02X %02X %02X",
-                reassembly_buffer_[0], reassembly_buffer_[1], reassembly_buffer_[2], reassembly_buffer_[3],
-                reassembly_buffer_[4], reassembly_buffer_[5], reassembly_buffer_[6], reassembly_buffer_[7],
-                reassembly_buffer_[8], reassembly_buffer_[9], reassembly_buffer_[10], reassembly_buffer_[11]);
+     // Dump the header for debugging packet structure.
+     //
+     // This used to require 12 bytes and print exactly 12, which meant the
+     // shortest frames on the link were the ones it never showed: the pump's
+     // 9-byte Class 5 and Class 11 replies to the stage-3 extension packets
+     // and its 11-byte Class 2 replies to the stage-1 burst fell under the
+     // threshold, so issue #174 could establish their framing and class from
+     // "Packet complete: 9 bytes" but not their payload -- which is exactly
+     // the evidence needed to settle whether those replies can encode a
+     // refusal, and therefore whether a failed auth step is detectable at all.
+     // Dumping what is there rather than nothing is the difference.
+     //
+     // Ahead of the trim and the CRC check, where it has always been, so that
+     // a frame about to be dropped as corrupt is still shown -- that is the
+     // case the bytes are most wanted in.
+     if (reassembly_buffer_.size() >= 8) {
+       char hex[3 * FRAME_DUMP_BYTES + 1];
+       const size_t n = std::min<size_t>(reassembly_buffer_.size(), FRAME_DUMP_BYTES);
+       size_t off = 0;
+       for (size_t i = 0; i < n && off + 3 < sizeof(hex); i++) {
+         off += snprintf(hex + off, sizeof(hex) - off, "%02X ", reassembly_buffer_[i]);
+       }
+       ESP_LOGV(TAG, "Packet bytes [0-%u]: %s", (unsigned) (n - 1), hex);
      }
 
      // Trim to the declared frame length before anything looks at the bytes.
@@ -292,6 +310,13 @@ void Transport::on_notification(const uint8_t* data, size_t len) {
        reassembly_buffer_.clear();
        expected_packet_length_ = 0;
        return;
+     }
+
+     // Offer the frame to the non-consuming observer before dispatch, so it
+     // sees frames a command match would otherwise swallow. It cannot affect
+     // what happens next -- see Transport::set_frame_observer().
+     if (frame_observer_) {
+       frame_observer_(reassembly_buffer_.data(), frame_len);
      }
 
      // Try to dispatch to registered response handler first
