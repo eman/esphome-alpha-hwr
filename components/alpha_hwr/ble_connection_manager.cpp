@@ -463,6 +463,35 @@ void BLEConnectionManager::handle_notification(const esp_ble_gattc_cb_param_t *p
 
 void BLEConnectionManager::handle_auth_complete(const esp_ble_gap_cb_param_t *param) {
   auto &auth_cmpl = param->ble_security.auth_cmpl;
+  // Not our pump: every branch below writes state that describes *this* link --
+  // the pairing sensor, the failure hold, encryption_pending_, the deferred CCCD
+  // write. Acting on a stranger's AUTH_CMPL corrupts all four. The failure branch
+  // is the worst of them: it latches the stranger's reason at AUTH rank, which
+  // outranks every other hold, and then disconnects the pump.
+  if (!gap_addr_is_pump_(auth_cmpl.bd_addr)) {
+    // Logged at DEBUG, with both addresses, rather than dropped silently. This
+    // is the one gate whose false negative is fatal: if the pump ever stopped
+    // matching (a firmware change, a pump variant, an address-type quirk) the
+    // symptom is a link that opens, never subscribes and parks in SUBSCRIBING
+    // until the watchdog recycles it -- with nothing in the log to say why. The
+    // two addresses side by side name the cause immediately.
+    // "no address" is rendered as <unset> rather than 00:00:00:00:00:00, which
+    // reads as a real address and would send a reader hunting for the device
+    // that owns it. The all-zero case is not hypothetical -- it is exactly what
+    // gap_addr_matches() treats as "no peer configured".
+    const uint8_t *ours = client_ != nullptr ? client_->get_remote_bda() : nullptr;
+    char ours_str[18];
+    if (!core::gap_addr_is_set(ours)) {
+      snprintf(ours_str, sizeof(ours_str), "<unset>");
+    } else {
+      snprintf(ours_str, sizeof(ours_str), "%02X:%02X:%02X:%02X:%02X:%02X",
+               ours[0], ours[1], ours[2], ours[3], ours[4], ours[5]);
+    }
+    ESP_LOGD(TAG, "Ignoring AUTH_CMPL from %02X:%02X:%02X:%02X:%02X:%02X (pump is %s)",
+             auth_cmpl.bd_addr[0], auth_cmpl.bd_addr[1], auth_cmpl.bd_addr[2],
+             auth_cmpl.bd_addr[3], auth_cmpl.bd_addr[4], auth_cmpl.bd_addr[5], ours_str);
+    return;
+  }
   char addr_str[18];
   sprintf(addr_str, "%02X:%02X:%02X:%02X:%02X:%02X",
           auth_cmpl.bd_addr[0], auth_cmpl.bd_addr[1], auth_cmpl.bd_addr[2],
@@ -673,12 +702,38 @@ void BLEConnectionManager::handle_gap_event(esp_gap_ble_cb_event_t event, esp_bl
               param->ble_security.ble_req.bd_addr[0], param->ble_security.ble_req.bd_addr[1],
               param->ble_security.ble_req.bd_addr[2], param->ble_security.ble_req.bd_addr[3],
               param->ble_security.ble_req.bd_addr[4], param->ble_security.ble_req.bd_addr[5]);
-      ESP_LOGI(TAG, "BLE security request from device %s - accepting", addr_str);
-      esp_ble_gap_security_rsp(param->ble_security.ble_req.bd_addr, true);
+      switch (core::gap_security_action(gap_addr_is_pump_(param->ble_security.ble_req.bd_addr),
+                                        pairing_enabled_)) {
+        case core::GapSecurityAction::ACCEPT:
+          ESP_LOGI(TAG, "BLE security request from pump %s - accepting", addr_str);
+          esp_ble_gap_security_rsp(param->ble_security.ble_req.bd_addr, true);
+          break;
+        case core::GapSecurityAction::DECLINE:
+          // No reply, rather than a reply of `false`. ESPHome's own
+          // BLEClientBase::gap_event_handler() has already answered this event
+          // with `true` for its configured peer -- unconditionally, with no
+          // enable_pairing notion of its own -- so a contradicting `false` from
+          // here would arrive second against an SMP exchange already underway.
+          // enable_pairing therefore governs what this component does (security
+          // params, encryption requests, and the consent above); it cannot stop
+          // the ble_client itself from consenting. Say so rather than imply a
+          // guarantee that is not ours to make.
+          ESP_LOGW(TAG, "BLE security request from pump %s while enable_pairing is false", addr_str);
+          ESP_LOGW(TAG, "  Not consenting here; note ble_client accepts it independently");
+          break;
+        case core::GapSecurityAction::IGNORE:
+          ESP_LOGD(TAG, "Ignoring BLE security request from %s (not our pump)", addr_str);
+          break;
+      }
       break;
     }
-      
+
     case ESP_GAP_BLE_PASSKEY_NOTIF_EVT: {
+      // Log-only, but still address-filtered: this fires for every peer on the
+      // node, and reporting a stranger's passkey as the pump's is misleading.
+      if (!gap_addr_is_pump_(param->ble_security.key_notif.bd_addr)) {
+        break;
+      }
       char addr_str[18];
       sprintf(addr_str, "%02X:%02X:%02X:%02X:%02X:%02X",
               param->ble_security.key_notif.bd_addr[0], param->ble_security.key_notif.bd_addr[1],
@@ -690,11 +745,24 @@ void BLEConnectionManager::handle_gap_event(esp_gap_ble_cb_event_t event, esp_bl
     }
       
     case ESP_GAP_BLE_KEY_EVT:
+      // Log-only, address-filtered on the same rationale as the passkey events:
+      // key exchange with somebody else's peer is not this component's business
+      // to narrate.
+      if (!gap_addr_is_pump_(param->ble_security.ble_key.bd_addr)) {
+        break;
+      }
       ESP_LOGD(TAG, "BLE key event (key exchange in progress)");
       ESP_LOGD(TAG, "  Key type: 0x%02x", param->ble_security.ble_key.key_type);
       break;
-      
+
     case ESP_GAP_BLE_REMOVE_BOND_DEV_COMPLETE_EVT:
+      // This component never removes a bond, so every one of these events is
+      // somebody else's -- a bluetooth_proxy unpair, most likely. Unfiltered, it
+      // reported "BLE bond removed successfully" about the pump when the pump's
+      // bond was untouched, which is the most misleading line in this switch.
+      if (!gap_addr_is_pump_(param->remove_bond_dev_cmpl.bd_addr)) {
+        break;
+      }
       if (param->remove_bond_dev_cmpl.status == ESP_BT_STATUS_SUCCESS) {
         ESP_LOGI(TAG, "BLE bond removed successfully");
       } else {
@@ -708,13 +776,38 @@ void BLEConnectionManager::handle_gap_event(esp_gap_ble_cb_event_t event, esp_bl
               param->ble_security.ble_req.bd_addr[0], param->ble_security.ble_req.bd_addr[1],
               param->ble_security.ble_req.bd_addr[2], param->ble_security.ble_req.bd_addr[3],
               param->ble_security.ble_req.bd_addr[4], param->ble_security.ble_req.bd_addr[5]);
-      ESP_LOGI(TAG, "BLE numeric comparison request from %s", addr_str);
-      ESP_LOGI(TAG, "  Auto-accepting (Just Works mode)");
-      esp_ble_confirm_reply(param->ble_security.ble_req.bd_addr, true);
+      // Unlike SEC_REQ, nothing in ESPHome answers this event *by default*, so
+      // DECLINE is enforceable here rather than advisory. It is not quite "the
+      // only responder": ESPHome ships an on_numeric_comparison_request trigger
+      // and a ble_client.numeric_comparison_reply action, so a config that
+      // wires those up on this same client would reply twice. Nothing in this
+      // repo's packages does, and a user who adds one has asked for manual
+      // control of exactly this event.
+      switch (core::gap_security_action(gap_addr_is_pump_(param->ble_security.ble_req.bd_addr),
+                                        pairing_enabled_)) {
+        case core::GapSecurityAction::ACCEPT:
+          ESP_LOGI(TAG, "BLE numeric comparison request from pump %s", addr_str);
+          ESP_LOGI(TAG, "  Auto-accepting (Just Works mode)");
+          esp_ble_confirm_reply(param->ble_security.ble_req.bd_addr, true);
+          break;
+        case core::GapSecurityAction::DECLINE:
+          ESP_LOGW(TAG, "Rejecting numeric comparison from pump %s - enable_pairing is false", addr_str);
+          esp_ble_confirm_reply(param->ble_security.ble_req.bd_addr, false);
+          break;
+        case core::GapSecurityAction::IGNORE:
+          ESP_LOGD(TAG, "Ignoring numeric comparison request from %s (not our pump)", addr_str);
+          break;
+      }
       break;
     }
       
     case ESP_GAP_BLE_PASSKEY_REQ_EVT: {
+      // Log-only. Address-filtered for the same reason as PASSKEY_NOTIF: the
+      // warning below claims Just Works was configured and something asked for
+      // a passkey anyway, which is only true of a peer we configured.
+      if (!gap_addr_is_pump_(param->ble_security.ble_req.bd_addr)) {
+        break;
+      }
       char addr_str[18];
       sprintf(addr_str, "%02X:%02X:%02X:%02X:%02X:%02X",
               param->ble_security.ble_req.bd_addr[0], param->ble_security.ble_req.bd_addr[1],

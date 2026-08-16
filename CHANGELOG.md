@@ -434,6 +434,39 @@
 
 ### Fixed
 
+- **The component no longer answers other devices' pairing requests, or acts on
+  their pairing results.** BLE GAP events are broadcast rather than routed:
+  ESPHome hands every GAP event to every BLE client and then to every node, so
+  the five security branches here saw the pairing traffic of every other peer
+  sharing the node — a Bluetooth proxy connection, a second `ble_client`,
+  anything — and all five acted on it. ESPHome's own client checks the address
+  before acting on the same events; this component did not, and so undid that
+  filtering one stack frame later.
+
+  Two branches replied "yes, let's pair" on a stranger's behalf. Neither
+  consulted `enable_pairing`, which defaults to false and means passive
+  telemetry only — the security setup honoured it, the reply paths did not.
+
+  The third is not hardening. The auth-complete handler read the address only to
+  print it, so a stranger's result was taken as the pump's: on failure it
+  latched that stranger's reason at the rank that outranks every other fault
+  reason — masking the real cause — and, with encryption in flight, disconnected
+  the pump. A stranger's *success* is as wrong: it publishes pairing-OK for the
+  pump, clears a genuine pairing fault, and can release a held-back notification
+  subscription onto a link that never authenticated.
+
+  One asymmetry is documented rather than papered over. At a security request
+  ESPHome's own client has already consented for its configured peer,
+  unconditionally, so declining here would send a contradicting answer into an
+  exchange already underway; `enable_pairing` governs what this component does,
+  not whether `ble_client` consents. At a numeric-comparison request nothing
+  else responds by default, so the refusal is real — and it is a behaviour
+  change worth naming: on a node with `enable_pairing: false`, a numeric
+  comparison request from the pump is now refused where it was previously
+  accepted. Reaching it takes a deliberate `io_capability` change, because
+  ESPHome's BLE stack sets "no input, no output" globally, which forces Just
+  Works and suppresses the request entirely.
+
 - **A BLE write that fails part-way through a packet no longer feeds the next
   command into the wreckage.** The failure path was identical whether zero or
   twenty bytes had reached the radio, and the 50 ms send pacing is measured from

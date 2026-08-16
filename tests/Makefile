@@ -15,7 +15,7 @@ MOCK_HDRS = $(shell find mocks -name '*.h' 2>/dev/null)
 DEPS = $(COMPONENT_HDRS) $(MOCK_HDRS)
 
 # Test executables
-TESTS = test_protocol test_frame_parser test_read_chain_lifetime test_control_service test_control_state test_dhw_demand_logic test_dhw_demand_component test_transport_matching test_transport_fsm test_schedule_service test_write_operations test_schedule_codec test_telemetry_units test_pump_schedule_ux test_publish_gate test_dhw_publish_gate test_link_watchdog test_auth test_sensor_publisher test_telemetry_service test_device_info_service test_initial_read_retry test_subscribe_outcome test_failure_hold
+TESTS = test_protocol test_frame_parser test_read_chain_lifetime test_control_service test_control_state test_dhw_demand_logic test_dhw_demand_component test_transport_matching test_transport_fsm test_schedule_service test_write_operations test_schedule_codec test_telemetry_units test_pump_schedule_ux test_publish_gate test_dhw_publish_gate test_link_watchdog test_auth test_sensor_publisher test_telemetry_service test_device_info_service test_initial_read_retry test_subscribe_outcome test_failure_hold test_gap_security_policy
 
 # Default target
 all: $(TESTS)
@@ -62,6 +62,14 @@ test_subscribe_outcome: test_subscribe_outcome.cpp ../components/alpha_hwr/subsc
 # becoming a permanent hold that silences every later fault.
 test_failure_hold: test_failure_hold.cpp ../components/alpha_hwr/failure_hold.h $(DEPS)
 	$(CXX) $(CXXFLAGS) -Werror=switch test_failure_hold.cpp -o test_failure_hold $(LDFLAGS)
+
+# -Werror=switch again: ble_connection_manager.cpp switches over
+# GapSecurityAction at both reply sites, so a fourth action added without
+# deciding what each handler does with it must break the build rather than
+# silently take a default. The test mirrors that switch so the guard applies
+# here too, where it is actually compiled.
+test_gap_security_policy: test_gap_security_policy.cpp ../components/alpha_hwr/gap_security_policy.h $(DEPS)
+	$(CXX) $(CXXFLAGS) -Werror=switch test_gap_security_policy.cpp -o test_gap_security_policy $(LDFLAGS)
 
 test_dhw_publish_gate: test_dhw_publish_gate.cpp ../components/dhw_demand/publish_gate.h $(DEPS)
 	$(CXX) $(CXXFLAGS) test_dhw_publish_gate.cpp -o test_dhw_publish_gate $(LDFLAGS)
@@ -182,6 +190,7 @@ test: $(TESTS)
 	@./test_initial_read_retry
 	@./test_subscribe_outcome
 	@./test_failure_hold
+	@./test_gap_security_policy
 	@echo ""
 	@echo "=========================================="
 	@echo "Running Transport Matching Tests..."
