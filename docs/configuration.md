@@ -62,9 +62,15 @@ Raise `data_timeout` if your setup has long legitimate quiet periods; set it to
 
 A link that stays deaf is not recycled on the configured cadence forever. Each
 recycle that produces no data doubles the window for the next one, up to a
-ceiling of one hour, and **any** inbound notification resets it to the
-configured value. A link that can recover still recovers on the first or second
-try; a permanently deaf one drops from roughly 1,300 recycles a day to about 28.
+ceiling of one hour, and a notification received once the session is **ready**
+resets it to the configured value. (Ready-gated because a deaf pump still
+answers the handshake: resetting on those frames would clear the window once per
+session and the backoff would never engage.) A link that can recover still
+recovers on the first or second try; a permanently deaf one drops from roughly
+1,300 recycles a day to about 28.
+
+A widened window is not reset by the reconnect either, so it governs the next
+connection's handshake as well — which matters for reading `link_max_gap` below.
 
 That matters because a recycle is not free: each one re-enters the
 encryption-on-open path on a bonded pump, taking one more run at the window
@@ -96,24 +102,35 @@ observation. The two requirements pull against each other — clear of every gap
 that happens routinely, short enough not to sit in the stuck state for long —
 and only data from real installations settles it.
 
-It samples exactly the intervals the watchdog is timed over, which is what makes
-it usable for that: the clock starts at connection-open and every inbound
-notification closes an interval and starts the next. So the open-to-first-
-notification interval is included (it is inside the window, and against a 60s
-budget it is the tightest case, not the loosest), and so is an interval that
-ends in a recycle rather than a notification. That last one matters most:
+It samples the intervals the watchdog is timed over, which is what makes it
+usable for that: the clock starts at connection-open, and an interval is closed
+by whatever ends it — a notification, a watchdog recycle, or the link dropping.
+So the open-to-first-notification interval is included (it is inside the window,
+and against a 60s budget it is the tightest case, not the loosest), and so is a
+quiet period cut short by a recycle or a drop, which is where the number would
+otherwise be silent about exactly the excursions it exists to reveal. Time spent
+disconnected is not sampled, since the watchdog is not running then either.
 
-> **A reading at or above your `data_timeout` means the ceiling was reached.**
-> The value is then a floor, not a measurement — the link was torn down, so how
-> long the quiet would have lasted is unknown. After a backoff it reports which
-> ceiling: a reading near `120s` on a `60s` budget is the second window in a
-> recycle sequence.
+> **A reading is a lower bound on how long the link went quiet**, not a
+> measurement of it. When a recycle or a drop ended the interval, how long the
+> quiet would have lasted is unknown.
+>
+> **A high reading does not by itself mean a recycle happened.** The watchdog
+> runs against the window currently in force, and the backoff widens that after
+> a recycle — so a 90s interval that ended on its own under a widened 120s
+> window reads the same as one cut off by a 60s ceiling. `link_recycles` and the
+> Pump Link Fault sensor are what distinguish the two; this number alone cannot.
 
-Because the sensor tracks a maximum, expect it to sit at the handshake latency
-(around 6s) on a healthy link rather than at zero. It is a RAM value and starts
-over at every boot, including a reflash; Home Assistant's long-term statistics
-keep the hourly maximum indefinitely, so use the statistics graph rather than
-the current state when you want the history across reboots.
+Because the sensor tracks a maximum, expect it to settle at roughly the 10s poll
+interval on a healthy link rather than at zero — the first poll cycle of the
+first connection puts it there. It is a RAM value and starts over at every boot,
+including a reflash; Home Assistant's long-term statistics keep the hourly
+maximum indefinitely, so use the statistics graph rather than the current state
+when you want the history across reboots.
+
+With `data_timeout: 0s` the sensor still records intervals, but there is no
+budget for them to be read against and no recycle to cut them short — it becomes
+a plain "longest quiet period on a live link" number.
 
 For a deliberate data-gathering run, set `data_timeout` well above what you
 expect (`600s`, say) for a few weeks. The watchdog still recovers a deaf link,

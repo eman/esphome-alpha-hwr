@@ -88,6 +88,13 @@ void AlphaHwrComponent::setup() {
   });
 
   ble_manager_.set_disconnection_callback([this]() {
+    // Close the gap interval this drop ended. The watchdog was timing it
+    // against its budget until the link went away, so leaving it unrecorded
+    // censors the sample the same way dropping the recycle sample did -- a link
+    // that goes quiet and then drops on its own (supervision timeout, pump
+    // power loss, the encryption-failure teardown) would report only its
+    // steady-state cadence. The sampler ignores this if no open preceded it.
+    this->link_gap_.on_disconnect(millis());
     // Cancel in-flight auth so its pending scheduler lambdas are invalidated
     // and do not fire against the next BLE connection.
     this->auth_.cancel();
@@ -532,8 +539,8 @@ void AlphaHwrComponent::check_link_liveness_() {
 }
 
 // Link diagnostics for issue #176: the consecutive-recycle counter an
-// automation can threshold on, and the longest inter-notification gap seen,
-// which is what a data-driven data_timeout default has to be chosen from.
+// automation can threshold on, and the longest quiet interval seen, which is
+// what a data-driven data_timeout default has to be chosen from.
 //
 // Gated on change. sensor::Sensor::publish_state() does not dedup, so
 // republishing on every ~1 s tick would cost a frame per API subscriber per

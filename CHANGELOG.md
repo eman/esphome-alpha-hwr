@@ -10,10 +10,10 @@
   reads 0 in normal operation and an automation can threshold on it; the Pump
   Link Fault sensor shows a reason only *during* a reconnect and clears on
   recovery, which makes repeated recycles a flap cadence somebody has to be
-  watching to notice rather than a value. `link_max_gap` records the longest gap
-  between notifications since boot, which is what a `data_timeout` default
-  chosen from observation rather than from a constants calculation has to be
-  based on.
+  watching to notice rather than a value. `link_max_gap` records the longest
+  quiet interval since boot — every interval the watchdog times, however it
+  ended — which is what a `data_timeout` default chosen from observation rather
+  than from a constants calculation has to be based on.
 
 - **The Lovelace card has host tests** — `tests/js/test_schedule_card.js`, run
   by `make test-js` and in CI. 1,800 lines that had shipped broken twice for
@@ -386,23 +386,35 @@
   discarded and the running maximum asymptoted to just under the budget whatever
   the pump did — "never above 12 s in a month" reading as "60 s was comfortable"
   when what it meant was "no quiet period between 12 s and 60 s ended on its
-  own". The recycle now records the interval it gave up on, so a reading at or
-  above the configured budget says plainly that the ceiling was reached, and
-  after a backoff, which ceiling.
+  own". An interval ended by a plain drop — supervision timeout, pump power
+  loss, the encryption-failure teardown — was discarded the same way, censoring
+  the sample at a threshold nobody configured. Both are now recorded, at the
+  recycle and in the disconnection callback; a disconnect with no open before it
+  samples nothing, so a failed connection attempt cannot record the downtime
+  since the last session as if the link had been up and silent for it.
 
   The open-to-first-notification interval is now sampled too, rather than
   excluded as "the handshake, not the pump's cadence". It is inside the window
   the watchdog acts on, and per the sizing note it is the *binding* case — 17.2 s
   worst case against a 60 s budget, where steady state is bounded by our own 10 s
   poll — so excluding it left the statistic unable to report the case the default
-  is tightest against. The visible change is a floor on the sensor at the
-  handshake latency (around 6 s) instead of a maximum that starts at zero.
+  is tightest against. Nothing visible changes on a healthy link: the maximum
+  reaches the 10 s poll interval in the first poll cycle regardless.
 
-  Both failures biased the number downward, toward "the budget was never close":
-  the direction that argues for keeping a default nobody has validated. The
-  sampler moved into `link_watchdog.h` as `LinkGapSampler` so host tests can pin
-  it; `tests/test_link_watchdog.cpp` now drives three deaf recycle cycles and
-  fails if the maximum comes back under the budget.
+  All of these biased the number downward, toward "the budget was never close":
+  the direction that argues for keeping a default nobody has validated. What a
+  reading means is now stated where it can be read — it is a lower bound on the
+  quiet, and because the backoff widens the window in force and the reconnect
+  does not reset it, a value above the configured budget does *not* by itself
+  mean a recycle happened. `link_recycles` is what distinguishes the two.
+
+  The sampler moved into `link_watchdog.h` as `LinkGapSampler` so host tests can
+  pin it, and `tests/test_link_watchdog.cpp`'s simulator now models the backoff
+  it had been ignoring — which corrected a neighbouring test that claimed the
+  watchdog re-fires once per tick during the async disconnect. At the configured
+  budget the backoff covers that on its own; the re-arm is load-bearing at the
+  one-hour cap, where there is nothing left to double, and that is what the test
+  asserts now.
 
 - **A single-event slot past what the pump actually has now settles REJECTED
   immediately instead of TIMEOUT fifteen seconds later.** Single events live at

@@ -564,9 +564,12 @@ private:
   // Backoff state for that watchdog (issue #176). link_data_timeout_ms_ is the
   // configured budget and never changes; this is the window currently in force.
   // It doubles on every recycle that produced no data and resets to the
-  // configured value on any inbound notification, so a link that can recover is
-  // unaffected while a permanently deaf one stops being recycled ~1,300 times
-  // a day. Initialised from the configured value in setup().
+  // configured value on a notification received while the session is READY (a
+  // deaf pump still answers the handshake, so resetting on those would mean the
+  // backoff never engages), so a link that can recover is unaffected while a
+  // permanently deaf one stops being recycled ~1,300 times a day. Not reset at
+  // connection-open: a widened window governs the next connection's handshake
+  // too. Initialised from the configured value in setup().
   uint32_t link_data_timeout_current_ms_{60000};
 
   // Consecutive recycles with no data in between. Reset by an inbound

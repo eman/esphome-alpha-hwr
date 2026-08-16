@@ -139,9 +139,15 @@ static const uint32_t LINK_DATA_TIMEOUT_BACKOFF_CAP_MS = 3600000u;
 /// Doubling with a ceiling keeps recovery automatic while bounding all three: a
 /// link that can recover still does on the first or second try, and a
 /// permanently deaf one drops from ~1,300 recycles a day to about 28. The
-/// caller resets to the configured value on any inbound notification, so a pump
-/// that comes back hours later is served by the configured budget again rather
-/// than by an hour-wide window.
+/// caller resets to the configured value on a notification received while the
+/// session is READY, so a pump that comes back hours later is served by the
+/// configured budget again rather than by an hour-wide window. READY-gated
+/// rather than on any notification, because a deaf pump still answers the
+/// handshake: resetting on those frames would clear the window once per session
+/// forever and the backoff would never engage (see the reset site in
+/// alpha_hwr.cpp). The widened window therefore also governs the next
+/// connection's handshake, which is why a recycle is not the only way for the
+/// gap statistic to read above the configured budget.
 ///
 /// @param current_ms The window that just expired.
 /// @param cap_ms     Ceiling; the window never grows past this.
@@ -179,9 +185,13 @@ inline uint32_t link_data_timeout_next(uint32_t current_ms, uint32_t cap_ms) {
 ///     worst case against a 60 s budget, where steady state is bounded by our
 ///     own 10 s poll. Excluding it as "the handshake, not the pump's cadence"
 ///     left the statistic structurally unable to report the case the default is
-///     tightest against. The cost is a floor on the maximum at the handshake
-///     latency (5.90/6.17/5.94 s measured), which is below anything a
-///     steady-state gap has to reach to be interesting.
+///     tightest against. Including it costs nothing visible in practice: the
+///     interval is a few seconds (the 5.90/6.17/5.94 s measured above is open
+///     to READY, and this file records that control-mode notifications arrive
+///     *during* the handshake, so first-inbound is earlier than that and has
+///     never been measured on its own), while the running maximum reaches the
+///     10 s poll interval within the first poll cycle of the first connection
+///     and stays there.
 ///   - **An interval that ends in a recycle counts too**, which is what
 ///     on_recycle() is for. Without it the sample is censored at exactly the
 ///     threshold being validated: the watchdog re-arms and disconnects, so no
@@ -191,28 +201,58 @@ inline uint32_t link_data_timeout_next(uint32_t current_ms, uint32_t cap_ms) {
 ///     as "60 s was comfortable" when what it means is "no quiet period between
 ///     12 s and 60 s ended on its own" — the opposite conclusion.
 ///
-/// Time between a disconnect and the next open is not sampled, because the
-/// watchdog is not running then either.
+/// An interval is closed by whatever ends it: a notification, a recycle, or the
+/// link dropping for some reason of its own. Time between that drop and the
+/// next open is not sampled, because the watchdog is not running then either.
+///
+/// What a reading means, and what it does not:
+///
+///   - It is a lower bound on how long the link went quiet. When the interval
+///     was cut short by a recycle or a drop, how long the quiet would have
+///     lasted is unknowable.
+///   - A reading above the configured `data_timeout` does NOT by itself mean a
+///     recycle happened. The watchdog runs against the window currently in
+///     force, which the backoff widens after a recycle and which is only reset
+///     by a notification received while READY — so a 90 s interval that ended
+///     on its own under a widened 120 s window reads the same as one that hit a
+///     60 s ceiling. `link_recycles` and the fault sensor are what distinguish
+///     them; this number alone cannot.
 class LinkGapSampler {
  public:
   /// Connection open. The watchdog's clock starts here, so this one does too;
   /// it opens an interval without closing one, since what came before the open
   /// was not a quiet link but no link.
-  void on_open(uint32_t now_ms) { this->last_ms_ = now_ms; }
+  void on_open(uint32_t now_ms) {
+    this->last_ms_ = now_ms;
+    this->armed_ = true;
+  }
 
   /// Inbound notification: closes an interval and opens the next.
   void on_inbound(uint32_t now_ms) { this->sample_(now_ms); }
 
   /// The watchdog fired: record the interval it gave up on, and re-arm with the
   /// same stamp check_link_liveness_() re-arms the window with.
-  ///
-  /// The recorded value is a floor rather than a gap — the link is torn down
-  /// here, so how long the quiet would have lasted is unknowable. It always
-  /// exceeds the window that expired (the elapsed test is strictly
-  /// greater-than, evaluated on a ~1 s tick), so a maximum above the configured
-  /// `data_timeout` says plainly that the ceiling was reached, and after a
-  /// backoff, which ceiling.
   void on_recycle(uint32_t now_ms) { this->sample_(now_ms); }
+
+  /// The link dropped for a reason other than the watchdog — supervision
+  /// timeout, pump power loss, the encryption-failure teardown. The watchdog
+  /// was timing that interval against its budget right up to the drop, so
+  /// discarding it censors the sample the same way dropping the recycle sample
+  /// did, just at a threshold nobody configured: a link that routinely goes
+  /// quiet for 45 s and then drops would report only its steady-state cadence.
+  ///
+  /// Disarms, so a disconnect with no open before it cannot sample the downtime
+  /// since the previous session. A failed connection attempt that reports a
+  /// disconnect without an open is the case that would otherwise record the
+  /// entire gap between sessions as if the link had been up and silent for it —
+  /// an inflated reading, which argues for a longer timeout and is exactly as
+  /// wrong as the deflated one this class exists to fix.
+  void on_disconnect(uint32_t now_ms) {
+    if (!this->armed_)
+      return;
+    this->sample_(now_ms);
+    this->armed_ = false;
+  }
 
   uint32_t max_ms() const { return this->max_ms_; }
 
@@ -228,6 +268,7 @@ class LinkGapSampler {
 
   uint32_t last_ms_{0};
   uint32_t max_ms_{0};
+  bool armed_{false};
 };
 
 }  // namespace alpha_hwr

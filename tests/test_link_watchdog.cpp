@@ -24,6 +24,7 @@
 using esphome::alpha_hwr::link_data_timeout_expired;
 using esphome::alpha_hwr::link_data_timeout_next;
 using esphome::alpha_hwr::LinkGapSampler;
+using esphome::alpha_hwr::LINK_DATA_TIMEOUT_BACKOFF_CAP_MS;
 
 int tests_passed = 0;
 int tests_failed = 0;
@@ -61,11 +62,26 @@ struct LinkSim {
   /// load-bearing rather than decorative.
   bool rearm{true};
 
-  /// The gap statistic, stamped at the same three points the component stamps
-  /// last_inbound at. Set sample_recycles false to model it WITHOUT
-  /// on_recycle(), which is what censors the sample at the budget.
+  /// The gap statistic, stamped at the same points the component stamps
+  /// last_inbound at, plus the disconnect. Set sample_recycles false to model it
+  /// WITHOUT on_recycle(), which is what censors the sample at the budget.
   LinkGapSampler gap;
   bool sample_recycles{true};
+  /// Set false with sample_recycles to model the sampler as it shipped in #189:
+  /// closing an interval on a notification and on nothing else.
+  bool sample_disconnects{true};
+
+  /// The window currently in force. The component backs this off on every
+  /// recycle that produced no data (link_data_timeout_next) and resets it only
+  /// on a notification received while READY, so the simulator does too: without
+  /// the backoff it would answer questions about a watchdog that stopped
+  /// shipping when the backoff landed, and both the fire cadence and what the
+  /// gap statistic records depend on it.
+  uint32_t window{TIMEOUT_MS};
+  /// A deaf pump still answers the handshake, so the backoff reset is gated on
+  /// READY rather than on any notification. Set false to model frames arriving
+  /// on a session that never gets there.
+  bool ready{true};
 
   int pending_disconnect_{0};
 
@@ -79,26 +95,35 @@ struct LinkSim {
   void notification() {
     last_inbound = now;
     gap.on_inbound(now);
+    if (ready)
+      window = TIMEOUT_MS;
   }
   /// A clean drop: the pump or the stack closes the link with no watchdog
-  /// involvement. The watchdog does not run while disconnected, so nothing is
-  /// sampled until the next open.
+  /// involvement. Closes the interval the drop ended -- the watchdog was timing
+  /// it until the link went away -- and nothing is sampled again until the next
+  /// open.
   void drop() {
     connected = false;
     pending_disconnect_ = 0;
+    if (sample_disconnects)
+      gap.on_disconnect(now);
   }
 
   /// Advance by one 1s loop() tick, evaluating the watchdog as the component
   /// does. Returns true if it fired on this tick.
   bool tick() {
     now += 1000;
-    if (pending_disconnect_ > 0 && --pending_disconnect_ == 0)
+    if (pending_disconnect_ > 0 && --pending_disconnect_ == 0) {
       connected = false;  // the DISCONNECT event finally lands
-    if (!link_data_timeout_expired(connected, now, last_inbound, TIMEOUT_MS))
+      if (sample_disconnects)
+        gap.on_disconnect(now);  // ...and the component's callback closes the interval
+    }
+    if (!link_data_timeout_expired(connected, now, last_inbound, window))
       return false;
     fired++;
     if (sample_recycles)
       gap.on_recycle(now);  // record the interval before the re-arm erases it
+    window = link_data_timeout_next(window, LINK_DATA_TIMEOUT_BACKOFF_CAP_MS);
     if (rearm)
       last_inbound = now;  // check_link_liveness_() re-arms before disconnecting
     // A repeat disconnect() on an already-disconnecting link does not postpone
@@ -168,10 +193,9 @@ void test_deaf_from_connection_open() {
 }
 
 void test_rearm_prevents_refiring_during_the_async_disconnect() {
-  // The re-arm in check_link_liveness_() is the only thing stopping the
-  // watchdog from firing on every tick between requesting the disconnect and
-  // the DISCONNECT event landing. Give that gap a realistic 8 ticks and show
-  // the difference, because an untested guard is an assumed one.
+  // The re-arm in check_link_liveness_() stops the watchdog firing on every
+  // tick between requesting the disconnect and the DISCONNECT event landing.
+  // Give that gap a realistic 8 ticks. An untested guard is an assumed one.
   LinkSim with_rearm;
   with_rearm.disconnect_latency_ticks = 8;
   with_rearm.open(1000);
@@ -181,14 +205,42 @@ void test_rearm_prevents_refiring_during_the_async_disconnect() {
               "The re-arm holds the watchdog to one fire while the disconnect is in flight");
   TEST_ASSERT(!with_rearm.connected, "...and the link is down once the event lands");
 
+  // At the configured budget the backoff covers the same window on its own: the
+  // fire doubles 60s to 120s, so the next tick is nowhere near expired even
+  // with a stale stamp. This test asserted 8 fires here until the simulator
+  // learned about the backoff, which is worth stating plainly -- the number was
+  // measuring a watchdog that stopped shipping when the backoff landed.
   LinkSim without_rearm;
   without_rearm.disconnect_latency_ticks = 8;
   without_rearm.rearm = false;
   without_rearm.open(1000);
   for (int t = 0; t < 200; t++)
     without_rearm.tick();
-  TEST_ASSERT(without_rearm.fired == 8,
-              "Without it the same episode fires once per tick until the event lands");
+  TEST_ASSERT(without_rearm.fired == 1,
+              "At the default budget the backoff alone also holds it to one fire");
+
+  // Where the re-arm is still the only guard: a permanently deaf link ends at
+  // the one-hour cap, and link_data_timeout_next() returns the cap unchanged.
+  // With nothing left to double, a stale stamp is expired on every tick of the
+  // disconnect window, and each fire re-latches the failure reason on a link
+  // that is already being torn down.
+  LinkSim at_cap;
+  at_cap.disconnect_latency_ticks = 8;
+  at_cap.rearm = false;
+  at_cap.window = LINK_DATA_TIMEOUT_BACKOFF_CAP_MS;
+  at_cap.open(1000);
+  for (int t = 0; t < 4000; t++)
+    at_cap.tick();
+  TEST_ASSERT(at_cap.fired == 8,
+              "At the backoff cap, without the re-arm, it fires once per tick until the event lands");
+
+  LinkSim at_cap_rearmed;
+  at_cap_rearmed.disconnect_latency_ticks = 8;
+  at_cap_rearmed.window = LINK_DATA_TIMEOUT_BACKOFF_CAP_MS;
+  at_cap_rearmed.open(1000);
+  for (int t = 0; t < 4000; t++)
+    at_cap_rearmed.tick();
+  TEST_ASSERT(at_cap_rearmed.fired == 1, "...and once with it, which is what the re-arm is for");
 }
 
 void test_deaf_mid_session() {
@@ -292,9 +344,9 @@ void test_gap_is_not_censored_at_the_budget() {
     s.open(1000);
     for (int c = 0; c < cycles; c++) {
       const int before = s.fired;
-      for (int guard = 0; guard < 200 && s.fired == before; guard++)
+      for (int guard = 0; guard < 1000 && s.fired == before; guard++)
         s.tick();
-      for (int guard = 0; guard < 200 && s.connected; guard++)
+      for (int guard = 0; guard < 1000 && s.connected; guard++)
         s.tick();  // the async DISCONNECT event lands
       s.open(s.now + 6000);  // reconnect, still deaf
     }
@@ -302,17 +354,50 @@ void test_gap_is_not_censored_at_the_budget() {
 
   LinkSim censored;
   censored.sample_recycles = false;
+  censored.sample_disconnects = false;
   run_deaf_cycles(censored, 3);
   TEST_ASSERT(censored.fired == 3, "Three budgets expire on a link that never speaks");
   TEST_ASSERT(censored.gap.max_ms() == 0,
-              "Without the recycle sample, a link that never speaks reports no gap at all");
+              "As #189 shipped it, three expired budgets leave the maximum at zero");
 
   LinkSim sim;
   run_deaf_cycles(sim, 3);
   TEST_ASSERT(sim.gap.max_ms() > TIMEOUT_MS,
-              "With it, the maximum exceeds the configured budget: the ceiling was reached");
-  TEST_ASSERT(sim.gap.max_ms() <= TIMEOUT_MS + 1000,
-              "...by no more than the 1s evaluation tick, since it is the budget plus a tick");
+              "With it, the maximum exceeds the configured budget");
+  // No notification ever arrives, so nothing resets the backoff: the three
+  // windows are 60s, 120s and 240s, each recorded a tick after it expired. The
+  // maximum is therefore the LAST window, not the configured budget -- which is
+  // what lets a reading say which ceiling was hit, and is why "budget plus a
+  // tick" would be the wrong bound to assert here.
+  TEST_ASSERT(sim.gap.max_ms() > 4 * TIMEOUT_MS,
+              "...and tracks the widened window rather than the configured one");
+  TEST_ASSERT(sim.gap.max_ms() <= 4 * TIMEOUT_MS + 1000,
+              "...landing one evaluation tick past the third window");
+}
+
+void test_gap_records_an_interval_ended_by_a_plain_drop() {
+  // Not every quiet interval ends in a notification or a recycle. A link that
+  // goes quiet and is then dropped by the stack -- supervision timeout, pump
+  // power loss, the encryption-failure teardown -- was being timed against the
+  // budget right up to the drop, and discarding that interval censors the
+  // sample at a threshold nobody configured.
+  LinkSim sim;
+  sim.open(1000);
+  for (int t = 0; t < 10; t++)
+    sim.tick();
+  sim.notification();  // a healthy session, 10s in
+  for (int t = 0; t < 45; t++)
+    sim.tick();  // 45s of quiet, inside the 60s budget...
+  sim.drop();    // ...ended by the link going away, not by the watchdog
+  TEST_ASSERT(sim.fired == 0, "The watchdog never fired: the drop came first");
+  TEST_ASSERT(sim.gap.max_ms() == 45000,
+              "The interval the drop ended is recorded, not discarded");
+
+  // ...but the downtime after it is not, however long the link stays away.
+  sim.now += 600000;
+  sim.open(sim.now);
+  sim.notification();
+  TEST_ASSERT(sim.gap.max_ms() == 45000, "...while the downtime that follows still is not");
 }
 
 void test_gap_records_a_floor_not_a_measurement() {
@@ -333,6 +418,26 @@ void test_gap_records_a_floor_not_a_measurement() {
 
   TEST_ASSERT(quiet_but_alive.gap.max_ms() == permanently_deaf.gap.max_ms(),
               "A censored interval reports the budget it hit, not how long the quiet lasted");
+}
+
+void test_gap_ignores_a_disconnect_with_no_open_before_it() {
+  // A connection attempt that fails without ever opening still reports a
+  // disconnect. Sampling it would record the downtime since the previous
+  // session as though the link had been up and silent throughout -- an inflated
+  // reading, which argues for a longer timeout and is exactly as wrong as the
+  // deflated one the recycle sample fixes.
+  LinkGapSampler s;
+  s.on_disconnect(500000);
+  TEST_ASSERT(s.max_ms() == 0, "A disconnect with no open before it samples nothing");
+
+  s.on_open(600000);
+  s.on_inbound(604000);
+  s.on_disconnect(605000);
+  TEST_ASSERT(s.max_ms() == 4000, "...while a real session still reports its own intervals");
+
+  s.on_disconnect(900000);
+  TEST_ASSERT(s.max_ms() == 4000,
+              "...and a second disconnect callback does not sample the downtime after the first");
 }
 
 void test_millis_rollover() {
@@ -475,6 +580,8 @@ int main() {
   test_gap_ignores_time_spent_disconnected();
   test_gap_tracks_the_longest_quiet_interval();
   test_gap_is_not_censored_at_the_budget();
+  test_gap_records_an_interval_ended_by_a_plain_drop();
+  test_gap_ignores_a_disconnect_with_no_open_before_it();
   test_gap_records_a_floor_not_a_measurement();
   test_millis_rollover();
   test_predicate_has_no_notion_of_ready();
