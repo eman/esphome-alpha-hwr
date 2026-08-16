@@ -161,7 +161,7 @@ MUTATIONS=(
 # instead of being told immediately. The second leaves the failed command at the
 # head of the queue, which wedges the link for every command after it -- far
 # worse than the one write that was lost.
-"transport-send-failure-silent|components/alpha_hwr/transport.cpp|ESP_LOGE(TAG, \"Failed to send chunk, dropping command\");\n        if (cmd.callback) {\n          cmd.callback(false, nullptr, 0);\n        }|ESP_LOGE(TAG, \"Failed to send chunk, dropping command\");"
+"transport-send-failure-silent|components/alpha_hwr/transport.cpp|          this->peer_resync_started_ms_ = now;\n        }\n        if (cmd.callback) {\n          cmd.callback(false, nullptr, 0);\n        }|          this->peer_resync_started_ms_ = now;\n        }"
 "transport-send-failure-wedges-queue|components/alpha_hwr/transport.cpp|        ESP_LOGE(TAG, \"Failed to send chunk, dropping command\");|        ESP_LOGE(TAG, \"Failed to send chunk\"); if (true) break;"
 # The queue-advance property ON ITS OWN. The entry above drops the failure report
 # and the pop in one edit, so the report assertions kill it and it proves nothing
@@ -173,7 +173,29 @@ MUTATIONS=(
 # writes cannot tell the second command being sent from the first being re-sent,
 # so five assertions passed against a transport that never advanced. The test
 # asserts on the payload byte now.
-"transport-failed-command-stays-queued|components/alpha_hwr/transport.cpp|        ESP_LOGE(TAG, \"Failed to send chunk, dropping command\");\n        if (cmd.callback) {\n          cmd.callback(false, nullptr, 0);\n        }\n        this->command_queue_.pop_front();|        ESP_LOGE(TAG, \"Failed to send chunk, dropping command\");\n        if (cmd.callback) {\n          cmd.callback(false, nullptr, 0);\n        }"
+"transport-failed-command-stays-queued|components/alpha_hwr/transport.cpp|          this->peer_resync_started_ms_ = now;\n        }\n        if (cmd.callback) {\n          cmd.callback(false, nullptr, 0);\n        }\n        this->command_queue_.pop_front();|          this->peer_resync_started_ms_ = now;\n        }\n        if (cmd.callback) {\n          cmd.callback(false, nullptr, 0);\n        }"
+# The peer-resync hold, in the three ways it can be got wrong. A write that dies
+# part-way through a packet leaves the peer holding the head of a frame whose
+# length byte promises more; a receiver built like ours appends whatever comes
+# next rather than restarting on a frame start, so the following command is
+# swallowed and its caller waits out a full timeout in silence.
+#
+# Dropping the hold restores that. Applying it to EVERY failure loses the
+# distinction the fix exists to draw -- a first-chunk failure put nothing on the
+# wire and must not buy a second of silence. Shrinking the window to nothing
+# leaves the hold in place while making it useless, which is the version that
+# would look right in review.
+"transport-no-peer-resync-hold|components/alpha_hwr/transport.cpp|        if (cmd.bytes_sent > 0) {|        if (false) {"
+"transport-peer-resync-hold-always|components/alpha_hwr/transport.cpp|        if (cmd.bytes_sent > 0) {|        if (true) {"
+"transport-peer-resync-window-zero|components/alpha_hwr/transport.h|  static constexpr uint32_t PEER_RESYNC_HOLD_MS = REASSEMBLY_TIMEOUT_MS + 100;|  static constexpr uint32_t PEER_RESYNC_HOLD_MS = 0;"
+# The fourth way, and the likeliest one in practice: not zeroing the window but
+# TRIMMING it, because 1.1 s feels like a long stall. 700 ms leaves the hold
+# plainly visible in the code and useless -- the peer's guard fires at 950 ms
+# after the failure, so a shorter hold hands the next command back into the
+# partial frame exactly as before. The test probes the boundary at 950 ms rather
+# than at some comfortable fraction of it for this reason; with a looser probe
+# this mutant survives.
+"transport-peer-resync-window-too-short|components/alpha_hwr/transport.h|  static constexpr uint32_t PEER_RESYNC_HOLD_MS = REASSEMBLY_TIMEOUT_MS + 100;|  static constexpr uint32_t PEER_RESYNC_HOLD_MS = 700;"
 "transport-missing-writer-silent|components/alpha_hwr/transport.cpp|ESP_LOGW(TAG, \"Write callback not set, dropping command\");\n        if (cmd.callback) {\n          cmd.callback(false, nullptr, 0);\n        }|ESP_LOGW(TAG, \"Write callback not set, dropping command\");"
 # Restores issue #179's off-by-one: a seven-byte Class 7 header instead of six,
 # which cost every device-info string its first character. It survived for as
@@ -563,8 +585,17 @@ PY
       SURVIVED=0
     fi
   else
-    if ! (cd "$TESTS_DIR" && make clean >/dev/null 2>&1 && make -j"$JOBS" test >/dev/null 2>&1); then
+    # Build and RUN must be separate steps here, exactly as in the scoped arm
+    # above. `make test` does both, so folding them together inverts every
+    # verdict: a mutation the suite catches makes the target exit non-zero and
+    # was reported "did not compile", while one that survives exits zero and was
+    # scored "caught". SCOPED=0 therefore reported the opposite of the truth for
+    # every entry -- the failure mode this whole script exists to prevent,
+    # living in the script. `make` alone builds; `make test` then only runs.
+    if ! (cd "$TESTS_DIR" && make clean >/dev/null 2>&1 && make -j"$JOBS" >/dev/null 2>&1); then
       BUILD_BROKEN=1
+    elif (cd "$TESTS_DIR" && make test >/dev/null 2>&1); then
+      SURVIVED=1
     else
       SURVIVED=0
     fi

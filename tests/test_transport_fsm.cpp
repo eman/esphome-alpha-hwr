@@ -97,6 +97,89 @@ void test_send_failure_midway_through_a_chunked_packet() {
               "a half-written packet fails the command once, rather than hanging");
 }
 
+// A failure PART-WAY through a packet is not the same event as a failure on the
+// first chunk, and until now the code could not tell them apart.
+//
+// If chunk 1 of 3 reached the pump and chunk 2 did not, the pump is holding the
+// head of a frame whose length byte promises more. Our own reassembler -- the
+// mirror of the pump's -- ignores a frame start while it is mid-frame and only
+// abandons a partial after REASSEMBLY_TIMEOUT_MS, so a peer built the same way
+// appends the next command to the wreckage and swallows it whole. The caller of
+// THAT command then waits out its full timeout with nothing to show.
+//
+// So after a partial write the transport owes the peer silence long enough for
+// its staleness guard to fire, and owes it only then: a first-chunk failure put
+// no bytes on the wire and must not pay the stall.
+void test_partial_write_holds_off_so_the_peer_can_resync() {
+  std::cout << "\n=== Testing hold-off after a partial write ===" << std::endl;
+  esphome::alpha_hwr::core::Transport transport;
+
+  int chunks = 0;
+  std::vector<uint8_t> first_bytes;
+  transport.set_write_callback([&](const uint8_t *data, size_t len) -> bool {
+    chunks++;
+    if (len > 0) first_bytes.push_back(data[0]);
+    return chunks != 2;  // chunk 1 lands, chunk 2 fails
+  });
+
+  transport.send_command(std::vector<uint8_t>(53, 0xAA), 0, 0, nullptr);
+  transport.send_command(std::vector<uint8_t>(10, 0xBB), 0, 0, nullptr);
+
+  // Drive to the failure: chunk 1 lands on the first loop, chunk 2 fails on the
+  // second. Stop there -- a third loop is exactly what must not send anything.
+  for (int i = 0; i < 2; i++) { mock_millis += 51; transport.loop(); }
+  TEST_ASSERT(chunks == 2, "the second chunk failed");
+
+  // Probe just BELOW the peer's staleness boundary, not at some comfortable
+  // fraction of it. A peer built like this one starts its reassembly clock when
+  // the first fragment lands and abandons at > REASSEMBLY_TIMEOUT_MS; the
+  // failing attempt is at least one pacing interval after that fragment, so the
+  // partial is stale at 1000 - 50 = 950 ms after the failure. Anything shorter
+  // than that leaves the hold in place and useless, and a probe at 600 ms would
+  // wave it through: a 700 ms window passes every assertion in this file if the
+  // probe is loose, which is the likeliest way for someone to "trim the stall".
+  // Stepped 1 ms at a time so the probe lands exactly on the boundary rather
+  // than straddling it: at T+950 the peer's clock reads 1000 since its first
+  // fragment, and its guard is strictly `> 1000`, so it is NOT yet stale.
+  const uint32_t peer_stale_boundary_ms = 950;
+  for (uint32_t t = 0; t < peer_stale_boundary_ms; t++) {
+    mock_millis += 1;
+    transport.loop();
+  }
+  bool sent_during_hold = false;
+  for (uint8_t b : first_bytes) if (b == 0xBB) sent_during_hold = true;
+  TEST_ASSERT(!sent_during_hold,
+              "the next command is withheld until the peer's partial must have gone stale");
+
+  // Past it, the link resumes -- the hold is a pause, not a wedge.
+  for (uint32_t t = 0; t < 400; t++) { mock_millis += 1; transport.loop(); }
+  for (uint8_t b : first_bytes) if (b == 0xBB) sent_during_hold = true;
+  TEST_ASSERT(sent_during_hold, "and goes out once the peer's partial frame must have gone stale");
+}
+
+void test_first_chunk_failure_does_not_hold_off() {
+  std::cout << "\n=== Testing no hold-off when nothing reached the peer ===" << std::endl;
+  esphome::alpha_hwr::core::Transport transport;
+
+  int chunks = 0;
+  std::vector<uint8_t> first_bytes;
+  transport.set_write_callback([&](const uint8_t *data, size_t len) -> bool {
+    chunks++;
+    if (len > 0) first_bytes.push_back(data[0]);
+    return chunks != 1;  // the very first chunk fails; nothing is on the wire
+  });
+
+  transport.send_command(std::vector<uint8_t>(10, 0xAA), 0, 0, nullptr);
+  transport.send_command(std::vector<uint8_t>(10, 0xBB), 0, 0, nullptr);
+
+  for (int i = 0; i < 4; i++) { mock_millis += 51; transport.loop(); }
+
+  bool sent_second = false;
+  for (uint8_t b : first_bytes) if (b == 0xBB) sent_second = true;
+  TEST_ASSERT(sent_second,
+              "no bytes reached the peer, so the next command is not delayed a second for nothing");
+}
+
 void test_missing_write_callback_drops_the_command() {
   std::cout << "\n=== Testing no write callback configured ===" << std::endl;
   esphome::alpha_hwr::core::Transport transport;
@@ -467,6 +550,8 @@ int main() {
   test_transport_chunking();
   test_send_failure_fails_the_command_and_frees_the_transport();
   test_send_failure_midway_through_a_chunked_packet();
+  test_partial_write_holds_off_so_the_peer_can_resync();
+  test_first_chunk_failure_does_not_hold_off();
   test_missing_write_callback_drops_the_command();
   
   std::cout << "\n===========================================================" << std::endl;

@@ -42,6 +42,17 @@ void Transport::loop() {
 
   switch (this->state_) {
     case State::IDLE:
+      // A previous write died part-way through a packet, so the peer is holding
+      // a partial frame that would absorb whatever we send next. Wait for its
+      // staleness guard rather than feeding it. Gated here, in IDLE only, so a
+      // command already in flight still gets its response and its timeout.
+      if (this->peer_resync_pending_) {
+        if (now - this->peer_resync_started_ms_ < PEER_RESYNC_HOLD_MS) {
+          return;
+        }
+        ESP_LOGD(TAG, "Peer resync hold elapsed; resuming sends");
+        this->peer_resync_pending_ = false;
+      }
       // Check pacing between commands
       if (now - this->last_send_time_ < this->send_pacing_ms_) {
         return;
@@ -93,6 +104,15 @@ void Transport::loop() {
         }
       } else {
         ESP_LOGE(TAG, "Failed to send chunk, dropping command");
+        // Only when part of the frame is already on the wire. A first-chunk
+        // failure put nothing there, so the peer has nothing to resynchronise
+        // from and must not be made to wait a second for it.
+        if (cmd.bytes_sent > 0) {
+          ESP_LOGW(TAG, "Partial frame left at the peer (%zu/%zu bytes); holding sends for %" PRIu32 " ms",
+                   cmd.bytes_sent, cmd.packet.size(), PEER_RESYNC_HOLD_MS);
+          this->peer_resync_pending_ = true;
+          this->peer_resync_started_ms_ = now;
+        }
         if (cmd.callback) {
           cmd.callback(false, nullptr, 0);
         }
@@ -252,7 +272,16 @@ void Transport::on_notification(const uint8_t* data, size_t len) {
   if (reassembly_buffer_.size() > MAX_PACKET_SIZE) {
     ESP_LOGW(TAG, "Reassembly buffer overflow (%d bytes), clearing", 
              reassembly_buffer_.size());
+    // reset() clears the peer-resync hold, which is right on a disconnect and
+    // wrong here: this path runs on a LIVE link, so a partial frame we left at
+    // the pump is still sitting there. Preserve the hold across it rather than
+    // letting an inbound overflow hand the next command straight back into the
+    // wreckage.
+    const bool hold = peer_resync_pending_;
+    const uint32_t hold_started = peer_resync_started_ms_;
     reset();
+    peer_resync_pending_ = hold;
+    peer_resync_started_ms_ = hold_started;
     return;
   }
 
@@ -320,6 +349,14 @@ void Transport::reset() {
   // writes from the previous connection do not execute on the next connect.
   command_queue_.clear();
   pending_handlers_.clear();
+  // The peer's partial frame died with the link, so a hold armed before the
+  // drop would stall the first second of the next connection for nothing.
+  //
+  // True of the disconnect caller, which is what this is for. reset() is also
+  // reached from on_notification()'s buffer-overflow path on a LIVE link, where
+  // it is NOT true -- that call site saves and restores the hold itself rather
+  // than relying on this.
+  peer_resync_pending_ = false;
   state_ = State::IDLE;
 }
 

@@ -434,6 +434,26 @@
 
 ### Fixed
 
+- **A BLE write that fails part-way through a packet no longer feeds the next
+  command into the wreckage.** The failure path was identical whether zero or
+  twenty bytes had reached the radio, and the 50 ms send pacing is measured from
+  the last *successful* chunk — so it was already satisfied at the moment of
+  failure and the next command went out on the following tick, ~16 ms later.
+
+  The peer is holding the head of a frame whose length byte promises more. A
+  receiver built like this component's ignores a frame start while reassembling
+  and only abandons a partial after a second, so it appends whatever arrives and
+  keeps appending until the declared length is reached. For commands that wait
+  on a response the cost is the next one; for the fire-and-forget reads that
+  queue back to back (telemetry, the auth handshake) a probe against this
+  component's own reassembler swallowed four.
+
+  A hold is now armed only when bytes actually reached the wire, and blocks the
+  next send until the peer's partial must have gone stale. Its length is derived
+  from this component's own reassembly timeout, which is an estimate of the pump
+  rather than a measurement — the pump's reassembler cannot be observed from
+  here. The stall is paid only on a fault.
+
 - **The pump clock sync reported success without checking anything, and the
   "Last Clock Sync" sensor recorded it.** `TimeService::set_clock_async()`
   formatted its frame, handed it to the transport as fire-and-forget, and then
