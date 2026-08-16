@@ -802,27 +802,69 @@ inline PumpOnResult decide_pump_on(const PumpOnInputs &in,
     return r;
   }
 
-  // Tier 3 — the heater's own flag, guarded. Strictly additive: it sits below
-  // everything and cannot displace a stronger tier, and it only ever adds
-  // demand. Measured in the companion detector its whole footprint is 121 of
-  // 60 480 cells over a week — 9 windows, 20.3 minutes — but those firings
-  // corroborate against a channel sharing no sensor with the flag: on pump-on
-  // runs ≥60 s the lower tank falls a median −0.390 °F/min when it fires
-  // against −0.043 °F/min when it stays silent. A 9× gap, and the right shape:
-  // cold makeup water entering the tank, not recirculation's slow bleed.
+  // Tier 3 — the heater's own flag, guarded. It sits below everything and only
+  // ever adds demand, but note that is a statement about its *ordering*, not
+  // about its effect: a tier reached because the one above it declined can
+  // overrule that decline just as surely as one that ran ahead of it. This
+  // header used to call it "strictly additive" on the strength of the ordering
+  // alone, and that is exactly the reasoning issue #173 overturned. Hence the
+  // gate below.
+  //
+  // Its firings corroborate against a channel sharing no sensor with the flag:
+  // on pump-on runs ≥60 s the lower tank falls a median −0.390 °F/min when it
+  // fires against −0.043 °F/min when it stays silent. A 9× gap, and the right
+  // shape: cold makeup water entering the tank, not recirculation's slow bleed.
+  //
+  // Both that statistic and the "121 of 60 480 cells over a week — 9 windows,
+  // 20.3 minutes" footprint this comment used to quote were measured on the
+  // *ungated* tier, so they describe a population this code no longer has. By
+  // the same study's figures 93 % of sustained-flag cells had a measurement
+  // available and are now suppressed, so the real footprint is roughly an order
+  // of magnitude smaller and the corroboration should if anything be stronger
+  // (the cells removed were the recirculation ones). Neither has been
+  // re-measured against the gated tier; they are kept as the reason the tier
+  // exists, not as a description of what it now does.
   //
   // The same flag is a bad *oracle* and a useful *input* — scored against
   // physics, 988 of its positive cells had no water behind them. Those two
   // roles are easy to conflate and the answers are opposite (issue #138).
-  if (in.dhw_in_use_sustained) {
+  //
+  // It is a *recall* tier, and only that: it answers the cells where nothing
+  // is measurable. Where the subtraction does have an answer, the flag has no
+  // business overriding it (issue #173). Reaching here with a non-NaN
+  // r.demand_gpm means tier 2 looked at that same number and found it at or
+  // under t.demand_flow — a measured no-draw — so firing anyway would let a
+  // flag outrank a measurement. Tier 2 declining by falling through is not a
+  // veto, but the effect on the published result is identical.
+  //
+  // Measured on the companion Python detector over 30 days, replaying stored
+  // sensor data: of 1007 cells with the flag sustained, 937 had the
+  // subtraction available and *all 937* measured no household draw (median
+  // −0.021 GPM, max +0.134 against a 0.30 cut). Not one *measured* draw reached
+  // this tier, because tier 2 already answers those — the stronger phrasing
+  // ("no real draw") is not available to us, since the only instrument that
+  // could confirm one is the subtraction being questioned. What the gate
+  // genuinely gives up is a true draw whose measured value lands at or under
+  // the cut: with the subtraction's −0.10 ± 0.06 GPM offset that is a real draw
+  // up to roughly 0.4 GPM, and the evidence that none occurred is one house
+  // over one month. The trade is still right — 93 % of the cells were
+  // recirculation, and the pre-gate tier published intensities as low as 0.08
+  // for the rest — but it is a trade, not a free correction. The
+  // gate removed 176 minutes of published demand and 61 sessions there, and
+  // left every one of the tier's corpus-confirmed true positives — they all
+  // live in the no-measurement cells this still fires on. See
+  // eman/dhw-sensor-apps#102 and its fix in #103.
+  if (in.dhw_in_use_sustained && std::isnan(r.demand_gpm)) {
     r.demand = true;
     r.confidence = 0.6f;
-    // Intensity from the measurement where it is available. Raw meter flow is
-    // uninformative in this regime, so where the subtraction declined there is
-    // no honest intensity to publish and the no-claim constant says so.
-    r.demand_level = (!std::isnan(r.demand_gpm) && r.demand_gpm > 0.0f)
-                         ? std::min(1.0f, r.demand_gpm / 2.5f)
-                         : kNoIntensityClaim;
+    // Past that gate the subtraction is by definition unavailable, so there is
+    // no honest intensity to publish and the no-claim constant says so. The
+    // measurement-derived arm this used to carry is gone with the cells it
+    // applied to: it could only ever run on a demand_gpm at or under the
+    // threshold, which published levels as low as 0.08 — an order of magnitude
+    // *below* kNoIntensityClaim, asserting near-zero draw rather than
+    // declining to assert.
+    r.demand_level = kNoIntensityClaim;
     r.method = "deterministic_dhw_in_use";
     return r;
   }

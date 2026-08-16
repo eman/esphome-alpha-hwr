@@ -120,12 +120,33 @@ two are normally paired, with pump telemetry feeding the detector.
   `dhw_in_use_min_seconds` (70). The flag is far too noisy bare (~77 events/day,
   median 15 s), and the guard is what makes it usable; its survivors corroborate
   against a channel sharing no sensor with it, the lower tank falling a median
-  −0.390 °F/min when it fires against −0.043 when it stays silent. Strictly
-  additive: it sits below everything, only ever adds demand, and its whole
-  measured footprint is 9 windows totalling ~20 minutes a week. Where the
-  subtraction declined there is no honest intensity to publish, so it reports
-  the shared no-claim constant 0.4 rather than deriving one from meter flow.
+  −0.390 °F/min when it fires against −0.043 when it stays silent. Where no
+  measurement is available there is no honest intensity to publish, so it
+  reports the shared no-claim constant 0.4 rather than deriving one from meter
+  flow. (The "9 windows totalling ~20 minutes a week" footprint this used to
+  quote, and the −0.390 °F/min figure, were both measured on the *ungated*
+  tier — see the bullet below. Neither has been re-measured since.)
   See [issue #138](https://github.com/eman/esphome-alpha-hwr/issues/138).
+- **It is a recall tier only, and fires only where nothing measured the loop.**
+  It used to be described as strictly additive — below everything, only ever
+  adding demand — and that was true of its *ordering* but not of its effect. A
+  tier reached because the one above it declined can overrule that decline just
+  as effectively as one that ran ahead of it. Where the subtraction has an
+  answer and that answer is "no draw", the flag is now suppressed. Replaying 30
+  days of stored data through the companion detector: of 1007 cells with the
+  flag sustained, 937 had a measurement available and *all* of them measured no
+  draw — the tier's marginal contribution over the subtraction, wherever the
+  subtraction exists, is zero, and what it was adding there was recirculation.
+  It keeps every corpus-confirmed true positive, all of which live in the
+  no-measurement cells.
+
+  Stated precisely, that is "not one *measured* draw", not "not one real draw":
+  the only instrument that could confirm a real one is the subtraction being
+  questioned. What the gate gives up is a true draw whose measured value lands
+  at or under the cut — with the subtraction's −0.10 ± 0.06 GPM offset, a real
+  draw up to roughly 0.4 GPM — and the evidence that none occurred is one house
+  over one month. The trade is still the right one, but it is a trade. See
+  [issue #173](https://github.com/eman/esphome-alpha-hwr/issues/173).
 - **Release-hold on the output**: demand is recomputed from scratch each tick, so an
   input dithering around its threshold would chatter the binary sensor. Rising edges
   pass through immediately; falling edges are held for `demand_release_seconds`.
