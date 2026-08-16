@@ -2,6 +2,7 @@
 
 #include "esphome/components/ble_client/ble_client.h"
 #include "esphome/components/binary_sensor/binary_sensor.h"
+#include "failure_hold.h"
 #include "subscribe_outcome.h"
 #include <esp_gattc_api.h>
 #include <esp_gap_ble_api.h>
@@ -170,36 +171,9 @@ class BLEConnectionManager {
   std::string last_failure_;     // latched last failure reason (human-readable)
   bool bonded_at_open_{false};   // bond state captured at the last connection-open
   // Why last_failure_ is being held over the routine disconnects of a reconnect
-  // loop, if it is. One value rather than two booleans on purpose: the origin
-  // decides how the hold is released, so a "held" flag and a separate "who set
-  // it" flag can disagree, and every site that sets one must remember the
-  // other. That went wrong immediately -- a successful auth cleared the hold
-  // but left the origin set, so a LATER pairing failure could be silently
-  // erased by the next notification.
-  //
-  // AUTH is released only by a successful AUTH_CMPL, because the failure it
-  // records erases the bond and recovery must pass back through one. DATA is
-  // released by any inbound notification, which refutes it by construction --
-  // and must NOT be released by AUTH_CMPL, which never fires at all when
-  // pairing is disabled (the default).
-  //
-  // Crucially the two are not interchangeable: an SMP failure on an UNBONDED
-  // pump latches its reason WITHOUT tearing the link down, and that link then
-  // subscribes and delivers notifications normally (passive telemetry needs no
-  // bond). Releasing an AUTH hold on inbound data would wipe exactly the
-  // pairing diagnostic the hold exists to preserve.
-  enum class FailureHold : uint8_t {
-    NONE,  // no hold; the next disconnect reason may overwrite last_failure_
-    AUTH,  // auth/encryption failure; released by a successful AUTH_CMPL
-    DATA,  // inbound-data watchdog; released by any received notification
-    // A subscribe step that failed outright. Outranks DATA: the watchdog's
-    // "No data from pump" is the *symptom* of this cause, and it fires 60 s
-    // later, so without the ranking the forced disconnect would overwrite the
-    // specific reason with the generic one and the operator would end up
-    // exactly where issue #175 started. Released like DATA, by any received
-    // notification.
-    SUBSCRIBE,
-  };
+  // loop, if it is. The rank, the release rules and the reasoning behind both
+  // live in failure_hold.h, where they are host-tested; every site in the .cpp
+  // that writes last_failure_ goes through failure_hold_admits().
   FailureHold failure_hold_{FailureHold::NONE};
 
   // Advertisement identifiers decoded at scan time (pre-connection)

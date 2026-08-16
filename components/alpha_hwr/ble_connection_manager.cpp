@@ -230,10 +230,19 @@ void BLEConnectionManager::report_subscribe_outcome_(SubscribeOutcome outcome) {
   // The hold is what makes a blocking failure's reason survive the reconnect
   // that follows. A CCCD write failure does not take it: one of its documented
   // synchronous causes is the link already being gone, and holding over that
-  // would relabel a link loss as a subscribe fault for the whole episode.
-  last_failure_ = subscribe_outcome_to_string(outcome);
-  if (subscribe_outcome_holds_fault(outcome))
-    failure_hold_ = FailureHold::SUBSCRIBE;
+  // would relabel a link loss as a subscribe fault for the whole episode --
+  // so it arrives at rank NONE and writes only when nothing is held.
+  //
+  // Nor does either kind outrank an auth failure. A subscribe that fails on a
+  // link whose pairing just failed is that failure's consequence, and the
+  // pairing reason is the one an operator can act on.
+  const FailureHold rank = subscribe_outcome_holds_fault(outcome)
+                               ? FailureHold::SUBSCRIBE
+                               : FailureHold::NONE;
+  if (failure_hold_admits(failure_hold_, rank)) {
+    last_failure_ = subscribe_outcome_to_string(outcome);
+    failure_hold_ = rank;
+  }
 
   ESP_LOGW(TAG, "Notification subscribe failed: %s",
            subscribe_outcome_to_string(outcome));
@@ -268,11 +277,13 @@ void BLEConnectionManager::force_disconnect(const char *reason) {
   // Terminated", which is true but says nothing; holding it keeps the actual
   // reason readable through the reconnect loop that follows. Cleared by
   // handle_notification() the moment data flows again.
-  // ...unless a subscribe step already named the actual cause. The watchdog
-  // reaches here 60 s after such a failure with "No data from pump", which is
-  // that failure's symptom, and overwriting would put the operator back on the
-  // generic string issue #175 exists to replace.
-  if (failure_hold_ != FailureHold::SUBSCRIBE) {
+  // ...unless a subscribe step or a pairing failure already named the actual
+  // cause. The watchdog reaches here 60 s after such a failure with "No data
+  // from pump", which is that failure's symptom, and overwriting would put the
+  // operator back on the generic string issue #175 exists to replace. Both
+  // outrank DATA, so one rank comparison covers them (failure_hold.h) — an
+  // earlier `!= SUBSCRIBE` here let the same overwrite through on AUTH.
+  if (failure_hold_admits(failure_hold_, FailureHold::DATA)) {
     last_failure_ = reason;
     failure_hold_ = FailureHold::DATA;
   }
@@ -432,10 +443,9 @@ void BLEConnectionManager::handle_notification(const esp_ble_gattc_cb_param_t *p
     // so release that hold here rather than waiting for the AUTH_CMPL clear
     // below — with pairing disabled (the default) AUTH_CMPL never fires at all,
     // so a watchdog hold would otherwise never be released. Scoped to the
-    // watchdog's own hold: see FailureHold for why an auth-failure hold must
+    // watchdog's own hold: see failure_hold.h for why an auth-failure hold must
     // survive notifications.
-    if (failure_hold_ == FailureHold::DATA ||
-        failure_hold_ == FailureHold::SUBSCRIBE)
+    if (failure_hold_released_by_data(failure_hold_))
       failure_hold_ = FailureHold::NONE;
     if (notification_callback_) {
       notification_callback_(notify_evt->value, notify_evt->value_len);
@@ -471,7 +481,7 @@ void BLEConnectionManager::handle_auth_complete(const esp_ble_gap_cb_param_t *pa
     // very defect the watchdog exists for — so releasing it here would drop the
     // deaf-link reason on a link that is still deaf. It is released by inbound
     // data instead, which is the evidence that actually refutes it.
-    if (failure_hold_ == FailureHold::AUTH)
+    if (failure_hold_released_by_auth(failure_hold_))
       failure_hold_ = FailureHold::NONE;
     if (subscription_deferred_) {
       // Service discovery finished while SMP was negotiating; the link is now
@@ -521,11 +531,15 @@ void BLEConnectionManager::handle_auth_complete(const esp_ble_gap_cb_param_t *pa
       // reconnect loop don't overwrite the real cause before recovery.
       char afbuf[64];
       snprintf(afbuf, sizeof(afbuf), "%s (0x%02x)", fail_reason, auth_cmpl.fail_reason);
-      last_failure_ = afbuf;
-      // Overwrites any DATA hold: this is the newer and more specific fault,
-      // and leaving the origin as DATA would let the next notification erase it
-      // (an unbonded pump keeps delivering notifications after a failed SMP).
-      failure_hold_ = FailureHold::AUTH;
+      // Ranks above every other hold, so this admits unconditionally today --
+      // through the same call as every other write site, so that stays true of
+      // the rank rather than of a comment. Leaving a DATA origin in place would
+      // let the next notification erase this reason, and an unbonded pump keeps
+      // delivering notifications after a failed SMP.
+      if (failure_hold_admits(failure_hold_, FailureHold::AUTH)) {
+        last_failure_ = afbuf;
+        failure_hold_ = FailureHold::AUTH;
+      }
     }
     // Bonded reconnect whose encryption failed: the link may stay up in an
     // unauthenticated state, and a later discovery-complete would then send
@@ -606,7 +620,7 @@ void BLEConnectionManager::handle_gattc_event(esp_gattc_cb_event_t event, esp_ga
       // Skip while any hold is in place (an auth/encryption failure, or the
       // watchdog's deaf-link reason), so the routine disconnects of the ensuing
       // reconnect loop don't overwrite the real cause before recovery.
-      if (failure_hold_ == FailureHold::NONE) {
+      if (failure_hold_admits(failure_hold_, FailureHold::NONE)) {
         const char *rname;
         switch (param->disconnect.reason) {
           case ESP_GATT_CONN_L2C_FAILURE:          rname = "L2CAP Failure"; break;
