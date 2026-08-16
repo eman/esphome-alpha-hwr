@@ -30,20 +30,23 @@ collision:
 Duplicate switch entity with name 'Schedule Enabled' found.
 ```
 
-Fix that one and the next appears (`Duplicate select entity with name 'Pump
-Control Mode'`), and fix that and a third does (`ID pump_mode_select
-redefined!`). Three independent collisions, so renaming your way to a working
-combination is not the intended path.
+Rename that and the next appears (`Duplicate select entity with name 'Pump
+Control Mode'`), and rename that and a third does (`ID pump_mode_select
+redefined!`). Two conflicting entities, three errors. Renaming all three does
+produce a valid config, but you would be maintaining a fork of the package to
+get two overlapping sets of the same controls.
 
 Choose by what you want:
 
 - **`alpha_hwr_controls.yaml`** for most installs. Its mode select reads the
-  pump's actual mode instead of assuming the last thing it was told, and it adds
-  the setpoint numbers, Engage Pump, and Temperature AutoAdapt.
+  pump's actual mode; the other assumes whatever it last wrote and asserts
+  "Constant Speed" at boot. It also adds the setpoint numbers, Engage Pump, and
+  Temperature AutoAdapt.
 - **`alpha_hwr_schedule.yaml`** for a smaller entity list: a schedule toggle, two
-  remote-mode buttons, and an optimistic mode select. It exposes more mode
-  options than the Grundfos GO app shows for this pump, which is a wider surface
-  than most installs want.
+  remote-mode buttons, and an optimistic mode select. Its select offers ten
+  modes against the other's six — the extra four are the AutoAdapt variants,
+  which are a wider surface than a hot-water recirculation install typically
+  needs.
 
 Both pump packages also set `logger: level: INFO` and expose node-health
 diagnostics (`Free Heap`, `Min Free Heap`, `Largest Free Block`, `Heap

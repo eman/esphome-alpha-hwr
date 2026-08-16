@@ -48,20 +48,29 @@
   is not: a config with both does not build. ESPHome stops at
   `Duplicate switch entity with name 'Schedule Enabled'`; fix that and
   `Duplicate select entity with name 'Pump Control Mode'` appears; fix that and
-  `ID pump_mode_select redefined!` appears. Three independent collisions, so
-  there is no renaming that composes them — they are two designs for one UI, and
-  the README now says which to pick and why.
+  `ID pump_mode_select redefined!` appears. Two conflicting entities, three
+  errors. Renaming all three *does* yield a valid config, but only by forking one
+  of the packages to run two overlapping sets of the same controls — so the
+  README now says which to pick and why rather than how to merge them.
 
-  **`alpha_hwr_schedule.yaml` also had no working-tree check at all**, which is
-  why this went unnoticed. `tests/ci-compile.yaml` loads the *other* control UI,
-  and the example that loads this one pins a release tag, so CI was validating
-  the last release of it rather than the branch. The gap was not only YAML:
-  `ControlMode::AUTO_ADAPT`, `AUTO_ADAPT_RADIATOR`, `AUTO_ADAPT_UNDERFLOOR` and
-  `AUTO_ADAPT_COMBINED` are named by that package's lambdas and by nothing else
-  in the tree, so renaming an enumerator would have kept CI green while the
-  package stopped building for whoever uses it. It now has its own config
-  (`tests/ci-compile-schedule.yaml`), validated *and* compiled in CI — a second
-  build, sharing the cached toolchain.
+- **Two packages had no working-tree check at all**, which is why the above went
+  unnoticed. `tests/ci-compile.yaml` loads `alpha_hwr_controls.yaml`, and the
+  examples that load the other two pin a release tag — so CI was validating the
+  last *release* of `alpha_hwr_schedule.yaml` and `alpha_hwr_base.yaml` rather
+  than the branch. Neither can share a config with what is already covered:
+  the schedule UI collides as above, and `alpha_hwr_base.yaml` is a parallel copy
+  of `alpha_hwr_pairing.yaml` rather than an include. Both now have their own
+  (`tests/ci-compile-base.yaml`, `tests/ci-compile-schedule.yaml`).
+
+  The schedule UI is also **compiled**, not merely validated, because
+  `esphome config` does not compile lambda bodies. Its select is the only YAML
+  lambda in the tree naming `ControlMode::AUTO_ADAPT`, `AUTO_ADAPT_RADIATOR`,
+  `AUTO_ADAPT_UNDERFLOOR` or `AUTO_ADAPT_COMBINED` — those four are all over the
+  compiled C++, so renaming one and letting the compiler find the callers fixes
+  the component and `alpha_hwr_controls.yaml`, and leaves this package quietly
+  broken. That is a second full ESP-IDF build rather than a marginal one, since
+  the build tree is not cached; the base package gets validation only, its single
+  lambda being covered by the builds that already run.
 
 - **The 0.3 GPM `flow_threshold` floor is settled by measurement, and stays**
   ([#180](https://github.com/eman/esphome-alpha-hwr/issues/180)). `AGENTS.md`

@@ -751,24 +751,38 @@ release, and no CI job runs `esphome config`.
   > 2. `Duplicate select entity with name 'Pump Control Mode'`
   > 3. `ID pump_mode_select redefined!`
   >
+  > Two conflicting entities produce three errors: the switch contributes one, the select two.
+  >
   > The ID redefinition this item is named for is real but reports *last* — it only surfaces once
-  > both name collisions are resolved, verified by renaming them in a scratch copy. Anyone
+  > both name collisions are resolved, verified by renaming them in a scratch copy. So anyone
   > searching the tree for the error the audit names would not find it, and anyone renaming their
-  > way out of the first two still fails on the third. So "avoid combining both unless you want
-  > duplicate controls" understated it twice over: you do not get duplicate controls, you get a
-  > config that does not build, and there is no rename that composes them.
+  > way out of the first two still fails on the third. "Avoid combining both unless you want
+  > duplicate controls" understated it: you do not get duplicate controls, you get a config that
+  > does not build.
   >
-  > Fixed as documentation, because mutual exclusivity is the right design — these are two designs
-  > for one UI, and the only way to compose them would be to gut one. The README now says so with
-  > the actual errors.
+  > *A first draft of this note went further and said no rename composes them. A skeptic pass
+  > falsified that in one command — rename all three and the config validates. What is true is
+  > that doing so means forking a package to run two overlapping sets of the same controls, which
+  > is an argument, not an impossibility. Fixed as documentation on that basis.*
   >
-  > **The larger find is what made this invisible.** `alpha_hwr_schedule.yaml` had no working-tree
-  > check of any kind: `tests/ci-compile.yaml` loads `alpha_hwr_controls.yaml`, and the one example
-  > that loads the schedule package pins `@vX.Y.Z`, so CI validated the last *release* of it. And
-  > the gap was not only YAML — `ControlMode::AUTO_ADAPT`, `AUTO_ADAPT_RADIATOR`,
-  > `AUTO_ADAPT_UNDERFLOOR` and `AUTO_ADAPT_COMBINED` are named by that package's lambdas and by
-  > nothing else in the tree, so renaming an enumerator would have left CI green while the package
-  > stopped building for its users. It now has its own config and its own firmware build.
+  > **The larger find is what made this invisible**, and it is not limited to this package.
+  > `alpha_hwr_schedule.yaml` had no working-tree check of any kind: `tests/ci-compile.yaml` loads
+  > `alpha_hwr_controls.yaml`, and the one example that loads the schedule package pins `@vX.Y.Z`,
+  > so CI validated the last *release* of it. The same was true of `alpha_hwr_base.yaml` — the
+  > package README.md offers as the starting point — which is a parallel copy of
+  > `alpha_hwr_pairing.yaml` rather than an include and so cannot share a config either. The
+  > skeptic caught that one: the first draft closed the hole for the schedule UI while claiming to
+  > have closed it "for everything else", leaving an equivalent instance open. Both are covered now.
+  >
+  > The schedule UI is compiled as well as validated, because `esphome config` does not compile
+  > lambda bodies. *The first draft justified that with a claim the skeptic refuted flatly:* that
+  > `ControlMode::AUTO_ADAPT`, `AUTO_ADAPT_RADIATOR`, `AUTO_ADAPT_UNDERFLOOR` and
+  > `AUTO_ADAPT_COMBINED` are named "by nothing else in the tree". They are named throughout
+  > compiled C++ — `control_service.cpp`'s switches, `mode_to_string()`, the `MODES[]` table, and
+  > the host suite. The true and narrower statement is that this package holds the only *YAML
+  > lambda* naming them, so renaming an enumerator and letting the compiler find the callers
+  > repairs the component and `alpha_hwr_controls.yaml` while leaving this package broken. That
+  > still justifies the build, but it is a smaller claim than the one first written down.
 - **`time_id` is load-bearing but undocumented** — without it the pump clock never syncs, so
   schedule windows run on a drifting RTC.
 
