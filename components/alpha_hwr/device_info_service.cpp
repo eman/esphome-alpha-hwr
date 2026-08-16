@@ -134,8 +134,14 @@ void DeviceInfoService::read_class7_string_async(uint8_t string_id,
       // string rewrites were papering over.
       static const size_t HEADER_LEN = 6;
       static const size_t CRC_LEN = 2;
+      // The shortest frame that can carry a (zero-length) string. Named rather
+      // than inlined because it is load-bearing: string_len below is size_t, so
+      // a shorter frame would wrap it to ~1.8e19 and the copy loop would read
+      // far past the frame. transport.cpp dispatches Class 3/7 on len >= 5, so
+      // 5-, 6- and 7-byte frames do reach this callback.
+      static const size_t MIN_FRAME_LEN = HEADER_LEN + CRC_LEN;
 
-      if (!success || !data || len < HEADER_LEN + CRC_LEN) {
+      if (!success || !data || len < MIN_FRAME_LEN) {
         ESP_LOGW(TAG, "No response for String ID %d", string_id);
         on_complete(false, nullptr);
         return;
