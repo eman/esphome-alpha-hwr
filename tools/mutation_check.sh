@@ -213,6 +213,23 @@ MUTATIONS=(
 "backoff-never-grows|components/alpha_hwr/link_watchdog.h|  const uint32_t doubled = current_ms * 2u;|  const uint32_t doubled = current_ms;"
 "backoff-ignores-the-cap|components/alpha_hwr/link_watchdog.h|  return doubled > cap_ms ? cap_ms : doubled;|  return doubled;"
 "backoff-shrinks-a-large-budget|components/alpha_hwr/link_watchdog.h|  if (current_ms >= cap_ms)\n    return current_ms;|"
+# The gap statistic (issue #176). All three mutations bias it the same way --
+# downward, toward "the budget was never close" -- which is the direction that
+# argues for keeping a data_timeout default nobody has validated. Dropping the
+# recycle sample is the one that shipped: it censors the sample at exactly the
+# threshold the number exists to validate, since an interval that ends in a
+# recycle is never closed by a notification.
+"gap-censored-at-the-budget|components/alpha_hwr/link_watchdog.h|  void on_recycle(uint32_t now_ms) { this->sample_(now_ms); }|  void on_recycle(uint32_t now_ms) { (void) now_ms; }"
+"gap-samples-the-time-spent-disconnected|components/alpha_hwr/link_watchdog.h|    this->last_ms_ = now_ms;\n    this->armed_ = true;|    this->armed_ = true;"
+"gap-never-closes-an-interval|components/alpha_hwr/link_watchdog.h|    if (gap > this->max_ms_)\n      this->max_ms_ = gap;\n    this->last_ms_ = now_ms;|    if (gap > this->max_ms_)\n      this->max_ms_ = gap;"
+# The disconnect sample and its arming guard. Dropping the sample loses every
+# interval ended by a drop the watchdog did not cause -- the same censoring, at
+# a threshold nobody configured. Dropping the guard is the opposite error: a
+# connection attempt that fails without opening reports a disconnect, and
+# sampling it records the downtime since the previous session as though the link
+# had been up and silent for all of it.
+"gap-drops-the-disconnect-sample|components/alpha_hwr/link_watchdog.h|  void on_disconnect(uint32_t now_ms) {\n    if (!this->armed_)\n      return;\n    this->sample_(now_ms);\n    this->armed_ = false;\n  }|  void on_disconnect(uint32_t now_ms) { (void) now_ms; }"
+"gap-samples-an-unarmed-disconnect|components/alpha_hwr/link_watchdog.h|    if (!this->armed_)\n      return;\n    this->sample_(now_ms);|    this->sample_(now_ms);"
 
 # Initial-read re-arm (bench regression: a stalled one-shot read chain left the
 # node with device info and the operating statistics unread for as long as the

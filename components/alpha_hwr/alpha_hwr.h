@@ -597,23 +597,29 @@ private:
   // Backoff state for that watchdog (issue #176). link_data_timeout_ms_ is the
   // configured budget and never changes; this is the window currently in force.
   // It doubles on every recycle that produced no data and resets to the
-  // configured value on any inbound notification, so a link that can recover is
-  // unaffected while a permanently deaf one stops being recycled ~1,300 times
-  // a day. Initialised from the configured value in setup().
+  // configured value on a notification received while the session is READY (a
+  // deaf pump still answers the handshake, so resetting on those would mean the
+  // backoff never engages), so a link that can recover is unaffected while a
+  // permanently deaf one stops being recycled ~1,300 times a day. Not reset at
+  // connection-open: a widened window governs the next connection's handshake
+  // too. Initialised from the configured value in setup().
   uint32_t link_data_timeout_current_ms_{60000};
 
-  // Consecutive recycles with no data in between. Reset by an inbound
-  // notification, so it reads 0 in normal operation and an automation can
-  // threshold on it instead of having to detect a flap cadence live.
+  // Consecutive recycles with no data in between. Reset by a notification
+  // received while the session is READY -- the same gate as the backoff window
+  // above, and for the same reason -- so it reads 0 in normal operation and an
+  // automation can threshold on it instead of having to detect a flap cadence
+  // live.
   uint32_t link_recycles_without_data_{0};
 
-  // Longest inter-notification gap observed since boot, for choosing the
-  // data_timeout default from what actually happens on real installations
-  // rather than from a constants calculation. link_had_inbound_ gates the
-  // first sample, whose "gap" would be the handshake rather than the pump's
-  // reporting cadence.
-  uint32_t link_max_gap_ms_{0};
-  bool link_had_inbound_{false};
+  // Longest quiet interval observed since boot, for choosing the data_timeout
+  // default from what actually happens on real installations rather than from a
+  // constants calculation. Samples exactly the intervals the watchdog above is
+  // timed over — including the open-to-first-notification one, and including an
+  // interval that ends in a recycle rather than a notification; see
+  // LinkGapSampler for why both of those are load-bearing. Stamped alongside
+  // link_last_inbound_ms_ at all three of its call sites.
+  LinkGapSampler link_gap_;
 
   uint32_t link_boot_ms_{0};
   uint32_t link_last_open_ms_{0};

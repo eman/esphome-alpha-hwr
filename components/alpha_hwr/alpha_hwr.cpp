@@ -80,19 +80,21 @@ void AlphaHwrComponent::setup() {
     // subscribe paths that never call subscribed_callback_() leave the session
     // short of READY forever, and those need recycling too.
     this->link_last_inbound_ms_ = this->link_last_open_ms_;
-    // ...and re-arm the gap sampler with it. Without this the first
-    // notification of the *second* and every later connection measures the
-    // handshake as an inter-notification gap -- link_watchdog.h budgets 17.2 s
-    // worst case from open to first inbound data -- and since link_max_gap_ms_
-    // is a running maximum it never comes back down. The statistic that is
-    // supposed to choose a data_timeout default would then be biased upward by
-    // its own reconnects, which argues for a longer timeout: exactly the
-    // self-serving direction.
-    this->link_had_inbound_ = false;
+    // ...and start the gap sampler from the same stamp, so what it reports is
+    // what the watchdog acts on. The interval that ends here is not sampled:
+    // the link was down for it, and the watchdog does not run on a down link.
+    this->link_gap_.on_open(this->link_last_open_ms_);
     this->evaluate_link_status();
   });
 
   ble_manager_.set_disconnection_callback([this]() {
+    // Close the gap interval this drop ended. The watchdog was timing it
+    // against its budget until the link went away, so leaving it unrecorded
+    // censors the sample the same way dropping the recycle sample did -- a link
+    // that goes quiet and then drops on its own (supervision timeout, pump
+    // power loss, the encryption-failure teardown) would report only its
+    // steady-state cadence. The sampler ignores this if no open preceded it.
+    this->link_gap_.on_disconnect(millis());
     // Cancel in-flight auth so its pending scheduler lambdas are invalidated
     // and do not fire against the next BLE connection.
     this->auth_.cancel();
@@ -190,24 +192,14 @@ void AlphaHwrComponent::setup() {
         // correctness check on the payload.
         const uint32_t inbound_now = millis();
 
-        // Longest inter-notification gap seen since boot, as a running maximum
-        // (issue #176). The data_timeout default has to clear every gap that
-        // happens routinely while staying short enough to be useful, and those
-        // two requirements pull opposite ways -- only observation settles it.
+        // Longest quiet interval seen since boot, as a running maximum (issue
+        // #176). The data_timeout default has to clear every gap that happens
+        // routinely while staying short enough to be useful, and those two
+        // requirements pull opposite ways -- only observation settles it.
         // Recorded here rather than derived from the poll interval because a
         // bench reading once turned out to be 90 s old against a channel the
         // constants said was 10 s.
-        //
-        // Skipped while the previous stamp is the connection-open one: that
-        // gap measures the handshake, not the pump's reporting cadence, and
-        // mixing the two would inflate the statistic this exists to gather.
-        if (this->link_had_inbound_) {
-          const uint32_t gap = inbound_now - this->link_last_inbound_ms_;
-          if (gap > this->link_max_gap_ms_) {
-            this->link_max_gap_ms_ = gap;
-          }
-        }
-        this->link_had_inbound_ = true;
+        this->link_gap_.on_inbound(inbound_now);
 
         // Data arrived, so whatever the link was doing, it is doing it again --
         // but only frames received while the session is READY count as that
@@ -486,10 +478,12 @@ void AlphaHwrComponent::check_link_liveness_() {
   // would misstate the trigger once the window has grown.
   const uint32_t expired_ms = this->link_data_timeout_current_ms_;
 
-  // Consecutive recycles that produced no data (issue #176). Reset only by an
-  // inbound notification, so it reads 0 in normal operation and an automation
-  // can threshold on it -- a value to alert on rather than a flap cadence
-  // somebody has to be watching to notice.
+  // Consecutive recycles that produced no data (issue #176). Reset only by a
+  // notification received while the session is READY (see the reset site in the
+  // notification callback: handshake frames do not count as proof the link
+  // works), so it reads 0 in normal operation and an automation can threshold
+  // on it -- a value to alert on rather than a flap cadence somebody has to be
+  // watching to notice.
   this->link_recycles_without_data_++;
 
   // Widen the next window. See link_data_timeout_next(): a recoverable link
@@ -531,13 +525,19 @@ void AlphaHwrComponent::check_link_liveness_() {
   // call; without the re-arm the window is still expired on every one of them
   // and the watchdog would re-fire (and re-latch its failure reason) each tick
   // until the DISCONNECT event finally lands.
-  this->link_last_inbound_ms_ = millis();
+  const uint32_t rearm_ms = millis();
+  // Record the interval being given up on before the re-arm erases it. This is
+  // the one sample the gap statistic cannot afford to drop: it is the only kind
+  // that reaches the budget, and dropping it censors the sample at exactly the
+  // threshold the statistic exists to validate (see LinkGapSampler).
+  this->link_gap_.on_recycle(rearm_ms);
+  this->link_last_inbound_ms_ = rearm_ms;
   this->ble_manager_.force_disconnect(reason);
 }
 
 // Link diagnostics for issue #176: the consecutive-recycle counter an
-// automation can threshold on, and the longest inter-notification gap seen,
-// which is what a data-driven data_timeout default has to be chosen from.
+// automation can threshold on, and the longest quiet interval seen, which is
+// what a data-driven data_timeout default has to be chosen from.
 //
 // Gated on change. sensor::Sensor::publish_state() does not dedup, so
 // republishing on every ~1 s tick would cost a frame per API subscriber per
@@ -551,11 +551,12 @@ void AlphaHwrComponent::publish_link_diagnostics_() {
         static_cast<float>(this->link_recycles_without_data_));
   }
 
+  const uint32_t max_gap_ms = this->link_gap_.max_ms();
   if (this->link_max_gap_sensor_ != nullptr &&
-      this->link_max_gap_published_ != this->link_max_gap_ms_) {
-    this->link_max_gap_published_ = this->link_max_gap_ms_;
-    this->link_max_gap_sensor_->publish_state(
-        static_cast<float>(this->link_max_gap_ms_) / 1000.0f);
+      this->link_max_gap_published_ != max_gap_ms) {
+    this->link_max_gap_published_ = max_gap_ms;
+    this->link_max_gap_sensor_->publish_state(static_cast<float>(max_gap_ms) /
+                                              1000.0f);
   }
 }
 

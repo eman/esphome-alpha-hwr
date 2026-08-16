@@ -150,8 +150,8 @@ alpha_hwr:
    pump_last_link_failure:
      name: "Pump Link Fault"
 
-   # Link recycle counter and the longest gap between notifications seen since
-   # boot (issue #176). The fault sensor above shows the reason *during* a
+   # Link recycle counter and the longest quiet interval seen since boot
+   # (issue #176). The fault sensor above shows the reason *during* a
    # reconnect and clears on recovery, so repeated recycles read as a flap you
    # have to be watching to catch. This counter is a value an automation can
    # threshold on instead: it reads 0 in normal operation and only climbs while

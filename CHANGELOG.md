@@ -6,15 +6,16 @@
 
 - **`link_recycles` and `link_max_gap`** — two optional diagnostic sensors for
   the inbound-data watchdog (issue #176). `link_recycles` counts consecutive
-  recycles that produced no data and resets on any inbound notification, so it
-  reads 0 in normal operation and an automation can threshold on it; the Pump
+  recycles that produced no data and resets on a notification received once the
+  session is ready (a deaf pump still answers the handshake, so those frames
+  cannot count as proof the link works), so it reads 0 in normal operation and
+  an automation can threshold on it; the Pump
   Link Fault sensor shows a reason only *during* a reconnect and clears on
   recovery, which makes repeated recycles a flap cadence somebody has to be
-  watching to notice rather than a value. `link_max_gap` records the longest gap
-  between notifications since boot, which is what a `data_timeout` default
-  chosen from observation rather than from a constants calculation has to be
-  based on. The gap between connection-open and the first notification is
-  excluded — that measures the handshake, not the pump's reporting cadence.
+  watching to notice rather than a value. `link_max_gap` records the longest
+  quiet interval since boot — every interval the watchdog times, however it
+  ended — which is what a `data_timeout` default chosen from observation rather
+  than from a constants calculation has to be based on.
 
 - **The Lovelace card has host tests** — `tests/js/test_schedule_card.js`, run
   by `make test-js` and in CI. 1,800 lines that had shipped broken twice for
@@ -486,6 +487,55 @@
   gains eight entries, six of them for code that three earlier passes had left
   unguarded.
 
+- **`link_max_gap` no longer censors its own sample at the threshold it exists
+  to validate** (issue #176, review of PR #189). The statistic only counted
+  intervals that ended in a notification, and an interval that ends in a
+  watchdog recycle never does: the watchdog re-arms the window and disconnects,
+  so nothing closes it. Every excursion past `data_timeout` was therefore
+  discarded and the running maximum asymptoted to just under the budget whatever
+  the pump did — "never above 12 s in a month" reading as "60 s was comfortable"
+  when what it meant was "no quiet period between 12 s and 60 s ended on its
+  own". Measured on the bench by flashing the old build and the new one against
+  the same pump with `data_timeout` forced to `5s`: five recycles, and the old
+  build's maximum read **2.6 s** — apparent double headroom over a budget it had
+  breached five times. The new one reads **6.0 s**.
+
+  An interval ended by a plain drop — supervision timeout, pump power loss, the
+  encryption-failure teardown — was discarded the same way, censoring the sample
+  at a threshold nobody configured. Same A/B, with polling suspended for 45 s on
+  a live link and the link then dropped: the old build published nothing and sat
+  at its steady-state 9.5 s, the new one recorded **53.0 s**.
+
+  Both kinds are recorded now, at the recycle and in the disconnection callback.
+  A disconnect with no open before it samples nothing, so a failed connection
+  attempt cannot record the downtime since the last session as if the link had
+  been up and silent for it.
+
+  The open-to-first-notification interval is now sampled too, rather than
+  excluded as "the handshake, not the pump's cadence". It is inside the window
+  the watchdog acts on, and per the sizing note it is the *binding* case — 17.2 s
+  worst case against a 60 s budget, where steady state is bounded by our own 10 s
+  poll — so excluding it left the statistic unable to report the case the default
+  is tightest against. Nothing visible changes on a healthy link: the maximum
+  reaches the 10 s poll interval in the first poll cycle regardless — 4.9 s then
+  9.5 s on the bench, where the first figure is the newly-sampled handshake
+  interval and the second is the first poll cycle overtaking it.
+
+  All of these biased the number downward, toward "the budget was never close":
+  the direction that argues for keeping a default nobody has validated. What a
+  reading means is now stated where it can be read — it is a lower bound on the
+  quiet, and because the backoff widens the window in force and the reconnect
+  does not reset it, a value above the configured budget does *not* by itself
+  mean a recycle happened. `link_recycles` is what distinguishes the two.
+
+  The sampler moved into `link_watchdog.h` as `LinkGapSampler` so host tests can
+  pin it, and `tests/test_link_watchdog.cpp`'s simulator now models the backoff
+  it had been ignoring — which corrected a neighbouring test that claimed the
+  watchdog re-fires once per tick during the async disconnect. At the configured
+  budget the backoff covers that on its own; the re-arm is load-bearing at the
+  one-hour cap, where there is nothing left to double, and that is what the test
+  asserts now.
+
 - **A single-event slot past what the pump actually has now settles REJECTED
   immediately instead of TIMEOUT fifteen seconds later.** Single events live at
   Object 84 SubIDs 900–999, so any slot 0–99 is a legal thing to *ask* for — but
@@ -541,8 +591,12 @@
   encryption request can fail and erase the bond.
 
   A recycle that produces no data now doubles the window for the next one, up to
-  a ceiling of one hour, and any inbound notification resets it to the
-  configured value. A link that can recover still does on the first or second
+  a ceiling of one hour, and a notification received once the session is ready
+  resets it to the configured value — ready-gated because a deaf pump still
+  answers the handshake, so resetting on those frames would clear the window
+  once per session and the backoff would never engage. A widened window is not
+  reset by the reconnect either, so it also governs the next connection's
+  handshake. A link that can recover still does on the first or second
   try; a permanently deaf one drops to about 28 recycles a day. A `data_timeout`
   of `0s` stays disabled, and a budget configured larger than the ceiling is
   returned unchanged rather than clamped down (issue #176).
