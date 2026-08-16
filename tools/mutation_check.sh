@@ -283,28 +283,26 @@ SURVIVORS=()
 CAUGHT=0
 
 for entry in "${MUTATIONS[@]}"; do
+  SURVIVED=0
+  BUILD_BROKEN=0
   IFS='|' read -r name file search replace <<< "$entry"
 
-  # `read` with four variables gives the last one everything after the third
-  # delimiter, so a '|' in the REPLACE field is harmless -- but one in the
-  # SEARCH field silently truncates it there, and the rest lands in `replace`.
-  # The entry then applies a mutation nobody wrote. That is worse than not
-  # applying: the mangled result usually fails to compile, and a build failure
-  # short-circuits the run below into reporting "caught", so the entry looks
-  # like it is proving coverage it never tested.
+  # A '|' in the SEARCH field silently truncates it there, and the remainder is
+  # swallowed by `replace` -- so the entry applies a mutation nobody wrote.
   #
-  # Reassembling and comparing catches it for the cost of one string compare.
-  if [[ "$name|$file|$search|$replace" != "$entry" ]]; then
-    echo -e "${RED}✗ unparseable entry${NC}"
-    echo "    The search field contains a '|', so it was truncated there and"
-    echo "    the remainder was swallowed by the replacement. Pick an anchor"
-    echo "    line without a pipe -- '||' in the searched-for code is the usual"
-    echo "    cause. (A '|' in the REPLACEMENT is fine.)"
-    SURVIVORS+=("$name (unparseable entry)")
-    restore_or_die
-    continue
-  fi
-  printf "%-24s " "$name"
+  # This CANNOT be detected by reassembling the four fields and comparing: the
+  # remainder is absorbed verbatim, delimiters included, so `name|file|search|
+  # replace` reproduces the original entry exactly even when the split was
+  # wrong. (I shipped that check first; it is worthless, and worth recording as
+  # such so it is not re-invented.) Nor can it be detected by counting
+  # delimiters, because replacements legitimately contain them.
+  #
+  # What catches it is downstream: a mangled entry produces code that does not
+  # compile, and the run below now reports that as its own outcome instead of
+  # scoring it "caught". See the note there. The rule for authors is simply:
+  # the search field must not contain a '|' -- if the line you want to anchor on
+  # has '||' in it, anchor on a neighbouring line. A '|' in the replacement is
+  # fine.
 
   APPLIED=$(SEARCH="$search" REPLACE="$replace" python3 - "$PROJECT_DIR/$file" <<'PY'
 import os, sys
@@ -329,13 +327,12 @@ PY
     continue
   fi
 
-  # NOTE on what "caught" means. Below, a failed build short-circuits the &&
-  # into leaving SURVIVED at 0, so a mutation that does not compile is reported
-  # as caught. In CI terms it would indeed be caught -- the build is red -- but
-  # it proves nothing about the test suite, which is what this check exists to
-  # measure. Entries should therefore be written to produce code that COMPILES
-  # and is wrong, not code that fails to parse. The unparseable-entry guard
-  # above closes the one way this used to happen silently.
+  # A mutation that does not COMPILE proves nothing about the test suite, which
+  # is the only thing this check measures. It used to score as "caught": a
+  # failed build short-circuited the && below, leaving SURVIVED at 0. That made
+  # a mangled entry -- a search field truncated at a '|', say -- look like it
+  # was proving coverage it never tested. Build failures are now their own
+  # outcome, so entries have to produce code that compiles and is wrong.
 
   # Only the targets that actually compile this file. A mutation to
   # dhw_demand_logic.h cannot change what test_auth decides, and rebuilding it
@@ -370,18 +367,30 @@ PY
     # survived on the *previous* build. Cheap insurance against the exact
     # stale-binary artifact that has produced false survivors here before.
     ( cd "$TESTS_DIR" && rm -f "${SEL[@]}" )
-    if (cd "$TESTS_DIR" && make -j"$JOBS" "${SEL[@]}" >/dev/null 2>&1) && \
-       (cd "$TESTS_DIR" && for t in "${SEL[@]}"; do ./"$t" >/dev/null 2>&1 || exit 1; done); then
+    if ! (cd "$TESTS_DIR" && make -j"$JOBS" "${SEL[@]}" >/dev/null 2>&1); then
+      BUILD_BROKEN=1
+    elif (cd "$TESTS_DIR" && for t in "${SEL[@]}"; do ./"$t" >/dev/null 2>&1 || exit 1; done); then
       SURVIVED=1
     else
       SURVIVED=0
     fi
   else
-    if (cd "$TESTS_DIR" && make clean >/dev/null 2>&1 && make -j"$JOBS" test >/dev/null 2>&1); then
-      SURVIVED=1
+    if ! (cd "$TESTS_DIR" && make clean >/dev/null 2>&1 && make -j"$JOBS" test >/dev/null 2>&1); then
+      BUILD_BROKEN=1
     else
       SURVIVED=0
     fi
+  fi
+
+  if [[ "$BUILD_BROKEN" == "1" ]]; then
+    echo -e "${RED}✗ did not compile${NC}"
+    echo "    The mutated code does not build, so the suite was never run and"
+    echo "    this entry proves nothing about coverage. Usually the search"
+    echo "    field contains a '|' and was truncated there; sometimes the"
+    echo "    replacement is simply not valid C++. Fix the entry."
+    SURVIVORS+=("$name (did not compile)")
+    restore_or_die
+    continue
   fi
 
   if [[ "$SURVIVED" == "1" ]]; then
