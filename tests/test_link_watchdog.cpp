@@ -22,6 +22,7 @@
 #include "../components/alpha_hwr/link_watchdog.h"
 
 using esphome::alpha_hwr::link_data_timeout_expired;
+using esphome::alpha_hwr::link_data_timeout_next;
 
 int tests_passed = 0;
 int tests_failed = 0;
@@ -230,6 +231,88 @@ void test_predicate_has_no_notion_of_ready() {
               "The budget does not depend on having reached READY");
 }
 
+// ── Backoff (issue #176) ─────────────────────────────────────────────────────
+// A link that stays deaf was recycled every ~66 s indefinitely: ~1,300 passes a
+// day, each one re-entering the encryption-on-open path where a failure can
+// erase the bond (issue #14). Doubling with a ceiling bounds that without
+// costing recovery -- a link that can recover still does on the first or second
+// try.
+void test_backoff_doubles_to_the_cap() {
+  std::cout << "\n=== The window doubles, then stops at the cap ===" << std::endl;
+
+  const uint32_t cap = esphome::alpha_hwr::LINK_DATA_TIMEOUT_BACKOFF_CAP_MS;
+  TEST_ASSERT(cap == 3600000u, "The default ceiling is one hour");
+
+  uint32_t w = 60000;
+  w = link_data_timeout_next(w, cap);
+  TEST_ASSERT(w == 120000u, "60 s doubles to 120 s");
+  w = link_data_timeout_next(w, cap);
+  TEST_ASSERT(w == 240000u, "...then 240 s");
+
+  // Walk it to the ceiling and confirm it stops there rather than overshooting.
+  int steps = 2;
+  while (w < cap && steps < 100) {
+    w = link_data_timeout_next(w, cap);
+    steps++;
+  }
+  TEST_ASSERT(w == cap, "The window lands exactly on the cap, not past it");
+  TEST_ASSERT(steps == 6,
+              "...after 6 doublings from 60 s — about 28 recycles a day "
+              "against ~1,300 before");
+  TEST_ASSERT(link_data_timeout_next(w, cap) == cap,
+              "Once at the cap it stays there however long the link stays deaf");
+}
+
+void test_backoff_leaves_a_disabled_watchdog_disabled() {
+  std::cout << "\n=== Backoff cannot switch the watchdog on ===" << std::endl;
+
+  // 0 means disabled everywhere else in this header, and doubling "never" is
+  // meaningless. Returning anything else would silently arm a watchdog the
+  // operator turned off.
+  TEST_ASSERT(link_data_timeout_next(0, 3600000u) == 0,
+              "A disabled watchdog stays disabled after a backoff step");
+}
+
+void test_backoff_never_shrinks_a_configured_window() {
+  std::cout << "\n=== A budget larger than the cap is not overridden ==="
+            << std::endl;
+
+  // Someone who configures two hours means it. Clamping down to the ceiling
+  // would be the backoff making the watchdog *more* aggressive, which is the
+  // opposite of its purpose.
+  const uint32_t two_hours = 7200000u;
+  TEST_ASSERT(link_data_timeout_next(two_hours, 3600000u) == two_hours,
+              "A window already past the cap is returned unchanged");
+  TEST_ASSERT(link_data_timeout_next(3600000u, 3600000u) == 3600000u,
+              "A window exactly at the cap is returned unchanged");
+}
+
+void test_backoff_cannot_wrap_into_a_tiny_window() {
+  std::cout << "\n=== Doubling past 2^31 clamps rather than wrapping ==="
+            << std::endl;
+
+  // Unreachable from any sane configuration, but a wrap would turn a very long
+  // window into a near-zero one — a watchdog that fires constantly, which is
+  // the failure this whole change exists to prevent.
+  const uint32_t huge = 0x90000000u;  // doubling overflows uint32
+  const uint32_t out = link_data_timeout_next(huge, 3600000u);
+  TEST_ASSERT(out == huge,
+              "A window past the cap is returned unchanged before any doubling "
+              "can overflow");
+
+  // And with a cap above it, the doubling itself is what must not wrap.
+  // Pinned exactly, not as an inequality. `out2 >= huge` let the overflow
+  // clamp be mutated to `return current_ms;` with the suite still green -- the
+  // two differ for real inputs (2147483648 with a 4294967295 cap gives
+  // 4294967295 against 2147483648) even though the shipped 1-hour cap makes the
+  // branch unreachable in production. A dead branch is still worth pinning if
+  // it is the one standing between a doubling and a wrap.
+  const uint32_t out2 = link_data_timeout_next(huge, 0xFFFFFFFFu);
+  TEST_ASSERT(out2 == 0xFFFFFFFFu,
+              "Doubling toward a huge cap clamps to the cap rather than "
+              "wrapping to a tiny window");
+}
+
 int main() {
   std::cout << "==========================================" << std::endl;
   std::cout << "Link Watchdog Tests (audit finding 8)" << std::endl;
@@ -243,6 +326,10 @@ int main() {
   test_deaf_mid_session();
   test_millis_rollover();
   test_predicate_has_no_notion_of_ready();
+  test_backoff_doubles_to_the_cap();
+  test_backoff_leaves_a_disabled_watchdog_disabled();
+  test_backoff_never_shrinks_a_configured_window();
+  test_backoff_cannot_wrap_into_a_tiny_window();
 
   std::cout << "\n==========================================" << std::endl;
   std::cout << "Results: " << tests_passed << " passed, " << tests_failed << " failed" << std::endl;

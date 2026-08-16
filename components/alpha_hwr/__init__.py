@@ -108,6 +108,8 @@ CONF_OPERATING_HOURS = "operating_hours"
 CONF_CLOCK_DIFF = "clock_diff"
 CONF_LAST_CLOCK_SYNC = "last_clock_sync"
 CONF_PUMP_LINK_STATUS = "pump_link_status"
+CONF_LINK_RECYCLES = "link_recycles"
+CONF_LINK_MAX_GAP = "link_max_gap"
 CONF_PUMP_LAST_LINK_FAILURE = "pump_last_link_failure"
 CONF_TIME_ID = "time_id"
 
@@ -329,6 +331,23 @@ CONFIG_SCHEMA = cv.Schema(
             icon="mdi:clock-check",
             entity_category=ENTITY_CATEGORY_DIAGNOSTIC,
         ),
+        # Link diagnostics (issue #176). Both read 0 on a healthy link, so an
+        # automation can threshold on the recycle count rather than having to
+        # notice a flap cadence live, and the observed gap is what a
+        # data-driven data_timeout default has to be chosen from.
+        cv.Optional(CONF_LINK_RECYCLES): sensor.sensor_schema(
+            icon="mdi:restart-alert",
+            accuracy_decimals=0,
+            entity_category=ENTITY_CATEGORY_DIAGNOSTIC,
+            state_class=STATE_CLASS_MEASUREMENT,
+        ),
+        cv.Optional(CONF_LINK_MAX_GAP): sensor.sensor_schema(
+            unit_of_measurement="s",
+            icon="mdi:timer-alert-outline",
+            accuracy_decimals=1,
+            entity_category=ENTITY_CATEGORY_DIAGNOSTIC,
+            state_class=STATE_CLASS_MEASUREMENT,
+        ),
         cv.Optional(CONF_PUMP_LINK_STATUS): text_sensor.text_sensor_schema(
             icon="mdi:bluetooth-connect",
         ),
@@ -510,6 +529,14 @@ async def to_code(config):
     if CONF_LAST_CLOCK_SYNC in config:
         sens = await text_sensor.new_text_sensor(config[CONF_LAST_CLOCK_SYNC])
         cg.add(var.set_last_clock_sync_sensor(sens))
+
+    if CONF_LINK_RECYCLES in config:
+        sens = await sensor.new_sensor(config[CONF_LINK_RECYCLES])
+        cg.add(var.set_link_recycles_sensor(sens))
+
+    if CONF_LINK_MAX_GAP in config:
+        sens = await sensor.new_sensor(config[CONF_LINK_MAX_GAP])
+        cg.add(var.set_link_max_gap_sensor(sens))
 
     if CONF_PUMP_LINK_STATUS in config:
         sens = await text_sensor.new_text_sensor(config[CONF_PUMP_LINK_STATUS])

@@ -80,6 +80,15 @@ void AlphaHwrComponent::setup() {
     // subscribe paths that never call subscribed_callback_() leave the session
     // short of READY forever, and those need recycling too.
     this->link_last_inbound_ms_ = this->link_last_open_ms_;
+    // ...and re-arm the gap sampler with it. Without this the first
+    // notification of the *second* and every later connection measures the
+    // handshake as an inter-notification gap -- link_watchdog.h budgets 17.2 s
+    // worst case from open to first inbound data -- and since link_max_gap_ms_
+    // is a running maximum it never comes back down. The statistic that is
+    // supposed to choose a data_timeout default would then be biased upward by
+    // its own reconnects, which argues for a longer timeout: exactly the
+    // self-serving direction.
+    this->link_had_inbound_ = false;
     this->evaluate_link_status();
   });
 
@@ -179,7 +188,46 @@ void AlphaHwrComponent::setup() {
         // pump answering with frames this build cannot decode still counts as
         // alive. The watchdog is a liveness check on the link, not a
         // correctness check on the payload.
-        this->link_last_inbound_ms_ = millis();
+        const uint32_t inbound_now = millis();
+
+        // Longest inter-notification gap seen since boot, as a running maximum
+        // (issue #176). The data_timeout default has to clear every gap that
+        // happens routinely while staying short enough to be useful, and those
+        // two requirements pull opposite ways -- only observation settles it.
+        // Recorded here rather than derived from the poll interval because a
+        // bench reading once turned out to be 90 s old against a channel the
+        // constants said was 10 s.
+        //
+        // Skipped while the previous stamp is the connection-open one: that
+        // gap measures the handshake, not the pump's reporting cadence, and
+        // mixing the two would inflate the statistic this exists to gather.
+        if (this->link_had_inbound_) {
+          const uint32_t gap = inbound_now - this->link_last_inbound_ms_;
+          if (gap > this->link_max_gap_ms_) {
+            this->link_max_gap_ms_ = gap;
+          }
+        }
+        this->link_had_inbound_ = true;
+
+        // Data arrived, so whatever the link was doing, it is doing it again --
+        // but only frames received while the session is READY count as that
+        // proof. A pump that answers the handshake and then goes silent
+        // delivers one frame per session, and link_watchdog.h records that
+        // control-mode notifications *are* received during the handshake on
+        // this specimen. Resetting on those would clear the window and the
+        // counter once per session forever: the backoff would never engage, and
+        // the counter an automation is supposed to threshold on would read 0
+        // while the node recycled ~1,200 times a day. Simulated at exactly that.
+        //
+        // Post-READY frames are the poll responses, which are what "the link
+        // works" actually means. A pump that comes back after hours reaches
+        // READY and resets from there.
+        if (this->session_.is_ready()) {
+          this->link_data_timeout_current_ms_ = this->link_data_timeout_ms_;
+          this->link_recycles_without_data_ = 0;
+        }
+
+        this->link_last_inbound_ms_ = inbound_now;
 
         // Pump Link Status: this — not auth completing — is what proves the
         // link works, so it is where a run of failed attempts is forgiven.
@@ -415,6 +463,7 @@ void AlphaHwrComponent::loop() {
     this->link_last_eval_ms_ = millis();
     this->check_link_liveness_();
     this->evaluate_link_status();
+    this->publish_link_diagnostics_();
   }
 }
 
@@ -423,12 +472,36 @@ void AlphaHwrComponent::loop() {
 // than a session-state transition.
 void AlphaHwrComponent::check_link_liveness_() {
   if (!link_data_timeout_expired(this->session_.is_connected(), millis(),
-                                 this->link_last_inbound_ms_, this->link_data_timeout_ms_)) {
+                                 this->link_last_inbound_ms_,
+                                 this->link_data_timeout_current_ms_)) {
     return;
   }
 
-  ESP_LOGE(TAG, "No data from pump for %" PRIu32 " ms while %s - recycling the link",
-           this->link_data_timeout_ms_, this->session_.get_state_name());
+  // The window that actually expired, kept for the log and the fault string
+  // before the backoff below moves it. Reporting the configured value here
+  // would misstate the trigger once the window has grown.
+  const uint32_t expired_ms = this->link_data_timeout_current_ms_;
+
+  // Consecutive recycles that produced no data (issue #176). Reset only by an
+  // inbound notification, so it reads 0 in normal operation and an automation
+  // can threshold on it -- a value to alert on rather than a flap cadence
+  // somebody has to be watching to notice.
+  this->link_recycles_without_data_++;
+
+  // Widen the next window. See link_data_timeout_next(): a recoverable link
+  // still recovers on the first or second try, while a permanently deaf one
+  // drops from ~1,300 recycles a day to about 28, bounding the number of runs
+  // at the encryption-on-open window that can erase the bond (issue #14).
+  this->link_data_timeout_current_ms_ =
+      link_data_timeout_next(this->link_data_timeout_current_ms_,
+                             LINK_DATA_TIMEOUT_BACKOFF_CAP_MS);
+
+  ESP_LOGE(TAG,
+           "No data from pump for %" PRIu32 " ms while %s - recycling the link "
+           "(consecutive: %" PRIu32 ", next window %" PRIu32 " ms)",
+           expired_ms, this->session_.get_state_name(),
+           this->link_recycles_without_data_,
+           this->link_data_timeout_current_ms_);
 
   // Count this as a failed attempt, even though the session may have reached
   // READY: by the watchdog's own evidence it never worked. Paired with the
@@ -442,12 +515,12 @@ void AlphaHwrComponent::check_link_liveness_() {
   // milliseconds: truncating would render 1500ms as "(1s)" and anything under a
   // second as "(0s)", i.e. a fault string that misreports its own trigger.
   char reason[64];
-  if (this->link_data_timeout_ms_ % 1000 == 0) {
+  if (expired_ms % 1000 == 0) {
     snprintf(reason, sizeof(reason), "No data from pump (%" PRIu32 "s)",
-             this->link_data_timeout_ms_ / 1000);
+             expired_ms / 1000);
   } else {
     snprintf(reason, sizeof(reason), "No data from pump (%" PRIu32 "ms)",
-             this->link_data_timeout_ms_);
+             expired_ms);
   }
   // Re-arm before disconnecting. esp_ble_gattc_close() is asynchronous, so the
   // session stays is_connected() for some number of loop() ticks after this
@@ -456,6 +529,30 @@ void AlphaHwrComponent::check_link_liveness_() {
   // until the DISCONNECT event finally lands.
   this->link_last_inbound_ms_ = millis();
   this->ble_manager_.force_disconnect(reason);
+}
+
+// Link diagnostics for issue #176: the consecutive-recycle counter an
+// automation can threshold on, and the longest inter-notification gap seen,
+// which is what a data-driven data_timeout default has to be chosen from.
+//
+// Gated on change. sensor::Sensor::publish_state() does not dedup, so
+// republishing on every ~1 s tick would cost a frame per API subscriber per
+// second for values that change at most once per recycle -- the exact shape of
+// the load that OOMs this node (issue #127).
+void AlphaHwrComponent::publish_link_diagnostics_() {
+  if (this->link_recycles_sensor_ != nullptr &&
+      this->link_recycles_published_ != this->link_recycles_without_data_) {
+    this->link_recycles_published_ = this->link_recycles_without_data_;
+    this->link_recycles_sensor_->publish_state(
+        static_cast<float>(this->link_recycles_without_data_));
+  }
+
+  if (this->link_max_gap_sensor_ != nullptr &&
+      this->link_max_gap_published_ != this->link_max_gap_ms_) {
+    this->link_max_gap_published_ = this->link_max_gap_ms_;
+    this->link_max_gap_sensor_->publish_state(
+        static_cast<float>(this->link_max_gap_ms_) / 1000.0f);
+  }
 }
 
 // Pump Link Status state machine. The status is the FIRST matching condition
