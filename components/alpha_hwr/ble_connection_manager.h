@@ -3,6 +3,7 @@
 #include "esphome/components/ble_client/ble_client.h"
 #include "esphome/components/binary_sensor/binary_sensor.h"
 #include "failure_hold.h"
+#include "gap_security_policy.h"
 #include "subscribe_outcome.h"
 #include <esp_gattc_api.h>
 #include <esp_gap_ble_api.h>
@@ -136,6 +137,16 @@ class BLEConnectionManager {
   void handle_auth_complete(const esp_ble_gap_cb_param_t *param);
   /// Returns true if the device at @p bda already has a stored bond.
   static bool check_is_bonded(const esp_bd_addr_t bda);
+
+  /// True when a GAP security event carrying @p bda concerns *our* pump.
+  ///
+  /// GAP events are broadcast to every BLE client and every node on the device,
+  /// so without this every handler below also sees the security traffic of any
+  /// bluetooth_proxy or second ble_client sharing the node. See
+  /// gap_security_policy.h for what each handler does with the answer.
+  bool gap_addr_is_pump_(const uint8_t *bda) const {
+    return client_ != nullptr && core::gap_addr_matches(bda, client_->get_remote_bda());
+  }
 
   // BLE client reference
   ble_client::BLEClient *client_{nullptr};

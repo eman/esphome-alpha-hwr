@@ -249,6 +249,22 @@ MUTATIONS=(
 # cleared on exactly the links it describes.
 "failure-hold-auth-not-released-at-ready|components/alpha_hwr/failure_hold.h|    case FailureHold::SUBSCRIBE:\n      return false;  // and a blocking subscribe fault never reaches READY\n    case FailureHold::AUTH:\n      return true;|    case FailureHold::SUBSCRIBE:\n      return false;  // and a blocking subscribe fault never reaches READY\n    case FailureHold::AUTH:\n      return false;"
 "failure-hold-watchdog-released-at-ready|components/alpha_hwr/failure_hold.h|      return false;  // READY does not prove the pump is answering|      return true;  // READY does not prove the pump is answering"
+# GAP security policy (gap_security_policy.h). BLE GAP events are broadcast to
+# every client and every node on the device, not routed to the connection that
+# caused them, so a handler without an address check answers -- and acts on --
+# the pairing traffic of every other BLE peer sharing the node. The first two
+# are the auto-accept as it shipped: no address check at all, and the address
+# check present but the enable_pairing gate missing. The third is the tempting
+# fix that is still wrong, refusing a stranger's request on another component's
+# behalf instead of staying out of it. The last two attack the comparison
+# itself: stopping after one octet accepts every device with a matching OUI,
+# and dropping the unset-peer guard makes an all-zero event address match a
+# ble_client that has no address configured yet.
+"gap-security-accepts-any-device|components/alpha_hwr/gap_security_policy.h|  if (!addr_is_ours) {\n    return GapSecurityAction::IGNORE;\n  }|  if (false) {\n    return GapSecurityAction::IGNORE;\n  }"
+"gap-security-ignores-enable-pairing|components/alpha_hwr/gap_security_policy.h|  return pairing_enabled ? GapSecurityAction::ACCEPT : GapSecurityAction::DECLINE;|  return GapSecurityAction::ACCEPT;"
+"gap-security-refuses-for-others|components/alpha_hwr/gap_security_policy.h|    return GapSecurityAction::IGNORE;\n  }\n  return pairing_enabled|    return GapSecurityAction::DECLINE;\n  }\n  return pairing_enabled"
+"gap-addr-compares-one-octet|components/alpha_hwr/gap_security_policy.h|  for (size_t i = 0; i < BD_ADDR_LEN; i++) {\n    if (event_addr[i] != peer_addr[i]) {|  for (size_t i = 0; i < 1; i++) {\n    if (event_addr[i] != peer_addr[i]) {"
+"gap-addr-unset-peer-matches|components/alpha_hwr/gap_security_policy.h|  if (peer_is_unset) {\n    return false;\n  }|  if (false) {\n    return false;\n  }"
 "link-watchdog-never-fires|components/alpha_hwr/link_watchdog.h|return static_cast<uint32_t>(now_ms - last_inbound_ms) > timeout_ms;|return false;"
 "link-watchdog-rollover-unsafe|components/alpha_hwr/link_watchdog.h|return static_cast<uint32_t>(now_ms - last_inbound_ms) > timeout_ms;|return now_ms > last_inbound_ms + timeout_ms;"
 # data_timeout backoff (issue #176). Without it a deaf link is recycled ~1,300
