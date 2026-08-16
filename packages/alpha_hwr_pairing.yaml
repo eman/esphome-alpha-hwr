@@ -150,6 +150,19 @@ alpha_hwr:
    pump_last_link_failure:
      name: "Pump Link Fault"
 
+   # Link recycle counter and the longest gap between notifications seen since
+   # boot (issue #176). The fault sensor above shows the reason *during* a
+   # reconnect and clears on recovery, so repeated recycles read as a flap you
+   # have to be watching to catch. This counter is a value an automation can
+   # threshold on instead: it reads 0 in normal operation and only climbs while
+   # the link is failing to deliver data. The gap is what a data_timeout
+   # default should be chosen from, since it records what this installation
+   # actually does rather than what the poll interval predicts.
+   link_recycles:
+     name: "Pump Link Recycles"
+   link_max_gap:
+     name: "Pump Link Longest Gap"
+
    # Run state, and the alarm for the illegal "schedule on but pump stopped"
    # state that silently loses every window (issue #124). "Engage Pump" reads
    # off for both AUTO and STOP once the schedule is on, so these are the only
