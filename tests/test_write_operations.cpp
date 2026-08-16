@@ -1512,6 +1512,87 @@ static void test_clear_single_event() {
   TEST_ASSERT(h.sim.single_events[3][0] == 0, "pump slot 3 is disabled");
 }
 
+// A caller-supplied slot is bounded by the count the pump reports, not by the
+// 35-slot fallback -- this specimen answers 5. Without the bound, slot 10 goes
+// out as SubID 910; a pump that owns only 900-904 never answers it, so the
+// operation settles TIMEOUT ~15 s later instead of REJECTED up front, and the
+// detail blames the link rather than the argument.
+//
+// Both halves matter. The reject case alone passes just as well against a
+// hardcoded `slot >= 35`, which would let 10 through on this pump; pairing it
+// with slot 4 accepted pins the bound to the device's own number.
+static void test_single_event_slot_bounded_by_pump_capacity() {
+  std::cout << "\n=== single event: slot past the pump's count -> rejected, nothing written ===" << std::endl;
+  Harness h;
+  h.prime_cache();
+  h.sim.max_single_events = 5;
+  // Slot 10 is one the *simulator* would happily answer (it models 35), so a
+  // failure here is the bound going missing, not the sim declining to reply.
+  h.sim.single_events[10][0] = 1;
+
+  h.write_op.submit_clear_single_event(10, "sb1");
+  h.advance(25000);
+
+  TEST_ASSERT(h.events_for("sb1") == 1, "exactly one terminal event");
+  const WriteResult *r = h.result_for("sb1");
+  TEST_ASSERT(r && r->status == WriteStatus::REJECTED, "status is rejected");
+  TEST_ASSERT(r && r->detail.find("out of range") != std::string::npos,
+              "detail names the argument, not a timeout");
+  TEST_ASSERT(r && r->detail.find("pump has 5") != std::string::npos,
+              "detail reports the pump's own count, not the 35 fallback");
+  TEST_ASSERT(h.sim.overview_writes == 0, "no configuration commit reached the pump");
+  TEST_ASSERT(h.sim.single_events[10][0] == 1, "slot 10 was left untouched");
+
+  // max_events is a count, so the highest legal slot is max_events - 1. Slot 5
+  // on a 5-slot pump is the off-by-one this pins; the sim answers SubID 905
+  // happily, so only the bound distinguishes it.
+  h.sim.single_events[5][0] = 1;
+  h.write_op.submit_clear_single_event(5, "sb1b");
+  h.advance(25000);
+
+  const WriteResult *rb = h.result_for("sb1b");
+  TEST_ASSERT(h.events_for("sb1b") == 1, "exactly one terminal event for the boundary slot");
+  TEST_ASSERT(rb && rb->status == WriteStatus::REJECTED, "slot == max_events is out of range");
+  TEST_ASSERT(h.sim.single_events[5][0] == 1, "slot 5 was left untouched");
+}
+
+static void test_single_event_last_valid_slot_still_writes() {
+  std::cout << "\n=== single event: the pump's last slot is still writable ===" << std::endl;
+  Harness h;
+  h.prime_cache();
+  h.sim.max_single_events = 5;
+  h.sim.single_events[4][0] = 1;
+
+  h.write_op.submit_clear_single_event(4, "sb2");
+  h.advance(25000);
+
+  TEST_ASSERT(h.events_for("sb2") == 1, "exactly one terminal event");
+  const WriteResult *r = h.result_for("sb2");
+  TEST_ASSERT(r && r->status == WriteStatus::ACCEPTED, "max_events-1 is in range");
+  TEST_ASSERT(h.sim.single_events[4][0] == 0, "pump slot 4 is disabled");
+}
+
+// The bound sits in run_single_event_(), which both commands share, so the
+// entity path's explicit-slot write (AlphaHwrComponent::write_single_event)
+// is covered by the same check rather than by a second copy of it.
+static void test_set_single_event_explicit_slot_is_bounded() {
+  std::cout << "\n=== set_single_event: explicit slot past the pump's count -> rejected ===" << std::endl;
+  Harness h;
+  h.prime_cache();
+  h.sim.max_single_events = 5;
+
+  h.write_op.submit_set_single_event(1000000, 2000000, "sb3", nullptr, 10,
+                                     WriteOrigin::ENTITY);
+  h.advance(25000);
+
+  TEST_ASSERT(h.events_for("sb3") == 1, "exactly one terminal event");
+  const WriteResult *r = h.result_for("sb3");
+  TEST_ASSERT(r && r->status == WriteStatus::REJECTED, "status is rejected");
+  TEST_ASSERT(r && r->detail.find("out of range") != std::string::npos,
+              "detail names the argument");
+  TEST_ASSERT(h.sim.single_events[10][0] == 0, "no event was written to slot 10");
+}
+
 static void test_set_vacation_writes_stop_event() {
   std::cout << "\n=== set_vacation: writes a Stop single-event ===" << std::endl;
   Harness h;
@@ -2167,6 +2248,9 @@ int main() {
   test_clear_vacation_targets_stop_slot();
   test_clear_vacation_none_active();
   test_clear_single_event();
+  test_single_event_slot_bounded_by_pump_capacity();
+  test_single_event_last_valid_slot_still_writes();
+  test_set_single_event_explicit_slot_is_bounded();
   test_schedule_supersede_keys();
   test_refresh_ops();
   test_refresh_schedule_all_layers_fail();

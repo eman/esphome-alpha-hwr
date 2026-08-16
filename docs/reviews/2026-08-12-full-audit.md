@@ -690,6 +690,24 @@ release, and no CI job runs `esphome config`.
 - **`clear_single_event` accepts slots 0–99** (`api_bridge.cpp:330`) against a ≤35-slot table. The
   only unvalidated argument that reaches the wire — every other service is range-checked or
   whitelisted.
+
+  > **Wire side already closed; the record here is stale.** `618ca70`, committed the same day this
+  > report was written, added the bound to `run_single_event_()` — after `ensure_overview_()`, so
+  > it compares against the count the pump itself reports rather than the 35-slot fallback. It
+  > covers `clear_single_event`, the entity path's explicit-slot `write_single_event`, and any
+  > future caller, because both commands share that one resolver.
+  >
+  > **The bridge's 0–99 is not the defect it looks like.** 0–99 *is* the protocol envelope —
+  > single events occupy Object 84 SubIDs 900–999 (`schedule_service.h:133,150`). Tightening it to
+  > a constant would hardcode 35 at a layer that cannot know this pump answers 5, which is worse
+  > than deferring: it would reject legal slots on a larger pump and still accept illegal ones on
+  > a smaller. The envelope belongs at the bridge, the device bound where the device count is
+  > known.
+  >
+  > **What actually remained was test cover**, and that is what closed this item: the bound shipped
+  > with no test, so nothing distinguished it from a hardcoded 35 or an off-by-one. Three tests now
+  > model a 5-slot pump — slot 10 and slot 5 rejected, slot 4 accepted, nothing written in the
+  > reject cases — with two mutations pinning both failure modes.
 - **Three example YAMLs ship a working all-`A` API key and `test-ota` password.** The MAC gets a
   `# ← CHANGE THIS` marker and WiFi is step 2; the encryption key and OTA password are marked
   nowhere and appear in no setup step.

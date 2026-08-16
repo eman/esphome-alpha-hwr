@@ -98,6 +98,13 @@ MUTATIONS=(
 # public surfaces. It went unnoticed for as long as it did precisely because no
 # test asserted either spelling.
 "command-string-service-name-drift|components/alpha_hwr/write_operation_service.cpp|    case WriteCommand::SET_PUMP_STATE:        return \"set_pump_state\";|    case WriteCommand::SET_PUMP_STATE:        return \"pump_set_state\";"
+# The single-event slot bound is the last stop before a caller's index becomes
+# SubID 900+idx on the wire. Two ways to get it wrong, and the pair is the point:
+# hardcoding 35 still rejects absurd values while quietly accepting slot 10 on a
+# 5-slot pump, and >= vs > lets slot == max_events through. Neither shows up
+# against a 35-slot simulator, which is why the tests model a 5-slot one.
+"single-event-slot-bound-hardcoded|components/alpha_hwr/write_operation_service.cpp|      if (op->slot >= static_cast<int16_t>(max_events)) {|      if (op->slot >= 35) {"
+"single-event-slot-bound-off-by-one|components/alpha_hwr/write_operation_service.cpp|      if (op->slot >= static_cast<int16_t>(max_events)) {|      if (op->slot > static_cast<int16_t>(max_events)) {"
 # Restores issue #179's off-by-one: a seven-byte Class 7 header instead of six,
 # which cost every device-info string its first character. It survived for as
 # long as it did because the only test fixture was generated from the same wrong
