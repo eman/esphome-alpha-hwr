@@ -4,6 +4,7 @@
 #include <cstdio>
 #include "fixture_crc.h"
 #include "../components/alpha_hwr/schedule_service.h"
+#include "../components/alpha_hwr/schedule_codec.h"
 #include "../components/alpha_hwr/transport.h"
 #include "../components/alpha_hwr/session.h"
 
@@ -36,12 +37,55 @@ void test_schedule_write_payload() {
   // Set session to ready state to allow writes
   session.on_authenticated();
 
-  // Write a simple schedule (layer 1)
-  std::vector<esphome::alpha_hwr::ScheduleEntry> entries;
-  entries.push_back(esphome::alpha_hwr::ScheduleEntry("Monday", 6, 0, 8, 0)); // Mon 6am-8am
-  
-  bool success = service.write_entries(entries, 1);
-  TEST_ASSERT(success, "write_entries() accepted the schedule");
+  // Write a simple schedule (layer 1) through the path production uses.
+  //
+  // This drove write_entries() until that method was deleted as dead code. The
+  // envelope it asserts is the same -- one 53-byte Class 10 OpSpec 0xB3 frame
+  // at SubID 1000+layer -- but it now comes from write_layer_image_async(),
+  // which is what the write-operation layer actually calls, so the assertions
+  // below describe shipped behaviour rather than a method nobody could reach.
+  esphome::alpha_hwr::codec::UploadRequest request;
+  request.entries.push_back({/*layer=*/1, /*day=*/0, /*bh=*/6, /*bm=*/0, /*eh=*/8, /*em=*/0});
+  uint8_t image[esphome::alpha_hwr::codec::LAYER_IMAGE_BYTES];
+  esphome::alpha_hwr::codec::build_layer_image(request, 1, image);
+
+  // A layer that has not been read back is refused rather than written blind:
+  // a 42-byte image covers the whole week, so writing one built from an unread
+  // layer silently drops whatever else that layer holds. This is the issue #92
+  // anti-clobber guard. Assert it first, then satisfy it, so the guard is
+  // pinned rather than merely worked around.
+  //
+  // The guard is checked twice -- write_layer_image_async() declines up front
+  // and write_cached_layer_async() declines again -- so what this pins is the
+  // pair. Removing either one alone leaves the suite green; removing both turns
+  // it red. Stated because "the guard is tested" would be a stronger claim than
+  // the test earns.
+  bool refused_uncached = false;
+  service.write_layer_image_async(1, image, [&](bool ok) { refused_uncached = !ok; });
+  TEST_ASSERT(refused_uncached, "an uncached layer is refused, not written blind");
+  // Pump the FSM before asserting nothing was sent. Transport only calls the
+  // write callback from loop(), so asserting on an unpumped queue is a test
+  // that cannot fail -- it would read as corroboration while checking nothing.
+  for (int i = 0; i < 4; i++) { mock_millis += 51; transport.loop(); }
+  TEST_ASSERT(sent_chunks.empty(), "and nothing reached the wire");
+
+  // Prime the cache with a layer-1 read: OpSpec 0x13, type 0xDE01, a
+  // [00 00 2A] size header and 42 zero bytes.
+  service.read_entries_async(1, nullptr);
+  for (int i = 0; i < 4; i++) { mock_millis += 51; transport.loop(); }
+  std::vector<uint8_t> layer_frame = {0x24, 0x00, 0xF8, 0xE7, 0x0A, 0x13, 0x00, 0x00, 0xDE, 0x01,
+                                      0x00, 0x00, 0x2A};
+  layer_frame.insert(layer_frame.end(), 42, 0x00);
+  layer_frame.push_back(0xAA);
+  layer_frame.push_back(0xBB);
+  layer_frame[1] = static_cast<uint8_t>(layer_frame.size() - 4);
+  layer_frame = with_crc(std::move(layer_frame));
+  transport.on_notification(layer_frame.data(), layer_frame.size());
+  mock_millis += 51;
+  transport.loop();
+  sent_chunks.clear();  // drop the read's own frames
+
+  service.write_layer_image_async(1, image, [](bool) {});
 
   // Run the FSM to dispatch all chunks (59 bytes total -> 3 chunks)
   mock_millis += 50;
@@ -67,13 +111,19 @@ void test_schedule_write_payload() {
 
   TEST_ASSERT(full_packet.size() == 59, "Full GENI packet length is 59 bytes (53 APDU + 6 header/footer)");
 
-  // Check the payload details
-  // APDU: Class=10 (0x0A), OpSpec=5 (0xB3), Obj=84 (0x54), Sub=1001 (0x03E9)
-  // GENI format: [0x27][LEN][DST][SRC] + APDU
-  TEST_ASSERT(full_packet[4] == 0x0A, "Class 10 (Settings)");
-  TEST_ASSERT(full_packet[5] == 0xB3, "OpSpec 5 (Write)");
-  TEST_ASSERT(full_packet[6] == 0x54, "Object 84 (ClockProgram)");
-  TEST_ASSERT(full_packet[7] == 0x03 && full_packet[8] == 0xE9, "SubID 1001 (Layer 1)");
+  // Guarded: TEST_ASSERT records a failure and carries on, so without this a
+  // write that produced nothing would turn one honest failure into an
+  // out-of-bounds read of an empty vector (cppcheck flags it, and on a host
+  // build it is undefined behaviour rather than a red test).
+  if (full_packet.size() >= 9) {
+    // Check the payload details
+    // APDU: Class=10 (0x0A), OpSpec=5 (0xB3), Obj=84 (0x54), Sub=1001 (0x03E9)
+    // GENI format: [0x27][LEN][DST][SRC] + APDU
+    TEST_ASSERT(full_packet[4] == 0x0A, "Class 10 (Settings)");
+    TEST_ASSERT(full_packet[5] == 0xB3, "OpSpec 5 (Write)");
+    TEST_ASSERT(full_packet[6] == 0x54, "Object 84 (ClockProgram)");
+    TEST_ASSERT(full_packet[7] == 0x03 && full_packet[8] == 0xE9, "SubID 1001 (Layer 1)");
+  }
 }
 
 // Single-event timestamps live in the pump's LOCAL-Unix clock domain on the

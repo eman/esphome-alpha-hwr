@@ -698,6 +698,29 @@ release, and no CI job runs `esphome config`.
   Still worth acting on: `schedule_service.h:342` tells the next developer to "Use
   `write_entries_async()` for proper transaction handling" — steering them at the one method that
   omits the mandatory commit and always returns true. **The fix is deletion, not repair.**
+
+  **Closed**, and the disposition was right — but two of the specifics were not, in the same way
+  the other P3 items have been: the note describes an older tree than the one it audits.
+
+  - *"`ScheduleService::clear_entry` has zero callers."* It had already been deleted, along with
+    `read_entries()`, before this report was written. What is dead is `clear_entry_async()` — a
+    different method — plus `clear_single_event_async()`, which the note does not mention.
+  - *"The schedule layer writes and `set_state` are referenced only from commented-out YAML
+    (`hwr-pump-example.yaml:98,103`)."* Those lines call `id(pump).enable_schedule()`, which is the
+    **facade** method, and it submits to the write-operation layer. It shares a name with the dead
+    `ScheduleService::enable_schedule()` and is otherwise unrelated. Deleting on the strength of
+    that citation would have removed working code from a working example.
+
+  Deleted: `write_entries`, `write_entries_async`, `enable_schedule`, `disable_schedule`,
+  `set_state`, `clear_entry_async`, `clear_single_event_async`, the `build_schedule_apdu` helper,
+  and the two facade passthroughs — 418 lines. The commented recipe that taught the broken pair now
+  teaches `set_schedule_entry()` and `upload_schedule`.
+
+  One thing the compiler found that no reading would have: the file-scope `TAG` in
+  `schedule_service.cpp` was shadowed by a class-scope `TAG` in the header, so every member
+  function bound to the header's. The only code still using the file-scope one was the
+  anonymous-namespace `build_schedule_apdu()`. Removing that turned it into an unused-variable
+  warning — a ninth piece of dead code, invisible until the eighth went.
 - **`is_frame_start` is applied to continuation chunks** (`transport.cpp:206`) — **new, found
   during verification.** A mid-frame fragment beginning with 0x24/0x27 restarts reassembly and
   destroys the frame in flight. Observed 8 times in the repo's own btsnoop captures — ~0.02% frame

@@ -26,8 +26,6 @@ namespace esphome {
 namespace alpha_hwr {
 namespace services {
 
-static const char *TAG = "schedule_service";
-
 // Single-event timestamps cross the wire in the pump's LOCAL-Unix clock domain
 // while SingleEvent itself always holds UTC, so both directions shift by the
 // local UTC offset -- but they do NOT share one offset, and the description
@@ -47,62 +45,6 @@ static const char *TAG = "schedule_service";
 static const char *DAY_NAMES[7] = {"Monday",   "Tuesday", "Wednesday",
                                    "Thursday", "Friday",  "Saturday",
                                    "Sunday"};
-
-namespace {
-
-// Builds the 53-byte Class 10 SET APDU (11-byte header + 42-byte payload)
-// used to write a full week of schedule entries to one layer. Shared by
-// write_entries() and write_entries_async() so the encoding logic only
-// lives in one place.
-void build_schedule_apdu(const std::vector<ScheduleEntry> &entries,
-                         uint8_t layer, uint8_t apdu_out[53]) {
-  // Prepare 42-byte payload (7 days × 6 bytes)
-  uint8_t payload_data[42];
-  memset(payload_data, 0, 42); // Initialize with zeros (disabled entries)
-
-  // Fill payload with entries
-  for (const auto &entry : entries) {
-    int day_idx = entry.get_day_index();
-    if (day_idx < 0) {
-      ESP_LOGW(TAG, "Invalid day name in entry (day_index=%d), skipping", day_idx);
-      continue;
-    }
-
-    size_t offset = day_idx * 6;
-
-    // Fill 6-byte entry
-    entry.to_bytes(payload_data + offset);
-
-    ESP_LOGV(TAG,
-             "Added entry for %s at offset %zu: %02X %02X %02X %02X %02X %02X",
-             entry.get_day(), offset, payload_data[offset],
-             payload_data[offset + 1], payload_data[offset + 2],
-             payload_data[offset + 3], payload_data[offset + 4],
-             payload_data[offset + 5]);
-  }
-
-  // Build APDU
-  uint16_t sub_id = 1000 + layer;
-  uint8_t sub_h = (sub_id >> 8) & 0xFF;
-  uint8_t sub_l = sub_id & 0xFF;
-
-  apdu_out[0] = 0x0A;  // Class 10
-  apdu_out[1] = 0xB3;  // OpSpec 5
-  apdu_out[2] = 84;    // Object ID 84
-  apdu_out[3] = sub_h; // SubID high byte
-  apdu_out[4] = sub_l; // SubID low byte
-  apdu_out[5] = 0x00;  // Reserved
-  apdu_out[6] = 0xDE;  // Type 222 header
-  apdu_out[7] = 0x01;
-  apdu_out[8] = 0x00;
-  apdu_out[9] = 0x00;  // Size high byte
-  apdu_out[10] = 0x2A; // Size low byte (42 bytes)
-
-  // Append payload
-  memcpy(apdu_out + 11, payload_data, 42);
-}
-
-}  // namespace
 
 // -------------------------------------------------------------------------
 // Constructor
@@ -208,83 +150,6 @@ bool ScheduleService::poll_state_async(std::function<void(bool)> on_complete) {
   return true;
 }
 
-bool ScheduleService::enable_schedule() { return this->set_state(true); }
-bool ScheduleService::disable_schedule() { return this->set_state(false); }
-
-bool ScheduleService::set_state(bool enable) {
-  if (!this->session_.is_ready()) {
-    ESP_LOGE(TAG, "Cannot set schedule state: session not ready");
-    return false;
-  }
-
-  ESP_LOGI(TAG, "%s schedule...", enable ? "Enabling" : "Disabling");
-
-  // Read-modify-write implementation (matches Python reference
-  // schedule.py:724-767) Use cached ClockProgramOverview structure if
-  // available, otherwise use defaults
-  uint8_t structure_bytes[10];
-
-  if (this->overview_cached_) {
-    // Use cached structure from last poll (preserves all pump settings)
-    memcpy(structure_bytes, this->overview_structure_, 10);
-    ESP_LOGD(TAG, "Using cached ClockProgramOverview structure");
-  } else {
-    // Fallback to default values (for first-time use before any poll)
-    // These are typical ALPHA HWR default values
-    ESP_LOGW(TAG, "No cached overview - using default values (consider calling "
-                  "poll_state() first)");
-    structure_bytes[0] = 0x8C; // max_nof_actions = 140
-    structure_bytes[1] = 0x23; // max_nof_single_events = 35
-    structure_bytes[2] = 0x05; // max_nof_alternative_events_per_day = 5
-    structure_bytes[3] = 0x05; // max_nof_events_per_day = 5
-    structure_bytes[4] = 0x00; // clock_program_enabled (will be set below)
-    structure_bytes[5] = 0x01; // default_action = Stop (set explicitly below)
-    structure_bytes[6] = 0x00; // base_set_point (float32 = 0.0)
-    structure_bytes[7] = 0x00;
-    structure_bytes[8] = 0x00;
-    structure_bytes[9] = 0x00;
-  }
-
-  // Modify only the enable flag (byte 4)
-  structure_bytes[4] = enable ? 0x01 : 0x00;
-  // Force default_action = Stop (SchedulingActionType 0x01), matching the
-  // Grundfos app, instead of preserving whatever is on the pump. The pump
-  // idles between windows and runs during the Auto windows we write. A stale
-  // default_action of Auto (0x02) makes the app render the whole schedule as
-  // "pump will be idle" (bench-confirmed 2026-07-22). Keep the cache in sync
-  // with what we write so later cache reuses stay consistent.
-  structure_bytes[5] = 0x01;
-  if (this->overview_cached_)
-    this->overview_structure_[5] = 0x01;
-
-  // Build APDU: Class 10 SET command for Object 84, SubID 1
-  // OpSpec 0x93 = OpSpec 4 (SET), Length 19
-  uint8_t apdu[21];
-  apdu[0] = 0x0A;  // Class 10
-  apdu[1] = 0x93;  // OpSpec 4, Length 19
-  apdu[2] = 84;    // Object 84 (decimal)
-  apdu[3] = 0x00;  // SubID high byte
-  apdu[4] = 0x01;  // SubID low byte (SubID = 1)
-  apdu[5] = 0x00;  // Reserved
-  apdu[6] = 0xDA;  // Type 218 (ClockProgramOverview)
-  apdu[7] = 0x01;  // Type continued
-  apdu[8] = 0x00;  // Type continued
-  apdu[9] = 0x00;  // Size high byte
-  apdu[10] = 0x0A; // Size low byte (10 bytes)
-  memcpy(apdu + 11, structure_bytes, 10);
-
-  // Write command
-  this->write_class10_command(apdu, 21);
-
-  ESP_LOGI(TAG, "Schedule %s command sent", enable ? "enable" : "disable");
-
-  // Update cached state optimistically (will be verified on next poll)
-  this->schedule_enabled_ = enable;
-  this->schedule_state_cached_ = true;
-
-  return true;
-}
-
 void ScheduleService::set_state_async(bool enable, std::function<void(bool)> on_sent) {
   if (!this->session_.is_ready()) {
     ESP_LOGE(TAG, "Cannot set schedule state: session not ready");
@@ -293,7 +158,7 @@ void ScheduleService::set_state_async(bool enable, std::function<void(bool)> on_
     return;
   }
 
-  // Unlike the legacy set_state(), require the real overview: blind RMW of the
+  // Require the real overview: blind RMW of the
   // 10-byte ClockProgramOverview from hardcoded defaults could overwrite pump
   // settings we never read (the issue-#92 clobber class). The operation layer
   // polls the overview first, so this is only a safety net.
@@ -309,10 +174,21 @@ void ScheduleService::set_state_async(bool enable, std::function<void(bool)> on_
   uint8_t structure_bytes[10];
   memcpy(structure_bytes, this->overview_structure_, 10);
   structure_bytes[4] = enable ? 0x01 : 0x00;
-  structure_bytes[5] = 0x01;  // default_action = Stop (see set_state() note)
+  // Force default_action = Stop (SchedulingActionType 0x01), matching the
+  // Grundfos app, instead of preserving whatever is on the pump. The pump idles
+  // between windows and runs during the Auto windows we write. A stale
+  // default_action of Auto (0x02) makes the app render the whole schedule as
+  // "pump will be idle" (bench-confirmed 2026-07-22). Keep the cache in sync
+  // with what we write so later cache reuses stay consistent.
+  //
+  // This note used to live in set_state(), which both overview-write paths
+  // pointed at. That method is gone as dead code, so the explanation lives here
+  // now -- at the first of the two sites that actually writes the byte, rather
+  // than in a footnote to something deleted.
+  structure_bytes[5] = 0x01;
   this->overview_structure_[5] = 0x01;  // keep cache consistent
 
-  // Same APDU as set_state(): Class 10 OpSpec 0x93, Object 84, SubID 1,
+  // Class 10 OpSpec 0x93, Object 84, SubID 1,
   // Type 218 (ClockProgramOverview) — but sent expecting a response window so
   // the caller gets a completion signal instead of fire-and-forget.
   uint8_t apdu[21];
@@ -413,7 +289,9 @@ bool ScheduleService::send_configuration_commit() {
 
   if (this->overview_cached_) {
     memcpy(structure_bytes, this->overview_structure_, 10);
-    structure_bytes[5] = 0x01;  // default_action = Stop (see set_state() note)
+    // default_action = Stop; see the note in set_state_async() for why this is
+    // forced rather than preserved.
+    structure_bytes[5] = 0x01;
     this->overview_structure_[5] = 0x01;  // keep cache consistent
     ESP_LOGD(TAG, "Using cached ClockProgramOverview structure for commit");
   } else {
@@ -612,115 +490,6 @@ bool ScheduleService::read_entries_async(
   return true;
 }
 
-bool ScheduleService::write_entries(const std::vector<ScheduleEntry> &entries,
-                                    uint8_t layer) {
-  if (!this->session_.is_ready()) {
-    ESP_LOGE(TAG, "Cannot write schedule entries: session not ready");
-    return false;
-  }
-
-  // Validate layer
-  if (layer > 4) {
-    ESP_LOGE(TAG, "Invalid layer: %d. Must be 0-4.", layer);
-    return false;
-  }
-
-  // Validate entries
-  std::vector<std::string> errors;
-  if (!this->validate_entries(entries, &errors)) {
-    ESP_LOGE(TAG, "Schedule validation failed:");
-    for (const auto &error : errors) {
-      ESP_LOGE(TAG, "  %s", error.c_str());
-    }
-    return false;
-  }
-
-  ESP_LOGI(TAG, "Writing %zu schedule entries to layer %d...", entries.size(),
-           layer);
-
-  uint8_t apdu[53]; // 11 header bytes + 42 data bytes
-  build_schedule_apdu(entries, layer, apdu);
-
-  // Write chunk
-  this->write_class10_command(apdu, sizeof(apdu));
-
-  ESP_LOGI(TAG, "Schedule written successfully to layer %d", layer);
-  return true;
-}
-
-bool ScheduleService::write_entries_async(
-    const std::vector<ScheduleEntry> &entries, uint8_t layer,
-    std::function<void(bool)> on_complete) {
-  if (!this->session_.is_ready()) {
-    ESP_LOGE(TAG, "Cannot write schedule entries: session not ready");
-    if (on_complete)
-      on_complete(false);
-    return false;
-  }
-
-  if (!this->set_timeout_callback_) {
-    ESP_LOGE(TAG,
-             "Cannot use async write: set_timeout_callback not configured");
-    if (on_complete)
-      on_complete(false);
-    return false;
-  }
-
-  // Validate layer
-  if (layer > 4) {
-    ESP_LOGE(TAG, "Invalid layer: %d. Must be 0-4.", layer);
-    if (on_complete)
-      on_complete(false);
-    return false;
-  }
-
-  // Validate entries
-  std::vector<std::string> errors;
-  if (!this->validate_entries(entries, &errors)) {
-    ESP_LOGE(TAG, "Schedule validation failed:");
-    for (const auto &error : errors) {
-      ESP_LOGE(TAG, "  %s", error.c_str());
-    }
-    if (on_complete)
-      on_complete(false);
-    return false;
-  }
-
-  ESP_LOGI(TAG, "Writing %zu schedule entries to layer %d (async mode)...",
-           entries.size(), layer);
-
-  uint8_t apdu[53]; // 11 header bytes + 42 data bytes
-  build_schedule_apdu(entries, layer, apdu);
-
-  ESP_LOGI(TAG, "Queueing async schedule write for layer %d...", layer);
-
-  this->transport_.send_apdu_command(
-      apdu, sizeof(apdu), 0xDE01, 0,
-      [on_complete, layer](bool success, const uint8_t * /*data*/, size_t /*len*/) {
-        if (success) {
-          ESP_LOGI(TAG, "Async write completed with ACK for layer %d", layer);
-        } else {
-          ESP_LOGW(TAG,
-                   "Async write timeout/error for layer %d - treating as "
-                   "success (per Python reference: pump commits on timeout)",
-                   layer);
-        }
-        // NOTE: Always reports true to match Python reference behavior.
-        // The pump's two-phase commit often times out even on success because
-        // the ACK notification arrives outside the expected window.
-        if (on_complete) {
-          on_complete(true);
-        }
-      },
-      // quiet_timeout=true: this write is fire-and-forget (the pump commits on
-      // timeout), so the transport logs the expected timeout at DEBUG, not WARN.
-      3000, /*allow_register_read=*/false, /*expect_short_ack=*/false,
-      /*quiet_timeout=*/true);
-
-  return true;
-}
-
-
 // -------------------------------------------------------------------------
 // Validation Methods
 // -------------------------------------------------------------------------
@@ -820,10 +589,6 @@ bool ScheduleService::validate_entries(
 // Internal Helper Methods
 // -------------------------------------------------------------------------
 
-// NOTE: read_class10_object() removed - requires async implementation
-// For Phase 7, only write operations (enable/disable/write_entries) are
-// supported Read operations (get_state/read_entries) will be added in Phase 8
-
 void ScheduleService::write_class10_command(const uint8_t *apdu,
                                             size_t apdu_len) {
   // Build GENI frame and queue the packet with pacing and non-blocking wait
@@ -912,22 +677,6 @@ void ScheduleService::write_layer_image_async(
   }
   memcpy(cached_layer_data_[layer], image, 42);
   write_cached_layer_async(layer, on_complete);
-}
-
-void ScheduleService::clear_entry_async(uint8_t layer, uint8_t day_index,
-                                        std::function<void(bool)> on_complete) {
-  // Create a disabled entry
-  ScheduleEntry disabled;
-  disabled.set_enabled(false);
-  disabled.set_action(0x02);
-  disabled.set_begin_hour(0);
-  disabled.set_begin_minute(0);
-  disabled.set_end_hour(0);
-  disabled.set_end_minute(0);
-  disabled.set_day(DAY_NAMES[day_index]);
-  disabled.set_layer(layer);
-
-  set_entry_async(layer, day_index, disabled, on_complete);
 }
 
 void ScheduleService::write_cached_layer_async(
@@ -1126,17 +875,6 @@ void ScheduleService::write_single_event_async(
           on_complete(true);
       },
       3000);
-}
-
-void ScheduleService::clear_single_event_async(
-    uint8_t index, std::function<void(bool)> on_complete) {
-  SingleEvent disabled;
-  disabled.index = index;
-  disabled.enabled = false;
-  disabled.action = 0x02;
-  disabled.begin_timestamp = 0;
-  disabled.end_timestamp = 0;
-  write_single_event_async(disabled, on_complete);
 }
 
 int ScheduleService::find_free_single_event_slot(

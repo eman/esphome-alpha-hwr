@@ -421,11 +421,6 @@ void AlphaHwrComponent::setup() {
         this->set_timeout(delay_ms, std::move(callback));
       });
 
-  schedule_service_.set_timeout_callback(
-      [this](std::function<void()> callback, uint32_t delay_ms) {
-        this->set_timeout(delay_ms, std::move(callback));
-      });
-
   schedule_service_.set_state_change_callback(
       [this](bool enabled) { this->publish_schedule_hash(); });
 

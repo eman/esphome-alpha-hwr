@@ -198,11 +198,15 @@ struct SingleEvent {
  * Schedule Service - Manages pump weekly schedules.
  *
  * Provides methods to:
- * - Read schedule entries from pump (by layer or all layers)
- * - Write schedule entries to pump (with validation)
- * - Enable/disable the internal schedule
+ * - Read schedule entries from the pump (by layer or all layers)
+ * - Write a layer image, a single event, and the ClockProgramOverview
  * - Validate entries for overlaps and time range errors
- * - Clear individual day entries
+ *
+ * These are the wire primitives. Every one of them that WRITES is called from
+ * WriteOperationService, never directly from a lambda or the facade -- see
+ * AGENTS §6. The class used to carry a parallel set of self-contained writes
+ * (write_entries, enable_schedule, set_state, ...); they were unreachable and
+ * are gone.
  *
  * Example Usage (from lambda in YAML):
  *
@@ -275,18 +279,6 @@ public:
   }
 
   /**
-   * Set callback for timeout operations (ESPHome's set_timeout).
-   * Required for async write operations with completion callbacks.
-   *
-   * @param callback Function that takes (lambda, delay_ms) and schedules lambda
-   * to run after delay
-   */
-  void set_timeout_callback(
-      std::function<void(std::function<void()>, uint32_t)> callback) {
-    this->set_timeout_callback_ = callback;
-  }
-
-  /**
    * Set callback for schedule state changes.
    */
   void set_state_change_callback(StateChangeCallback callback) {
@@ -343,7 +335,7 @@ public:
   /**
    * Write the schedule enabled flag with a completion callback (issue #92).
    * Read-modify-write of the cached 10-byte ClockProgramOverview; unlike the
-   * legacy set_state() this REQUIRES the overview to be cached — the blind
+   * the removed legacy path this REQUIRES the overview to be cached — the blind
    * hardcoded-defaults RMW is exactly the clobber class issue #92 bans.
    *
    * @param on_sent Called with true once the write was ACKed or its response
@@ -353,35 +345,6 @@ public:
    *   session not ready).
    */
   void set_state_async(bool enable, std::function<void(bool)> on_sent);
-
-  /**
-   * Enable the internal schedule.
-   *
-   * Activates the pump's built-in schedule functionality. When enabled,
-   * the pump will automatically start/stop according to the programmed
-   * schedule entries.
-   *
-   * @return True if successfully enabled, false otherwise
-   *
-   * Protocol: Class 10, OpSpec 0x93, Object 84, SubID 1
-   * - Reads current ClockProgramOverview structure
-   * - Modifies byte 4 (clock_program_enabled) to 0x01
-   * - Writes back complete 10-byte structure
-   */
-  bool enable_schedule();
-
-  /**
-   * Disable the internal schedule.
-   *
-   * Deactivates the pump's built-in schedule functionality. The pump
-   * will continue operating according to its current mode, but will
-   * not automatically start/stop based on the schedule.
-   *
-   * @return True if successfully disabled, false otherwise
-   *
-   * Protocol: Same as enable_schedule() but sets byte 4 to 0x00
-   */
-  bool disable_schedule();
 
   // -------------------------------------------------------------------------
   // Schedule Entry Operations
@@ -399,60 +362,6 @@ public:
       int layer, std::function<void(bool success,
                                     const std::vector<ScheduleEntry> &entries)>
                      on_complete);
-
-  /**
-   * Write schedule entries to the pump (synchronous, fire-and-forget).
-   *
-   * Writes a complete weekly schedule to the specified layer. Each layer
-   * can contain up to 7 entries (one per day). Entries are validated before
-   * writing to ensure no overlaps or invalid time ranges.
-   *
-   * Note: This is fire-and-forget mode - returns immediately without waiting
-   * for acknowledgment. Use write_entries_async() for proper transaction
-   * handling.
-   *
-   * @param entries Vector of ScheduleEntry objects to write
-   * @param layer Schedule layer to write to (0-4)
-   * @return True if successfully written, false otherwise
-   */
-  bool write_entries(const std::vector<ScheduleEntry> &entries,
-                     uint8_t layer = 0);
-
-  /**
-   * Write schedule entries to the pump (async with completion callback).
-   *
-   * Writes a complete weekly schedule and waits for acknowledgment from pump.
-   * Uses ESPHome's set_timeout() to check for response after write completes.
-   *
-   * @param entries Vector of ScheduleEntry objects to write
-   * @param layer Schedule layer to write to (0-4)
-   * @param on_complete Callback invoked when write completes (with success
-   * status)
-   * @return True if write packet sent successfully, false on validation/send
-   * error
-   *
-   * Protocol: Class 10, OpSpec 0xB3 (OpSpec 5), Object 84
-   * - SubID: 1000 + layer
-   * - Payload: 42 bytes (7 days × 6 bytes, no header for writes)
-   * - APDU format:
-   *   [0x0A]              # Class 10
-   *   [0xB3]              # OpSpec 5
-   *   [84]                # Object ID
-   *   [SubH][SubL]        # SubID (big-endian)
-   *   [0x00]              # Reserved
-   *   [0xDE][0x01][0x00]  # Type 222 header
-   *   [0x00][0x2A]        # Size (42 bytes)
-   *   [42 bytes data]     # Schedule entries
-   *
-   * Validation:
-   * - Layer must be 0-4
-   * - Time ranges must be valid (non-zero duration)
-   * - No overlaps allowed within same day/layer
-   * - Only one entry per day per layer (last one wins)
-   */
-  bool write_entries_async(const std::vector<ScheduleEntry> &entries,
-                           uint8_t layer,
-                           std::function<void(bool success)> on_complete);
 
 
   // -------------------------------------------------------------------------
@@ -476,15 +385,6 @@ public:
    * @param on_complete Callback with success status
    */
   void write_single_event_async(const SingleEvent &event,
-                                std::function<void(bool)> on_complete);
-
-  /**
-   * Clear (disable) a single event at a specific index.
-   *
-   * @param index Event slot (0 to max_nof_single_events-1)
-   * @param on_complete Callback with success status
-   */
-  void clear_single_event_async(uint8_t index,
                                 std::function<void(bool)> on_complete);
 
   /**
@@ -659,17 +559,6 @@ public:
                                std::function<void(bool)> on_complete);
 
   /**
-   * Clear (disable) a single day's schedule entry on a layer.
-   * Writes a disabled entry for the specified day.
-   *
-   * @param layer Schedule layer (0-4)
-   * @param day_index Day index (0=Monday, 6=Sunday)
-   * @param on_complete Callback with success status
-   */
-  void clear_entry_async(uint8_t layer, uint8_t day_index,
-                         std::function<void(bool)> on_complete);
-
-  /**
    * Check if a layer's entries are cached.
    */
   bool is_layer_cached(uint8_t layer) const {
@@ -710,7 +599,6 @@ protected:
   // -------------------------------------------------------------------------
 
   void write_class10_command(const uint8_t *apdu, size_t apdu_len);
-  bool set_state(bool enable);
 
   /**
    * Write a full layer from cached data and call config commit.
@@ -728,8 +616,6 @@ protected:
   ScheduleCallback schedule_callback_;
   WriteCallback write_callback_;
   StateChangeCallback state_change_callback_;
-
-  std::function<void(std::function<void()>, uint32_t)> set_timeout_callback_;
 
   // Cached state
   bool schedule_state_cached_{false};

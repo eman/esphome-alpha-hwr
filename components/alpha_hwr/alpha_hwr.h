@@ -971,17 +971,6 @@ public:
                      on_complete) {
     return schedule_service_.read_entries_async(layer, on_complete);
   }
-  bool write_schedule_entries(const std::vector<ScheduleEntry> &entries,
-                              uint8_t layer = 0) {
-    if (!check_ready("write_schedule_entries")) return false;
-    return schedule_service_.write_entries(entries, layer);
-  }
-  bool write_schedule_entries_async(const std::vector<ScheduleEntry> &entries,
-                                    uint8_t layer,
-                                    std::function<void(bool)> on_complete) {
-    if (!check_ready("write_schedule_entries_async")) { if (on_complete) on_complete(false); return false; }
-    return schedule_service_.write_entries_async(entries, layer, on_complete);
-  }
   void clear_schedule_entry(const std::string &day, uint8_t layer = 0,
                             std::function<void(bool)> on_complete = nullptr) {
     if (!check_ready("clear_schedule_entry")) { if (on_complete) on_complete(false); return; }
