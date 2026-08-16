@@ -19,16 +19,22 @@ namespace services {
  * Handles reading and synchronizing the pump's real-time clock (RTC).
  * The RTC is used for schedule execution and event logging.
  *
- * Protocol Details:
- * - Read Time: Object 94, SubID 101 (DateTimeActual)
- *   Response: [Status(2)][Length(1)][Year(2BE)][Month][Day][Hour][Minute][Second]
- *   Status 0x0000 = valid, 0xFFFF = unset
+ * Protocol Details, as captured from the pump (2026-08-15) rather than as
+ * transcribed from the Python reference, which described both frames wrongly:
  *
- * - Set Time: Object 94, SubID 100 (DateTimeConfig)
- *   Payload: [Year(2BE)][Month][Day][Hour][Minute][Second] + 13 padding bytes (19 total)
- *   Frame: [0x27][Length][0x07][0x5E][0x64][0x70][DateTime...][CRC]
+ * - Read Time: Object 94, SubID 101 (DateTimeActual), type 322 version 1.
+ *   Object body, which is what the command callback receives:
+ *     [Size(3BE) = 12][Year(2BE)][Month][Day][Hour][Minute][Second][5 trailing]
+ *   The first three bytes were long described as "[Status(2)][Length(1)]" and
+ *   are the ordinary size header; the trailing five are not read.
  *
- * Reference: reference/alpha-hwr/src/alpha_hwr/services/time.py
+ * - Set Time: Object 94, SubID 100 (DateTimeConfig), type 321 version 2.
+ *   22-byte APDU, 11 data bytes:
+ *     [0A][94][5E][00 64][01 41][02][00 00 0B][01][Year(2BE)][M][D][h][m][s][0][0][0]
+ *   The older description here -- 19 payload bytes, a frame starting
+ *   [27][len][07][5E][64][70] -- matched neither the code below it nor the
+ *   wire; see send_set_clock_command() for what the fields are and how they
+ *   were identified.
  */
 class TimeService {
  public:
@@ -59,20 +65,44 @@ class TimeService {
   void get_clock_async(std::function<void(ESPTime)> callback);
 
   /**
-   * @brief Synchronize the pump's internal real-time clock with system time.
+   * @brief Wire primitive: write the pump's real-time clock.
    *
-   * Writes to Object 94, SubID 100 (DateTimeConfig) using the standard protocol format.
+   * Object 94 SubID 100 (DateTimeConfig), type 321 version 2, 11 data bytes:
+   * `[0x01][Year(2BE)][Month][Day][Hour][Minute][Second][0][0][0]`. The fields
+   * are LOCAL time, matching what SubID 101 reads back.
    *
-   * @param callback Called with success status (true if clock was set successfully)
+   * Deliberately fire-and-forget, and deliberately not the verdict. Nothing in
+   * this repo records what -- if anything -- the pump answers a SubID 100 SET
+   * with, so there is no ACK shape to match: the transport's short-ACK path is
+   * an allowlist keyed on the queued OpSpec plus object bytes and this write is
+   * not on it. Passing a callback anyway would buy a 3 s wildcard window that
+   * can only ever close empty, and its `false` would be indistinguishable from
+   * a genuine send failure. So the caller confirms the only honest way, by
+   * reading SubID 101 back -- the same "the ACK is not the verdict" rule the
+   * Class 3 commands follow for the opposite reason (issue #46).
    *
-   * Implementation Notes:
-   * - Uses Object 94, SubID 100 (DateTimeConfig) with SET operation
-   * - Format: [UnknownByte][Object][SubID][OpSpec][DateTime...]
-   * - DateTime format: [Year(2BE)][Month][Day][Hour][Minute][Second][padding(13 bytes)]
-   * - Total payload: 19 bytes
-   * - Uses ESPHome's sntp_time to get current local time
+   * Bench-confirmed (2026-08-15): this exact APDU,
+   *   0A 94 5E 00 64 01 41 02 00 00 0B 01 07 EA 08 0F 14 27 07 00 00 00
+   * written at 20:39:07, read back as 20:39:08 one round trip later. The write
+   * lands whether or not anything acknowledges it.
+   *
+   * Not a standalone write path (AGENTS §6): the only caller is
+   * WriteOperationService::run_set_clock_(), which owns the confirm, the
+   * watchdog and the settle event.
+   *
+   * @param local_now Node wall-clock time to write, as local fields.
    */
-  void set_clock_async(std::function<void(bool)> callback);
+  void send_set_clock_command(const ESPTime &local_now);
+
+  /**
+   * @brief Resolve the node's own wall clock.
+   *
+   * @param out Receives local time when this returns true.
+   * @return False when no `time_id` is configured, or when the component has
+   *   one but SNTP has not synced yet -- in both cases there is nothing worth
+   *   writing to the pump.
+   */
+  bool current_time(ESPTime &out) const;
 
  private:
   core::Transport *transport_;

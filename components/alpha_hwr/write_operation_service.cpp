@@ -1,5 +1,7 @@
 #include "write_operation_service.h"
 #include "schedule_service.h"
+#include "time_service.h"
+#include "esphome/core/hal.h"
 #include "esphome/core/log.h"
 #include <algorithm>
 #include <cstdarg>
@@ -23,6 +25,7 @@ const char *write_command_to_string(WriteCommand cmd) {
     case WriteCommand::CLEAR_SCHEDULE_ENTRY:  return "clear_schedule_entry";
     case WriteCommand::SET_SCHEDULE_ENABLED:  return "set_schedule_enabled";
     case WriteCommand::SET_REMOTE_MODE:       return "set_remote_mode";
+    case WriteCommand::SET_CLOCK:             return "set_clock";
     case WriteCommand::SET_SINGLE_EVENT:      return "set_single_event";
     case WriteCommand::CLEAR_SINGLE_EVENT:    return "clear_single_event";
     case WriteCommand::REFRESH_SCHEDULE:      return "refresh_schedule";
@@ -58,8 +61,9 @@ static std::string format_detail(const char *fmt, ...) {
   return std::string(buf);
 }
 
-WriteOperationService::WriteOperationService(ControlService &control, ScheduleService &schedule)
-    : control_(control), schedule_service_(schedule) {}
+WriteOperationService::WriteOperationService(ControlService &control, ScheduleService &schedule,
+                                             TimeService &time)
+    : control_(control), schedule_service_(schedule), time_service_(time) {}
 
 // ---------------------------------------------------------------------------
 // Queue machinery
@@ -115,6 +119,12 @@ std::vector<std::string> WriteOperationService::resource_keys_(const Operation &
       // and the schedule, so a queued remote-mode write must not supersede --
       // or be superseded by -- any of them.
       return {"remote_mode"};
+    case WriteCommand::SET_CLOCK:
+      // Its own resource. Two syncs queued back to back are genuinely
+      // redundant -- the later one carries the later time -- so letting the
+      // newer supersede the older is right, and it must not touch anything
+      // else.
+      return {"clock"};
     case WriteCommand::SET_SINGLE_EVENT:
     case WriteCommand::CLEAR_SINGLE_EVENT:
       // One shared key: a set's slot is resolved only when the op runs, so
@@ -196,6 +206,7 @@ void WriteOperationService::start_front_() {
     case WriteCommand::CLEAR_SCHEDULE_ENTRY:  budget = WATCHDOG_SCHED_ENTRY_MS; break;
     case WriteCommand::SET_SCHEDULE_ENABLED:  budget = WATCHDOG_SCHED_ENABLED_MS; break;
     case WriteCommand::SET_REMOTE_MODE:       budget = WATCHDOG_REMOTE_MODE_MS; break;
+    case WriteCommand::SET_CLOCK:             budget = WATCHDOG_SET_CLOCK_MS; break;
     case WriteCommand::SET_SINGLE_EVENT:
     case WriteCommand::CLEAR_SINGLE_EVENT:    budget = WATCHDOG_SINGLE_EVENT_MS; break;
     case WriteCommand::REFRESH_SCHEDULE:      budget = WATCHDOG_REFRESH_SCHEDULE_MS; break;
@@ -215,6 +226,7 @@ void WriteOperationService::start_front_() {
     case WriteCommand::CLEAR_SCHEDULE_ENTRY:  run_schedule_entry_(seq); break;
     case WriteCommand::SET_SCHEDULE_ENABLED:  run_schedule_enabled_(seq); break;
     case WriteCommand::SET_REMOTE_MODE:       run_remote_mode_(seq); break;
+    case WriteCommand::SET_CLOCK:             run_set_clock_(seq); break;
     case WriteCommand::SET_SINGLE_EVENT:
     case WriteCommand::CLEAR_SINGLE_EVENT:    run_single_event_(seq); break;
     case WriteCommand::REFRESH_SCHEDULE:      run_refresh_schedule_(seq); break;
@@ -342,6 +354,16 @@ void WriteOperationService::finish_(uint32_t seq, WriteStatus status, const std:
       // `enabled` (not sched_enabled): this is a pump control-source state,
       // not a schedule one. Carries the SETTLED value from the readback.
       result.enabled = op.enabled ? 1 : 0;
+      break;
+    case WriteCommand::SET_CLOCK:
+      // The measured offset, not the time we asked for: on every terminal
+      // status except ACCEPTED the requested value is the one thing already
+      // known, and what the reader needs is how far out the pump still is.
+      // NAN when no readback ever decoded a time. That is the usual TIMEOUT,
+      // but not the same thing as one: a ladder whose first readback decoded
+      // out of tolerance and whose retries then failed to decode settles
+      // TIMEOUT carrying the real measurement it did get.
+      result.clock_offset_s = op.clock_offset_s;
       break;
     case WriteCommand::SET_SINGLE_EVENT:
     case WriteCommand::CLEAR_SINGLE_EVENT:
@@ -685,6 +707,149 @@ void WriteOperationService::confirm_remote_mode_(uint32_t seq) {
     finish_(seq, WriteStatus::REJECTED,
             format_detail("pump still reports %s control",
                           control_.get_remote_enabled() ? "Remote/Digital" : "Local/Panel"));
+  });
+}
+
+// ---------------------------------------------------------------------------
+// SET_CLOCK: Object 94 Sub 100 write -> Sub 101 readback.
+//
+// The pump's RTC drives its schedule, so a clock that quietly failed to sync
+// runs the weekly program at the wrong time. Until this operation existed the
+// write was a standalone path -- the last one in the component after remote
+// mode moved -- and it reported success from the fact that it had formatted a
+// packet: `callback(true)` on the line after send, unconditionally, with a
+// comment promising a verification read that was never written. That bool is
+// what stamps the "Last Clock Sync" text sensor and what sets the 24 h
+// suppression timer, so a sync that never left the node showed a fresh
+// timestamp and then declined to try again for a day.
+//
+// The confirm asks the question that matters -- does the pump hold the right
+// time NOW -- rather than whether our particular frame is what put it there.
+// A pump that was already correct settles ACCEPTED, which is the truth.
+// ---------------------------------------------------------------------------
+void WriteOperationService::run_set_clock_(uint32_t seq) {
+  Operation *op = find_(seq);
+  if (op == nullptr || op->phase == Phase::DONE) return;
+
+  // Validated before any wire write, so a malformed time is INVALID rather
+  // than a wasted round trip. The caller resolves the clock (only the
+  // component owns time_id), so this guards against a caller that did not
+  // check, not against a cold SNTP.
+  // Hoisted to one pipe-free line so tools/mutation_check.sh can anchor to it:
+  // its entries are split with IFS='|', which truncates a search string at the
+  // first `||` and scores the mutation as survived without applying it.
+  const bool have_writable_time = op->clock_now.is_valid() && op->clock_now.year >= 2021;
+  if (!have_writable_time) {
+    finish_(seq, WriteStatus::INVALID, "no valid system time to write");
+    return;
+  }
+
+  op->phase = Phase::WRITING;
+  op->clock_submitted_ms = millis();
+  time_service_.send_set_clock_command(op->clock_now);
+  op->phase = Phase::CONFIRMING;
+  schedule_([this, seq]() { confirm_set_clock_(seq); }, CLOCK_CONFIRM_DELAY_MS);
+}
+
+void WriteOperationService::confirm_set_clock_(uint32_t seq) {
+  Operation *op = find_(seq);
+  if (op == nullptr || op->phase == Phase::DONE) return;
+
+  time_service_.get_clock_async([this, seq](ESPTime pump_time) {
+    Operation *op = find_(seq);
+    if (op == nullptr || op->phase == Phase::DONE) return;
+
+    // Did the readback decode at all? A parse failure arrives as a
+    // default-constructed ESPTime, whose month of 0 puts it out of range. That
+    // is "we learned nothing", not "the pump disagrees" -- reporting REJECTED
+    // off it would blame the pump for a reply we could not read, so it falls
+    // through to the retry ladder and then TIMEOUT.
+    //
+    // fields_in_range() rather than is_valid(): is_valid() also floors the year
+    // at 2019, and a pump whose RTC has been reset by a power cut reads
+    // 2000-01-01 -- decoded perfectly, wildly wrong, and precisely the state a
+    // clock sync exists to repair. Calling that "unreadable" would report the
+    // one case where the offset is most worth having as though nothing had come
+    // back at all.
+    //
+    // A readback that decodes is the verdict, first time. Retrying it cannot
+    // change the answer: the pump's clock is not going to start agreeing on a
+    // second read, and nothing here claims the pump applies the write late (the
+    // 1.5 s settle delay before the first read is what covers that). Only the
+    // undecodable branch retries.
+    ESPTime node_now;
+    if (pump_time.fields_in_range() && time_service_.current_time(node_now)) {
+      // Ask the node's clock NOW rather than projecting the time we submitted
+      // forward by the elapsed milliseconds.
+      //
+      // The projection was wrong in a way worth recording. It stamped the
+      // instant the frame was ENQUEUED, and the transport is a strictly FIFO
+      // one-at-a-time queue: with another command parked ahead, the frame goes
+      // out seconds later while the fields inside it still say when it was
+      // built. The pump then holds a clock that really is behind, we compared
+      // against a stamp taken before the delay, and the node's own queue
+      // latency came out as the pump's drift -- one blocked APDU spent the
+      // whole 5 s tolerance and settled a correct sync REJECTED.
+      //
+      // Comparing two clocks at one instant has no such term in it. It is also
+      // the question the settle event claims to answer: does the pump hold the
+      // right time now.
+      //
+      // Both sides are resolved from LOCAL FIELDS by the same function, which
+      // matters for one hour a year. In the DST fall-back fold a local time
+      // names two instants and ESPHome resolves toward standard time; the
+      // node's own timestamp is exact, so inside the fold it is the daylight
+      // one while the pump's readback comes back standard. Comparing those
+      // settles a correct sync REJECTED "3600 s off" every 15 minutes until
+      // 02:00. Running the node's side through recalc too makes the ambiguity
+      // cancel; outside the fold it returns what it was given.
+      node_now.recalc_timestamp_local();
+      const int64_t offset =
+          static_cast<int64_t>(pump_time.timestamp) - static_cast<int64_t>(node_now.timestamp);
+      op->clock_offset_s = static_cast<float>(offset);
+
+      // The window is asymmetric, and the asymmetry is the point.
+      //
+      // The fields we send are built when the operation runs, but the transport
+      // is a strictly FIFO one-at-a-time queue: with other commands parked
+      // ahead, the frame does not reach the pump until they clear, and it still
+      // carries the older time. The pump is then genuinely behind by that send
+      // delay -- our latency, not its fault, and nothing the confirm reads can
+      // undo it. A fixed +/-5 s window called that a failure as soon as one
+      // blocked APDU sat in front of the write, and then retried every 15
+      // minutes for as long as the link stayed busy.
+      //
+      // What bounds the delay is the operation's own age: the frame cannot have
+      // been sent before the operation started, so the pump cannot lag us by
+      // more than that. Allowing exactly that much on the LATE side excuses the
+      // delay we caused and nothing else -- a pump that ignored the write shows
+      // its accumulated drift, which is far larger than one operation's
+      // lifetime, and a pump running fast is not explained by this at all, so
+      // the EARLY side keeps the tight tolerance.
+      const uint32_t elapsed_ms = millis() - op->clock_submitted_ms;
+      const int64_t late_allowance =
+          static_cast<int64_t>(elapsed_ms / 1000) + CLOCK_TOLERANCE_S;
+      if (offset >= -late_allowance && offset <= CLOCK_TOLERANCE_S) {
+        finish_(seq, WriteStatus::ACCEPTED, "");
+        return;
+      }
+      finish_(seq, WriteStatus::REJECTED,
+              format_detail("pump clock is %lld s off after the write",
+                            static_cast<long long>(offset)));
+      return;
+    }
+
+    if (op->attempts >= CLOCK_MAX_ATTEMPTS) {
+      // The last readback carried no usable time, or the node lost its own
+      // clock mid-operation: nothing is known about where the pump now stands,
+      // which is a TIMEOUT and not a REJECTED. clock_offset_s is left as it
+      // stands -- NAN if no attempt ever measured one.
+      finish_(seq, WriteStatus::TIMEOUT, "pump clock unreadable");
+      return;
+    }
+
+    op->attempts++;
+    schedule_([this, seq]() { confirm_set_clock_(seq); }, CLOCK_RETRY_DELAY_MS);
   });
 }
 
@@ -1122,6 +1287,17 @@ void WriteOperationService::submit_set_remote_mode(bool enabled, const std::stri
   op.op_id = op_id;
   op.origin = origin;
   op.enabled = enabled;
+  op.done = std::move(done);
+  submit_(std::move(op));
+}
+
+void WriteOperationService::submit_set_clock(const ESPTime &local_now, const std::string &op_id,
+                                             std::function<void(bool)> done, WriteOrigin origin) {
+  Operation op;
+  op.command = WriteCommand::SET_CLOCK;
+  op.op_id = op_id;
+  op.origin = origin;
+  op.clock_now = local_now;
   op.done = std::move(done);
   submit_(std::move(op));
 }

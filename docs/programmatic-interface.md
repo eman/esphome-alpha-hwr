@@ -140,6 +140,39 @@ it is confirmed from a readback of the pump's `control_source` rather than
 from the command ACK: a pump that acks the command and then stays on Local
 settles `rejected`, not `accepted`.
 
+### The pump clock has no service either, and its event is `internal`
+
+The pump's real-time clock drives its weekly schedule, so the node syncs it to
+its own SNTP time: on the first poll after the link is fully synchronized, and
+once a day after that. Nobody asks for either, so both carry
+`origin: "internal"` and `op_id: "clock_sync"`; there is no `set_clock` service
+to call.
+
+It settles like every other write: the node writes Object 94, reads the pump's
+clock back, and compares it against the node's own clock at that moment.
+`accepted` means the pump now holds the right time — which is the question worth
+answering, so a pump that was already correct also settles `accepted`. A pump
+whose clock still disagrees settles `rejected` with the remaining offset in
+`detail`; a readback that never decodes settles `timeout`
+(`pump clock unreadable`), because a clock we could not read tells us nothing
+about whether the pump is wrong.
+
+`clock_offset_s` carries the measured offset in seconds, positive when the pump
+runs ahead. It is normally absent on `timeout`, though a run whose first
+readback decoded and whose retries did not will carry the measurement it got.
+
+One asymmetry is worth knowing if you watch these events. The time written into
+the frame is built when the operation runs, and the BLE transport sends one
+command at a time, so a frame queued behind other traffic reaches the pump late
+and leaves it genuinely a few seconds behind. That lag is the node's, not the
+pump's, and it cannot exceed the operation's own lifetime — so a pump reading
+*behind* by up to that much still settles `accepted`, with the real offset
+reported, while a pump reading *ahead* is held to the flat tolerance.
+
+A confirmed sync sets the next attempt a day out. One that does not confirm
+retries in 15 minutes rather than a day, so a pump running its schedule off a
+wrong clock is not left that way until tomorrow.
+
 ### Schedules
 
 These keep the names and single `data`-string formats of the original
@@ -285,7 +318,7 @@ as a read of the others); `layer`/`day`/`day_name`/`begin`/`end`/`enabled`
 for schedule entries; `slot`/`begin_ts`/`end_ts`/`enabled` for single events;
 `event_count` for the refreshes; `remote_enabled` for `set_remote_mode`
 (a separate key from `enabled`, which on every other command is the pump's
-run state). For `accepted`/`clamped`/`rejected` these
+run state); `clock_offset_s` for `set_clock`. For `accepted`/`clamped`/`rejected` these
 carry what the pump **actually holds** (from the readback), not what was
 requested. The original request is echoed alongside in `requested_*` fields
 (`requested_mode`, `requested_value`, `requested_temp_min`/`_max`,

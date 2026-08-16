@@ -738,19 +738,31 @@ void AlphaHwrComponent::trigger_initial_data_reads() {
     });
   });
 
-  // Sync pump clock (Read time first to calculate drift, then sync)
+  // Measure pump clock drift. A READ only -- the write is check_and_sync_time()'s.
+  //
+  // This leg used to submit the sync as well, and could not: sync_pump_clock()
+  // goes through check_ready() -> is_state_synchronized(), which needs the
+  // control cache that sync_cache_async() fills from the t=5000 leg below. At
+  // t=2000 that cache is empty on every connection, cold boot and reconnect
+  // alike, so the submission was refused 100% of the time -- visible on the
+  // bench as "Command rejected: pump state is not yet fully synchronized
+  // (sync_pump_clock)" at every boot. check_and_sync_time() then wrote the
+  // clock on a later update() anyway, which is why nothing looked broken.
+  //
+  // Rather than move this leg past t=5000 to race the same gate from the other
+  // side, the write is left where it already works and this leg does what it
+  // can do at t=2000: read the pump's clock and publish the pre-sync drift.
   this->set_timeout(2000, [this, gen]() {
     if (gen != this->read_chain_gen_) return;
-    // First attempt only. This leg WRITES the pump RTC, and check_and_sync_time()
-    // throttles that same write to once per 24 h precisely because it is a
-    // write; replaying it on every re-arm would bypass that throttle entirely.
-    // The daily sync owns the clock from here on.
+    // First attempt only: the drift figure is "how far out was the pump when we
+    // found it", so a re-armed chain must not overwrite it with a reading taken
+    // after a sync has already corrected the pump.
     if (this->initial_clock_sync_started_) {
-      ESP_LOGD(TAG, "Skipping pump clock sync on read-chain retry");
+      ESP_LOGD(TAG, "Skipping pump clock drift read on read-chain retry");
       return;
     }
     this->initial_clock_sync_started_ = true;
-    ESP_LOGD(TAG, "Performing initial pump clock sync...");
+    ESP_LOGD(TAG, "Measuring pump clock drift...");
 
     // First read the pump clock to measure drift
     this->time_service_.get_clock_async([this](ESPTime pump_time) {
@@ -781,45 +793,7 @@ void AlphaHwrComponent::trigger_initial_data_reads() {
         }
       }
 
-      // Now sync the clock
-      bool can_sync = false;
-#ifdef USE_TIME
-      can_sync = (this->time_id_ != nullptr);
-#endif
-      if (!can_sync) {
-        ESP_LOGD(TAG, "Skipping pump clock sync (no time_id configured)");
-        return;
-      }
-
-      this->time_service_.set_clock_async([this](bool success) {
-        if (success) {
-          ESP_LOGD(TAG, "Initial pump clock sync successful");
-          this->last_time_sync_timestamp_ = millis();
-
-          // Update last sync time sensor
-#ifdef USE_TEXT_SENSOR
-          if (this->last_clock_sync_sensor_) {
-            char buf[32];
-            bool used_time_id = false;
-#ifdef USE_TIME
-            if (this->time_id_) {
-              this->time_id_->now().strftime(buf, sizeof(buf), "%Y-%m-%d %H:%M:%S");
-              used_time_id = true;
-            }
-#endif
-            if (!used_time_id) {
-              time_t now = ::time(nullptr);
-              const struct tm *tm_info = localtime(&now);
-              strftime(buf, sizeof(buf), "%Y-%m-%d %H:%M:%S", tm_info);
-            }
-            this->last_clock_sync_sensor_->publish_state(buf);
-          }
-#endif
-        } else {
-          ESP_LOGW(TAG,
-                   "Initial pump clock sync failed - will retry in 24 hours");
-        }
-      });
+      // No sync submitted here; see the note above this timeout.
     });
   });
 
@@ -1002,47 +976,36 @@ void AlphaHwrComponent::update() {
   }
 }
 
-void AlphaHwrComponent::check_and_sync_time() {
-  // Check if we need to sync (once per day)
-  uint32_t now = millis();
-
-  // Handle millis() rollover (every ~49 days)
-  if (now < last_time_sync_timestamp_) {
-    ESP_LOGD(TAG, "millis() rollover detected, resetting time sync tracking");
-    last_time_sync_timestamp_ = 0;
+bool AlphaHwrComponent::submit_clock_sync_(const char *reason) {
+  // Ask quietly first. sync_pump_clock() goes through check_ready(), which
+  // WARNs when the pump state is not synchronized -- right for a user or an
+  // automation that asked for something, wrong for a poll that runs every 10 s
+  // and is simply early. The cache fills a few seconds into each connection, so
+  // without this every boot logs the rejection once or twice.
+  if (!this->is_state_synchronized()) {
+    ESP_LOGD(TAG, "%s pump clock sync deferred: pump state not synchronized yet", reason);
+    return false;
   }
 
-  // If never synced (0) or 24 hours have passed
-  if (last_time_sync_timestamp_ == 0 ||
-      (now - last_time_sync_timestamp_) >= TIME_SYNC_INTERVAL_MS) {
-    // Check if system time is available via SNTP
-    time_t current_time = ::time(nullptr);
-#ifdef USE_TIME
-    if (this->time_id_) current_time = this->time_id_->now().timestamp;
-#endif
-    if (current_time < 1609459200) { // Before 2021-01-01 means time not synced
-      ESP_LOGD(TAG,
-               "System time not synced via SNTP yet, skipping pump clock sync");
-      return;
-    }
+  // Assume the sync will not confirm. The result callback promotes this to the
+  // full day; every other path -- rejected, timeout, superseded, or never
+  // submitted at all -- leaves the short interval in place.
+  this->time_sync_interval_ms_ = TIME_SYNC_RETRY_MS;
 
-    bool can_sync = false;
-#ifdef USE_TIME
-    can_sync = (this->time_id_ != nullptr);
-#endif
-    if (!can_sync) {
-      ESP_LOGD(TAG, "Skipping pump clock sync (no time_id configured)");
-      return;
-    }
+  const bool submitted = this->sync_pump_clock(
+      "clock_sync", [this, reason](bool success) {
+        if (!success) {
+          ESP_LOGW(TAG, "%s pump clock sync did not confirm - retrying in %u min",
+                   reason, static_cast<unsigned>(TIME_SYNC_RETRY_MS / 60000));
+          return;
+        }
+        ESP_LOGD(TAG, "%s pump clock sync confirmed", reason);
+        this->time_sync_interval_ms_ = TIME_SYNC_INTERVAL_MS;
 
-    ESP_LOGD(TAG, "Daily time sync due - syncing pump clock...");
-    time_service_.set_clock_async([this](bool success) {
-      if (success) {
-        ESP_LOGD(TAG, "Daily pump clock sync successful");
-        this->last_time_sync_timestamp_ = millis();
-
-        // Update last sync time sensor
 #ifdef USE_TEXT_SENSOR
+        // "Last Clock Sync" now means what its name says. It used to be
+        // stamped from a callback that was hardcoded true, so it advanced
+        // whether or not the pump ever received the write.
         if (this->last_clock_sync_sensor_) {
           char buf[32];
           bool used_time_id = false;
@@ -1060,11 +1023,43 @@ void AlphaHwrComponent::check_and_sync_time() {
           this->last_clock_sync_sensor_->publish_state(buf);
         }
 #endif
-      } else {
-        ESP_LOGW(TAG, "Daily pump clock sync failed - will retry next update");
-      }
-    });
+      });
+
+  if (!submitted) {
+    // Nothing was written and no BLE traffic was spent -- typically the link is
+    // not synchronized yet (the boot chain reaches here before it is) or SNTP
+    // has not answered. Leave the stamp alone so the next update() (10 s) tries
+    // again, rather than backing off 15 minutes over a check that costs nothing
+    // to repeat. DEBUG, not WARN: on the bench this fires twice at every boot
+    // and is followed ten seconds later by a sync that works.
+    ESP_LOGD(TAG, "%s pump clock sync not attempted yet; retrying shortly", reason);
+    return false;
   }
+
+  // Stamp the ATTEMPT. See the field's declaration: throttling on success
+  // alone would let an unconfirmable clock collect a write every 10 s.
+  uint32_t stamp = millis();
+  if (stamp == 0) stamp = 1;  // 0 is the "never attempted" sentinel
+  this->last_time_sync_timestamp_ = stamp;
+  return true;
+}
+
+void AlphaHwrComponent::check_and_sync_time() {
+  uint32_t now = millis();
+
+  // Handle millis() rollover (every ~49 days)
+  if (now < last_time_sync_timestamp_) {
+    ESP_LOGD(TAG, "millis() rollover detected, resetting time sync tracking");
+    last_time_sync_timestamp_ = 0;
+  }
+
+  if (last_time_sync_timestamp_ != 0 &&
+      (now - last_time_sync_timestamp_) < time_sync_interval_ms_) {
+    return;
+  }
+
+  ESP_LOGD(TAG, "Pump clock sync due");
+  this->submit_clock_sync_("Daily");
 }
 
 void AlphaHwrComponent::read_device_info() {
