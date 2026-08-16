@@ -184,9 +184,54 @@ void test_single_event_tz_shift_across_dst() {
               "The residual is 4 of 97 samples — the ambiguous hour alone, not "
               "the 32 an unresolved offset produced");
 
-  // The sentinel still survives the resolving path.
+  // The sentinel still survives the resolving path. (Decorative, honestly: the
+  // early return in local_unix_to_utc_resolved only saves two localtime_r
+  // calls, since local_unix_to_utc already answers 0 for 0 at any offset.
+  // Removing the guard leaves this assertion green. Kept because the guard is
+  // the cheap path, not because this pins it.)
   TEST_ASSERT(local_unix_to_utc_resolved(0) == 0,
               "sentinel 0 not shifted by the resolving decode");
+
+  // A zone whose offset is NOT a whole number of hours. Until this case the
+  // only TZ-driven test was US Pacific, so the minutes and seconds terms of
+  // local_utc_offset_seconds() were never exercised: neutering either of them
+  // left the whole suite green. That matters more now that the function has
+  // moved from a file-static into a header whose comment implies generality.
+  setenv("TZ", "ACST-9:30ACDT,M10.1.0,M4.1.0", 1);  // +9:30 / +10:30
+  tzset();
+  const uint32_t acst_ref = 1772964000;  // any instant outside a transition
+  TEST_ASSERT(local_utc_offset_seconds((time_t) acst_ref) % 3600 != 0,
+              "The fixture zone really does have a sub-hour offset");
+  {
+    const uint32_t wire = utc_to_local_unix(
+        acst_ref, local_utc_offset_seconds((time_t) acst_ref));
+    TEST_ASSERT(local_unix_to_utc_resolved(wire) == acst_ref,
+                "A half-hour offset round-trips exactly — the minutes term of "
+                "the offset calculation is load-bearing");
+  }
+
+  // Local and UTC in different calendar years, which is the only time the
+  // day_delta year branch fires. Breaking it costs a full 86400 s, and nothing
+  // exercised it before: mutating it to 0 left the suite green.
+  setenv("TZ", "PST8PDT,M3.2.0/2,M11.1.0/2", 1);
+  tzset();
+  {
+    // 2026-01-01 03:00 UTC is 2025-12-31 19:00 local — different years.
+    const uint32_t newyear = 1767236400;
+    struct tm lt {}, gt {};
+    time_t ref = (time_t) newyear;
+    localtime_r(&ref, &lt);
+    gmtime_r(&ref, &gt);
+    TEST_ASSERT(lt.tm_year != gt.tm_year,
+                "The fixture really does straddle a year boundary");
+    TEST_ASSERT(local_utc_offset_seconds(ref) == -28800,
+                "The offset across a year boundary is still -8 h, not off by a "
+                "day");
+    const uint32_t wire =
+        utc_to_local_unix(newyear, local_utc_offset_seconds(ref));
+    TEST_ASSERT(local_unix_to_utc_resolved(wire) == newyear,
+                "...and the round trip is exact across it");
+  }
 
   unsetenv("TZ");
   tzset();

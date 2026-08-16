@@ -71,6 +71,14 @@ MUTATIONS=(
 # at one of them -- and the visible symptom was a write settling REJECTED while
 # the pump held exactly the right value.
 "dst-offset-resolved-from-local|components/alpha_hwr/schedule_service.h|  const int32_t refined = local_utc_offset_seconds(\n      static_cast<time_t>(static_cast<int64_t>(local) - approx));\n  return local_unix_to_utc(local, refined);|  return local_unix_to_utc(local, approx);"
+# Both found by a skeptic pass, both survived the original tests: the only
+# TZ-driven test used US Pacific, whose offsets are whole hours and whose sample
+# instants share a calendar year with UTC. So a whole-hour-only implementation
+# and a broken year-rollover branch were each indistinguishable from the real
+# thing. Pre-existing code, but this change is the first to test the function at
+# all, which makes it the place to close them.
+"dst-offset-ignores-sub-hour-zones|components/alpha_hwr/schedule_service.h|(lt.tm_min - gt.tm_min) * 60|0 * (lt.tm_min - gt.tm_min) * 60"
+"dst-offset-year-rollover-branch|components/alpha_hwr/schedule_service.h|    day_delta = (lt.tm_year > gt.tm_year) ? 1 : -1;|    day_delta = 0;"
 "ignore-unrelated-gate|components/alpha_hwr/response_match.h|return is_class3_or_7(queued_class) && !is_class3_or_7(incoming_class);|return false;"
 "remote-mode-confirm-fresh|components/alpha_hwr/write_operation_service.cpp|bool confirmed = success && fresh && control_.remote_state_valid_ &&|bool confirmed = success && control_.remote_state_valid_ &&"
 # Restores the exact naming defect issue #159 reported: the service was called
