@@ -226,20 +226,37 @@ void Authentication::complete() {
     // its 60 s budget is measured (link_watchdog.h), whereas recycling on this
     // signal would strand exactly the pump variant that fail-open exists to
     // protect -- one that stays quiet until first polled would never reach the
-    // polling that would make it answer. What this buys is a named cause ~57 s
-    // before "No data from pump (60s)".
+    // polling that would make it answer. What this buys is a named cause
+    // roughly 52 s before "No data from pump (60s)" in the worst case, 55 s
+    // typically -- not the 57 s a naive 60 - 2.7 gives, because the watchdog's
+    // window opens at connection-open and the handshake does not start there:
+    // 500 ms post-connect, up to 3 x 1000 ms discovery retries and 2000 ms
+    // stabilize come first (link_watchdog.h).
     //
     // **It has a false negative**, and the argument that excuses the gate's
     // miscounting does not excuse this one. A frame is credited by class, and
     // this pump pushes unsolicited Class 0x0A control-mode notifications during
     // the handshake. A pump that ignored all ten packets but pushed one of
     // those would reach here with replies_total_ == 1 and take the INFO branch
-    // below. Tightening the test to stage_replies_[0] (Class 0x02 has no
-    // telemetry twin) trades this for a false POSITIVE on any firmware that
-    // answers the other stages but not the legacy burst, which is the worse
-    // error for a diagnostic whose whole value is being trusted. The three
-    // per-stage PROCEED_UNANSWERED warnings still fire in that case, so the
-    // condition is under-reported rather than unreported.
+    // below.
+    //
+    // Three tests were weighed, and this one is chosen for being the only one
+    // that cannot false-POSITIVE -- if any frame came back, the link is not
+    // deaf, whatever it was answering:
+    //
+    //   - stage_replies_[0] alone (Class 0x02 has no telemetry twin) reports
+    //     deafness on any firmware that answers the later stages but not the
+    //     legacy burst.
+    //   - stage_replies_[0] == 0 && stage_replies_[2] == 0 is stronger than
+    //     that -- an unsolicited Class 0x0A cannot satisfy it -- but still
+    //     reports deafness for a pump that answers only the unlock burst.
+    //     (An earlier version of this comment offered the first two as the
+    //     whole choice. They are not; this one is better than the pair and
+    //     still not free.)
+    //
+    // For a diagnostic whose only value is being trusted, under-reporting is
+    // the error to prefer, and the three per-stage PROCEED_UNANSWERED warnings
+    // still fire underneath it.
     ESP_LOGE(TAG,
              "Handshake complete but the pump answered none of its %u packets "
              "- the link is open and deaf; expect the data watchdog to recycle "

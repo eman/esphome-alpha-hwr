@@ -79,16 +79,22 @@ struct AuthRig {
   /// When true, every packet the handshake sends is answered by the pump
   /// before the next scheduled timer runs.
   bool pump_answers{false};
+  /// Index into `sent` of one packet the pump does NOT answer, or -1 for none.
+  /// A stage short by exactly one reply is what distinguishes "waits for all of
+  /// them" from "waits for most of them" — see
+  /// test_a_stage_waits_for_its_last_packet().
+  int unanswered_packet{-1};
   /// Packets written but not yet answered; drained one BLE tick later.
   std::vector<Packet> pending_replies;
 
   AuthRig() {
     transport.set_write_callback([this](const uint8_t *data, size_t len) {
+      const int index = static_cast<int>(this->sent.size());
       this->sent.push_back(as_packet(data, len));
       // Queued rather than injected here: a reply cannot arrive in the middle
       // of the write that provoked it, and injecting re-entrantly from inside
       // transport.loop() would test a sequence the radio cannot produce.
-      if (this->pump_answers)
+      if (this->pump_answers && index != this->unanswered_packet)
         this->pending_replies.push_back(as_packet(data, len));
       return true;
     });
@@ -254,8 +260,8 @@ void test_an_unanswered_handshake_stretches_but_still_completes() {
               "handshake is not stranded");
   TEST_ASSERT(r.sent.size() == 10, "And all ten packets still went out");
   TEST_ASSERT(r.auth.replies_seen() == 0,
-              "With the silence recorded, which is the ~1.5 s deaf-link signal "
-              "that previously took the 60 s data watchdog to produce");
+              "With the silence recorded — the signal the 60 s data watchdog "
+              "would otherwise have been the first to produce");
 
   // Three gates, each waiting its full ceiling before giving up.
   TEST_ASSERT(r.virtual_elapsed_ms == 1200 + 3 * GATE_CEILING_MS,
@@ -313,6 +319,113 @@ void test_a_late_reply_is_waited_for_rather_than_walked_past() {
   TEST_ASSERT(r.virtual_elapsed_ms < 1200 + GATE_CEILING_MS,
               "And advanced strictly inside stage 3's own ceiling — as soon as "
               "the replies landed, not on a fixed longer timer");
+}
+
+// ── 2d. All of them, not most of them ────────────────────────────────────────
+// The property the whole change turns on — a stage is not left until *every*
+// one of its packets has been answered — was asserted nowhere until a second
+// adversarial pass went looking. Both of the cases above are blind to it: at
+// 10-of-10 the `>=` in the gate holds whatever the expected count is, and at
+// 0-of-N it fails whatever the expected count is. Only a stage short by
+// exactly one can tell "waits for all five" from "waits for four".
+//
+// Nothing tied packets_in_stage()'s 3/5/2 to the `repeat_count <` bounds that
+// actually send the packets, so drift on the gate side was silent: all three
+// of `case 1: return 2`, `case 2: return 4` and `case 3: return 1` left the
+// full suite green, and `case 2: return 4` is precisely the stage-2 boundary
+// crossed one packet early that this change exists to prevent. Now in
+// tools/mutation_check.sh as auth-gate-expects-one-packet-too-few.
+static void assert_stage_waits_for_its_last_packet(int unanswered_index,
+                                                   const char *what) {
+  mock_millis = 0;
+  AuthRig r;
+  r.pump_answers = true;
+  r.unanswered_packet = unanswered_index;
+  r.run_full_handshake();
+
+  TEST_ASSERT(r.auth.replies_seen() == 9, what);
+  // Exactly one gate — the one whose stage is short — burns its full ceiling.
+  // If the gate expected one packet fewer than the stage sends, it would be
+  // satisfied and this would read 1200.
+  TEST_ASSERT(r.virtual_elapsed_ms == 1200 + GATE_CEILING_MS,
+              "...and that stage's gate waited out its whole ceiling rather "
+              "than counting the short stage as answered");
+  TEST_ASSERT(r.completions == 1, "...then completed anyway, failing open");
+}
+
+void test_a_stage_waits_for_its_last_packet() {
+  std::cout << "\n=== A stage short one reply waits, per stage ===" << std::endl;
+  // Packet indices: 0-2 stage 1, 3-7 stage 2, 8-9 stage 3.
+  assert_stage_waits_for_its_last_packet(
+      2, "Stage 1 with 2 of 3 answered is not treated as answered");
+  assert_stage_waits_for_its_last_packet(
+      7, "Stage 2 with 4 of 5 answered is not treated as answered");
+  assert_stage_waits_for_its_last_packet(
+      9, "Stage 3 with 1 of 2 answered is not treated as answered");
+}
+
+// ── 2e. What may not be counted ──────────────────────────────────────────────
+// Two guards in on_frame()'s path that the first round of tests left standing
+// on nothing.
+void test_frames_of_no_handshake_class_are_not_counted() {
+  std::cout << "\n=== Frames of an unmapped class are not replies ==="
+            << std::endl;
+  mock_millis = 0;
+  AuthRig r;
+  r.auth.start();
+  r.drain();
+
+  // Class 3 command ACKs and Class 7 device-info frames both occur on this
+  // link and answer no handshake stage. Dropping the `stage != 0` term of
+  // auth_frame_answers_stage() would credit them -- and then index
+  // stage_replies_[stage - 1] with stage == 0, i.e. one before the array.
+  r.inject_reply(0x03, 11);
+  r.inject_reply(0x07, 16);
+  TEST_ASSERT(r.auth.replies_seen() == 0,
+              "A Class 3 ACK and a Class 7 device-info frame answer no stage, "
+              "so neither is counted (and neither indexes stage_replies_[-1])");
+}
+
+void test_a_telemetry_notification_during_stage_1_is_not_a_stage_2_reply() {
+  std::cout << "\n=== An unsolicited Class 10 frame during stage 1 is not "
+               "credited ===" << std::endl;
+  mock_millis = 0;
+  AuthRig r;
+  r.auth.start();
+  r.drain();  // stage 1 is in flight
+
+  // This pump pushes control-mode notifications unprompted during the
+  // handshake. One landing here answers nothing: stage 2 has not sent yet.
+  // Pinned through Authentication rather than only against the predicate,
+  // because the stage marker is what makes the predicate's answer correct --
+  // `current_stage_ = 1` mutated to 2 survives a unit-level test.
+  r.inject_reply(0x0A, 22);
+  TEST_ASSERT(r.auth.replies_seen() == 0,
+              "Not counted while stage 1 is the stage in flight");
+
+  r.run_scheduled();
+  TEST_ASSERT(r.completions == 1, "And the handshake still completes");
+}
+
+void test_a_flood_of_replies_cannot_wrap_the_counter() {
+  std::cout << "\n=== A saturated reply counter does not wrap ===" << std::endl;
+  mock_millis = 0;
+  AuthRig r;
+  r.auth.start();
+  r.drain();
+
+  // stage_replies_ is a byte. 256 same-class frames wrap it to zero without
+  // the saturation guard, which would reopen a gate the pump had already
+  // satisfied -- the exact failure the guard's comment describes.
+  for (int i = 0; i < 256; i++)
+    r.inject_reply(0x02, 11);
+
+  r.run_scheduled();
+  TEST_ASSERT(r.completions == 1, "It completes");
+  TEST_ASSERT(r.virtual_elapsed_ms == 1200 + 2 * GATE_CEILING_MS,
+              "Stage 1's gate is satisfied — only stages 2 and 3, which the "
+              "pump never answered here, wait out their ceilings. A wrapped "
+              "counter would make it three");
 }
 
 // ── 2c. The observer takes nothing ───────────────────────────────────────────
@@ -565,6 +678,10 @@ int main() {
   test_an_answered_handshake_still_takes_1200_ms();
   test_an_unanswered_handshake_stretches_but_still_completes();
   test_a_late_reply_is_waited_for_rather_than_walked_past();
+  test_a_stage_waits_for_its_last_packet();
+  test_frames_of_no_handshake_class_are_not_counted();
+  test_a_telemetry_notification_during_stage_1_is_not_a_stage_2_reply();
+  test_a_flood_of_replies_cannot_wrap_the_counter();
   test_the_handshake_consumes_none_of_the_replies();
   test_a_corrupt_reply_is_not_counted();
   test_replies_do_not_carry_across_handshakes();

@@ -342,6 +342,28 @@ MUTATIONS=(
 # zero-replies branch in complete() report deafness only on the very first
 # handshake after boot, i.e. almost never when it matters.
 "auth-replies-carry-across-handshakes|components/alpha_hwr/auth.cpp|  replies_total_ = 0;\n  packets_total_ = 0;|  packets_total_ = 0;"
+# The counts the gates wait for. Nothing ties these to the `repeat_count <`
+# bounds that actually send the packets, so drift on this side is silent: the
+# burst still emits ten packets and only the gate is wrong. `case 2: return 4`
+# is the whole defect back again -- stage 2 satisfied by four of five replies
+# and advanced with the fifth unanswered. All three survived until a second
+# adversarial pass went looking, because every test to that point ran at
+# 10-of-10 or 0-of-N, where `>=` gives the same answer either way.
+"auth-gate-expects-one-packet-too-few|components/alpha_hwr/auth.cpp|    case 2: return 5;|    case 2: return 4;"
+"auth-gate-expects-one-legacy-packet-too-few|components/alpha_hwr/auth.cpp|    case 1: return 3;|    case 1: return 2;"
+# The guard that makes on_frame()'s indexing safe, not just its counting
+# correct: without `stage != 0` any CRC-valid response of an unmapped class
+# (Class 3 ACKs and Class 7 device-info frames both occur on this link) is
+# credited, and stage_replies_[stage - 1] then writes one before the array.
+"auth-unmapped-class-counted|components/alpha_hwr/auth_gate.h|  return stage != 0 && stage <= current_stage;|  return stage <= current_stage;"
+# The stage marker the ordering guard depends on. Pinned at unit level in
+# test_auth_gate, but that cannot see a marker set to the wrong value -- an
+# unsolicited Class 0x0A during stage 1 is then credited to a stage that has
+# sent nothing.
+"auth-stage-marker-runs-ahead|components/alpha_hwr/auth.cpp|  current_stage_ = 1;|  current_stage_ = 2;"
+# The saturation guard its own comment justifies: 256 same-class frames wrap
+# the byte to zero and reopen a gate the pump had already satisfied.
+"auth-reply-counter-wraps|components/alpha_hwr/auth.cpp|  if (stage_replies_[stage - 1] < 255)\n    stage_replies_[stage - 1]++;|  stage_replies_[stage - 1]++;"
 #
 # Deliberately absent: removing the gate's ceiling
 # (`waits_used < max_waits` -> `true`). It is catchable in principle, but the

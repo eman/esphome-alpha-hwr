@@ -82,12 +82,13 @@
 // what keeps this a bounded number: without a ceiling on the gates the
 // handshake could outlast the watchdog that is supposed to catch it.
 //
-// The full +1.5 s is incurred exactly when the pump answers NOTHING, since
-// that is what runs all three gates to their ceilings — i.e. it lands on the
-// deaf link this watchdog exists for, not on some unrelated slow case. (An
-// earlier version of this note claimed the opposite, that the growth only
-// affects a pump answering slowly. It is the reverse, and the test that pins
-// the 2700 ms figure asserts zero replies in the same breath.) A pump that
+// The full +1.5 s is incurred when no stage is fully answered inside its
+// floor plus 500 ms — a deaf pump always, and equally a pump answering very
+// slowly, answering partially, or behind a congested link. The point worth
+// keeping is only that the deaf link is among them rather than excluded from
+// them: the growth lands on exactly the case this watchdog exists for. (Two
+// earlier versions of this note both overreached — the first said the growth
+// affects only a slow pump, the correction said only a silent one.) A pump that
 // answers everything costs nothing extra and reaches first inbound data during
 // the handshake, far inside the budget; a pump that answers nothing is 18.7 s
 // into a 60 s window instead of 17.2 s, which the ~41 s of remaining slack is

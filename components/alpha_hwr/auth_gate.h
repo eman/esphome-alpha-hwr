@@ -18,11 +18,15 @@
 // show a class-matched reply behind every one of the ten packets: three
 // 11-byte Class 2 replies to stage 1, five 22-byte Class 10 replies to
 // stage 2, and a 9-byte Class 5 and 9-byte Class 11 reply to stage 3. Ten
-// packets, ten replies, in both logs. Reply latency, from the timestamps in
-// the issue: 51 ms (stage 1), 188 ms (stage 2), 150 and 204 ms (stage 3). The
-// issue's "about 40 ms behind each" characterises stage 1; it does not
-// generalise, and the spread across stages is what the ceiling below is sized
-// against.
+// packets, ten replies, in both logs.
+//
+// The four latencies the capture actually yields, each from a send to the
+// first log line reporting its reply: 51 ms (stage 1 packet 2), 188 ms
+// (stage 2 packet 1), and 150 and 204 ms (stage 3). The issue's "about 40 ms
+// behind each" characterises stage 1 and does not generalise. Read them as a
+// spread, not as measurements -- AUTH_GATE_MAX_WAITS below records why they
+// are looser than they look, and why the largest latency in the capture is in
+// fact unknown.
 //
 // **What the capture does NOT show is a stage being walked past.** The issue
 // reads it as one -- "stage 2 was declared complete at 14.108 while the reply
@@ -123,22 +127,47 @@ constexpr uint8_t AUTH_REPLY_FRAME_START = 0x24;
 /// a duration so the decision needs no clock (the caller owns the scheduler,
 /// and the host test drives it). Ten ticks of AUTH_GATE_POLL_MS.
 ///
-/// Sizing: worst reply latency in the capture is 204 ms (the Class 11 reply to
-/// EXT_2, 14.312 -> 14.516). 500 ms is 2.45x that. Three gates puts the
-/// handshake's worst case at 1200 + 1500 = 2700 ms of scheduled delay against
-/// the 1200 ms it takes today, which the inbound-data watchdog's budget
-/// absorbs -- see the sizing note in link_watchdog.h, updated for this.
+/// Sizing, and the honest limits of it. The four latencies quoted above are
+/// the only ones the capture yields, and 500 ms is about 2.5x the largest of
+/// them. Three caveats, because a bare "2.45x the worst observed" would be
+/// three different kinds of wrong:
 ///
-/// **Scheduled delay, not wall clock**, and the difference is not small on
-/// this device: in the same capture stage 2's five 50 ms hops plus its 200 ms
-/// tail -- 250 ms of scheduled delay in the pre-change code, since the tail
-/// timer starts once the fifth packet is queued -- spanned 13.300 to 14.108,
-/// about 3.2x. Under that much scheduler and transport-pacing slop a "500 ms"
-/// ceiling is nearer 1.6 s of real time and the 2700 ms worst case nearer
-/// 8.6 s. Still an order of magnitude inside the 60 s watchdog budget, which
-/// is the property that has to hold; the tick count is not a wall-clock
-/// promise and the host tests measure summed scheduled delay, never elapsed
-/// time.
+///   - **The reply that motivates the change is not among them.** The 123 ms
+///     margin comes from the fifth stage-2 packet's reply at 14.189, and its
+///     latency cannot be derived: the capture timestamps the first of the five
+///     sends, not the fifth. The floor puts it at >= 131 ms; distributing the
+///     observed 13.300 -> 14.108 span evenly over the five hops puts it near
+///     243 ms, i.e. plausibly worse than any figure above. So the largest
+///     latency in this capture is unknown, and 204 ms is a lower bound on it.
+///   - **The four are not commensurable.** They are measured to three
+///     different log lines -- transport "Packet complete", transport "Packet
+///     bytes", telemetry "Not Class 10" -- which the capture shows spanning
+///     4 ms at one point. The spread across stages is real; the precision is
+///     not.
+///   - **The ratio is against the wrong quantity anyway.** The ceiling bounds
+///     waiting *past the floor*, not latency *from the send*, so what a stage
+///     actually tolerates is floor + 500 ms -- 700 ms at stage 2.
+///
+/// What the number rests on is therefore the shape and not the decimal: every
+/// observed latency is a small multiple of 100 ms, the ceiling is several
+/// times that, and exceeding it costs nothing but the fail-open path.
+///
+/// Three gates puts the handshake's worst case at 1200 + 1500 = 2700 ms of
+/// scheduled delay against the 1200 ms it takes today, which the inbound-data
+/// watchdog's budget absorbs -- see the sizing note in link_watchdog.h,
+/// updated for this.
+///
+/// **Scheduled delay, not wall clock.** The host tests measure summed
+/// scheduled delay and never elapsed time, so neither figure is a wall-clock
+/// promise. How far apart they run is not established here either way: the one
+/// interval in the capture that is a bare timer with no BLE write inside it --
+/// the 200 ms stage-2 tail, 14.108 -> 14.312 -- ran at 204 ms, within 2%, and
+/// a gate tick is that kind of timer. The 808 ms that stage 2's five 50 ms
+/// hops took is not a counter-example: it contains five writes, so most of it
+/// is the transport's own 50 ms pacing rather than scheduler slop. (An earlier
+/// version of this note extrapolated a "3.2x" factor from that span and
+/// applied it to the ceiling, which was wrong twice over -- it misadded the
+/// span's scheduled delay, and it charged pacing to timers that send nothing.)
 constexpr uint8_t AUTH_GATE_MAX_WAITS = 10;
 
 /// Tick length for the wait above.
@@ -147,8 +176,9 @@ constexpr uint32_t AUTH_GATE_POLL_MS = 50;
 /// What a gate decides. PROCEED_UNANSWERED is separated from PROCEED_ANSWERED
 /// because the two mean opposite things about the link even though both
 /// advance: one is a pump that answered, the other is the ceiling expiring on
-/// a pump that did not, which is worth a warning and is the ~1 s deaf-link
-/// signal the component would otherwise not get until the 60 s watchdog.
+/// a pump that did not, which is worth a warning. The first of those fires at
+/// 750 ms, the earliest the component learns anything about a deaf link;
+/// without it the 60 s watchdog is the first to say so.
 enum class AuthGate : uint8_t {
   PROCEED_ANSWERED,
   WAIT,

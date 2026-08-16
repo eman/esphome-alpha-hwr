@@ -60,6 +60,7 @@
   going out from the failed one being re-sent, so five assertions passed
   against a transport whose queue never advanced. It asserts on the payload
   byte now, and the `pop_front()` has a mutation entry of its own.
+
 - **The GENI authentication handshake waits for the pump's replies instead of
   only for the clock** (issue #174). `auth.cpp` sent ten packets on timers and
   declared success 1200 ms later without ever inspecting a reply — it passed no

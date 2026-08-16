@@ -76,8 +76,11 @@ void test_a_short_stage_waits() {
   std::cout << "\n=== A stage still missing replies waits ===" << std::endl;
 
   TEST_ASSERT(auth_stage_gate(4, 5, 0, AUTH_GATE_MAX_WAITS) == AuthGate::WAIT,
-              "4 of 5: wait — this is the case the capture caught, the fifth "
-              "reply arriving 81 ms after the old code had moved on");
+              "4 of 5: wait — a stage short one reply is not answered. (An "
+              "earlier version of this message said the capture caught the "
+              "fifth reply arriving 81 ms after the old code moved on. It did "
+              "not: the reply landed 123 ms INSIDE the boundary — see "
+              "auth_gate.h.)");
   TEST_ASSERT(auth_stage_gate(0, 3, 0, AUTH_GATE_MAX_WAITS) == AuthGate::WAIT,
               "0 of 3: wait");
   TEST_ASSERT(auth_stage_gate(4, 5, AUTH_GATE_MAX_WAITS - 1,
