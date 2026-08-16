@@ -349,6 +349,21 @@
 
 ### Fixed
 
+- **A single-event slot past what the pump actually has now settles REJECTED
+  immediately instead of TIMEOUT fifteen seconds later.** Single events live at
+  Object 84 SubIDs 900–999, so any slot 0–99 is a legal thing to *ask* for — but
+  how many exist is a property of the device, reported in its ClockProgramOverview.
+  Ask a five-slot pump to clear slot 10 and SubID 910 went out to nobody; the
+  operation then sat on the watchdog and blamed the link for what was really a bad
+  argument.
+
+  The bound reads the pump's own count rather than a constant, and it sits after
+  the overview precondition so that count is known. It covers both single-event
+  commands and every caller of them, since they share one slot resolver. On the
+  bench pump — five slots — slot 10 and slot 5 are refused in about 0.3 s with
+  `single event slot 5 out of range (pump has 5)`, and slot 4 still writes
+  normally.
+
 - **Single-event readback resolved its timezone offset from the wrong clock,
   so writes near a DST transition settled REJECTED.** The pump stores
   single-event timestamps as local Unix time, so both directions shift by the
