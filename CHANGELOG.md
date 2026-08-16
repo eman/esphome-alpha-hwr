@@ -401,7 +401,9 @@
   worst case against a 60 s budget, where steady state is bounded by our own 10 s
   poll — so excluding it left the statistic unable to report the case the default
   is tightest against. Nothing visible changes on a healthy link: the maximum
-  reaches the 10 s poll interval in the first poll cycle regardless.
+  reaches the 10 s poll interval in the first poll cycle regardless — 4.9 s then
+  9.5 s on the bench, where the first figure is the newly-sampled handshake
+  interval and the second is the first poll cycle overtaking it.
 
   All of these biased the number downward, toward "the budget was never close":
   the direction that argues for keeping a default nobody has validated. What a

@@ -188,10 +188,10 @@ inline uint32_t link_data_timeout_next(uint32_t current_ms, uint32_t cap_ms) {
 ///     tightest against. Including it costs nothing visible in practice: the
 ///     interval is a few seconds (the 5.90/6.17/5.94 s measured above is open
 ///     to READY, and this file records that control-mode notifications arrive
-///     *during* the handshake, so first-inbound is earlier than that and has
-///     never been measured on its own), while the running maximum reaches the
-///     10 s poll interval within the first poll cycle of the first connection
-///     and stays there.
+///     *during* the handshake, so first-inbound is earlier than that: 4.9 s and
+///     5.2 s on two bench boots), while the running maximum reaches the 10 s
+///     poll interval within the first poll cycle of the first connection and
+///     stays there — 9.5/9.6 s measured, against a 60 s budget.
 ///   - **An interval that ends in a recycle counts too**, which is what
 ///     on_recycle() is for. Without it the sample is censored at exactly the
 ///     threshold being validated: the watchdog re-arms and disconnects, so no
