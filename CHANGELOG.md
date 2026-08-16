@@ -448,11 +448,28 @@
   secrets-example.yaml secrets.yaml`, and that template shipped the same
   published key — so the recommended sequence still produced a node secured with
   a key anybody can read, now with the warning one file further away. So the
-  template's two security-critical values are deliberately unusable: `api_key`
-  is not valid base64 of the right length, and `ota_password` is commented out.
-  Copying and building now fails with an error naming whichever you have not
-  set. CI no longer copies that template; it writes its own throwaway secrets
-  with a freshly generated key, so the tree contains no working key at all.
+  template's three security-critical values are deliberately unusable: `api_key`
+  is not valid base64 of the right length, `ap_password` is shorter than the 8
+  characters WPA requires, and `ota_password` is commented out. Copying and
+  building now fails with an error naming whichever you have not set. CI no
+  longer copies that template; it writes its own throwaway secrets with a
+  freshly generated key, so the tree contains no working key at all.
+
+  `ap_password` is on that list because `hwr-pump-example.yaml` pairs the
+  fallback hotspot with `captive_portal:`. A password published here would let
+  anyone in range join that recovery network and reach the portal — an opening
+  rather than a formality, and one an earlier draft of this entry left standing
+  while claiming the examples were covered.
+
+  Two of the guarantees needed narrowing rather than strengthening. Deleting
+  `ota_password` from the secrets file does *not* produce unauthenticated OTA,
+  as an earlier draft of the template said: every example references `!secret
+  ota_password`, so the build fails instead. Genuinely running without OTA
+  authentication means removing the `password:` line from the example's `ota:`
+  block. And `components/alpha_hwr/discovery_example.yaml` is nested, so ESPHome
+  resolves `!secret` beside *it* rather than at the repository root — giving it
+  an encryption key created a config the documented single `cp` could not build
+  until the second copy was written down.
 
   **Two examples were worse off than the three being fixed**, which the first
   draft also missed while asserting in the README that every example was
