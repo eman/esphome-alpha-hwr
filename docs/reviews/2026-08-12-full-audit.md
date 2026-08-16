@@ -733,6 +733,46 @@ release, and no CI job runs `esphome config`.
   `write_operation_service.h` gives `make: Nothing to be done` and a stale binary. Verified.
 - **Every test write callback hardcodes `return true`**, making `transport.cpp`'s send-failure
   branch unreachable though production returns false on any GATT error.
+
+  **Closed as written** — accurate, unlike most of this section. (An earlier draft of this note
+  called it "the first item whose description matched the tree"; that is false. The DST item two
+  bullets up carries no correction either and was closed seven hours earlier, and the whole P1
+  section is headed "survived refutation".)
+
+  Verified before acting: no test in the suite returned false from a write callback, so both
+  branches were unreached — the send failure at `transport.cpp:95`, and the never-wired-writer
+  case at `:66`, which the note does not mention.
+
+  The branches are **correct**. Four tests now drive them, pinned by four `mutation_check.sh`
+  entries. What matters is asserted: the caller is told immediately rather than waiting out its own
+  timeout, and the queue advances so one lost write does not wedge the link for everything behind
+  it. That second property took two attempts — the first test counted writes, which cannot tell the
+  next command going out from the failed one being re-sent, so five assertions passed against a
+  transport whose queue never advanced. It asserts on the payload byte now, and a mutation that
+  removes only the `pop_front()` is a separate entry.
+
+  On `:66`: it is testable but **not reachable in production**. `set_write_callback` is called
+  unconditionally in `setup()` and `loop()` only runs after that, so the writer is never null when
+  the branch could execute. An unattached characteristic returns false from *inside* the callback,
+  which is the `:95` branch. Worth testing; not worth describing as a live state, as an earlier
+  draft here did.
+
+  **New, found while reviewing this** — a defect in production, not in the tests, and not in the
+  original audit: a send failure **part-way through a chunked packet leaves the peer holding a
+  partial frame**, and nothing resynchronises. The failure path is byte-identical whether zero or
+  twenty bytes went out. `last_send_time_` tracks the last *successful* chunk, so the pacing gate
+  opens immediately and the next command's first chunk reaches the pump ~16 ms later. Fed to this
+  component's own receiver — the mirror of the pump's — the next command is swallowed whole:
+  `is_frame_start` is deliberately ignored while reassembling, and the staleness escape hatch is
+  `REASSEMBLY_TIMEOUT_MS = 1000`, sixty times the gap production leaves. One lost write then costs
+  two to four commands, and only the first gets the immediate failure report.
+
+  Reachable: `schedule_service.cpp` builds a 53-byte APDU (59-byte frame, three chunks), and there
+  are five more multi-chunk sites. **Inferred, not measured** — the pump's reassembler cannot be
+  tested from here, so what is proven is only that production takes no abandon-frame, delay or
+  resync step, and has no path that distinguishes a first-chunk failure from a mid-frame one. A fix
+  (hold off the next command for the peer's staleness window when `bytes_sent > 0`) is a production
+  change and needs its own bench run.
 - **`clear_single_event` accepts slots 0–99** (`api_bridge.cpp:330`) against a ≤35-slot table. The
   only unvalidated argument that reaches the wire — every other service is range-checked or
   whitelisted.

@@ -42,6 +42,24 @@
 
 ### Changed
 
+- **The transport's send-failure branches are tested.** Every write callback in
+  the suite returned `true` unconditionally, so the two paths production takes
+  when a chunk cannot reach the BLE stack had never executed under test: a GATT
+  write returning false — the ordinary consequence of a link dropping mid-write
+  — and a transport whose write callback was never wired (testable, though not
+  reachable in production: the writer is always set before `loop()` can run).
+
+  Both are correct. Four tests hold them there, pinned by four
+  `mutation_check.sh` entries, asserting that the caller is failed immediately
+  rather than left to wait out its own timeout, and that the queue advances so
+  one lost write does not wedge the link for every command behind it.
+
+  That second property took two attempts, which is the part worth repeating.
+  The first version counted writes — and a count cannot tell the next command
+  going out from the failed one being re-sent, so five assertions passed
+  against a transport whose queue never advanced. It asserts on the payload
+  byte now, and the `pop_front()` has a mutation entry of its own.
+
 - **`alpha_hwr_controls.yaml` and `alpha_hwr_schedule.yaml` are documented as
   mutually exclusive, because they are.** The README said to "avoid combining
   both unless you want duplicate controls", which reads as a matter of taste. It

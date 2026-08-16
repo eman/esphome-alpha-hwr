@@ -151,6 +151,30 @@ MUTATIONS=(
 "clock-apdu-type|components/alpha_hwr/time_service.cpp|  apdu[5] = 0x01;   // Type high (321 = 0x0141)|  apdu[5] = 0x99;   // Type high (321 = 0x0141)"
 "clock-apdu-version|components/alpha_hwr/time_service.cpp|  apdu[7] = 0x02;   // Object version|  apdu[7] = 0x77;   // Object version"
 "clock-apdu-declared-size|components/alpha_hwr/time_service.cpp|  apdu[10] = 0x0B;  // Size low (11 bytes)|  apdu[10] = 0x05;  // Size low (11 bytes)"
+# The two branches taken when a chunk cannot be handed to the BLE stack. Every
+# write callback in the suite returned true unconditionally until now, so a GATT
+# failure -- the ordinary consequence of a link dropping mid-write -- was the one
+# transport path that had never executed under test. The branches turned out to
+# be correct; these keep them that way.
+#
+# The first drops the failure report, so a caller waits out its own timeout
+# instead of being told immediately. The second leaves the failed command at the
+# head of the queue, which wedges the link for every command after it -- far
+# worse than the one write that was lost.
+"transport-send-failure-silent|components/alpha_hwr/transport.cpp|ESP_LOGE(TAG, \"Failed to send chunk, dropping command\");\n        if (cmd.callback) {\n          cmd.callback(false, nullptr, 0);\n        }|ESP_LOGE(TAG, \"Failed to send chunk, dropping command\");"
+"transport-send-failure-wedges-queue|components/alpha_hwr/transport.cpp|        ESP_LOGE(TAG, \"Failed to send chunk, dropping command\");|        ESP_LOGE(TAG, \"Failed to send chunk\"); if (true) break;"
+# The queue-advance property ON ITS OWN. The entry above drops the failure report
+# and the pop in one edit, so the report assertions kill it and it proves nothing
+# about the pop. This one removes only the pop: the caller is still told, and the
+# failed command simply stays at the head of the queue, wedging the link for
+# every command behind it.
+#
+# It is here because the first version of the test could not catch it. Counting
+# writes cannot tell the second command being sent from the first being re-sent,
+# so five assertions passed against a transport that never advanced. The test
+# asserts on the payload byte now.
+"transport-failed-command-stays-queued|components/alpha_hwr/transport.cpp|        ESP_LOGE(TAG, \"Failed to send chunk, dropping command\");\n        if (cmd.callback) {\n          cmd.callback(false, nullptr, 0);\n        }\n        this->command_queue_.pop_front();|        ESP_LOGE(TAG, \"Failed to send chunk, dropping command\");\n        if (cmd.callback) {\n          cmd.callback(false, nullptr, 0);\n        }"
+"transport-missing-writer-silent|components/alpha_hwr/transport.cpp|ESP_LOGW(TAG, \"Write callback not set, dropping command\");\n        if (cmd.callback) {\n          cmd.callback(false, nullptr, 0);\n        }|ESP_LOGW(TAG, \"Write callback not set, dropping command\");"
 # Restores issue #179's off-by-one: a seven-byte Class 7 header instead of six,
 # which cost every device-info string its first character. It survived for as
 # long as it did because the only test fixture was generated from the same wrong

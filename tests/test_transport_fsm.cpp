@@ -17,6 +17,104 @@ int tests_failed = 0;
     std::cout << "[FAIL] " << message << std::endl; \
   }
 
+// The two branches production takes when a chunk cannot be handed to the BLE
+// stack. Every write callback in this suite used to return true unconditionally,
+// so neither had ever executed: a GATT failure -- the ordinary consequence of a
+// link dropping mid-write -- was the one transport path with no coverage at all.
+//
+// The unwired-writer branch is testable but unreachable in production:
+// set_write_callback() is called unconditionally in setup() and loop() only runs
+// afterwards, and an unattached characteristic returns false from INSIDE the
+// callback, which is the other branch. Covered because a branch that exists
+// should behave, not because a node can reach it.
+void test_send_failure_fails_the_command_and_frees_the_transport() {
+  std::cout << "\n=== Testing send failure (GATT write returns false) ===" << std::endl;
+  esphome::alpha_hwr::core::Transport transport;
+
+  bool writes_succeed = false;
+  int chunks = 0;
+  std::vector<uint8_t> first_bytes;  // which command's bytes actually went out
+  transport.set_write_callback([&](const uint8_t *data, size_t len) -> bool {
+    chunks++;
+    if (len > 0) first_bytes.push_back(data[0]);
+    return writes_succeed;
+  });
+
+  int cb_calls = 0;
+  bool cb_success = true;
+  transport.send_command(std::vector<uint8_t>(10, 0xAA), 0, 0,
+                         [&](bool ok, const uint8_t *, size_t) { cb_calls++; cb_success = ok; });
+
+  mock_millis += 50;
+  transport.loop();
+
+  TEST_ASSERT(chunks == 1, "the write was attempted once");
+  TEST_ASSERT(cb_calls == 1, "the command's callback fired exactly once");
+  TEST_ASSERT(!cb_success, "and reported failure, not silence");
+
+  // The queue must advance: if the failed command were left at the head, the
+  // link would be wedged for every later command -- far worse than the one
+  // dropped write. (Leaving state_ in SENDING_CHUNKS is NOT asserted here and
+  // deliberately so: a fresh front command re-enters with bytes_sent == 0 and
+  // the SENDING_CHUNKS arm repeats the same pacing check, so it is an
+  // equivalent mutant that no assertion could distinguish.)
+  //
+  // Assert on WHICH command's bytes went out, not on how many writes happened.
+  // Counting writes cannot tell the second command being sent from the first
+  // being re-sent, so a transport that never pops still satisfies a count --
+  // the assertion reads as corroboration while discriminating nothing. (That
+  // was this test's first form, and a review pass proved it passed against a
+  // deliberately non-advancing queue.) The payload bytes differ by design.
+  writes_succeed = true;
+  transport.send_command(std::vector<uint8_t>(10, 0xBB), 0, 0, nullptr);
+  mock_millis += 50;
+  transport.loop();
+  TEST_ASSERT(first_bytes.size() == 2, "a second write was attempted");
+  TEST_ASSERT(first_bytes.size() == 2 && first_bytes[0] == 0xAA && first_bytes[1] == 0xBB,
+              "and it carried the SECOND command's bytes, so the queue advanced");
+}
+
+void test_send_failure_midway_through_a_chunked_packet() {
+  std::cout << "\n=== Testing send failure part-way through a packet ===" << std::endl;
+  esphome::alpha_hwr::core::Transport transport;
+
+  int chunks = 0;
+  transport.set_write_callback([&](const uint8_t *, size_t) -> bool {
+    chunks++;
+    return chunks < 2;  // first chunk lands, second fails
+  });
+
+  int cb_calls = 0;
+  bool cb_success = true;
+  // 53 bytes chunks into 20/20/13.
+  transport.send_command(std::vector<uint8_t>(53, 0xCC), 0, 0,
+                         [&](bool ok, const uint8_t *, size_t) { cb_calls++; cb_success = ok; });
+
+  for (int i = 0; i < 4; i++) { mock_millis += 51; transport.loop(); }
+
+  TEST_ASSERT(chunks == 2, "the third chunk is not attempted after the second fails");
+  TEST_ASSERT(cb_calls == 1 && !cb_success,
+              "a half-written packet fails the command once, rather than hanging");
+}
+
+void test_missing_write_callback_drops_the_command() {
+  std::cout << "\n=== Testing no write callback configured ===" << std::endl;
+  esphome::alpha_hwr::core::Transport transport;
+  // Deliberately never set one: this is the state between construction and
+  // BLEClient wiring up the characteristic.
+
+  int cb_calls = 0;
+  bool cb_success = true;
+  transport.send_command(std::vector<uint8_t>(10, 0xDD), 0, 0,
+                         [&](bool ok, const uint8_t *, size_t) { cb_calls++; cb_success = ok; });
+
+  mock_millis += 50;
+  transport.loop();
+
+  TEST_ASSERT(cb_calls == 1 && !cb_success,
+              "the command is failed rather than queued forever against a null writer");
+}
+
 void test_transport_chunking() {
   std::cout << "\n=== Testing Transport BLE Chunking ===" << std::endl;
   esphome::alpha_hwr::core::Transport transport;
@@ -367,6 +465,9 @@ int main() {
   std::cout << "===========================================================" << std::endl;
   
   test_transport_chunking();
+  test_send_failure_fails_the_command_and_frees_the_transport();
+  test_send_failure_midway_through_a_chunked_packet();
+  test_missing_write_callback_drops_the_command();
   
   std::cout << "\n===========================================================" << std::endl;
   std::cout << "  Test Results" << std::endl;
