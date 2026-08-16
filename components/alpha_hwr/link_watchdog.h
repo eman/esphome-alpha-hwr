@@ -199,7 +199,11 @@ inline uint32_t link_data_timeout_next(uint32_t current_ms, uint32_t cap_ms) {
 ///     budget is discarded. The maximum then asymptotes to just under the
 ///     budget whatever the pump does, and "never above 12 s in a month" reads
 ///     as "60 s was comfortable" when what it means is "no quiet period between
-///     12 s and 60 s ended on its own" — the opposite conclusion.
+///     12 s and 60 s ended on its own" — the opposite conclusion. Measured, by
+///     flashing the pre-fix build and this one against the same pump with
+///     data_timeout forced to 5 s: five recycles, and the old build's maximum
+///     read 2.6 s — apparent double headroom over a budget it had breached five
+///     times. This one reads 6.0 s.
 ///
 /// An interval is closed by whatever ends it: a notification, a recycle, or the
 /// link dropping for some reason of its own. Time between that drop and the
@@ -240,6 +244,12 @@ class LinkGapSampler {
   /// discarding it censors the sample the same way dropping the recycle sample
   /// did, just at a threshold nobody configured: a link that routinely goes
   /// quiet for 45 s and then drops would report only its steady-state cadence.
+  ///
+  /// Measured the same way as the recycle case: polling suspended for 45 s on a
+  /// live link, then the link dropped. The pre-fix build published nothing and
+  /// stayed at its steady-state 9.5 s; this one recorded 53.0 s — the interval
+  /// from the last notification to the drop, with the 60 s watchdog never
+  /// involved.
   ///
   /// Disarms, so a disconnect with no open before it cannot sample the downtime
   /// since the previous session. A failed connection attempt that reports a

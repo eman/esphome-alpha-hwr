@@ -388,9 +388,16 @@
   discarded and the running maximum asymptoted to just under the budget whatever
   the pump did — "never above 12 s in a month" reading as "60 s was comfortable"
   when what it meant was "no quiet period between 12 s and 60 s ended on its
-  own". An interval ended by a plain drop — supervision timeout, pump power
-  loss, the encryption-failure teardown — was discarded the same way, censoring
-  the sample at a threshold nobody configured. Both are now recorded, at the
+  own". Measured on the bench by flashing the old build and the new one against
+  the same pump with `data_timeout` forced to `5s`: five recycles, and the old
+  build's maximum read **2.6 s** — apparent double headroom over a budget it had
+  breached five times. The new one reads **6.0 s**.
+
+  An interval ended by a plain drop — supervision timeout, pump power loss, the
+  encryption-failure teardown — was discarded the same way, censoring the sample
+  at a threshold nobody configured. Same A/B, with polling suspended for 45 s on
+  a live link and the link then dropped: the old build published nothing and sat
+  at its steady-state 9.5 s, the new one recorded **53.0 s**. Both are now recorded, at the
   recycle and in the disconnection callback; a disconnect with no open before it
   samples nothing, so a failed connection attempt cannot record the downtime
   since the last session as if the link had been up and silent for it.
