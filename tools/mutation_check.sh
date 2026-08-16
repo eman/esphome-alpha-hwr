@@ -259,7 +259,14 @@ MUTATIONS=(
 # behalf instead of staying out of it. The last two attack the comparison
 # itself: stopping after one octet accepts every device with a matching OUI,
 # and dropping the unset-peer guard makes an all-zero event address match a
-# ble_client that has no address configured yet.
+# ble_client that has no address configured yet. The last three came from an
+# adversarial pass and were all SURVIVING when first written: every address in
+# the suite was zero-free, so "is this peer unset?" could be reduced to its
+# first octet and stay green -- while in production it reads a pump on a
+# 00:xx:xx OUI as unconfigured and ignores its AUTH_CMPL forever. The length
+# over-read is the same blind spot in the other direction: comparing a seventh
+# byte compares one object with itself in a test and reads out of bounds on the
+# device.
 #
 # Read the green here narrowly. All five mutate the *rule*; none can mutate its
 # *application*, because ble_connection_manager.cpp is compiled by no host test
@@ -272,6 +279,9 @@ MUTATIONS=(
 "gap-security-refuses-for-others|components/alpha_hwr/gap_security_policy.h|    return GapSecurityAction::IGNORE;\n  }\n  return pairing_enabled|    return GapSecurityAction::DECLINE;\n  }\n  return pairing_enabled"
 "gap-addr-compares-one-octet|components/alpha_hwr/gap_security_policy.h|  for (size_t i = 0; i < BD_ADDR_LEN; i++) {\n    if (event_addr[i] != peer_addr[i]) {|  for (size_t i = 0; i < 1; i++) {\n    if (event_addr[i] != peer_addr[i]) {"
 "gap-addr-unset-peer-matches|components/alpha_hwr/gap_security_policy.h|  if (peer_is_unset) {\n    return false;\n  }|  if (false) {\n    return false;\n  }"
+"gap-addr-unset-scan-one-octet|components/alpha_hwr/gap_security_policy.h|  for (size_t i = 0; i < BD_ADDR_LEN; i++) {\n    if (peer_addr[i] != 0) {|  for (size_t i = 0; i < 1; i++) {\n    if (peer_addr[i] != 0) {"
+"gap-addr-unset-first-octet-only|components/alpha_hwr/gap_security_policy.h|  bool peer_is_unset = true;\n  for (size_t i = 0; i < BD_ADDR_LEN; i++) {\n    if (peer_addr[i] != 0) {\n      peer_is_unset = false;\n      break;\n    }\n  }|  bool peer_is_unset = (peer_addr[0] == 0);"
+"gap-addr-len-over-read|components/alpha_hwr/gap_security_policy.h|constexpr size_t BD_ADDR_LEN = 6;|constexpr size_t BD_ADDR_LEN = 7;"
 "link-watchdog-never-fires|components/alpha_hwr/link_watchdog.h|return static_cast<uint32_t>(now_ms - last_inbound_ms) > timeout_ms;|return false;"
 "link-watchdog-rollover-unsafe|components/alpha_hwr/link_watchdog.h|return static_cast<uint32_t>(now_ms - last_inbound_ms) > timeout_ms;|return now_ms > last_inbound_ms + timeout_ms;"
 # data_timeout backoff (issue #176). Without it a deaf link is recycled ~1,300
