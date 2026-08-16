@@ -98,6 +98,26 @@ MUTATIONS=(
 # public surfaces. It went unnoticed for as long as it did precisely because no
 # test asserted either spelling.
 "command-string-service-name-drift|components/alpha_hwr/write_operation_service.cpp|    case WriteCommand::SET_PUMP_STATE:        return \"set_pump_state\";|    case WriteCommand::SET_PUMP_STATE:        return \"pump_set_state\";"
+# The single-event slot bound is the last stop before a caller's index becomes
+# SubID 900+idx on the wire. Two ways to get it wrong, and the pair is the point:
+# hardcoding 35 still rejects absurd values while quietly accepting slot 10 on a
+# 5-slot pump, and < vs <= lets slot == max_events through. Neither shows up
+# against a 35-slot simulator, which is why the tests model a 5-slot one.
+#
+# The predicate is hoisted into `slot_in_range` in production so these two have
+# a pipe-free line to anchor to: the entries are split with IFS='|', so a search
+# string containing `||` is truncated and the mutation is scored as though the
+# code were untouched.
+"single-event-slot-bound-hardcoded|components/alpha_hwr/write_operation_service.cpp|  const bool slot_in_range = op->slot >= 0 && op->slot < max_events;|  const bool slot_in_range = op->slot >= 0 && op->slot < 35;"
+"single-event-slot-bound-off-by-one|components/alpha_hwr/write_operation_service.cpp|  const bool slot_in_range = op->slot >= 0 && op->slot < max_events;|  const bool slot_in_range = op->slot >= 0 && op->slot <= max_events;"
+# The protocol envelope is a separate check from the device bound, and its
+# ORDERING is the behaviour: it runs before ensure_overview_() so that a slot
+# wrong on every pump is named as such even when the link cannot answer. Moving
+# it after leaves the device bound still catching the slot -- the operation is
+# still refused -- so only the settle status and detail change. That is exactly
+# the regression worth pinning: the user stops being told which of the two
+# things is broken.
+"single-event-envelope-after-overview|components/alpha_hwr/write_operation_service.cpp|  if (op->slot >= static_cast<int16_t>(services::SINGLE_EVENT_SLOT_LIMIT)) {|  if (false && op->slot >= static_cast<int16_t>(services::SINGLE_EVENT_SLOT_LIMIT)) {"
 # Restores issue #179's off-by-one: a seven-byte Class 7 header instead of six,
 # which cost every device-info string its first character. It survived for as
 # long as it did because the only test fixture was generated from the same wrong

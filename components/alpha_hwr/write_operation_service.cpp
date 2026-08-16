@@ -1407,25 +1407,33 @@ void WriteOperationService::run_single_event_(uint32_t seq) {
     return;
   }
 
+  // A slot at or past SINGLE_EVENT_SLOT_LIMIT is not a single-event slot on any
+  // pump — SubID 900+slot lands on the weekly schedule's layer records — so it
+  // is settled here, ahead of the overview read rather than after it. The
+  // ordering is the point: ensure_overview_() fails on a broken link, and an
+  // argument that is wrong regardless of the device would otherwise settle
+  // "overview not readable" and put the blame on the link. run_schedule_entry_()
+  // validates its layer and day the same way, before the same precondition.
+  //
+  // This does not do the same for a slot the *device* lacks (say 50 on a 5-slot
+  // pump). That one still reports the overview failure when the link is down,
+  // deliberately: the count comes from the pump, and with the pump unreachable
+  // the honest answer is that the write was not attempted, not a range claim
+  // against a number never read.
+  if (op->slot >= static_cast<int16_t>(services::SINGLE_EVENT_SLOT_LIMIT)) {
+    finish_(seq, WriteStatus::INVALID,
+            "single event slot " + std::to_string(op->slot) +
+                " is not a single-event slot (0-" +
+                std::to_string(services::SINGLE_EVENT_SLOT_LIMIT - 1) + ")");
+    return;
+  }
+
   op->phase = Phase::RESOLVING;
   ensure_overview_(seq, [this, seq]() {
     Operation *op = find_(seq);
     if (op == nullptr || op->phase == Phase::DONE) return;
 
     if (op->slot >= 0) {
-      // Bound the caller-supplied slot against what this pump actually has.
-      // ensure_overview_() just ran, so get_max_single_events() is the device's
-      // own count rather than the 35 fallback. Without this an out-of-range
-      // slot reaches the wire as SubID 900+idx and settles TIMEOUT instead of
-      // being rejected up front.
-      uint8_t max_events = schedule_service_.get_max_single_events();
-      if (op->slot >= static_cast<int16_t>(max_events)) {
-        finish_(seq, WriteStatus::REJECTED,
-                "single event slot " + std::to_string(op->slot) +
-                    " out of range (pump has " + std::to_string(max_events) +
-                    ")");
-        return;
-      }
       write_single_event_(seq);
       return;
     }
@@ -1475,6 +1483,34 @@ void WriteOperationService::run_single_event_(uint32_t seq) {
 void WriteOperationService::write_single_event_(uint32_t seq) {
   Operation *op = find_(seq);
   if (op == nullptr || op->phase == Phase::DONE) return;
+
+  // Last stop before SubID 900+slot goes on the wire, and deliberately so: all
+  // three resolutions in run_single_event_() funnel here — the caller-supplied
+  // slot, the vacation slot, and the free slot.
+  //
+  // Only the first can be out of range today, so for the other two this is
+  // belt-and-braces rather than a fix. It is worth the two lines because their
+  // safety is indirect and easy to erode: find_free_single_event_slot() clamps
+  // to this same count itself, but find_vacation_slot() does not — it returns
+  // whatever index the cache holds, and is in range only because
+  // read_single_events_async() reads slots 0..max-1 and so cannot put an
+  // out-of-range one there. Widening that loop would be enough to break it,
+  // with nothing at the write to stop it. Checking here costs one comparison
+  // and makes the choke point real rather than argued.
+  //
+  // ensure_overview_() has run on every path to here, so get_max_single_events()
+  // is the device's own count rather than the 35-slot fallback. Without the
+  // bound an out-of-range slot reaches the wire, goes unanswered, and settles
+  // TIMEOUT ~15 s later blaming the link for a bad argument.
+  const int16_t max_events = static_cast<int16_t>(schedule_service_.get_max_single_events());
+  const bool slot_in_range = op->slot >= 0 && op->slot < max_events;
+  if (!slot_in_range) {
+    finish_(seq, WriteStatus::REJECTED,
+            "single event slot " + std::to_string(op->slot) +
+                " out of range (pump has " + std::to_string(max_events) + ")");
+    return;
+  }
+
   op->phase = Phase::WRITING;
 
   SingleEvent event;
