@@ -28,13 +28,25 @@
 //     AUTH_CMPL: with pairing disabled (the default) AUTH_CMPL never fires at
 //     all, and reaching one proves nothing about whether the pump is answering
 //     -- which is the very defect the watchdog exists for.
-//   - AUTH is released only by a successful AUTH_CMPL, because the failure it
-//     records erases the bond and recovery must pass back through one. It must
-//     NOT be released by inbound data: an SMP failure on an UNBONDED pump
-//     latches its reason WITHOUT tearing the link down, and that link then
-//     subscribes and delivers notifications normally (passive telemetry needs
-//     no bond). Releasing AUTH on data would wipe exactly the pairing
-//     diagnostic the hold exists to preserve.
+//   - AUTH is released by a successful AUTH_CMPL, because the failure it
+//     records erases the bond and recovery must pass back through one -- and,
+//     failing that, by the GENI session reaching READY. It must NOT be
+//     released by inbound data: an SMP failure on an UNBONDED pump latches its
+//     reason WITHOUT tearing the link down, and that link then subscribes and
+//     delivers notifications normally (passive telemetry needs no bond).
+//     Releasing AUTH on data would wipe the pairing diagnostic while it is
+//     still the operative fault.
+//
+// The READY release is what bounds an AUTH hold, and it exists because the
+// rank made the hold otherwise unbreakable for the rest of the boot: nothing
+// outranks AUTH, and a pump that never pairs successfully never produces the
+// AUTH_CMPL that clears it. The fault string is shown only while the session
+// is NOT ready (see evaluate_link_status), so a hold surviving past READY can
+// no longer inform anyone about the pairing failure -- it can only mask the
+// *next* outage's cause with a stale one. Before the rank, the watchdog broke
+// such a hold within 60 s by overwriting it; that overwrite was the defect,
+// and this release is the part of it worth keeping. The pairing state itself
+// survives on its own sensor either way.
 //
 // One value rather than a "held" flag plus a separate "who set it" flag, on
 // purpose: the origin decides the release, so two flags can disagree and every
@@ -72,8 +84,8 @@ enum class FailureHold : uint8_t {
   SUBSCRIBE = 2,
   /// An auth/encryption failure. Ranks highest: it is the only fault here that
   /// erases the bond, and a subscribe failure on an unauthenticated link is
-  /// generally its consequence rather than a competing cause. Released only by
-  /// a successful AUTH_CMPL.
+  /// generally its consequence rather than a competing cause. Released by a
+  /// successful AUTH_CMPL, or by the session reaching READY.
   AUTH = 3,
 };
 
@@ -120,6 +132,30 @@ inline bool failure_hold_released_by_auth(FailureHold h) {
       return false;  // a fresh bond does not prove the pump is answering
     case FailureHold::SUBSCRIBE:
       return false;
+    case FailureHold::AUTH:
+      return true;
+  }
+  return false;
+}
+
+/// True when the GENI session reaching READY releases this hold.
+///
+/// Only AUTH, and only as its backstop -- see the note above. READY is a weak
+/// signal on purpose: the component's own auth-completion path records that
+/// reaching it proves a chain of timers ran and happens on a deaf link just
+/// the same. That is exactly why it must NOT release DATA or SUBSCRIBE, whose
+/// whole claim is that no data arrived: a deaf link reaches READY on every
+/// cycle and would clear the watchdog's reason each time. For AUTH the
+/// weakness does not matter -- if the link is in fact deaf, the watchdog
+/// writes the true current cause 60 s later, which is the outcome wanted.
+inline bool failure_hold_released_by_session_ready(FailureHold h) {
+  switch (h) {
+    case FailureHold::NONE:
+      return false;
+    case FailureHold::DATA:
+      return false;  // READY does not prove the pump is answering
+    case FailureHold::SUBSCRIBE:
+      return false;  // and a blocking subscribe fault never reaches READY
     case FailureHold::AUTH:
       return true;
   }

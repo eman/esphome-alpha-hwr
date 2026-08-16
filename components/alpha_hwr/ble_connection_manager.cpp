@@ -292,6 +292,14 @@ void BLEConnectionManager::force_disconnect(const char *reason) {
   }
 }
 
+void BLEConnectionManager::on_session_ready() {
+  if (failure_hold_released_by_session_ready(failure_hold_)) {
+    ESP_LOGD(TAG, "Session ready - releasing held failure reason: %s",
+             last_failure_.c_str());
+    failure_hold_ = FailureHold::NONE;
+  }
+}
+
 void BLEConnectionManager::handle_connection_opened(const esp_ble_gattc_cb_param_t *param) {
   ESP_LOGI(TAG, "BLE connection opened. Pairing enabled: %s", pairing_enabled_ ? "YES" : "NO");
   

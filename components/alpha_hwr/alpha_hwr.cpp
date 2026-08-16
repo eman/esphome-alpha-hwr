@@ -289,6 +289,15 @@ void AlphaHwrComponent::setup() {
     this->session_.on_authenticated();
     ESP_LOGI(TAG, "✓ Authentication handshake complete - pump ready");
 
+    // Release an auth-failure hold on the fault string. Nothing else releases
+    // it once the pump has stopped producing successful AUTH_CMPL events, and
+    // the string is displayed only while the session is not ready — so a hold
+    // that outlives READY cannot report the pairing failure any more, it can
+    // only mask the next outage's cause with it (failure_hold.h). Unlike the
+    // link-status counters below, this is safe on a deaf link: if the link is
+    // deaf, the watchdog writes the true reason 60 s later, which is the point.
+    this->ble_manager_.on_session_ready();
+
     // Start telemetry service when authenticated
     this->telemetry_service_.start();
 

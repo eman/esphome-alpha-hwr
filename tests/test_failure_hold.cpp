@@ -26,6 +26,7 @@ using esphome::alpha_hwr::core::FailureHold;
 using esphome::alpha_hwr::core::failure_hold_admits;
 using esphome::alpha_hwr::core::failure_hold_released_by_auth;
 using esphome::alpha_hwr::core::failure_hold_released_by_data;
+using esphome::alpha_hwr::core::failure_hold_released_by_session_ready;
 
 int tests_passed = 0;
 int tests_failed = 0;
@@ -83,16 +84,44 @@ void test_the_defect_the_rank_replaces() {
 void test_a_hold_admits_only_its_equals_and_betters() {
   std::cout << "\n=== The rank is the whole rule ===" << std::endl;
 
-  for (auto held : ALL) {
-    for (auto incoming : ALL) {
-      const bool expected = static_cast<uint8_t>(held) <=
-                            static_cast<uint8_t>(incoming);
-      TEST_ASSERT(failure_hold_admits(held, incoming) == expected,
-                  std::string("holding ") + name(held) + ", a " +
-                      name(incoming) + " reason " +
-                      (expected ? "writes" : "does not write"));
-    }
-  }
+  // Spelled out rather than computed. An earlier version derived `expected`
+  // from `held <= incoming` on the underlying values, which is the production
+  // expression restated -- it would have agreed with any consistent ordering,
+  // including one that ranks a subscribe fault above a bond-erasing pairing
+  // failure. Sixteen hand-written outcomes say what the policy IS.
+  struct Row { FailureHold held; FailureHold incoming; bool writes; };
+  static const Row TABLE[] = {
+      {FailureHold::NONE,      FailureHold::NONE,      true},
+      {FailureHold::NONE,      FailureHold::DATA,      true},
+      {FailureHold::NONE,      FailureHold::SUBSCRIBE, true},
+      {FailureHold::NONE,      FailureHold::AUTH,      true},
+
+      {FailureHold::DATA,      FailureHold::NONE,      false},
+      {FailureHold::DATA,      FailureHold::DATA,      true},
+      {FailureHold::DATA,      FailureHold::SUBSCRIBE, true},
+      {FailureHold::DATA,      FailureHold::AUTH,      true},
+
+      {FailureHold::SUBSCRIBE, FailureHold::NONE,      false},
+      {FailureHold::SUBSCRIBE, FailureHold::DATA,      false},
+      {FailureHold::SUBSCRIBE, FailureHold::SUBSCRIBE, true},
+      {FailureHold::SUBSCRIBE, FailureHold::AUTH,      true},
+
+      {FailureHold::AUTH,      FailureHold::NONE,      false},
+      {FailureHold::AUTH,      FailureHold::DATA,      false},
+      {FailureHold::AUTH,      FailureHold::SUBSCRIBE, false},
+      {FailureHold::AUTH,      FailureHold::AUTH,      true},
+  };
+
+  const int rows = static_cast<int>(sizeof(TABLE) / sizeof(TABLE[0]));
+  const int holds = static_cast<int>(sizeof(ALL) / sizeof(ALL[0]));
+  TEST_ASSERT(rows == holds * holds,
+              "the table covers every (held, incoming) pair");
+
+  for (const auto &r : TABLE)
+    TEST_ASSERT(failure_hold_admits(r.held, r.incoming) == r.writes,
+                std::string("holding ") + name(r.held) + ", a " +
+                    name(r.incoming) + " reason " +
+                    (r.writes ? "writes" : "does not write"));
 }
 
 void test_nothing_is_held_against_a_first_reason() {
@@ -123,23 +152,92 @@ void test_a_fault_refreshes_its_own_text() {
               "a plain disconnect reason replaces another plain one");
 }
 
-void test_every_hold_has_exactly_one_release() {
+void test_the_release_matrix() {
   std::cout << "\n=== Each hold is released by the evidence that refutes it ==="
             << std::endl;
 
-  // A hold nothing releases is permanent, and a permanent hold silences every
-  // later fault. A hold everything releases is not a hold.
+  // The whole matrix, hand-written. An earlier version asserted instead that
+  // each hold has EXACTLY ONE release path -- which passed, but pinned an
+  // invariant nothing needed: AUTH now has two, and the exclusivity claim
+  // would have rejected the fix for an unbounded hold rather than the bug.
+  struct Row {
+    FailureHold hold;
+    bool by_data;
+    bool by_auth;
+    bool by_ready;
+  };
+  static const Row TABLE[] = {
+      {FailureHold::NONE,      false, false, false},
+      {FailureHold::DATA,      true,  false, false},
+      {FailureHold::SUBSCRIBE, true,  false, false},
+      {FailureHold::AUTH,      false, true,  true},
+  };
+
+  TEST_ASSERT(sizeof(TABLE) / sizeof(TABLE[0]) == sizeof(ALL) / sizeof(ALL[0]),
+              "the table covers every hold");
+
+  for (const auto &r : TABLE) {
+    TEST_ASSERT(failure_hold_released_by_data(r.hold) == r.by_data,
+                std::string(name(r.hold)) + ": inbound data " +
+                    (r.by_data ? "releases" : "does not release") + " it");
+    TEST_ASSERT(failure_hold_released_by_auth(r.hold) == r.by_auth,
+                std::string(name(r.hold)) + ": a successful auth " +
+                    (r.by_auth ? "releases" : "does not release") + " it");
+    TEST_ASSERT(failure_hold_released_by_session_ready(r.hold) == r.by_ready,
+                std::string(name(r.hold)) + ": reaching READY " +
+                    (r.by_ready ? "releases" : "does not release") + " it");
+  }
+
+  // The property that actually matters, kept as a property: no hold may be
+  // permanent. One that nothing releases silences every later fault for the
+  // rest of the boot, which is the defect the READY release exists to close.
   for (auto h : ALL) {
     if (h == FailureHold::NONE) continue;
-    const bool by_data = failure_hold_released_by_data(h);
-    const bool by_auth = failure_hold_released_by_auth(h);
-    TEST_ASSERT(by_data != by_auth,
-                std::string(name(h)) + " has exactly one release path");
+    TEST_ASSERT(failure_hold_released_by_data(h) ||
+                    failure_hold_released_by_auth(h) ||
+                    failure_hold_released_by_session_ready(h),
+                std::string(name(h)) + " has at least one release path");
   }
 
   TEST_ASSERT(!failure_hold_released_by_data(FailureHold::NONE) &&
-                  !failure_hold_released_by_auth(FailureHold::NONE),
+                  !failure_hold_released_by_auth(FailureHold::NONE) &&
+                  !failure_hold_released_by_session_ready(FailureHold::NONE),
               "NONE is not a hold, so nothing releases it");
+}
+
+void test_an_auth_hold_cannot_outlive_its_own_usefulness() {
+  std::cout << "\n=== An auth hold is bounded by READY ===" << std::endl;
+
+  // The defect the READY release closes. Nothing outranks AUTH, so before it
+  // the only exit was an AUTH_CMPL success -- which a pump that never pairs
+  // never produces. The hold then masked every later fault for the rest of the
+  // boot, and it could not even report the pairing failure any more: the fault
+  // string is displayed only while the session is NOT ready.
+  FailureHold held = FailureHold::AUTH;
+
+  // An unbonded pump keeps delivering telemetry after a failed SMP, so the
+  // session goes on to READY with the hold still set...
+  TEST_ASSERT(!failure_hold_released_by_data(held),
+              "inbound data still does not release it — while the link is "
+              "coming up, the pairing failure is the operative fault");
+  TEST_ASSERT(failure_hold_released_by_session_ready(held),
+              "...but READY does, because past that point the string is not "
+              "shown at all");
+  held = FailureHold::NONE;
+
+  // ...so a later, unrelated outage reports its own cause instead of a stale
+  // pairing string.
+  TEST_ASSERT(failure_hold_admits(held, FailureHold::DATA),
+              "a later deaf link then reports \"No data from pump\", not the "
+              "pairing failure from hours earlier");
+
+  // And the watchdog's own hold is NOT released by READY: a deaf link reaches
+  // READY on every cycle (auth completing proves only that a chain of timers
+  // ran), so releasing there would clear the reason on exactly the links it
+  // exists to describe.
+  TEST_ASSERT(!failure_hold_released_by_session_ready(FailureHold::DATA),
+              "READY does not release the watchdog's hold — it is reached on "
+              "deaf links too");
 }
 
 void test_the_release_asymmetry_is_the_reason_this_is_an_enum() {
@@ -259,7 +357,8 @@ int main() {
   test_a_hold_admits_only_its_equals_and_betters();
   test_nothing_is_held_against_a_first_reason();
   test_a_fault_refreshes_its_own_text();
-  test_every_hold_has_exactly_one_release();
+  test_the_release_matrix();
+  test_an_auth_hold_cannot_outlive_its_own_usefulness();
   test_the_release_asymmetry_is_the_reason_this_is_an_enum();
   test_the_write_sites_in_sequence();
   test_the_rank_is_pinned_and_a_new_hold_cannot_skip_a_release();

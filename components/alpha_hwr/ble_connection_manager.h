@@ -103,6 +103,13 @@ class BLEConnectionManager {
   /// connection gets recycled. No-op when no client is attached.
   void force_disconnect(const char *reason);
 
+  /// Tell the manager the GENI session reached READY. Releases an
+  /// auth-failure hold, which nothing else can do once the pump has stopped
+  /// producing AUTH_CMPL events (failure_hold.h): the pairing reason is shown
+  /// only while the session is not ready, so past this point it can no longer
+  /// report anything, only mask the next outage's cause.
+  void on_session_ready();
+
   // Debug helpers
   void dump_services();
 

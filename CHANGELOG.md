@@ -442,9 +442,25 @@
   a repeated watchdog fire keeps refreshing its own text and the backoff
   escalation ("(60s)", then "(120s)") stays visible. The release rules are
   deliberately *not* unified: inbound data releases the data and subscribe
-  holds and must not release an auth hold, which only a successful `AUTH_CMPL`
-  clears. Each is now a switch, so a new hold cannot be added without deciding
-  what releases it.
+  holds and must not release an auth hold, which a successful `AUTH_CMPL`
+  clears. Each is a switch, so a new hold cannot be added without deciding what
+  releases it.
+
+  **An auth hold is now also released when the session reaches READY**, which
+  is what stops the rank from making it permanent. Nothing outranks it, and a
+  pump that never pairs successfully never produces the `AUTH_CMPL` that clears
+  it — so on the old rule it would have masked every later fault for the rest
+  of the boot, while no longer being able to report the pairing failure at all:
+  the fault string is displayed only while the session is *not* ready. Past
+  READY the hold could only put a stale pairing reason in front of the next
+  outage's real cause. Pairing state itself is unaffected — it has its own
+  sensor. READY is a deliberately weak signal (a deaf link reaches it too), so
+  it releases *only* the auth hold: releasing the watchdog's there would clear
+  the deaf-link reason on exactly the links it describes.
+
+  One reporting change worth knowing: a failed CCCD write is recorded at the
+  lowest rank, so while another fault is held its string no longer replaces
+  what is shown. It is still logged, and it never held its reason anyway.
 
   No behaviour change on a healthy link, and no released firmware is known to
   have hit the overwrite: it needs an auth hold and then 60 s of silence, and
