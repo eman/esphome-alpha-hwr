@@ -347,9 +347,15 @@
   Replaying 30 days of stored sensor data through the companion detector: of
   1007 cells with the flag sustained, 937 had the subtraction available and
   **all 937 measured no draw** (median −0.021 GPM, max +0.134 against a 0.30
-  cut). Not one real draw reached this tier with a measurement in hand, because
-  the subtraction already answers those — so what the tier was adding there was
-  recirculation. Downstream that removed 176 minutes of published demand and 61
+  cut). Not one *measured* draw reached this tier, because the subtraction
+  already answers those — so what the tier was adding there was recirculation.
+
+  Stated as "measured" deliberately: the only instrument that could confirm a
+  real one is the subtraction being questioned. What the gate gives up is a true
+  draw whose measured value lands at or under the cut — with the subtraction's
+  −0.10 ± 0.06 GPM offset, a real draw up to roughly 0.4 GPM — ruled out by one
+  house over one month. The trade is the right one, but it is a trade, not a
+  free correction. Downstream that removed 176 minutes of published demand and 61
   sessions, and un-backdated 13 more that phantom pump-on demand had bridged
   into. Every corpus-confirmed true positive survived; they all live in the
   no-measurement cells the tier still fires on, which is what it exists for.
@@ -358,7 +364,8 @@
   measurement-derived intensity arm goes with the cells it applied to. It could
   only ever run on a value at or under the threshold, publishing levels as low
   as 0.08 — an order of magnitude *below* the no-claim constant, which asserts
-  near-zero draw rather than declining to assert (issue #173).
+  near-zero draw rather than declining to assert
+  ([issue #173](https://github.com/eman/esphome-alpha-hwr/issues/173)).
 
 - **The schedule card treated every write as successful.** `_saveChanges`
   discarded the user's pending edits at call time, then re-read the device on a
