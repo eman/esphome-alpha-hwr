@@ -69,7 +69,13 @@ inline bool gap_addr_is_set(const uint8_t *addr) {
 }
 
 inline bool gap_addr_matches(const uint8_t *event_addr, const uint8_t *peer_addr) {
-  if (event_addr == nullptr || !gap_addr_is_set(peer_addr)) {
+  // Split across two statements rather than one `||`: tools/mutation_check.sh
+  // splits its entries on `|`, so a search string containing one is silently
+  // truncated and the mutation it was meant to pin never runs.
+  if (!gap_addr_is_set(peer_addr)) {
+    return false;
+  }
+  if (event_addr == nullptr) {
     return false;
   }
   for (size_t i = 0; i < BD_ADDR_LEN; i++) {

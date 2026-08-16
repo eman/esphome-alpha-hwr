@@ -278,7 +278,7 @@ MUTATIONS=(
 "gap-security-ignores-enable-pairing|components/alpha_hwr/gap_security_policy.h|  return pairing_enabled ? GapSecurityAction::ACCEPT : GapSecurityAction::DECLINE;|  return GapSecurityAction::ACCEPT;"
 "gap-security-refuses-for-others|components/alpha_hwr/gap_security_policy.h|    return GapSecurityAction::IGNORE;\n  }\n  return pairing_enabled|    return GapSecurityAction::DECLINE;\n  }\n  return pairing_enabled"
 "gap-addr-compares-one-octet|components/alpha_hwr/gap_security_policy.h|  for (size_t i = 0; i < BD_ADDR_LEN; i++) {\n    if (event_addr[i] != peer_addr[i]) {|  for (size_t i = 0; i < 1; i++) {\n    if (event_addr[i] != peer_addr[i]) {"
-"gap-addr-unset-peer-matches|components/alpha_hwr/gap_security_policy.h|  if (event_addr == nullptr || !gap_addr_is_set(peer_addr)) {|  if (event_addr == nullptr) {"
+"gap-addr-unset-peer-matches|components/alpha_hwr/gap_security_policy.h|  if (!gap_addr_is_set(peer_addr)) {\n    return false;\n  }\n  if (event_addr == nullptr) {|  if (event_addr == nullptr) {"
 "gap-addr-unset-scan-one-octet|components/alpha_hwr/gap_security_policy.h|  for (size_t i = 0; i < BD_ADDR_LEN; i++) {\n    if (addr[i] != 0) {|  for (size_t i = 0; i < 1; i++) {\n    if (addr[i] != 0) {"
 "gap-addr-unset-first-octet-only|components/alpha_hwr/gap_security_policy.h|  for (size_t i = 0; i < BD_ADDR_LEN; i++) {\n    if (addr[i] != 0) {\n      return true;\n    }\n  }\n  return false;|  return addr[0] != 0;"
 "gap-addr-everything-is-unset|components/alpha_hwr/gap_security_policy.h|    if (addr[i] != 0) {\n      return true;\n    }|    if (addr[i] != 0) {\n      return false;\n    }"
