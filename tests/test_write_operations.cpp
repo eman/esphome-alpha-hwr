@@ -27,6 +27,7 @@
 #include "../components/alpha_hwr/control_service.h"
 #include "../components/alpha_hwr/schedule_service.h"
 #include "../components/alpha_hwr/session.h"
+#include "../components/alpha_hwr/time_service.h"
 #include "../components/alpha_hwr/transport.h"
 #include "../components/alpha_hwr/write_operation_service.h"
 #include "../components/alpha_hwr/schedule_codec.h"
@@ -50,6 +51,7 @@ using esphome::alpha_hwr::core::Transport;
 using esphome::alpha_hwr::services::ControlMode;
 using esphome::alpha_hwr::services::ControlService;
 using esphome::alpha_hwr::services::ScheduleService;
+using esphome::alpha_hwr::services::TimeService;
 using esphome::alpha_hwr::services::WriteCommand;
 using esphome::alpha_hwr::services::WriteOperationService;
 using esphome::alpha_hwr::services::WriteOrigin;
@@ -88,6 +90,29 @@ struct PumpSim {
   uint8_t max_single_events{35};
   uint8_t last_overview_write[10] = {};
   int overview_writes{0};
+
+  // Real-time clock (Object 94). Held as a UTC epoch; the sim converts to and
+  // from the local fields the wire carries, exactly as the pump would if its
+  // clock and the node's timezone agreed. Seeded to 2026-08-07 12:00:00 UTC so
+  // a test that never touches it still reads a valid time back.
+  time_t clock_epoch{1786104000};   // value at clock_base_ms
+  uint32_t clock_base_ms{0};
+  // The pump's clock RUNS. Freezing it would make the operation's
+  // "written time + elapsed" comparison drift by however long the confirm
+  // ladder took, so a retry could turn a correct sync into a mismatch and the
+  // tolerance would be silently absorbing a fixture artifact.
+  time_t clock_now() const {
+    return clock_epoch + static_cast<time_t>((mock_millis - clock_base_ms) / 1000);
+  }
+  bool respond_clock_reads{true};
+  // Swallow this many clock reads before answering again. Lets a test stretch
+  // the confirm ladder over real seconds without disabling readback for good.
+  int drop_clock_reads{0};
+  bool honor_clock_writes{true};
+  // Seconds the pump's clock sits ahead of what a write asked for, applied on
+  // top of an honored write. Models a pump that stores something other than
+  // what it was told.
+  int clock_write_skew_s{0};
 
   // Behavior switches
   bool respond_mode_reads{true};
@@ -139,7 +164,16 @@ struct Harness {
   Session session;
   ControlService control{transport, session};
   ScheduleService schedule{transport, session};
-  WriteOperationService write_op{control, schedule};
+  // The node's own wall clock, as ESPHome's time component would supply it.
+  // Built with -DUSE_TIME so TimeService::current_time() is the real function
+  // here, not its stub -- SET_CLOCK's confirm reads this on every readback.
+  esphome::time::RealTimeClock node_clock;
+  TimeService time_service{&transport};
+  // Epoch the node clock reads at node_clock_base_ms; advance() carries it
+  // forward with mock time so the confirm sees two clocks that both run.
+  time_t node_epoch{1786104000};
+  uint32_t node_clock_base_ms{0};
+  WriteOperationService write_op{control, schedule, time_service};
   PumpSim sim;
 
   bool ready{true};
@@ -156,6 +190,9 @@ struct Harness {
   int frames_class3_remote{0}; // Class 3 remote enable/disable commands
   int frames_dhw_read{0};   // Obj 91 Sub 421 reads
   int frames_dhw_write{0};  // Obj 91 Sub 421 writes
+  int frames_clock_read{0};   // Obj 94 Sub 101 reads
+  int frames_clock_write{0};  // Obj 94 Sub 100 writes
+  std::vector<uint8_t> last_clock_write;  // the whole 22-byte clock-write APDU
   std::vector<uint8_t> last_0601_setpoint_bytes;
   std::vector<uint8_t> last_dhw_write_setpoint;
   std::vector<uint8_t> last_temp_write_tail;
@@ -168,6 +205,13 @@ struct Harness {
   std::vector<uint8_t> out_buf;  // outgoing frame reassembly
 
   Harness() {
+    // mock_millis is a file-global that keeps climbing across tests, so the
+    // sim's running clock has to be based at whatever "now" this harness was
+    // built at, not at zero.
+    sim.clock_base_ms = mock_millis;
+    node_clock_base_ms = mock_millis;
+    time_service.set_time_id(&node_clock);
+    tick_node_clock();
     session.on_authenticated();
     control.set_schedule_callback([this](std::function<void()> fn, uint32_t delay) {
       tasks.push_back({mock_millis + delay, std::move(fn)});
@@ -291,6 +335,34 @@ struct Harness {
         }
       }
       inject_short_ack();
+    } else if (opspec == 0x03 && apdu_len >= 5 && apdu[2] == 0x5E && apdu[3] == 0x00 &&
+               apdu[4] == 0x65) {
+      // Obj 94 Sub 101 DateTimeActual read
+      frames_clock_read++;
+      if (sim.drop_clock_reads > 0) {
+        sim.drop_clock_reads--;
+      } else if (sim.respond_clock_reads) {
+        inject_clock_response();
+      }
+    } else if (opspec == 0x94 && apdu_len >= 22 && apdu[2] == 0x5E && apdu[3] == 0x00 &&
+               apdu[4] == 0x64) {
+      // Obj 94 Sub 100 DateTimeConfig write. The pump answers nothing the
+      // firmware waits for, so no injection here -- which is the point of the
+      // operation confirming by reading Sub 101 back.
+      frames_clock_write++;
+      last_clock_write.assign(apdu, apdu + 22);
+      if (sim.honor_clock_writes) {
+        struct tm t {};
+        t.tm_year = ((apdu[12] << 8) | apdu[13]) - 1900;
+        t.tm_mon = apdu[14] - 1;
+        t.tm_mday = apdu[15];
+        t.tm_hour = apdu[16];
+        t.tm_min = apdu[17];
+        t.tm_sec = apdu[18];
+        t.tm_isdst = -1;
+        sim.clock_epoch = ::mktime(&t) + sim.clock_write_skew_s;
+        sim.clock_base_ms = mock_millis;
+      }
     } else if (apdu[2] == 84 && apdu_len >= 5) {
       uint16_t sub = (apdu[3] << 8) | apdu[4];
       if (opspec == 0x03) {
@@ -376,14 +448,63 @@ struct Harness {
     inject(std::move(f));
   }
 
+  // Obj 94 Sub 101 DateTimeActual reply, transcribed from the bench pump
+  // (2026-08-15). Two captured samples, byte for byte:
+  //
+  //   00 00 0C 07 EA 08 0F 14 26 37 48 00 06 00 01   -> 2026-08-15 20:38:55
+  //   00 00 0C 07 EA 08 0F 14 27 08 13 00 06 00 01   -> 2026-08-15 20:39:08
+  //
+  // Fifteen bytes as the command callback receives them: a three-byte size
+  // header (00 00 0C = 12, and twelve bytes do follow), then year big-endian,
+  // month, day, hour, minute, second, then five more. The first of those five
+  // moved between the samples (0x48, 0x13) and the remaining four did not;
+  // it is not identified here and the parser reads none of them.
+  //
+  // The tail is the reason this fixture is transcribed rather than trimmed to
+  // the seven bytes the parser actually consumes. A fixture carrying only what
+  // the parser reads proves the parser can read its own fixture; carrying what
+  // the pump sends proves it tolerates the real reply.
+  void inject_clock_response() {
+    const time_t epoch = sim.clock_now();
+    struct tm t {};
+    ::localtime_r(&epoch, &t);
+    const uint16_t year = static_cast<uint16_t>(t.tm_year + 1900);
+    // Identity bytes 6-9 are 00 01 42 01, which is the measured value for
+    // 94/101 and NOT what inject_data_object_frame() can express -- it pins
+    // bytes 6-7 to 00 00, right for Object 84 and wrong here. Read as the
+    // transport reads them, byte 6 is 00, bytes 7-8 are the type (0x0142 =
+    // 322) and byte 9 is the version (1).
+    //
+    // Byte 5 is 0x13. In a real frame that field is the APDU body length, and
+    // this frame is 27 bytes: 10 header + 15 body + 2 CRC, so 27 - 8 = 19 =
+    // 0x13. It is the true value here rather than a constant that happens to
+    // miss the register-read length blocklist.
+    std::vector<uint8_t> f = {0x24, 0x17, 0xF8, 0xE7, 0x0A, 0x13,
+                              0x00, 0x01, 0x42, 0x01,
+                              0x00, 0x00, 0x0C,
+                              static_cast<uint8_t>((year >> 8) & 0xFF),
+                              static_cast<uint8_t>(year & 0xFF),
+                              static_cast<uint8_t>(t.tm_mon + 1),
+                              static_cast<uint8_t>(t.tm_mday),
+                              static_cast<uint8_t>(t.tm_hour),
+                              static_cast<uint8_t>(t.tm_min),
+                              static_cast<uint8_t>(t.tm_sec),
+                              // The captured tail, kept verbatim.
+                              0x48, 0x00, 0x06, 0x00, 0x01,
+                              0xAA, 0xBB};
+    inject(std::move(f));
+  }
+
   void inject_short_ack() {
     inject({0x24, 0x05, 0xF8, 0xE7, 0x0A, 0x01, 0x00, 0xAA, 0xBB});
   }
 
-  // Object 84 response frames use a plain DataObject shape: OpSpec 0x13
-  // (not in the register-read set), Obj at bytes 8-9, payload at byte 10
-  // with a [00 00 XX] header the parsers skip.
-  void inject_obj84_frame(uint8_t obj_hi, uint8_t obj_lo, const uint8_t *body, size_t body_len) {
+  // Object 84 and Object 94 replies share one DataObject shape: OpSpec 0x13
+  // (not in the register-read set), type at bytes 8-9, payload at byte 10 with
+  // a [00 00 XX] size header the parsers skip. Byte 5 is the APDU body length
+  // in real frames rather than the constant used here; nothing in the matching
+  // path reads it except the register-read length blocklist, which 0x13 misses.
+  void inject_data_object_frame(uint8_t obj_hi, uint8_t obj_lo, const uint8_t *body, size_t body_len) {
     std::vector<uint8_t> f = {0x24, 0, 0xF8, 0xE7, 0x0A, 0x13, 0x00, 0x00, obj_hi, obj_lo,
                               0x00, 0x00, static_cast<uint8_t>(body_len)};
     f.insert(f.end(), body, body + body_len);
@@ -397,22 +518,35 @@ struct Harness {
     uint8_t overview[10] = {0x8C, sim.max_single_events, 0x05, 0x05,
                             static_cast<uint8_t>(sim.sched_enabled ? 1 : 0),
                             0x01, 0x00, 0x00, 0x00, 0x00};
-    inject_obj84_frame(0xDA, 0x01, overview, 10);
+    inject_data_object_frame(0xDA, 0x01, overview, 10);
   }
 
   void inject_layer_frame(uint8_t layer) {
-    inject_obj84_frame(0xDE, 0x01, sim.layers[layer], 42);
+    inject_data_object_frame(0xDE, 0x01, sim.layers[layer], 42);
   }
 
   void inject_single_event_frame(uint8_t slot) {
-    inject_obj84_frame(0xDC, 0x01, sim.single_events[slot], 10);
+    inject_data_object_frame(0xDC, 0x01, sim.single_events[slot], 10);
   }
 
   // -- Time driver
+  void tick_node_clock() {
+    node_clock.set_epoch_for_test(node_epoch +
+                                  static_cast<time_t>((mock_millis - node_clock_base_ms) / 1000));
+  }
+
+  /** Point the node's wall clock at `epoch` as of now; it runs from there. */
+  void set_node_time(time_t epoch) {
+    node_epoch = epoch;
+    node_clock_base_ms = mock_millis;
+    tick_node_clock();
+  }
+
   void advance(uint32_t ms) {
     uint64_t end = mock_millis + ms;
     while (mock_millis < end) {
       mock_millis += 10;
+      tick_node_clock();
       for (size_t i = 0; i < injections.size();) {
         if (injections[i].due <= mock_millis) {
           auto frame = injections[i].frame;
@@ -1821,6 +1955,375 @@ static void test_refresh_schedule_partial_layer_failure() {
               "a single failed layer fails the whole read");
 }
 
+// ---------------------------------------------------------------------------
+// SET_CLOCK (Object 94). Every one of these drives the shipped operation
+// against the simulator; before it existed the clock write had no host test at
+// all and reported success from having formatted a packet.
+// ---------------------------------------------------------------------------
+
+// The node's wall clock, as ESPHome would hand it over. main() pins TZ=UTC, so
+// the local fields on the wire and the UTC epochs the sim keeps are the same
+// numbers and no test here is measuring the timezone engine.
+static esphome::ESPTime node_time(time_t epoch) {
+  return esphome::ESPTime::from_epoch_local(epoch);
+}
+
+static void test_set_clock_accepted() {
+  std::cout << "\n=== set_clock: pump takes the write and confirms ===" << std::endl;
+  Harness h;
+  h.prime_cache();
+  const time_t now = 1786104000;      // 2026-08-07 12:00:00 UTC
+  h.sim.clock_epoch = now - 3600;     // pump an hour behind
+  h.sim.clock_base_ms = mock_millis;
+
+  h.write_op.submit_set_clock(node_time(now), "clk1");
+  h.advance(10000);
+
+  TEST_ASSERT(h.events_for("clk1") == 1, "exactly one terminal event");
+  const WriteResult *r = h.result_for("clk1");
+  TEST_ASSERT(r && r->status == WriteStatus::ACCEPTED, "a confirmed sync settles ACCEPTED");
+  TEST_ASSERT(r && !std::isnan(r->clock_offset_s) && std::fabs(r->clock_offset_s) <= 1.0f,
+              "the settled offset is the measured post-write drift, near zero");
+  TEST_ASSERT(h.frames_clock_write == 1, "exactly one Sub 100 write went out");
+  TEST_ASSERT(h.frames_clock_read >= 1, "the confirm read Sub 101 back");
+  TEST_ASSERT(r && r->command == WriteCommand::SET_CLOCK, "reported as set_clock");
+}
+
+static void test_set_clock_wire_struct() {
+  std::cout << "\n=== set_clock: the APDU on the wire ===" << std::endl;
+  Harness h;
+  h.prime_cache();
+  // 2026-08-07 12:34:56 UTC. Year 2026 = 0x07EA, so a little-endian slip or a
+  // shifted field shows up as a specific wrong byte rather than as "invalid".
+  h.set_node_time(1786106096);
+  h.write_op.submit_set_clock(node_time(1786106096), "clk_wire");
+  h.advance(10000);
+
+  // The whole APDU, not just the struct. The eleven header bytes carry the
+  // object, sub-id, type, version and declared size, and until this asserted
+  // them a skeptic could corrupt the type, the version or the size byte and
+  // watch the entire suite stay green -- the simulator only matches on
+  // apdu[1..4] and only reads apdu[11..].
+  //
+  // Shape bench-captured from the pump on 2026-08-15; this fixture writes
+  // 2026-08-07 12:34:56 rather than the captured instant.
+  static const uint8_t EXPECTED[22] = {
+      0x0A,                    // Class 10
+      0x94,                    // OpSpec: SET + 20 body bytes
+      0x5E,                    // Object 94
+      0x00, 0x64,              // Sub-ID 100 (DateTimeConfig)
+      0x01, 0x41,              // Type 321
+      0x02,                    // Object version 2
+      0x00, 0x00, 0x0B,        // Declared size: 11 data bytes
+      0x01,                    // leading struct byte
+      0x07, 0xEA,              // year 2026, big-endian (AGENTS §3)
+      0x08, 0x07,              // month, day
+      0x0C, 0x22, 0x38,        // hour 12, minute 34, second 56
+      0x00, 0x00, 0x00};       // tail padding
+  TEST_ASSERT(h.last_clock_write.size() == 22, "22-byte APDU");
+  if (h.last_clock_write.size() == 22) {
+    bool same = true;
+    for (size_t i = 0; i < 22; i++) {
+      if (h.last_clock_write[i] != EXPECTED[i]) {
+        same = false;
+        std::cout << "  byte " << i << ": got 0x" << std::hex
+                  << static_cast<int>(h.last_clock_write[i]) << " want 0x"
+                  << static_cast<int>(EXPECTED[i]) << std::dec << std::endl;
+      }
+    }
+    TEST_ASSERT(same, "every byte matches the documented frame");
+    // Stated separately, so an edit that moves a field and keeps the frame
+    // self-consistent still fails the byte compare, and one that breaks the
+    // self-consistency fails here too.
+    const auto &w = h.last_clock_write;
+    TEST_ASSERT((w[1] & 0x7F) == 20, "OpSpec declares 20 body bytes");
+    TEST_ASSERT(w[10] == w.size() - 11, "declared size equals the data that follows");
+  }
+}
+
+static void test_set_clock_ignored_write_is_rejected() {
+  std::cout << "\n=== set_clock: pump ignores the write ===" << std::endl;
+  Harness h;
+  h.prime_cache();
+  const time_t now = 1786104000;
+  h.sim.honor_clock_writes = false;   // the frame lands nowhere
+  h.sim.clock_epoch = now - 600;      // and the pump stays ten minutes behind
+  h.sim.clock_base_ms = mock_millis;
+
+  h.write_op.submit_set_clock(node_time(now), "clk2");
+  h.advance(20000);
+
+  TEST_ASSERT(h.events_for("clk2") == 1, "exactly one terminal event");
+  const WriteResult *r = h.result_for("clk2");
+  TEST_ASSERT(r && r->status == WriteStatus::REJECTED,
+              "a pump that kept its old clock settles REJECTED, not ACCEPTED");
+  TEST_ASSERT(r && r->detail.find("-600 s off") != std::string::npos,
+              "the detail carries the measured offset");
+  TEST_ASSERT(r && r->clock_offset_s < -599.0f && r->clock_offset_s > -601.0f,
+              "clock_offset_s reports the drift the pump still holds");
+  // This is the case the old code reported as success: it called back true on
+  // the line after send, so "Last Clock Sync" advanced and the next attempt was
+  // suppressed for 24 h with the pump ten minutes out.
+}
+
+static void test_set_clock_already_correct_is_accepted() {
+  std::cout << "\n=== set_clock: pump was already right ===" << std::endl;
+  Harness h;
+  h.prime_cache();
+  const time_t now = 1786104000;
+  h.sim.honor_clock_writes = false;   // nothing applies the write...
+  h.sim.clock_epoch = now;            // ...but the pump already holds the time
+  h.sim.clock_base_ms = mock_millis;
+
+  h.write_op.submit_set_clock(node_time(now), "clk3");
+  h.advance(10000);
+
+  const WriteResult *r = h.result_for("clk3");
+  TEST_ASSERT(h.events_for("clk3") == 1, "exactly one terminal event");
+  TEST_ASSERT(r && r->status == WriteStatus::ACCEPTED,
+              "the confirm answers 'does the pump hold the right time', not "
+              "'did our frame put it there'");
+}
+
+static void test_set_clock_unreadable_is_timeout() {
+  std::cout << "\n=== set_clock: readback never answers ===" << std::endl;
+  Harness h;
+  h.prime_cache();
+  h.sim.respond_clock_reads = false;
+
+  h.write_op.submit_set_clock(node_time(1786104000), "clk4");
+  h.advance(30000);
+
+  TEST_ASSERT(h.events_for("clk4") == 1, "exactly one terminal event");
+  const WriteResult *r = h.result_for("clk4");
+  TEST_ASSERT(r && r->status == WriteStatus::TIMEOUT,
+              "an undecodable readback is TIMEOUT, not REJECTED -- nothing is "
+              "known about the pump's clock");
+  TEST_ASSERT(r && r->detail == "pump clock unreadable",
+              "settled on the read result, not the operation watchdog");
+  TEST_ASSERT(r && std::isnan(r->clock_offset_s), "no offset is claimed");
+  TEST_ASSERT(h.frames_clock_read == 3, "the initial confirm plus two retries");
+}
+
+static void test_set_clock_slow_ladder_is_not_drift() {
+  std::cout << "\n=== set_clock: a slow confirm is not drift ===" << std::endl;
+  Harness h;
+  h.prime_cache();
+  const time_t now = 1786104000;
+  h.sim.clock_epoch = now - 3600;
+  h.sim.clock_base_ms = mock_millis;
+  // Swallow the first two readbacks so each costs a full 5 s APDU timeout on
+  // top of the 1.5 s retry delay. By the time the third answers, ~14 s of mock
+  // time has passed and the pump's clock -- which runs -- has moved with it.
+  h.sim.drop_clock_reads = 2;
+
+  const uint32_t started = mock_millis;
+  h.write_op.submit_set_clock(node_time(now), "clk5");
+  h.advance(24000);
+
+  TEST_ASSERT(mock_millis - started > 10000, "the ladder really did take over 10 s");
+  TEST_ASSERT(h.events_for("clk5") == 1, "exactly one terminal event");
+  const WriteResult *r = h.result_for("clk5");
+  // Both clocks run, and the confirm reads them at one instant, so however long
+  // the ladder took cancels. An implementation that instead projects the
+  // submitted time forward has to get the elapsed interval exactly right --
+  // measured from the moment the frame was actually SENT, which nothing here
+  // can observe -- and every millisecond it is wrong by lands in the offset.
+  TEST_ASSERT(r && r->status == WriteStatus::ACCEPTED,
+              "a slow confirm ladder does not manufacture drift");
+  TEST_ASSERT(r && std::fabs(r->clock_offset_s) <= 1.0f, "the measured offset stays near zero");
+}
+
+static void test_set_clock_pre_2019_pump_clock_is_rejected_not_timeout() {
+  std::cout << "\n=== set_clock: pump RTC reset to 2000 ===" << std::endl;
+  Harness h;
+  h.prime_cache();
+  const time_t now = 1786104000;          // node: 2026-08-07 12:00:00 UTC
+  h.sim.honor_clock_writes = false;       // the write does not take
+  h.sim.clock_epoch = 946684800;          // pump: 2000-01-01, an RTC cleared by a power cut
+  h.sim.clock_base_ms = mock_millis;
+
+  h.write_op.submit_set_clock(node_time(now), "clk_old");
+  h.advance(20000);
+
+  TEST_ASSERT(h.events_for("clk_old") == 1, "exactly one terminal event");
+  const WriteResult *r = h.result_for("clk_old");
+  // ESPTime::is_valid() floors the year at 2019, so testing the readback with
+  // it would call a perfectly decoded 2000-01-01 "unreadable" -- reporting the
+  // one case where the offset matters most as though nothing came back.
+  TEST_ASSERT(r && r->status == WriteStatus::REJECTED,
+              "a decoded but ancient clock is REJECTED, not TIMEOUT");
+  TEST_ASSERT(r && !std::isnan(r->clock_offset_s) && r->clock_offset_s < -8.0e8f,
+              "and the event carries the ~26-year offset it measured");
+}
+
+static void test_set_clock_survives_the_dst_fall_back_fold() {
+  std::cout << "\n=== set_clock: inside the DST fall-back hour ===" << std::endl;
+  // 2026-11-01 01:30 US Pacific happens twice: once at 01:30 PDT (epoch
+  // 1793521800) and again an hour later at 01:30 PST (1793525400). ESPHome
+  // resolves such a local time toward standard time, so a readback of the wall
+  // clock we just wrote comes back as the LATER instant.
+  //
+  // The node's own clock knows which one it is. Comparing that exact epoch
+  // against the readback's re-resolved one differs by exactly 3600 inside the
+  // fold, which settles a correct sync REJECTED and retries every 15 minutes
+  // until 02:00. Both sides are resolved by the same rule now, so the
+  // ambiguity cancels.
+  setenv("TZ", "PST8PDT,M3.2.0/2,M11.1.0/2", 1);
+  tzset();
+  {
+    // Which of the two instants libc re-derives from those local fields is a
+    // platform decision -- glibc and macOS disagree -- and the node's clock
+    // must be set to the OTHER one for this to detect anything. Otherwise the
+    // exact epoch and the re-resolved one coincide, the missing conversion
+    // makes no difference, and the test passes against the bug. That is not
+    // hypothetical: this mutation was caught on macOS and survived on Linux CI
+    // until the fold was resolved here rather than assumed.
+    const time_t fold_pdt = 1793521800;  // 01:30 PDT, the first pass
+    const time_t fold_pst = 1793525400;  // 01:30 PST, an hour later
+    struct tm fields {};
+    ::localtime_r(&fold_pdt, &fields);
+    fields.tm_isdst = -1;
+    const time_t preferred = ::mktime(&fields);
+    const time_t node_epoch = (preferred == fold_pdt) ? fold_pst : fold_pdt;
+
+    Harness h;
+    h.prime_cache();
+    h.set_node_time(node_epoch);
+    h.sim.clock_epoch = node_epoch - 900;  // pump 15 min behind, same fold
+    h.sim.clock_base_ms = mock_millis;
+
+    h.write_op.submit_set_clock(node_time(node_epoch), "clk_dst");
+    h.advance(15000);
+
+    TEST_ASSERT(h.events_for("clk_dst") == 1, "exactly one terminal event");
+    const WriteResult *r = h.result_for("clk_dst");
+    TEST_ASSERT(r && r->status == WriteStatus::ACCEPTED,
+                "a sync inside the ambiguous hour still confirms");
+    TEST_ASSERT(r && std::fabs(r->clock_offset_s) <= 1.0f,
+                "and reports no offset -- not the 3600 s the fold would inject");
+  }
+  // Every other test in this file assumes the UTC pin main() set.
+  setenv("TZ", "UTC", 1);
+  tzset();
+}
+
+static void test_set_clock_queue_latency_is_not_the_pumps_drift() {
+  std::cout << "\n=== set_clock: the frame waits behind a busy transport ===" << std::endl;
+  Harness h;
+  h.prime_cache();
+  const time_t now = 1786104000;
+  h.sim.clock_epoch = now;
+  h.sim.clock_base_ms = mock_millis;
+  h.set_node_time(now);
+
+  // Park two commands the pump will never answer in front of the clock write.
+  // The transport is strictly FIFO and runs one command at a time, so the SET
+  // frame does not reach the wire until both have timed out -- while the local
+  // fields inside it still say when it was built.
+  h.sim.respond_mode_reads = false;
+  h.control.get_mode_async(nullptr);
+  h.control.get_mode_async(nullptr);
+
+  h.write_op.submit_set_clock(node_time(now), "clk_busy");
+  h.advance(40000);
+
+  TEST_ASSERT(h.frames_clock_write == 1, "the write did go out, late");
+  TEST_ASSERT(h.events_for("clk_busy") == 1, "exactly one terminal event");
+  const WriteResult *r = h.result_for("clk_busy");
+  // The pump applied exactly what it was sent, and is now behind by however
+  // long the frame waited -- a real residual, caused by us. Against a flat
+  // +/-5 s window that settled REJECTED with one command parked ahead and
+  // worse with two, then retried every 15 minutes for as long as the link
+  // stayed busy, since the ladder never re-sends the write.
+  TEST_ASSERT(r && r->status == WriteStatus::ACCEPTED,
+              "a slow send is not reported as a failed sync");
+  // The offset is still REPORTED -- the pump really did end up behind by the
+  // time the frame spent in the queue, and hiding that would be the other kind
+  // of lie. What changes is the verdict: a lag no larger than the operation's
+  // own age is ours, not the pump's.
+  TEST_ASSERT(r && r->clock_offset_s < -1.0f,
+              "the real residual lag is measured and reported, not zeroed");
+}
+
+static void test_set_clock_below_the_sntp_floor_never_writes() {
+  std::cout << "\n=== set_clock: node clock below the 2021 floor ===" << std::endl;
+  Harness h;
+  h.prime_cache();
+
+  // 2020-06-01. Passes ESPTime::is_valid(), whose floor is 2019, and fails the
+  // operation's own 2021 floor -- an ESP32 that partially restored time rather
+  // than one that has none. Without the second half of that guard this reaches
+  // the wire and writes a year-old clock into the pump.
+  h.write_op.submit_set_clock(node_time(1590969600), "clk_2020");
+  h.advance(3000);
+
+  TEST_ASSERT(h.events_for("clk_2020") == 1, "exactly one terminal event");
+  const WriteResult *r = h.result_for("clk_2020");
+  TEST_ASSERT(r && r->status == WriteStatus::INVALID, "settles INVALID before any wire write");
+  TEST_ASSERT(h.frames_clock_write == 0, "and nothing reached the wire");
+}
+
+static void test_set_clock_invalid_time_never_writes() {
+  std::cout << "\n=== set_clock: no system time to write ===" << std::endl;
+  Harness h;
+  h.prime_cache();
+
+  h.write_op.submit_set_clock(esphome::ESPTime{}, "clk6");
+  h.advance(2000);
+
+  TEST_ASSERT(h.events_for("clk6") == 1, "exactly one terminal event");
+  const WriteResult *r = h.result_for("clk6");
+  TEST_ASSERT(r && r->status == WriteStatus::INVALID,
+              "an unset time is INVALID -- deterministic, never worth a retry");
+  TEST_ASSERT(h.frames_clock_write == 0, "and nothing reached the wire");
+}
+
+static void test_set_clock_supersedes_only_other_clock_writes() {
+  std::cout << "\n=== set_clock: supersede scope ===" << std::endl;
+  Harness h;
+  h.prime_cache();
+  const time_t now = 1786104000;
+
+  // First one starts immediately and runs to its own terminal status; the
+  // second and third queue behind it on the same "clock" key.
+  h.write_op.submit_set_clock(node_time(now), "clk_a");
+  h.write_op.submit_set_clock(node_time(now + 1), "clk_b");
+  h.write_op.submit_set_setpoint(ControlMode::CONSTANT_SPEED, 2000, "sp_x");
+  h.write_op.submit_set_clock(node_time(now + 2), "clk_c");
+  h.advance(30000);
+
+  TEST_ASSERT(h.events_for("clk_a") == 1 && h.events_for("clk_b") == 1 &&
+                  h.events_for("clk_c") == 1 && h.events_for("sp_x") == 1,
+              "one terminal event each");
+  const WriteResult *b = h.result_for("clk_b");
+  TEST_ASSERT(b && b->status == WriteStatus::SUPERSEDED,
+              "a queued clock sync is superseded by a newer one");
+  const WriteResult *x = h.result_for("sp_x");
+  TEST_ASSERT(x && x->status != WriteStatus::SUPERSEDED,
+              "a queued setpoint is untouched -- the clock is its own resource");
+}
+
+static void test_set_clock_disconnect_mid_op() {
+  std::cout << "\n=== set_clock: disconnect during the confirm ===" << std::endl;
+  Harness h;
+  h.prime_cache();
+
+  h.write_op.submit_set_clock(node_time(1786104000), "clk7");
+  // Past the 1500 ms settle delay, so a Sub 101 readback is genuinely in
+  // flight rather than merely scheduled -- the harder of the two windows, and
+  // the one the test's name claims.
+  h.sim.drop_clock_reads = 1;
+  h.advance(1700);
+  h.write_op.on_disconnect();
+  h.advance(20000);
+
+  TEST_ASSERT(h.events_for("clk7") == 1,
+              "exactly one terminal event across the drop");
+  const WriteResult *r = h.result_for("clk7");
+  TEST_ASSERT(r && r->status == WriteStatus::TIMEOUT, "terminated by the disconnect");
+}
+
 static void test_refresh_single_events_all_slots_fail() {
   std::cout << "\n=== refresh_single_events: every slot read fails (issue #136) ===" << std::endl;
   Harness h;
@@ -1929,6 +2432,7 @@ static void test_command_strings() {
       {WriteCommand::CLEAR_SCHEDULE_ENTRY, "clear_schedule_entry"},
       {WriteCommand::SET_SCHEDULE_ENABLED, "set_schedule_enabled"},
       {WriteCommand::SET_REMOTE_MODE, "set_remote_mode"},
+      {WriteCommand::SET_CLOCK, "set_clock"},
       {WriteCommand::SET_SINGLE_EVENT, "set_single_event"},
       {WriteCommand::CLEAR_SINGLE_EVENT, "clear_single_event"},
       {WriteCommand::REFRESH_SCHEDULE, "refresh_schedule"},
@@ -1950,7 +2454,7 @@ static void test_command_strings() {
   //
   // It covers one of the two ways to add a command. An enumerator added with
   // no case in write_command_to_string() returns "unknown", leaving the count
-  // at 15, so this assert stays green -- that half is caught by -Wswitch and
+  // where the table left it, so this assert stays green -- that half is caught by -Wswitch and
   // CI's warnings-are-errors build, not here. Weakening either leaves the gap
   // uncovered.
   size_t named = 0;
@@ -2336,6 +2840,19 @@ int main() {
   test_refresh_ops();
   test_refresh_schedule_all_layers_fail();
   test_refresh_schedule_partial_layer_failure();
+  test_set_clock_accepted();
+  test_set_clock_wire_struct();
+  test_set_clock_ignored_write_is_rejected();
+  test_set_clock_already_correct_is_accepted();
+  test_set_clock_unreadable_is_timeout();
+  test_set_clock_slow_ladder_is_not_drift();
+  test_set_clock_queue_latency_is_not_the_pumps_drift();
+  test_set_clock_below_the_sntp_floor_never_writes();
+  test_set_clock_pre_2019_pump_clock_is_rejected_not_timeout();
+  test_set_clock_survives_the_dst_fall_back_fold();
+  test_set_clock_invalid_time_never_writes();
+  test_set_clock_supersedes_only_other_clock_writes();
+  test_set_clock_disconnect_mid_op();
   test_refresh_single_events_all_slots_fail();
   test_single_event_read_failure_blocks_slot_allocation();
   test_mode_strings();

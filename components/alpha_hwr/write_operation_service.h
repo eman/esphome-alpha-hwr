@@ -8,6 +8,7 @@
 #include <vector>
 #include "control_service.h"
 #include "schedule_codec.h"
+#include "esphome/core/time.h"
 
 namespace esphome {
 namespace alpha_hwr {
@@ -28,6 +29,7 @@ enum class WriteCommand : uint8_t {
   CLEAR_SCHEDULE_ENTRY,
   SET_SCHEDULE_ENABLED,
   SET_REMOTE_MODE,
+  SET_CLOCK,        // pump RTC sync; internal-only, no service, event-surface
   SET_SINGLE_EVENT,
   CLEAR_SINGLE_EVENT,
   REFRESH_SCHEDULE,
@@ -124,6 +126,11 @@ struct WriteResult {
   int8_t sched_enabled{-1};
   int16_t event_count{-1};
 
+  // SET_CLOCK: the pump's clock minus the node's, in seconds, measured by the
+  // confirm readback AFTER the write. Positive = the pump runs ahead. NAN when
+  // the readback never produced a usable time.
+  float clock_offset_s{NAN};
+
   // UPLOAD_SCHEDULE: per-layer outcome summary + post-op canonical hash
   std::string layers_written;   // e.g. "0,2"
   std::string layers_skipped;   // e.g. "1,3,4" (already matching, no write)
@@ -180,6 +187,7 @@ inline bool result_republishes_schedule(const WriteResult &r) {
 }
 
 class ScheduleService;
+class TimeService;
 
 /**
  * Write-operation layer (issue #92).
@@ -208,7 +216,7 @@ class ScheduleService;
  */
 class WriteOperationService {
  public:
-  WriteOperationService(ControlService &control, ScheduleService &schedule);
+  WriteOperationService(ControlService &control, ScheduleService &schedule, TimeService &time);
 
   /** Delegate for scheduling delayed steps (the component's set_timeout). */
   void set_schedule_callback(std::function<void(std::function<void()>, uint32_t)> callback) {
@@ -243,6 +251,23 @@ class WriteOperationService {
   void submit_set_remote_mode(bool enabled, const std::string &op_id,
                               std::function<void(bool)> done = nullptr,
                               WriteOrigin origin = WriteOrigin::SERVICE);
+  /**
+   * Write the pump's real-time clock (Object 94 Sub 100) and confirm it by
+   * reading Sub 101 back.
+   *
+   * The time is a PARAMETER, not something this layer reads from a clock of
+   * its own: only the component owns `time_id`, and §8.4 wants the wire step
+   * built from what the caller asked for. The confirm compares the readback
+   * against `local_now` advanced by the milliseconds that have since elapsed,
+   * so a slow confirm does not read as drift.
+   *
+   * ACCEPTED means the pump now holds the right time, which is the question
+   * worth answering -- not "our frame is what put it there". A pump that was
+   * already correct settles ACCEPTED, and so it should.
+   */
+  void submit_set_clock(const ESPTime &local_now, const std::string &op_id,
+                        std::function<void(bool)> done = nullptr,
+                        WriteOrigin origin = WriteOrigin::INTERNAL);
   void submit_set_mode(ControlMode mode, const std::string &op_id,
                        std::function<void(bool)> done = nullptr,
                        WriteOrigin origin = WriteOrigin::SERVICE);
@@ -369,6 +394,16 @@ class WriteOperationService {
     // counter's declaration for why sticky validity is not enough.
     uint32_t pre_remote_observations{0};
 
+    // SET_CLOCK: the local time written, and what the readback measured
+    // against the node's clock afterwards.
+    ESPTime clock_now{};
+    // millis() when the wire step ran. Not used to project the written time
+    // forward -- the confirm compares two clocks at one instant -- but to bound
+    // how far the pump may legitimately lag us: the frame cannot have reached
+    // it before this, so it cannot be behind by more than the operation's age.
+    uint32_t clock_submitted_ms{0};
+    float clock_offset_s{NAN};
+
     // Schedule fields
     uint8_t layer{0};
     uint8_t day_index{0};
@@ -434,6 +469,8 @@ class WriteOperationService {
   void confirm_schedule_entry_(uint32_t seq);
   void run_remote_mode_(uint32_t seq);
   void confirm_remote_mode_(uint32_t seq);
+  void run_set_clock_(uint32_t seq);
+  void confirm_set_clock_(uint32_t seq);
   void run_schedule_enabled_(uint32_t seq);
   void confirm_schedule_enabled_(uint32_t seq);
   void run_single_event_(uint32_t seq);
@@ -461,6 +498,7 @@ class WriteOperationService {
 
   ControlService &control_;
   ScheduleService &schedule_service_;
+  TimeService &time_service_;
 
   std::deque<Operation> queue_;
   uint32_t next_seq_{1};
@@ -498,6 +536,31 @@ class WriteOperationService {
   // to ENABLED_MAX_ATTEMPTS retries), so it gets the same budget: the retry
   // ladder is 800 + 2x1000 ms of delay on top of the APDU timeouts.
   static constexpr uint32_t WATCHDOG_REMOTE_MODE_MS = 12000;
+  // SET_CLOCK: a fire-and-forget write (no ACK window at all -- an APDU with
+  // no callback is popped as soon as its last chunk goes out), then the settle
+  // delay and, only while the readback will not decode, up to
+  // CLOCK_MAX_ATTEMPTS retries. That is CLOCK_MAX_ATTEMPTS + 1 = three reads
+  // at the 5 s timeout get_clock_async() asks for: 1500 + 3 x (5000 + 1500) =
+  // 19500 ms with an idle transport, measured at 19560.
+  static constexpr uint32_t CLOCK_CONFIRM_DELAY_MS = 1500;
+  static constexpr uint32_t CLOCK_RETRY_DELAY_MS = 1500;
+  static constexpr uint8_t CLOCK_MAX_ATTEMPTS = 2;
+  // How far the pump's clock may sit from the node's and still count as
+  // synced. The pump stores whole seconds and the readback is a second BLE
+  // round trip after the write, so a correct sync lands a second or two out as
+  // a matter of course; 5 s leaves room for that without being able to hide a
+  // write the pump ignored, which shows up as the accumulated drift that made
+  // the sync due in the first place. Applied tightly when the pump reads AHEAD
+  // and with the operation's own age added when it reads behind -- see the
+  // confirm for why those two directions are not symmetric.
+  static constexpr int32_t CLOCK_TOLERANCE_S = 5;
+  // 30 s, not 25: the ladder above measures 19.56 s with the transport to
+  // itself, and it does not have the transport to itself. Every readback queues
+  // behind whatever telemetry or schedule read is already in flight, and at
+  // 25 s the margin was under two blocked commands -- close enough that a
+  // confirm which would have succeeded settles on the watchdog instead, which
+  // reports TIMEOUT and waits 15 minutes.
+  static constexpr uint32_t WATCHDOG_SET_CLOCK_MS = 30000;
   static constexpr uint32_t WATCHDOG_SINGLE_EVENT_MS = 60000;
   static constexpr uint32_t WATCHDOG_REFRESH_SCHEDULE_MS = 30000;
   static constexpr uint32_t WATCHDOG_REFRESH_EVENTS_MS = 120000;

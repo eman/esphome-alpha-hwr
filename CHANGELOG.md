@@ -380,6 +380,77 @@
 
 ### Fixed
 
+- **The pump clock sync reported success without checking anything, and the
+  "Last Clock Sync" sensor recorded it.** `TimeService::set_clock_async()`
+  formatted its frame, handed it to the transport as fire-and-forget, and then
+  called back `true` unconditionally — under a comment promising a verification
+  read that was never written. That bool is what stamps the sensor and what
+  arms the 24-hour suppression timer, so a sync that never left the node showed
+  a fresh timestamp and then declined to try again for a day, with the pump
+  running its weekly schedule off whatever clock it happened to hold.
+
+  The write is now a `SET_CLOCK` operation in the write layer, which is where
+  AGENTS §6 has said every pump write belongs since issue #92 — it was the last
+  standalone write path left after remote mode moved. It is confirmed by
+  reading the pump's own clock back (Object 94 Sub 101) and comparing it with
+  the node's clock at that same moment. `accepted` means the pump holds the
+  right time, which is the question worth answering: a pump that was already
+  correct settles accepted. A clock that still disagrees settles `rejected`
+  with the offset in `detail`; a readback that will not decode settles
+  `timeout`, because a clock we cannot read says nothing about whether the pump
+  is wrong — including a pump whose RTC a power cut has reset to the year 2000,
+  which decodes perfectly and is exactly what a sync exists to repair.
+
+  The accept window is asymmetric, which took a bench capture and three
+  adversarial passes to get right. The time inside the frame is built when the
+  operation runs, and the transport sends one command at a time, so a frame
+  queued behind other traffic arrives late and leaves the pump genuinely a few
+  seconds behind — the node's own latency, reported as the pump's drift. What
+  bounds it is the operation's own age, so a pump reading behind by no more than
+  that is accepted (with the real offset still reported) while a pump reading
+  ahead is held to the flat 5 s tolerance. Both sides of the comparison are
+  resolved from local fields by the same function, which matters for one hour a
+  year: inside the DST fall-back fold an exact epoch and a re-resolved one sit
+  3600 s apart, and the difference settled a correct sync `rejected` every 15
+  minutes until 02:00.
+
+  It emits a `set_clock` settle event (`origin: internal`, `clock_offset_s`);
+  there is no service, since nobody calls this — the periodic check does. A sync
+  that does not confirm now retries in 15 minutes rather than a day. Stamping
+  the retry timer at submission rather than on success is what keeps that
+  honest: `update()` runs every 10 s, so throttling on success alone would have
+  turned an unconfirmable clock into a write every 10 seconds.
+
+  Two behaviour changes worth stating. Going through the write layer means the
+  sync now waits for the same readiness gate as every other write, so it happens
+  on the first poll after the link is fully synchronized rather than 2 s into
+  the boot read chain — that leg only ever measured drift anyway, and its
+  attempt to write was refused 100% of the time. And a node with no `time_id`
+  no longer logs about it at all above DEBUG.
+
+  The APDU is byte-for-byte what it was. Its six leading bytes had been carried
+  as an opaque "Type 322 header" with the object and sub-id labelled backwards.
+  They are named now — object 94, sub-id 100, type 321 version 2, an 11-byte
+  size — from the identical layout of the capture-verified Object 91 Sub 421
+  write, cross-checked against a measured identifier table which pins the
+  *read* at type 322 version 1. Config and actual are two objects; the old label
+  took the read's type and pasted it on the write.
+
+  Both frames are bench-captured rather than inferred, and the fixtures are
+  transcribed from the capture — including five trailing bytes in the reply that
+  the parser ignores, because a fixture carrying only what the parser reads
+  proves the parser can read its own fixture. The reply's first three bytes were
+  documented as `[Status(2)][Length(1)]` and are an ordinary size header.
+
+  Thirteen host tests drive the shipped operation against the pump simulator,
+  which learned Object 94 and a clock that runs with mock time; the suite builds
+  with `-DUSE_TIME` so `TimeService::current_time()` is the real function rather
+  than its stub. None of this had any host test before — `time_service.cpp` had
+  never been compiled by the suite at all, which is why the mock ESPHome SDK
+  gains an `ESPTime` with its fidelity boundary written down. `mutation_check.sh`
+  gains eight entries, six of them for code that three earlier passes had left
+  unguarded.
+
 - **`link_max_gap` no longer censors its own sample at the threshold it exists
   to validate** (issue #176, review of PR #189). The statistic only counted
   intervals that ended in a notification, and an interval that ends in a
@@ -397,10 +468,12 @@
   encryption-failure teardown — was discarded the same way, censoring the sample
   at a threshold nobody configured. Same A/B, with polling suspended for 45 s on
   a live link and the link then dropped: the old build published nothing and sat
-  at its steady-state 9.5 s, the new one recorded **53.0 s**. Both are now recorded, at the
-  recycle and in the disconnection callback; a disconnect with no open before it
-  samples nothing, so a failed connection attempt cannot record the downtime
-  since the last session as if the link had been up and silent for it.
+  at its steady-state 9.5 s, the new one recorded **53.0 s**.
+
+  Both kinds are recorded now, at the recycle and in the disconnection callback.
+  A disconnect with no open before it samples nothing, so a failed connection
+  attempt cannot record the downtime since the last session as if the link had
+  been up and silent for it.
 
   The open-to-first-notification interval is now sampled too, rather than
   excluded as "the handshake, not the pump's cadence". It is inside the window

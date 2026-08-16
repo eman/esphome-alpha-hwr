@@ -104,7 +104,7 @@ public:
         device_info_service_(transport_), time_service_(&transport_),
         event_log_service_(transport_, session_),
         history_service_(transport_, session_),
-        write_op_service_(control_service_, schedule_service_) {
+        write_op_service_(control_service_, schedule_service_, time_service_) {
     parent->register_ble_node(this);
     parent_ = parent;
     ESP_LOGI(TAG, "AlphaHwrComponent constructor");
@@ -521,10 +521,12 @@ private:
   bool device_info_read_ok_{false};
   bool statistics_read_ok_{false};
 
-  // The chain writes the pump RTC. Replaying it on every re-arm would bypass
-  // the 24 h throttle that check_and_sync_time() applies to that same write,
-  // so the clock leg runs on the first attempt only; the daily sync owns it
-  // from then on.
+  // The chain's clock leg publishes the pre-sync drift -- how far out the pump
+  // was when we found it. Re-running it after a sync has corrected the pump
+  // would replace that figure with a meaningless zero, so it runs on the first
+  // attempt of a connection only. It no longer writes anything; the write is
+  // check_and_sync_time()'s (see the leg's own comment for why it could never
+  // have written from there).
   bool initial_clock_sync_started_{false};
 
   /// True once the reads that only the chain performs have landed.
@@ -538,10 +540,41 @@ private:
   // (same pattern as auth_sequence_ / scheduler_sequence_). See issue #18.
   uint32_t read_chain_gen_{0};
 
-  // Time synchronization tracking
-  uint32_t last_time_sync_timestamp_{0}; // millis() when last sync occurred
+  // Time synchronization tracking.
+  //
+  // The stamp is taken when a sync is SUBMITTED, not when one succeeds. That
+  // matters now that a sync can honestly fail: update() runs every 10 s and
+  // the operation itself can take 25 s, so throttling on success alone would
+  // let a pump whose clock cannot be confirmed collect a fresh write every
+  // 10 s, several of them in flight at once. Stamping at submission makes the
+  // interval below a floor on ATTEMPTS, which is what bounds the traffic.
+  //
+  // 0 means never attempted, so the first update() after boot syncs.
+  uint32_t last_time_sync_timestamp_{0};
+  // How long to wait before the next attempt: a day after a confirmed sync,
+  // 15 minutes after one that did not confirm. Retrying a failed sync a day
+  // later would leave the pump running its schedule off a wrong clock for a
+  // day; retrying it every 10 s is the write storm above.
+  //
+  // Only a submitted sync sets this. When there is nothing to write at all --
+  // no time_id, SNTP silent, or the link not synchronized yet -- no attempt is
+  // stamped and the next update() retries in 10 s, which costs nothing because
+  // that path never reaches the wire.
+  uint32_t time_sync_interval_ms_{0};
   static constexpr uint32_t TIME_SYNC_INTERVAL_MS =
       24 * 60 * 60 * 1000; // 24 hours in milliseconds
+  static constexpr uint32_t TIME_SYNC_RETRY_MS = 15 * 60 * 1000;  // 15 minutes
+
+  /**
+   * Submit a pump clock sync and record its outcome (the "Last Clock Sync"
+   * text sensor and the retry interval above). The single place the RTC is
+   * written from; both the boot read-chain leg and the daily check call it.
+   *
+   * @param reason Short label for the logs.
+   * @return False when there is nothing to write -- no time_id, or SNTP has
+   *   not answered yet -- in which case no operation is submitted.
+   */
+  bool submit_clock_sync_(const char *reason);
 
   /**
    * Check if daily time sync is due and perform it if needed.
@@ -1233,20 +1266,39 @@ public:
   }
 
   /**
-   * Asynchronously synchronize pump's real-time clock with system time.
+   * Synchronize the pump's real-time clock with the node's (SNTP) time.
    *
-   * Sets the pump's internal RTC to match the ESP32's current time (from SNTP).
-   * The pump clock is used for schedule execution and event logging.
+   * Goes through the write-operation layer like every other pump write
+   * (AGENTS §6): serialized against other writes, watchdogged, and settled
+   * with one `set_clock` write_settled event carrying the confirmed offset.
    *
-   * @param callback Called with success status (true if clock was synchronized)
-   *
-   * Usage:
-   *   component->sync_pump_clock([](bool success) {
-   *     if (success) {
-   *       // Clock synchronized successfully
-   *     }
-   *   });
+   * @param op_id Optional identifier echoed in the settle event.
+   * @param done Fires with the terminal result -- true only for a sync the
+   *   pump's own clock readback confirmed.
+   * @param origin Defaults to INTERNAL: the two shipped callers are the boot
+   *   read chain and the daily check, and nobody asked for either.
+   * @return False when the write was not submitted at all: the link is not
+   *   ready, no `time_id` is configured, or SNTP has not answered yet. `done`
+   *   is NOT called in that case -- the return value is the answer, and it is
+   *   already in the caller's hand. Calling it as well conflates "we did not
+   *   try" with "we tried and the pump did not confirm", which are a 10-second
+   *   retry and a 15-minute one respectively; the bench log said "retrying in
+   *   15 min" twice at every boot while retrying in 10 s, because the two
+   *   shared a callback.
    */
+  bool sync_pump_clock(const std::string &op_id = "",
+                       std::function<void(bool)> done = nullptr,
+                       services::WriteOrigin origin = services::WriteOrigin::INTERNAL) {
+    if (!check_ready("sync_pump_clock")) return false;
+    ESPTime now;
+    if (!time_service_.current_time(now)) {
+      ESP_LOGD(TAG, "Skipping pump clock sync: no synced system time");
+      return false;
+    }
+    write_op_service_.submit_set_clock(now, op_id, std::move(done), origin);
+    return true;
+  }
+
   /**
    * Asynchronously read device information and update text sensors.
    *
