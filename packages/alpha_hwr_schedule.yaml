@@ -137,27 +137,31 @@ select:
 #        // Handle response
 #      });
 #
-# 3. Write schedule entries:
-#    std::vector<esphome::alpha_hwr::ScheduleEntry> entries;
-#    entries.push_back(esphome::alpha_hwr::ScheduleEntry(
-#      "Monday",      // day (name)
-#      6,             // begin_hour
-#      0,             // begin_minute
-#      8,             // end_hour
-#      0,             // end_minute
-#      0x02,          // action (0x02 = run pump)
-#      0,             // layer (0-4)
-#      true           // enabled
-#    ));
-#    bool result = id(pump).write_schedule_entries(entries, 0);
+# 2. Write one schedule entry. Goes through the write-operation layer like every
+#    other write: serialized, confirmed against a pump read-back, and reported
+#    in a set_schedule_entry settle event. The callback fires with the terminal
+#    result -- it is the pump's answer, not "the packet was formatted".
 #
-# 4. Write schedule entries (async):
-#    id(pump).write_schedule_entries_async(entries, 0,
-#      [](bool success) {
+#    The DAY COMES FROM THE day_index ARGUMENT (0 = Monday), not from the name
+#    in the entry: set_schedule_entry reads only the entry's begin/end times.
+#    Changing "Monday" below without changing the 0 still writes Monday.
+#    esphome::alpha_hwr::ScheduleEntry entry("Monday", 6, 0, 8, 0);
+#    id(pump).set_schedule_entry(/*layer=*/0, /*day_index=*/0, entry,
+#      [](bool ok) {
 #        // Handle completion
 #      });
 #
-# 5. Refresh schedule read-back sensors:
+# 3. Clear one entry:
+#    id(pump).clear_schedule_entry("Monday", 0);
+#
+#    The recipe that used to sit here built a vector of ScheduleEntry and
+#    called write_schedule_entries() / write_schedule_entries_async(). Both are
+#    gone: neither sent the configuration commit the pump needs to persist a
+#    layer, and the async one reported success unconditionally. To write a whole
+#    grid in one call, use the upload_schedule service instead -- see
+#    docs/programmatic-interface.md.
+#
+# 4. Refresh schedule read-back sensors:
 #    id(pump).update_schedule_display();
 #    // This reads the current schedule and updates the per-layer + hash sensors
 #

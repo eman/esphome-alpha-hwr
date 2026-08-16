@@ -377,6 +377,42 @@
   `sensor.water_heater_*`) — these are illustrative substitution values, so
   they change nothing at build time.
 
+### Removed
+
+- **Seven dead schedule methods, and the doc recipe that pointed at the worst of
+  them.** `ScheduleService` kept a parallel write surface from before the
+  write-operation layer existed (issue #92): `write_entries()`,
+  `write_entries_async()`, `enable_schedule()`, `disable_schedule()`,
+  `set_state()`, `clear_entry_async()` and `clear_single_event_async()`, plus
+  the `build_schedule_apdu()` helper only the first two used. None had a caller.
+  The facade passthroughs `write_schedule_entries()` and
+  `write_schedule_entries_async()` go with them.
+
+  Deleting rather than repairing, because the pair a user could actually have
+  reached never sent the configuration commit the pump needs to persist a layer
+  — the surviving `write_cached_layer_async()` does, which is the difference
+  that matters. The async one also reported success on a timeout, though that
+  part is less damning than it first looks: the surviving path reports `true`
+  the same way, and gets away with it only because `WriteOperationService` sits
+  above it and derives the real verdict from a read-back confirm. The deleted
+  method had nothing above it. And the header steered the next developer
+  straight at it: "Use `write_entries_async()` for proper transaction
+  handling", naming the one method in the class with neither a transaction nor
+  anything to check its result.
+
+  The lambda recipe in `alpha_hwr_schedule.yaml` that taught both is replaced by
+  the live path — `set_schedule_entry()` for one entry, the `upload_schedule`
+  service for a whole grid — each of which is serialized, committed, confirmed
+  against a read-back, and reported in a settle event.
+
+  Two things worth separating from the audit note that prompted this: the
+  facade's `enable_schedule()`/`disable_schedule()` are **not** affected. They
+  share a name with the deleted `ScheduleService` methods but route through
+  `submit_set_schedule_enabled()`, so the commented example in
+  `hwr-pump-example.yaml` points at working code and stays. And the audit's
+  `clear_entry()` was already removed; the `clear_entry_async()` deleted here is
+  a different method that was also never called.
+
 ### Fixed
 
 - **The pump clock sync reported success without checking anything, and the

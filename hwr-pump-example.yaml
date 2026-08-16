@@ -100,11 +100,11 @@ button:
 #     restore_mode: RESTORE_DEFAULT_OFF
 #     turn_on_action:
 #       - lambda: |-
-#           ESP_LOGI("switch", "Enabling pump schedule...");
-#           bool result = id(pump).enable_schedule();
-#           ESP_LOGI("switch", "Enable schedule result: %s", result ? "SUCCESS" : "FAILED");
+#           // enable_schedule() submits the write and returns whether it was
+#           // accepted for submission -- always true here. The pump's actual
+#           // answer arrives later as a set_schedule_enabled write_settled
+#           // event; listen for that if you need to know it landed.
+#           id(pump).enable_schedule();
 #     turn_off_action:
 #       - lambda: |-
-#           ESP_LOGI("switch", "Disabling pump schedule...");
-#           bool result = id(pump).disable_schedule();
-#           ESP_LOGI("switch", "Disable schedule result: %s", result ? "SUCCESS" : "FAILED");
+#           id(pump).disable_schedule();
