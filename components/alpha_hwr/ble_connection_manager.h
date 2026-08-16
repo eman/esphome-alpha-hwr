@@ -2,6 +2,7 @@
 
 #include "esphome/components/ble_client/ble_client.h"
 #include "esphome/components/binary_sensor/binary_sensor.h"
+#include "subscribe_outcome.h"
 #include <esp_gattc_api.h>
 #include <esp_gap_ble_api.h>
 #include <functional>
@@ -111,6 +112,15 @@ class BLEConnectionManager {
   
  private:
   void subscribe_to_notifications();
+  /// The subscribe attempt itself, reduced to its outcome. Split out from
+  /// subscribe_to_notifications() so that what the caller does about a failure
+  /// is a decision over a value (subscribe_outcome.h) rather than five
+  /// scattered early returns that each dropped what they knew (issue #175).
+  SubscribeOutcome attempt_subscribe_();
+  /// Latch a failed subscribe on the Pump Link Fault surface. Called both from
+  /// subscribe_to_notifications() and from the discovery paths above it, which
+  /// is where three of the outcomes actually originate.
+  void report_subscribe_outcome_(SubscribeOutcome outcome);
   void handle_connection_opened(const esp_ble_gattc_cb_param_t *param);
   static void handle_service_discovered(const esp_ble_gattc_cb_param_t *param);
   void handle_service_discovery_complete(esp_gatt_if_t gattc_if);
@@ -182,6 +192,13 @@ class BLEConnectionManager {
     NONE,  // no hold; the next disconnect reason may overwrite last_failure_
     AUTH,  // auth/encryption failure; released by a successful AUTH_CMPL
     DATA,  // inbound-data watchdog; released by any received notification
+    // A subscribe step that failed outright. Outranks DATA: the watchdog's
+    // "No data from pump" is the *symptom* of this cause, and it fires 60 s
+    // later, so without the ranking the forced disconnect would overwrite the
+    // specific reason with the generic one and the operator would end up
+    // exactly where issue #175 started. Released like DATA, by any received
+    // notification.
+    SUBSCRIBE,
   };
   FailureHold failure_hold_{FailureHold::NONE};
 
