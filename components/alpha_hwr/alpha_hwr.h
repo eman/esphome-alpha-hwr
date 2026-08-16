@@ -574,13 +574,14 @@ private:
   // threshold on it instead of having to detect a flap cadence live.
   uint32_t link_recycles_without_data_{0};
 
-  // Longest inter-notification gap observed since boot, for choosing the
-  // data_timeout default from what actually happens on real installations
-  // rather than from a constants calculation. link_had_inbound_ gates the
-  // first sample, whose "gap" would be the handshake rather than the pump's
-  // reporting cadence.
-  uint32_t link_max_gap_ms_{0};
-  bool link_had_inbound_{false};
+  // Longest quiet interval observed since boot, for choosing the data_timeout
+  // default from what actually happens on real installations rather than from a
+  // constants calculation. Samples exactly the intervals the watchdog above is
+  // timed over — including the open-to-first-notification one, and including an
+  // interval that ends in a recycle rather than a notification; see
+  // LinkGapSampler for why both of those are load-bearing. Stamped alongside
+  // link_last_inbound_ms_ at all three of its call sites.
+  LinkGapSampler link_gap_;
 
   uint32_t link_boot_ms_{0};
   uint32_t link_last_open_ms_{0};

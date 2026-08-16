@@ -23,6 +23,7 @@
 
 using esphome::alpha_hwr::link_data_timeout_expired;
 using esphome::alpha_hwr::link_data_timeout_next;
+using esphome::alpha_hwr::LinkGapSampler;
 
 int tests_passed = 0;
 int tests_failed = 0;
@@ -60,15 +61,32 @@ struct LinkSim {
   /// load-bearing rather than decorative.
   bool rearm{true};
 
+  /// The gap statistic, stamped at the same three points the component stamps
+  /// last_inbound at. Set sample_recycles false to model it WITHOUT
+  /// on_recycle(), which is what censors the sample at the budget.
+  LinkGapSampler gap;
+  bool sample_recycles{true};
+
   int pending_disconnect_{0};
 
   void open(uint32_t at_ms) {
     now = at_ms;
     connected = true;
     last_inbound = at_ms;  // seeded from the open, not from READY
+    gap.on_open(at_ms);
     pending_disconnect_ = 0;
   }
-  void notification() { last_inbound = now; }
+  void notification() {
+    last_inbound = now;
+    gap.on_inbound(now);
+  }
+  /// A clean drop: the pump or the stack closes the link with no watchdog
+  /// involvement. The watchdog does not run while disconnected, so nothing is
+  /// sampled until the next open.
+  void drop() {
+    connected = false;
+    pending_disconnect_ = 0;
+  }
 
   /// Advance by one 1s loop() tick, evaluating the watchdog as the component
   /// does. Returns true if it fired on this tick.
@@ -79,6 +97,8 @@ struct LinkSim {
     if (!link_data_timeout_expired(connected, now, last_inbound, TIMEOUT_MS))
       return false;
     fired++;
+    if (sample_recycles)
+      gap.on_recycle(now);  // record the interval before the re-arm erases it
     if (rearm)
       last_inbound = now;  // check_link_liveness_() re-arms before disconnecting
     // A repeat disconnect() on an already-disconnecting link does not postpone
@@ -186,6 +206,133 @@ void test_deaf_mid_session() {
   for (int t = 0; t < 300; t++)
     sim.tick();  // silence from here on
   TEST_ASSERT(sim.fired == 1, "A session that goes deaf mid-run is recycled too");
+}
+
+// --- The gap statistic (issue #176) -----------------------------------------
+//
+// These guard the property that makes the number worth acting on: it samples
+// the intervals the watchdog is timed over, all of them. Both failures below
+// bias it in the same direction — downward, toward "the budget was never
+// close" — which is the direction that argues for keeping a default nobody has
+// validated.
+
+void test_gap_samples_the_interval_from_connection_open() {
+  // The open-to-first-notification interval is inside the watchdog's window and
+  // is its worst case (17.2 s budgeted against 60 s), so it has to be in the
+  // sample. Excluding it as "handshake, not cadence" left the statistic unable
+  // to report the case the default is tightest against.
+  LinkSim sim;
+  sim.open(1000);
+  for (int t = 0; t < 6; t++)
+    sim.tick();
+  sim.notification();  // first inbound data 6 s after the open
+  TEST_ASSERT(sim.gap.max_ms() == 6000,
+              "The interval from connection-open to the first notification is sampled");
+
+  // ...and on every later connection too, not just the first after boot.
+  sim.drop();
+  sim.open(sim.now + 4000);
+  for (int t = 0; t < 9; t++)
+    sim.tick();
+  sim.notification();
+  TEST_ASSERT(sim.gap.max_ms() == 9000,
+              "...on reconnects as well, which is where the handshake repeats");
+}
+
+void test_gap_ignores_time_spent_disconnected() {
+  // A link that is down is not a link that is quiet: the watchdog does not run
+  // between the drop and the next open, so those minutes must not land in a
+  // statistic that is read as "how long this pump goes without talking".
+  LinkSim sim;
+  sim.open(1000);
+  sim.notification();
+  sim.drop();
+  sim.now += 600000;  // ten minutes off the air
+  sim.open(sim.now);
+  sim.notification();
+  TEST_ASSERT(sim.gap.max_ms() == 0,
+              "Time between a disconnect and the next open is not sampled");
+}
+
+void test_gap_tracks_the_longest_quiet_interval() {
+  // Steady state is bounded by our own 10 s poll, and the running maximum keeps
+  // the worst interval rather than the latest one.
+  LinkSim sim;
+  sim.open(1000);
+  for (int t = 0; t < 600; t++) {
+    sim.tick();
+    if (t % 10 == 9)
+      sim.notification();
+  }
+  TEST_ASSERT(sim.fired == 0, "Ten healthy minutes are not recycled");
+  TEST_ASSERT(sim.gap.max_ms() == 10000,
+              "A healthy link reports the poll interval as its longest gap");
+
+  for (int t = 0; t < 25; t++)
+    sim.tick();  // one 25 s lull, well inside the budget
+  sim.notification();
+  TEST_ASSERT(sim.gap.max_ms() == 25000, "A single lull moves the maximum...");
+  for (int t = 0; t < 60; t++) {
+    sim.tick();
+    if (t % 10 == 9)
+      sim.notification();
+  }
+  TEST_ASSERT(sim.gap.max_ms() == 25000, "...and healthy traffic afterwards does not lower it");
+}
+
+void test_gap_is_not_censored_at_the_budget() {
+  // The regression this exists for. An interval that ends in a recycle is never
+  // closed by a notification -- the watchdog re-arms and disconnects -- so
+  // without on_recycle() every excursion past the budget is discarded and the
+  // maximum asymptotes to just under it whatever the pump does. Read as
+  // "60 s was comfortable", it means the opposite.
+  // Three full deaf cycles: open, budget expires, recycle, reconnect, repeat --
+  // the flap this whole watchdog is about.
+  auto run_deaf_cycles = [](LinkSim &s, int cycles) {
+    s.open(1000);
+    for (int c = 0; c < cycles; c++) {
+      const int before = s.fired;
+      for (int guard = 0; guard < 200 && s.fired == before; guard++)
+        s.tick();
+      for (int guard = 0; guard < 200 && s.connected; guard++)
+        s.tick();  // the async DISCONNECT event lands
+      s.open(s.now + 6000);  // reconnect, still deaf
+    }
+  };
+
+  LinkSim censored;
+  censored.sample_recycles = false;
+  run_deaf_cycles(censored, 3);
+  TEST_ASSERT(censored.fired == 3, "Three budgets expire on a link that never speaks");
+  TEST_ASSERT(censored.gap.max_ms() == 0,
+              "Without the recycle sample, a link that never speaks reports no gap at all");
+
+  LinkSim sim;
+  run_deaf_cycles(sim, 3);
+  TEST_ASSERT(sim.gap.max_ms() > TIMEOUT_MS,
+              "With it, the maximum exceeds the configured budget: the ceiling was reached");
+  TEST_ASSERT(sim.gap.max_ms() <= TIMEOUT_MS + 1000,
+              "...by no more than the 1s evaluation tick, since it is the budget plus a tick");
+}
+
+void test_gap_records_a_floor_not_a_measurement() {
+  // The recorded value is what the link was given, not what it would have
+  // taken: the tear-down ends the observation. A pump that would have spoken at
+  // 90 s and one that never speaks again are indistinguishable here, and both
+  // read as "reached the ceiling" -- which is the honest report, and the reason
+  // the collection period wants a deliberately long data_timeout.
+  LinkSim quiet_but_alive;
+  quiet_but_alive.open(1000);
+  for (int t = 0; t < 600; t++)
+    quiet_but_alive.tick();
+
+  LinkSim permanently_deaf;
+  permanently_deaf.open(1000);
+  for (int t = 0; t < 6000; t++)
+    permanently_deaf.tick();
+
+  TEST_ASSERT(quiet_but_alive.gap.max_ms() == permanently_deaf.gap.max_ms(),
+              "A censored interval reports the budget it hit, not how long the quiet lasted");
 }
 
 void test_millis_rollover() {
@@ -324,6 +471,11 @@ int main() {
   test_deaf_from_connection_open();
   test_rearm_prevents_refiring_during_the_async_disconnect();
   test_deaf_mid_session();
+  test_gap_samples_the_interval_from_connection_open();
+  test_gap_ignores_time_spent_disconnected();
+  test_gap_tracks_the_longest_quiet_interval();
+  test_gap_is_not_censored_at_the_budget();
+  test_gap_records_a_floor_not_a_measurement();
   test_millis_rollover();
   test_predicate_has_no_notion_of_ready();
   test_backoff_doubles_to_the_cap();

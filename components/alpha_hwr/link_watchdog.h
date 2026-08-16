@@ -165,5 +165,70 @@ inline uint32_t link_data_timeout_next(uint32_t current_ms, uint32_t cap_ms) {
   return doubled > cap_ms ? cap_ms : doubled;
 }
 
+/// Running maximum of the quiet intervals the watchdog above measures.
+///
+/// The statistic exists to choose the `data_timeout` default from what real
+/// installations do rather than from a constants calculation (issue #176), and
+/// that only works if it samples exactly what the budget governs. The
+/// watchdog's clock starts at connection-open and is re-armed by every inbound
+/// notification, so those are the intervals — all of them. Two consequences,
+/// both of which the first cut of this got wrong:
+///
+///   - **The open-to-first-notification interval counts.** It is inside the
+///     window, and the sizing note above makes it the *binding* case: 17.2 s
+///     worst case against a 60 s budget, where steady state is bounded by our
+///     own 10 s poll. Excluding it as "the handshake, not the pump's cadence"
+///     left the statistic structurally unable to report the case the default is
+///     tightest against. The cost is a floor on the maximum at the handshake
+///     latency (5.90/6.17/5.94 s measured), which is below anything a
+///     steady-state gap has to reach to be interesting.
+///   - **An interval that ends in a recycle counts too**, which is what
+///     on_recycle() is for. Without it the sample is censored at exactly the
+///     threshold being validated: the watchdog re-arms and disconnects, so no
+///     notification ever closes that interval and every excursion past the
+///     budget is discarded. The maximum then asymptotes to just under the
+///     budget whatever the pump does, and "never above 12 s in a month" reads
+///     as "60 s was comfortable" when what it means is "no quiet period between
+///     12 s and 60 s ended on its own" — the opposite conclusion.
+///
+/// Time between a disconnect and the next open is not sampled, because the
+/// watchdog is not running then either.
+class LinkGapSampler {
+ public:
+  /// Connection open. The watchdog's clock starts here, so this one does too;
+  /// it opens an interval without closing one, since what came before the open
+  /// was not a quiet link but no link.
+  void on_open(uint32_t now_ms) { this->last_ms_ = now_ms; }
+
+  /// Inbound notification: closes an interval and opens the next.
+  void on_inbound(uint32_t now_ms) { this->sample_(now_ms); }
+
+  /// The watchdog fired: record the interval it gave up on, and re-arm with the
+  /// same stamp check_link_liveness_() re-arms the window with.
+  ///
+  /// The recorded value is a floor rather than a gap — the link is torn down
+  /// here, so how long the quiet would have lasted is unknowable. It always
+  /// exceeds the window that expired (the elapsed test is strictly
+  /// greater-than, evaluated on a ~1 s tick), so a maximum above the configured
+  /// `data_timeout` says plainly that the ceiling was reached, and after a
+  /// backoff, which ceiling.
+  void on_recycle(uint32_t now_ms) { this->sample_(now_ms); }
+
+  uint32_t max_ms() const { return this->max_ms_; }
+
+ private:
+  void sample_(uint32_t now_ms) {
+    // Unsigned subtraction, correct across the ~49-day millis() rollover for
+    // the same reason link_data_timeout_expired() is.
+    const uint32_t gap = static_cast<uint32_t>(now_ms - this->last_ms_);
+    if (gap > this->max_ms_)
+      this->max_ms_ = gap;
+    this->last_ms_ = now_ms;
+  }
+
+  uint32_t last_ms_{0};
+  uint32_t max_ms_{0};
+};
+
 }  // namespace alpha_hwr
 }  // namespace esphome

@@ -84,7 +84,7 @@ Two optional diagnostic sensors expose the state:
 | Entity | Reads |
 | --- | --- |
 | `link_recycles` | Consecutive recycles with no data in between. `0` on a healthy link. |
-| `link_max_gap` | Longest gap between notifications since boot, in seconds. |
+| `link_max_gap` | Longest quiet interval since boot, in seconds. |
 
 `link_recycles` is the one to alert on. The Pump Link Fault sensor shows the
 reason *during* a reconnect and clears on recovery, so repeated recycles read as
@@ -94,9 +94,31 @@ can threshold on.
 `link_max_gap` exists because the `60s` default is not yet chosen from
 observation. The two requirements pull against each other — clear of every gap
 that happens routinely, short enough not to sit in the stuck state for long —
-and only data from real installations settles it. The gap between
-connection-open and the first notification is excluded, since that measures the
-handshake rather than the pump's reporting cadence.
+and only data from real installations settles it.
+
+It samples exactly the intervals the watchdog is timed over, which is what makes
+it usable for that: the clock starts at connection-open and every inbound
+notification closes an interval and starts the next. So the open-to-first-
+notification interval is included (it is inside the window, and against a 60s
+budget it is the tightest case, not the loosest), and so is an interval that
+ends in a recycle rather than a notification. That last one matters most:
+
+> **A reading at or above your `data_timeout` means the ceiling was reached.**
+> The value is then a floor, not a measurement — the link was torn down, so how
+> long the quiet would have lasted is unknown. After a backoff it reports which
+> ceiling: a reading near `120s` on a `60s` budget is the second window in a
+> recycle sequence.
+
+Because the sensor tracks a maximum, expect it to sit at the handshake latency
+(around 6s) on a healthy link rather than at zero. It is a RAM value and starts
+over at every boot, including a reflash; Home Assistant's long-term statistics
+keep the hourly maximum indefinitely, so use the statistics graph rather than
+the current state when you want the history across reboots.
+
+For a deliberate data-gathering run, set `data_timeout` well above what you
+expect (`600s`, say) for a few weeks. The watchdog still recovers a deaf link,
+just more slowly, and only a budget the pump never reaches shows the shape of
+the tail instead of just the fact that a ceiling exists.
 
 ## Examples
 
