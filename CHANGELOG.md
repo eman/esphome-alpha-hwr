@@ -42,6 +42,36 @@
 
 ### Changed
 
+- **`alpha_hwr_controls.yaml` and `alpha_hwr_schedule.yaml` are documented as
+  mutually exclusive, because they are.** The README said to "avoid combining
+  both unless you want duplicate controls", which reads as a matter of taste. It
+  is not: a config with both does not build. ESPHome stops at
+  `Duplicate switch entity with name 'Schedule Enabled'`; fix that and
+  `Duplicate select entity with name 'Pump Control Mode'` appears; fix that and
+  `ID pump_mode_select redefined!` appears. Two conflicting entities, three
+  errors. Renaming all three *does* yield a valid config, but only by forking one
+  of the packages to run two overlapping sets of the same controls — so the
+  README now says which to pick and why rather than how to merge them.
+
+- **Two packages had no working-tree check at all**, which is why the above went
+  unnoticed. `tests/ci-compile.yaml` loads `alpha_hwr_controls.yaml`, and the
+  examples that load the other two pin a release tag — so CI was validating the
+  last *release* of `alpha_hwr_schedule.yaml` and `alpha_hwr_base.yaml` rather
+  than the branch. Neither can share a config with what is already covered:
+  the schedule UI collides as above, and `alpha_hwr_base.yaml` is a parallel copy
+  of `alpha_hwr_pairing.yaml` rather than an include. Both now have their own
+  (`tests/ci-compile-base.yaml`, `tests/ci-compile-schedule.yaml`).
+
+  The schedule UI is also **compiled**, not merely validated, because
+  `esphome config` does not compile lambda bodies. Its select is the only YAML
+  lambda in the tree naming `ControlMode::AUTO_ADAPT`, `AUTO_ADAPT_RADIATOR`,
+  `AUTO_ADAPT_UNDERFLOOR` or `AUTO_ADAPT_COMBINED` — those four are all over the
+  compiled C++, so renaming one and letting the compiler find the callers fixes
+  the component and `alpha_hwr_controls.yaml`, and leaves this package quietly
+  broken. That is a second full ESP-IDF build rather than a marginal one, since
+  the build tree is not cached; the base package gets validation only, its single
+  lambda being covered by the builds that already run.
+
 - **The 0.3 GPM `flow_threshold` floor is settled by measurement, and stays**
   ([#180](https://github.com/eman/esphome-alpha-hwr/issues/180)). `AGENTS.md`
   §11.4 asked for one specific analysis before anyone touched the floor: the

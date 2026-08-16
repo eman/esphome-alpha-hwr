@@ -176,6 +176,18 @@ jobs:
       - name: Validate CI config (working tree)
         run: esphome config tests/ci-compile.yaml
 
+      # Two packages cannot share the config above and so had no working-tree
+      # check at all -- the only examples that load them pin a release tag, so CI
+      # was validating the last release of each rather than the branch.
+      # alpha_hwr_schedule.yaml collides with alpha_hwr_controls.yaml on two
+      # entity names and one id; alpha_hwr_base.yaml is a parallel copy of
+      # alpha_hwr_pairing.yaml rather than an include.
+      - name: Validate CI config, schedule UI (working tree)
+        run: esphome config tests/ci-compile-schedule.yaml
+
+      - name: Validate CI config, base package (working tree)
+        run: esphome config tests/ci-compile-base.yaml
+
       # Some examples reference !secret. secrets.yaml is gitignored, so seed a
       # throwaway one from the committed template. ESPHome resolves !secret
       # relative to the config file, hence the copy beside the nested example.
@@ -226,7 +238,7 @@ jobs:
             ~/.platformio
             ~/.esphome
             ~/.cache/pip
-          key: esp-idf-${{ runner.os }}-${{ hashFiles('tests/ci-compile.yaml') }}
+          key: esp-idf-${{ runner.os }}-${{ hashFiles('tests/ci-compile.yaml', 'tests/ci-compile-schedule.yaml') }}
           restore-keys: |
             esp-idf-${{ runner.os }}-
 
@@ -236,13 +248,35 @@ jobs:
       - name: Compile firmware
         run: esphome compile tests/ci-compile.yaml
 
+      # The schedule UI's lambdas are not a subset of the controls UI's.
+      # ControlMode::AUTO_ADAPT, AUTO_ADAPT_RADIATOR, AUTO_ADAPT_UNDERFLOOR and
+      # AUTO_ADAPT_COMBINED are named all over compiled C++ (control_service.cpp
+      # switches, mode_to_string, the MODES table, the host suite) -- but of the
+      # YAML lambdas, only this package's name them. So renaming an enumerator
+      # and letting the compiler find the callers fixes the C++ and
+      # alpha_hwr_controls.yaml, whose six modes ARE built above, and silently
+      # leaves this package broken. `esphome config` cannot catch it; it does not
+      # compile lambda bodies.
+      #
+      # Cost, stated honestly: this is a second full build, not a marginal app
+      # link. tests/.esphome is in the repo tree and is not in the cache above --
+      # only ~/.platformio, ~/.esphome and ~/.cache/pip are -- and ESP-IDF builds
+      # per project directory, so this roughly doubles the job. Kept because the
+      # gap is real and otherwise invisible; if the wall time becomes a problem,
+      # caching tests/.esphome is the lever, with the usual stale-object caveat.
+      - name: Compile firmware, schedule UI
+        run: esphome compile tests/ci-compile-schedule.yaml
+
       - name: Report image size
         if: always()
         run: |
           # ESPHome writes the build tree beside the config file, so this is
           # tests/.esphome -- not .esphome at the repo root.
-          find tests/.esphome -name 'firmware*.bin' -o -name '*.elf' 2>/dev/null | head -5 || true
-          ls -la tests/.esphome/build/ci-compile/build/ 2>/dev/null || true
+          find tests/.esphome -name 'firmware*.bin' -o -name '*.elf' 2>/dev/null | head -10 || true
+          # Both configs build here now, so report each rather than only the first.
+          for d in ci-compile ci-compile-schedule; do
+            ls -la "tests/.esphome/build/$d/build/" 2>/dev/null || true
+          done
 
   # ---------------------------------------------------------------------------
   # Python: the two config schemas and the bench client. AGENTS §3 asks for

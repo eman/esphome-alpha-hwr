@@ -1,0 +1,62 @@
+# Config check for the OTHER control UI.
+#
+# tests/ci-compile.yaml covers alpha_hwr_controls.yaml. That leaves
+# alpha_hwr_schedule.yaml — the alternative UI — with no working-tree check at
+# all: the one example that loads it, hwr-pump-schedule-example.yaml, pins
+# `github://...@vX.Y.Z`, so it validates the last *release*. An edit to that
+# package therefore rode to release unvalidated, which is the same hole
+# ci-compile.yaml was written to close for the rest of the tree.
+#
+# The two packages cannot share one config. They are alternative designs for the
+# same UI and collide three ways — the "Schedule Enabled" switch name, the "Pump
+# Control Mode" select name, and the `pump_mode_select` id — so this is a second
+# config rather than another line in the first. That is also what makes the pair
+# mutually exclusive for users; see the README.
+#
+# Nothing device-specific: placeholder MAC and credentials, never flashed.
+
+esphome:
+  name: ci-compile-schedule
+  friendly_name: "CI Compile Check (schedule UI)"
+  project:
+    name: "grundfos.alpha_hwr"
+    version: "ci"
+
+substitutions:
+  mac_address: "00:00:00:00:00:00"
+
+# The working tree, not a published tag.
+external_components:
+  - source:
+      type: local
+      path: ../components
+    components: [alpha_hwr]
+
+packages:
+  alpha_hwr: !include ../packages/alpha_hwr_pairing.yaml
+  alpha_hwr_schedule: !include ../packages/alpha_hwr_schedule.yaml
+  alpha_hwr_schedule_editor: !include ../packages/alpha_hwr_schedule_editor.yaml
+
+esp32:
+  board: esp32-c3-devkitm-1
+  variant: esp32c3
+  framework:
+    type: esp-idf
+
+wifi:
+  ssid: "ci-ssid"
+  password: "ci-password"
+
+# Required by the alpha_hwr write services + write_settled event (issue #92).
+api:
+  custom_services: true
+  homeassistant_services: true
+  encryption:
+    key: "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA="
+
+ota:
+  - platform: esphome
+    password: "ci-ota"
+
+logger:
+  level: INFO

@@ -154,8 +154,12 @@ button:
 
 
 select:
-  # Pump Control Mode Selector  
-  # Matches the Grundfos GO app's 5 main control modes for ALPHA HWR
+  # Pump Control Mode Selector
+  # Six modes, chosen to match what the Grundfos GO app offers for the ALPHA
+  # HWR. (This comment said "5 main control modes" while listing six; the count
+  # was wrong, not the list. Nothing else in the repo records what the app
+  # shows, so treat the pairing as the original author's observation rather
+  # than something a capture pins.)
   # Note: This is separate from the Weekly Schedule feature (enable/disable via Object 82, Sub 104)
   - platform: template
     name: "Pump Control Mode"

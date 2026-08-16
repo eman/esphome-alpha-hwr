@@ -16,9 +16,37 @@ in the component stack directly from GitHub.
 | `packages/alpha_hwr_base.yaml` | Basic ALPHA HWR telemetry without BLE pairing | Good starting point for read-only monitoring |
 | `packages/alpha_hwr_pairing.yaml` | Full telemetry, diagnostics, schedules, and paired BLE access | Required for controls and schedule editing |
 | `packages/alpha_hwr_controls.yaml` | Recommended control UI | Adds pump enable, remote mode, schedule toggle, mode select, and setpoint controls |
-| `packages/alpha_hwr_schedule.yaml` | Lighter schedule/remote/mode UI | Simpler alternative to `alpha_hwr_controls.yaml`; avoid combining both unless you want duplicate controls |
+| `packages/alpha_hwr_schedule.yaml` | Lighter schedule/remote/mode UI | Simpler alternative to `alpha_hwr_controls.yaml`. **Pick one — including both fails validation**, see below |
 | `packages/alpha_hwr_schedule_editor.yaml` | ESPHome services and helper entities for weekly/single-event editing | Pair with `alpha_hwr_pairing.yaml` |
 | `packages/dhw_demand_detector.yaml` | DHW detector outputs plus Home Assistant supplementary sensors | Works standalone or alongside `alpha_hwr` |
+
+### `alpha_hwr_controls.yaml` and `alpha_hwr_schedule.yaml` are mutually exclusive
+
+They are two designs for the same UI, not layers, so a config that includes both
+does not build. It is not a cosmetic duplication — ESPHome stops at the first
+collision:
+
+```
+Duplicate switch entity with name 'Schedule Enabled' found.
+```
+
+Rename that and the next appears (`Duplicate select entity with name 'Pump
+Control Mode'`), and rename that and a third does (`ID pump_mode_select
+redefined!`). Two conflicting entities, three errors. Renaming all three does
+produce a valid config, but you would be maintaining a fork of the package to
+get two overlapping sets of the same controls.
+
+Choose by what you want:
+
+- **`alpha_hwr_controls.yaml`** for most installs. Its mode select reads the
+  pump's actual mode; the other assumes whatever it last wrote and asserts
+  "Constant Speed" at boot. It also adds the setpoint numbers, Engage Pump, and
+  Temperature AutoAdapt.
+- **`alpha_hwr_schedule.yaml`** for a smaller entity list: a schedule toggle, two
+  remote-mode buttons, and an optimistic mode select. Its select offers ten
+  modes against the other's six — the extra four are the AutoAdapt variants,
+  which are a wider surface than a hot-water recirculation install typically
+  needs.
 
 Both pump packages also set `logger: level: INFO` and expose node-health
 diagnostics (`Free Heap`, `Min Free Heap`, `Largest Free Block`, `Heap
@@ -48,7 +76,7 @@ delivered to every connected subscriber, so DEBUG is opt-in — put your own
 | Pairing status | No | Yes |
 | Control mode text sensor | No | Yes |
 | Schedule and single-event text sensors | No | Yes |
-| Start/stop, remote control, schedule toggle, mode/setpoint UI | No | Add `alpha_hwr_controls.yaml` or `alpha_hwr_schedule.yaml` |
+| Start/stop, remote control, schedule toggle, mode/setpoint UI | No | Add `alpha_hwr_controls.yaml` **or** `alpha_hwr_schedule.yaml` — not both |
 | Device info, history, event log, statistics | No | Yes |
 
 ## Using these packages from an external ESPHome config

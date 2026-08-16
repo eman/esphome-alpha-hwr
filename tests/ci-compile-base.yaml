@@ -1,0 +1,57 @@
+# Config check for the base (unpaired) telemetry package.
+#
+# alpha_hwr_base.yaml is what README.md points new users at for read-only
+# monitoring, and it had no working-tree check either: alpha_hwr_pairing.yaml is
+# a parallel copy of it rather than an include ("All sensors from
+# alpha_hwr_base.yaml PLUS", packages/alpha_hwr_pairing.yaml:9), so the two
+# cannot share a config, and the only example that loads this one pins
+# `github://...@vX.Y.Z`.
+#
+# Config validation only, no firmware build. The package holds a single lambda,
+# `pump->on_ble_service_data_seen(x)`, whose signature is already exercised by
+# the two builds that do run — so a second ESP-IDF build here would buy schema
+# coverage this check already gives. That is not true of
+# ci-compile-schedule.yaml, which is why that one does compile.
+#
+# Nothing device-specific: placeholder MAC and credentials, never flashed.
+
+esphome:
+  name: ci-compile-base
+  friendly_name: "CI Compile Check (base)"
+  project:
+    name: "grundfos.alpha_hwr"
+    version: "ci"
+
+substitutions:
+  mac_address: "00:00:00:00:00:00"
+
+# The working tree, not a published tag.
+external_components:
+  - source:
+      type: local
+      path: ../components
+    components: [alpha_hwr]
+
+packages:
+  alpha_hwr: !include ../packages/alpha_hwr_base.yaml
+
+esp32:
+  board: esp32-c3-devkitm-1
+  variant: esp32c3
+  framework:
+    type: esp-idf
+
+wifi:
+  ssid: "ci-ssid"
+  password: "ci-password"
+
+api:
+  encryption:
+    key: "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA="
+
+ota:
+  - platform: esphome
+    password: "ci-ota"
+
+logger:
+  level: INFO
