@@ -88,6 +88,19 @@ MUTATIONS=(
 # public surfaces. It went unnoticed for as long as it did precisely because no
 # test asserted either spelling.
 "command-string-service-name-drift|components/alpha_hwr/write_operation_service.cpp|    case WriteCommand::SET_PUMP_STATE:        return \"set_pump_state\";|    case WriteCommand::SET_PUMP_STATE:        return \"pump_set_state\";"
+# Restores issue #179's off-by-one: a seven-byte Class 7 header instead of six,
+# which cost every device-info string its first character. It survived for as
+# long as it did because the only test fixture was generated from the same wrong
+# assumption -- so the parser and its test agreed, and the pump was blamed. The
+# fixtures are transcribed from a capture now, which is what makes this mutation
+# fail rather than merely shift both sides together.
+"class7-header-length|components/alpha_hwr/device_info_service.cpp|      static const size_t HEADER_LEN = 6;|      static const size_t HEADER_LEN = 7;"
+# The length guard is the only thing standing between a runt frame and an
+# unsigned underflow: string_len is size_t, so a frame under 8 bytes wraps it to
+# ~1.8e19 and the copy loop reads ~127 bytes past the frame. transport.cpp
+# dispatches Class 3/7 on len >= 5, so 5-, 6- and 7-byte frames do reach the
+# callback. A skeptic pass found this relaxation left the whole suite green.
+"class7-runt-guard-relaxed|components/alpha_hwr/device_info_service.cpp|      static const size_t MIN_FRAME_LEN = HEADER_LEN + CRC_LEN;|      static const size_t MIN_FRAME_LEN = 5;"
 "response-crc-enforcement|components/alpha_hwr/transport.cpp|if (!protocol::frame_crc_valid(reassembly_buffer_.data(), frame_len)) {|if (false) {"
 "response-crc-trim|components/alpha_hwr/transport.cpp|if (expected_packet_length_ >= 4 && frame_len > expected_packet_length_) {|if (false) {"
 "register-read-vetoes-type-match|components/alpha_hwr/transport.cpp|bool wildcard_command = (cmd.expect_type_low_ver == 0x0000 && cmd.expect_type_high == 0x0000);|bool wildcard_command = true;"
