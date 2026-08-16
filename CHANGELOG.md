@@ -373,6 +373,28 @@
   `link_watchdog.h`, because `ble_connection_manager.cpp` is compiled by no host
   test and anything expressed there is unverifiable (issue #175).
 
+- **Every device-info string was missing its first character.** The Class 7
+  ReadString response has a six-byte header — `[STX][LEN][DST][SRC][0x07]
+  [Count]`, with the string starting at byte 6 — and the parser assumed seven,
+  reading from byte 7 and sizing the string at `len - 9`. The two version
+  strings, which had no compensating patch, therefore reached Home Assistant
+  short: `2601618V04.02.01.02539` and `2811431V06.00.01.00001` against the
+  `92601618V04.02.01.02539` and `92811431V06.00.01.00001` the Grundfos GO app
+  displays for the same pump. Both now match, confirmed on hardware.
+
+  The two long-standing string repairs turn out to have been this bug's own
+  footprints, not the pump's. Prepending `A` to `LPHA HWR` restored the `A` at
+  byte 6. Prepending `1` to a serial starting `0` was never a fix at all: it is
+  correct for a serial beginning `10` and would corrupt one beginning `20`.
+  Both are removed. Published serials are unchanged — the old path reached the
+  right answer for this serial by coincidence, and now reaches it by parsing.
+
+  The host test could not have caught this, because its fixture builder was
+  written from the same seven-byte assumption the parser made, so the two
+  agreed and the pump took the blame. Fixtures are transcribed from a capture
+  now, and each is checked against the bytes the dump shows before it is used
+  (issue #179).
+
 - **The schedule card treated every write as successful.** `_saveChanges`
   discarded the user's pending edits at call time, then re-read the device on a
   3 s timer. A `set_schedule_entry` carries a 20 s watchdog and writes are
