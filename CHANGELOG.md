@@ -358,11 +358,19 @@
   argument.
 
   The bound reads the pump's own count rather than a constant, and it sits after
-  the overview precondition so that count is known. It covers both single-event
-  commands and every caller of them, since they share one slot resolver. On the
-  bench pump — five slots — slot 10 and slot 5 are refused in about 0.3 s with
-  `single event slot 5 out of range (pump has 5)`, and slot 4 still writes
-  normally.
+  the overview precondition so that count is known. On the bench pump — five
+  slots — slot 10 and slot 5 are refused in about 0.3 s with `single event slot 5
+  out of range (pump has 5)`, and slot 4 still writes normally.
+
+  A slot of 100 or more is refused earlier still, and separately, because it is
+  wrong on *every* pump rather than merely on this one: SubID 900 + 100 is 1000,
+  which is where the weekly schedule's layer records live. That check runs ahead
+  of the overview read, so a broken link no longer turns a bad argument into
+  `"overview not readable"` — the same ordering `set_schedule_entry` already used
+  for its layer and day. A slot the protocol allows but this pump lacks still
+  reports the link failure when the link is down, deliberately: the count comes
+  from the pump, so with the pump unreachable there is no count to range-check
+  against.
 
 - **Single-event readback resolved its timezone offset from the wrong clock,
   so writes near a DST transition settled REJECTED.** The pump stores

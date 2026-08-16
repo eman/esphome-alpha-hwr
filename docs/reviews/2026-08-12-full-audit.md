@@ -691,23 +691,50 @@ release, and no CI job runs `esphome config`.
   only unvalidated argument that reaches the wire — every other service is range-checked or
   whitelisted.
 
-  > **Wire side already closed; the record here is stale.** `618ca70`, committed the same day this
-  > report was written, added the bound to `run_single_event_()` — after `ensure_overview_()`, so
-  > it compares against the count the pump itself reports rather than the 35-slot fallback. It
-  > covers `clear_single_event`, the entity path's explicit-slot `write_single_event`, and any
-  > future caller, because both commands share that one resolver.
+  > *(The citation has drifted: the check is at `api_bridge.cpp:373` now. Line 330 is inside
+  > `on_set_schedule_entry`.)*
   >
-  > **The bridge's 0–99 is not the defect it looks like.** 0–99 *is* the protocol envelope —
-  > single events occupy Object 84 SubIDs 900–999 (`schedule_service.h:133,150`). Tightening it to
-  > a constant would hardcode 35 at a layer that cannot know this pump answers 5, which is worse
-  > than deferring: it would reject legal slots on a larger pump and still accept illegal ones on
-  > a smaller. The envelope belongs at the bridge, the device bound where the device count is
-  > known.
+  > **Half stale, half right, and it took a skeptic pass to separate them.**
   >
-  > **What actually remained was test cover**, and that is what closed this item: the bound shipped
-  > with no test, so nothing distinguished it from a hardcoded 35 or an off-by-one. Three tests now
-  > model a 5-slot pump — slot 10 and slot 5 rejected, slot 4 accepted, nothing written in the
-  > reject cases — with two mutations pinning both failure modes.
+  > **Stale half.** `618ca70`, committed 15 seconds before this report, added a device bound to
+  > `run_single_event_()` — after `ensure_overview_()`, so it compares against the count the pump
+  > reports rather than the 35-slot fallback. The bullet's operative claim, "reaches the wire," was
+  > already false when it was written.
+  >
+  > **Right half.** The first draft of this note argued the bridge's 0–99 needed nothing because
+  > it *is* the protocol envelope, citing `schedule_service.h:133,150`. That justification was bad:
+  > those are two comments from one commit citing themselves, and the only capture evidence in the
+  > repo (`transport.cpp:505`) says 900–904 — this pump's five slots — while the tests call 35 "the
+  > protocol maximum". Nothing sourced 999.
+  >
+  > The conclusion survives on a different footing, one that is checkable here: the SubID is
+  > 900 + slot, and the weekly schedule's layer records occupy 1000–1004 (`schedule_service.cpp:85`
+  > and its siblings). Slot 100 addresses layer 0, not a single event. So 0–99 is the single-event
+  > SubID space because 1000 is spoken for — now named `SINGLE_EVENT_SLOT_LIMIT` with that
+  > reasoning attached, rather than left as a bare comment.
+  >
+  > **And the note's dichotomy was false.** It treated an envelope check as an *alternative* to the
+  > device bound. `run_schedule_entry_()` already does both, ten lines away: arguments validated
+  > INVALID before `ensure_overview_()`, device work after. Deferring everything had a real cost the
+  > draft did not account for — with the link down, an impossible slot settled
+  > `"overview not readable"`, blaming the link for an argument that could never have been right.
+  > The envelope check now runs first, and its ordering is itself mutation-tested.
+  >
+  > One limit, deliberate: a slot this *pump* lacks but the protocol allows (50 on a 5-slot pump)
+  > still reports the overview failure when the link is down. The count comes from the pump, so with
+  > the pump unreachable the honest answer is that the write was not attempted — not a range claim
+  > against a number never read. Pinned by its own test.
+  >
+  > **The bound also moved** out of the explicit-slot branch and into `write_single_event_()`, where
+  > all three resolutions funnel. The first draft claimed the old placement covered "any future
+  > caller"; it did not — it sat in one of two branches. The auto-slot branch is safe today only
+  > indirectly, because `read_single_events_async()` cannot put an out-of-range index in the cache
+  > for `find_vacation_slot()` to return. That property now has a test of its own.
+  >
+  > **Test cover was the rest of it.** The bound shipped with none, and neither way of getting it
+  > wrong is visible against the 35-slot simulator: hardcoding 35 accepts slot 10 on this pump, and
+  > `<=` for `<` accepts slot == max. Seven tests now model a 5-slot pump, with three mutations
+  > pinning both failure modes and the envelope's ordering.
 - **Three example YAMLs ship a working all-`A` API key and `test-ota` password.** The MAC gets a
   `# ← CHANGE THIS` marker and WiFi is step 2; the encryption key and OTA password are marked
   nowhere and appear in no setup step.

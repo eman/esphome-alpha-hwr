@@ -129,8 +129,25 @@ inline uint32_t local_unix_to_utc_resolved(uint32_t local) {
 }
 
 /**
+ * Highest single-event slot the protocol has room for, exclusive.
+ *
+ * Not a device capability — that is ClockProgramOverview's
+ * max_nof_single_events, which this bench specimen reports as 5 and which the
+ * write layer bounds against separately. This is the structural ceiling: the
+ * SubID is 900 + slot, and the weekly schedule's five layer records occupy
+ * SubIDs 1000-1004 (see the `1000 + layer` sites in schedule_service.cpp). Slot
+ * 100 therefore does not address a single event at all — it addresses layer 0.
+ *
+ * So 0-99 is the single-event SubID space because 1000 is spoken for, which is
+ * checkable in this repo; it is not an observed upper bound on any pump.
+ */
+static const uint16_t SINGLE_EVENT_SLOT_LIMIT = 100;
+
+/**
  * Single event entry (non-recurring, timestamp-based).
- * Protocol: Object 84, SubIDs 900-999, Type 220 (10 bytes)
+ * Protocol: Object 84, SubIDs 900-999, Type 220 (10 bytes) — the 999 ceiling is
+ * SINGLE_EVENT_SLOT_LIMIT's, i.e. where the layer records start, not a count of
+ * slots any pump has.
  *
  * Byte layout:
  *   [0]   enable (bool)
@@ -147,7 +164,7 @@ struct SingleEvent {
   uint8_t action{0x02};
   uint32_t begin_timestamp{0};
   uint32_t end_timestamp{0};
-  uint8_t index{0}; // 0-99 (SubID = 900 + index)
+  uint8_t index{0}; // 0 to SINGLE_EVENT_SLOT_LIMIT-1 (SubID = 900 + index)
 
   bool is_valid() const { return enabled && end_timestamp > begin_timestamp; }
 
