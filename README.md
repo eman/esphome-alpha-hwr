@@ -371,6 +371,38 @@ After that, reconnects reuse the stored bond.
 
 ## Examples in this repo
 
+Each example reads WiFi, the API encryption key and the OTA password from
+`secrets.yaml`, so start by creating one:
+
+```bash
+cp secrets-example.yaml secrets.yaml   # then fill in your own values
+```
+
+Filling it in is not optional. The template's `api_key` is deliberately not a
+valid key, its `ap_password` is deliberately too short, and its `ota_password`
+is deliberately commented out, so building straight after the copy fails with an
+error naming whichever you have not set.
+That is the point: no example in this repository carries a credential that would
+work if flashed, because an encryption key published in a public repository is
+not encryption, and a published OTA password lets anything on your LAN flash the
+node. `secrets.yaml` is gitignored.
+
+(The `tests/ci-compile*.yaml` harnesses do still hold a placeholder key. They
+exist so CI can compile the component before any secrets are seeded, they are
+not a recipe, and nothing instructs anyone to flash them.)
+
+One caveat ESPHome does not warn about: an *empty* `ota_password` is accepted and
+silently disables OTA authentication altogether, and an empty `ap_password`
+likewise leaves the fallback hotspot open. Set real values rather than blanking
+them.
+
+`components/alpha_hwr/discovery_example.yaml` is nested, and ESPHome resolves
+`!secret` relative to the config file, so it needs its own copy:
+
+```bash
+cp secrets.yaml components/alpha_hwr/secrets.yaml
+```
+
 - `hwr-pump-example.yaml` — basic read-only `alpha_hwr`
 - `hwr-pairing-example.yaml` — paired `alpha_hwr`
 - `hwr-pump-schedule-example.yaml` — paired pump with schedule UI/services

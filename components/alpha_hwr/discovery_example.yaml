@@ -9,6 +9,14 @@
 # Once you have the MAC address, you can use it in your main configuration
 # (see hwr-pump-example.yaml for the full example with sensors).
 #
+# Secrets: this file lives in a subdirectory, and ESPHome resolves !secret
+# relative to the config file rather than to the repository root — so the
+# root secrets.yaml the README tells you to create is invisible from here.
+# Give this one its own copy:
+#
+#   cp secrets-example.yaml secrets.yaml                      # if you have not already
+#   cp secrets.yaml components/alpha_hwr/secrets.yaml
+#
 # ============================================================================
 
 esphome:
@@ -25,10 +33,17 @@ wifi:
   ssid: !secret wifi_ssid
   password: !secret wifi_password
 
+# DEBUG is deliberate here and nowhere else: this config exists to print the
+# scan results you are looking for, and it is a throwaway you flash once to
+# learn a MAC address. Every log line is an API frame fanned out to every
+# subscriber, so do not carry this level over into a config you leave running
+# (issue #127).
 logger:
   level: DEBUG
 
 api:
+  encryption:
+    key: !secret api_key
 
 esp32_ble_tracker:
   scan_parameters:
