@@ -462,6 +462,8 @@
   lowest rank, so while another fault is held its string no longer replaces
   what is shown. It is still logged, and it never held its reason anyway.
 
+  Follow-up to the hold introduced by PR #188 (issue #175).
+
   No behaviour change on a healthy link, and no released firmware is known to
   have hit the overwrite: it needs an auth hold and then 60 s of silence, and
   the bonded encryption-failure path disconnects without going through the
