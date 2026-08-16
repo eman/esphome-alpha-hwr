@@ -371,6 +371,18 @@ After that, reconnects reuse the stored bond.
 
 ## Examples in this repo
 
+Every example reads WiFi, the API encryption key and the OTA password from
+`secrets.yaml`, so start by creating one:
+
+```bash
+cp secrets-example.yaml secrets.yaml   # then fill in your own values
+```
+
+None of these files carries a working credential, and ESPHome refuses to build
+until each secret is defined. That is deliberate: an encryption key published in
+a public repository is not encryption, and a published OTA password lets
+anything on your LAN flash the node. `secrets.yaml` is gitignored.
+
 - `hwr-pump-example.yaml` — basic read-only `alpha_hwr`
 - `hwr-pairing-example.yaml` — paired `alpha_hwr`
 - `hwr-pump-schedule-example.yaml` — paired pump with schedule UI/services

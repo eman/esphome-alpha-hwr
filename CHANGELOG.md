@@ -434,6 +434,27 @@
 
 ### Fixed
 
+- **The example configurations no longer ship working credentials.**
+  `hwr-pump-example.yaml`, `hwr-pairing-example.yaml` and
+  `hwr-pump-schedule-example.yaml` carried a real API encryption key and a real
+  OTA password inline. Both were flagged in comments, and both were still live
+  in anything flashed unchanged — an encryption key published in a public
+  repository is not encryption, and a published OTA password lets anything on
+  the LAN flash the node.
+
+  All three now read WiFi, the API key and the OTA password from `secrets.yaml`,
+  which is what the other two examples already did. The difference that matters
+  is not the comment: ESPHome refuses to build until each secret is defined, so
+  the failure mode changes from silently flashing a known key to a build error
+  naming the missing secret. `secrets-example.yaml` gains `ap_password` to cover
+  the fallback hotspot, and the README leads with the `cp secrets-example.yaml
+  secrets.yaml` step, which no document previously mentioned.
+
+  `hwr-pairing-example.yaml` also shipped `logger: level: DEBUG`, against the
+  advice its sibling example already carried: every log line is an API frame
+  fanned out to every subscriber, which is the heap-exhaustion path in issue
+  \#127. It is now commented out, as an opt-in for troubleshooting.
+
 - **The component no longer answers other devices' pairing requests, or acts on
   their pairing results.** BLE GAP events are broadcast rather than routed:
   ESPHome hands every GAP event to every BLE client and then to every node, so

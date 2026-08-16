@@ -14,7 +14,14 @@
 #
 # Setup Instructions:
 # 1. Replace the MAC address below with your pump's BLE MAC address
-# 2. Update WiFi credentials
+# 2. Create your secrets file and fill in your own values:
+#      cp secrets-example.yaml secrets.yaml
+#    This config reads WiFi, the API encryption key and the OTA password from
+#    it, so there is nothing to edit here and no working credential is carried
+#    in this file. ESPHome refuses to build until each secret is defined —
+#    which is the point: a config that ships a key anyone can read is not
+#    encrypted, and a published OTA password lets anything on your LAN flash
+#    this node.
 # 3. Flash to your ESP32
 #
 # ==============================================================================
@@ -38,8 +45,8 @@ esp32:
     type: esp-idf
 
 wifi:
-  ssid: "test-wifi"
-  password: "test-password"
+  ssid: !secret wifi_ssid
+  password: !secret wifi_password
   fast_connect: true
 
 logger:
@@ -50,15 +57,15 @@ api:
   custom_services: true
   homeassistant_services: true
   encryption:
-    # ← CHANGE THIS. Generate your own with `esphome wizard` or
-    # https://esphome.io/components/api.html#configuration-variables — this
-    # placeholder is public, so leaving it exposes every pump write service
-    # to anything on your LAN.
-    key: "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA="
+    # From secrets.yaml, so this file never carries a working key. Generate
+    # your own with `esphome wizard` or
+    # https://esphome.io/components/api.html#configuration-variables — a
+    # published key exposes every pump write service to anything on your LAN.
+    key: !secret api_key
 
 ota:
   - platform: esphome
-    password: "test-ota"  # ← CHANGE THIS (guards OTA firmware upload)
+    password: !secret ota_password  # guards OTA firmware upload
 
 button:
   - platform: restart
