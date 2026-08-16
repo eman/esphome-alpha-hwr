@@ -31,6 +31,7 @@
 #include "esphome/core/helpers.h"
 #include "esphome/core/log.h"
 #include "schedule_entry.h"
+#include <ctime>
 #include <functional>
 #include <vector>
 
@@ -59,6 +60,72 @@ inline uint32_t utc_to_local_unix(uint32_t utc, int32_t offset_s) {
 }
 inline uint32_t local_unix_to_utc(uint32_t local, int32_t offset_s) {
   return local == 0 ? 0u : static_cast<uint32_t>(static_cast<int64_t>(local) - offset_s);
+}
+
+/// Local UTC offset (seconds east of UTC) at the instant `ref`, e.g. -25200 for
+/// PDT, +3600 for CET.
+///
+/// `ref` is a **UTC epoch**. Uses only localtime_r/gmtime_r, both of which work
+/// on ESP-IDF newlib; mktime() there does NOT apply the TZ to a UTC-field tm, so
+/// the mktime(gmtime()) idiom returns 0. localtime has already resolved DST at
+/// `ref`, so the difference between the two representations is the offset.
+inline int32_t local_utc_offset_seconds(time_t ref) {
+  struct tm lt {}, gt {};
+  localtime_r(&ref, &lt);
+  gmtime_r(&ref, &gt);
+  int32_t off = (lt.tm_hour - gt.tm_hour) * 3600 + (lt.tm_min - gt.tm_min) * 60 +
+                (lt.tm_sec - gt.tm_sec);
+  // Correct for a date rollover between the two representations.
+  int day_delta = lt.tm_yday - gt.tm_yday;
+  if (lt.tm_year != gt.tm_year)
+    day_delta = (lt.tm_year > gt.tm_year) ? 1 : -1;
+  off += day_delta * 86400;
+  return off;
+}
+
+/// Convert a LOCAL-Unix value read back from the pump into UTC, resolving the
+/// offset correctly across a DST boundary.
+///
+/// The subtlety this exists for: local_utc_offset_seconds() takes a *UTC*
+/// instant, and on the read path the only thing available is the local value.
+/// Passing the local value directly evaluates the offset `off` seconds away
+/// from the true instant — in PDT, seven hours early — so any event within
+/// |off| of a transition resolved to the wrong side of it and came back an hour
+/// out. The write path is unaffected, because there the timestamp really is
+/// UTC; the asymmetry is what made it visible. The readback disagreed with what
+/// had just been written, so the confirm comparator settled the write REJECTED
+/// while the pump had stored exactly the right value.
+///
+/// One refinement step fixes most of it: take the offset at the local value as
+/// a first approximation, use it to get an approximate UTC, and resolve the
+/// offset again there.
+///
+/// Measured over a 24 h window at 15-minute steps around both 2026 US Pacific
+/// transitions (see test_single_event_tz_shift_across_dst):
+///
+///   spring-forward   28 of 97 samples wrong before, 0 after
+///   fall-back        32 of 97 samples wrong before, 4 after
+///
+/// The two transitions are not symmetric and the asymmetry is not a shortfall
+/// in the refinement. Spring-forward skips an hour of local time, so every
+/// local value that exists maps to exactly one instant and the round trip is
+/// exact. Fall-back *repeats* an hour, so two distinct UTC instants encode to
+/// the same wire value; nothing can recover which one was meant. That is a
+/// property of the pump storing local time -- its own clock program has the
+/// same ambiguity -- not of this conversion.
+///
+/// So the residual is exactly [transition, transition+1h) once a year, against
+/// the seven or eight hours at *both* transitions that the unresolved offset
+/// produced. A single event whose window falls inside that hour will still
+/// settle REJECTED on a readback comparison, correctly reporting that the value
+/// cannot be confirmed.
+inline uint32_t local_unix_to_utc_resolved(uint32_t local) {
+  if (local == 0)
+    return 0u;
+  const int32_t approx = local_utc_offset_seconds(static_cast<time_t>(local));
+  const int32_t refined = local_utc_offset_seconds(
+      static_cast<time_t>(static_cast<int64_t>(local) - approx));
+  return local_unix_to_utc(local, refined);
 }
 
 /**
