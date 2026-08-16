@@ -187,7 +187,7 @@ MUTATIONS=(
 # threshold the number exists to validate, since an interval that ends in a
 # recycle is never closed by a notification.
 "gap-censored-at-the-budget|components/alpha_hwr/link_watchdog.h|  void on_recycle(uint32_t now_ms) { this->sample_(now_ms); }|  void on_recycle(uint32_t now_ms) { (void) now_ms; }"
-"gap-samples-the-time-spent-disconnected|components/alpha_hwr/link_watchdog.h|  void on_open(uint32_t now_ms) { this->last_ms_ = now_ms; }|  void on_open(uint32_t now_ms) { (void) now_ms; }"
+"gap-samples-the-time-spent-disconnected|components/alpha_hwr/link_watchdog.h|    this->last_ms_ = now_ms;\n    this->armed_ = true;|    this->armed_ = true;"
 "gap-never-closes-an-interval|components/alpha_hwr/link_watchdog.h|    if (gap > this->max_ms_)\n      this->max_ms_ = gap;\n    this->last_ms_ = now_ms;|    if (gap > this->max_ms_)\n      this->max_ms_ = gap;"
 # The disconnect sample and its arming guard. Dropping the sample loses every
 # interval ended by a drop the watchdog did not cause -- the same censoring, at
