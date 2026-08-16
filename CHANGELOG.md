@@ -476,6 +476,52 @@
   `link_watchdog.h`, because `ble_connection_manager.cpp` is compiled by no host
   test and anything expressed there is unverifiable (issue #175).
 
+- **A pairing failure is no longer overwritten by the watchdog 60 s later.**
+  The hold that keeps a named cause on the Pump Link Fault surface was written
+  as a list of exceptions — the watchdog wrote its generic "No data from pump"
+  unless a *subscribe* hold was in place. An auth-failure hold is neither that
+  nor no hold at all, so it was overwritten: the same overwrite the subscribe
+  hold exists to prevent, on the one hold that records a bond-erasing failure.
+
+  Worse than losing the string. The overwrite also relabelled the origin as the
+  watchdog's, and that origin is released by inbound data — which an unbonded
+  pump keeps sending after a failed SMP, since passive telemetry needs no bond.
+  The pairing diagnostic would then be erased by the very next notification,
+  which is precisely the case the origin was introduced to protect.
+
+  The rule is now a rank (`failure_hold.h`, host-tested): `NONE < DATA <
+  SUBSCRIBE < AUTH`, and all four write sites ask the same question, so a hold
+  added later needs no new exception anywhere. Equal ranks still overwrite, so
+  a repeated watchdog fire keeps refreshing its own text and the backoff
+  escalation ("(60s)", then "(120s)") stays visible. The release rules are
+  deliberately *not* unified: inbound data releases the data and subscribe
+  holds and must not release an auth hold, which a successful `AUTH_CMPL`
+  clears. Each is a switch, so a new hold cannot be added without deciding what
+  releases it.
+
+  **An auth hold is now also released when the session reaches READY**, which
+  is what stops the rank from making it permanent. Nothing outranks it, and a
+  pump that never pairs successfully never produces the `AUTH_CMPL` that clears
+  it — so on the old rule it would have masked every later fault for the rest
+  of the boot, while no longer being able to report the pairing failure at all:
+  the fault string is displayed only while the session is *not* ready. Past
+  READY the hold could only put a stale pairing reason in front of the next
+  outage's real cause. Pairing state itself is unaffected — it has its own
+  sensor. READY is a deliberately weak signal (a deaf link reaches it too), so
+  it releases *only* the auth hold: releasing the watchdog's there would clear
+  the deaf-link reason on exactly the links it describes.
+
+  One reporting change worth knowing: a failed CCCD write is recorded at the
+  lowest rank, so while another fault is held its string no longer replaces
+  what is shown. It is still logged, and it never held its reason anyway.
+
+  Follow-up to the hold introduced by PR #188 (issue #175).
+
+  No behaviour change on a healthy link, and no released firmware is known to
+  have hit the overwrite: it needs an auth hold and then 60 s of silence, and
+  the bonded encryption-failure path disconnects without going through the
+  watchdog's writer.
+
 - **`dhw_demand`: the `dhw_in_use` tier no longer overrules a measured
   no-draw.** The heater's in-use flag fired whenever the tiers above it
   declined — including when the subtraction had declined *because it measured

@@ -147,6 +147,29 @@ MUTATIONS=(
 # the operator at the wrong cause, which defeats the whole purpose of naming
 # them; the second is the "distinctness is not correspondence" hole.
 "subscribe-fault-strings-swapped|components/alpha_hwr/subscribe_outcome.h|    case SubscribeOutcome::NO_SERVICE:\n      return \"Subscribe: service not found\";\n    case SubscribeOutcome::NO_CHARACTERISTIC:\n      return \"Subscribe: characteristic not found\";|    case SubscribeOutcome::NO_SERVICE:\n      return \"Subscribe: characteristic not found\";\n    case SubscribeOutcome::NO_CHARACTERISTIC:\n      return \"Subscribe: service not found\";"
+# Fault-hold rank (issue #175 follow-up). The first restores the exception list
+# the rank replaced: `!= SUBSCRIBE` reads as "hold the specific reason", but an
+# AUTH hold is neither NONE nor SUBSCRIBE, so the watchdog's generic "No data
+# from pump" overwrote a bond-erasing pairing failure 60 s later -- and relabelled
+# the origin DATA, which the next notification then released. The second drops the
+# rank entirely (last writer wins, the pre-#175 state). The third is the tempting
+# near-miss: strictly-greater, or the equivalent `held == NONE` one-liner, which
+# freezes a fault at its first text and hides the watchdog's backoff escalation
+# from the fault surface. The fourth releases a pairing failure on inbound data,
+# which an unbonded pump keeps sending after a failed SMP -- erasing exactly the
+# diagnostic the hold exists to preserve.
+"failure-hold-watchdog-outranks-auth|components/alpha_hwr/failure_hold.h|  return held <= incoming;|  return held != FailureHold::SUBSCRIBE;"
+"failure-hold-rank-ignored|components/alpha_hwr/failure_hold.h|  return held <= incoming;|  return true;"
+"failure-hold-never-refreshes-its-own-text|components/alpha_hwr/failure_hold.h|  return held <= incoming;|  return held < incoming;"
+"failure-hold-auth-released-by-data|components/alpha_hwr/failure_hold.h|    case FailureHold::AUTH:\n      return false;  // see the asymmetry above|    case FailureHold::AUTH:\n      return true;  // see the asymmetry above"
+# The READY release is what bounds an AUTH hold. Removing it restores a hold
+# with no exit for the rest of the boot on a pump that never pairs -- masking
+# every later fault with a pairing string that, past READY, is not even shown.
+# The second is the opposite error: releasing the watchdog's hold at READY,
+# which a deaf link reaches on every cycle, so the deaf-link reason would be
+# cleared on exactly the links it describes.
+"failure-hold-auth-not-released-at-ready|components/alpha_hwr/failure_hold.h|    case FailureHold::SUBSCRIBE:\n      return false;  // and a blocking subscribe fault never reaches READY\n    case FailureHold::AUTH:\n      return true;|    case FailureHold::SUBSCRIBE:\n      return false;  // and a blocking subscribe fault never reaches READY\n    case FailureHold::AUTH:\n      return false;"
+"failure-hold-watchdog-released-at-ready|components/alpha_hwr/failure_hold.h|      return false;  // READY does not prove the pump is answering|      return true;  // READY does not prove the pump is answering"
 "link-watchdog-never-fires|components/alpha_hwr/link_watchdog.h|return static_cast<uint32_t>(now_ms - last_inbound_ms) > timeout_ms;|return false;"
 "link-watchdog-rollover-unsafe|components/alpha_hwr/link_watchdog.h|return static_cast<uint32_t>(now_ms - last_inbound_ms) > timeout_ms;|return now_ms > last_inbound_ms + timeout_ms;"
 # data_timeout backoff (issue #176). Without it a deaf link is recycled ~1,300
