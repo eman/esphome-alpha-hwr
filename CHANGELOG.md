@@ -434,26 +434,53 @@
 
 ### Fixed
 
-- **The example configurations no longer ship working credentials.**
+- **No example configuration carries a credential that would work if flashed.**
   `hwr-pump-example.yaml`, `hwr-pairing-example.yaml` and
-  `hwr-pump-schedule-example.yaml` carried a real API encryption key and a real
-  OTA password inline. Both were flagged in comments, and both were still live
-  in anything flashed unchanged — an encryption key published in a public
+  `hwr-pump-schedule-example.yaml` each inlined a real API encryption key and a
+  real OTA password. Both were flagged in comments, and both were live in
+  anything flashed unchanged — an encryption key published in a public
   repository is not encryption, and a published OTA password lets anything on
-  the LAN flash the node.
+  the LAN flash the node. All three now read WiFi, the API key and the OTA
+  password from `secrets.yaml`.
 
-  All three now read WiFi, the API key and the OTA password from `secrets.yaml`,
-  which is what the other two examples already did. The difference that matters
-  is not the comment: ESPHome refuses to build until each secret is defined, so
-  the failure mode changes from silently flashing a known key to a build error
-  naming the missing secret. `secrets-example.yaml` gains `ap_password` to cover
-  the fallback hotspot, and the README leads with the `cp secrets-example.yaml
-  secrets.yaml` step, which no document previously mentioned.
+  **Moving them into the template was not, by itself, a fix**, and the first
+  draft of this change claimed otherwise. The documented path is `cp
+  secrets-example.yaml secrets.yaml`, and that template shipped the same
+  published key — so the recommended sequence still produced a node secured with
+  a key anybody can read, now with the warning one file further away. So the
+  template's two security-critical values are deliberately unusable: `api_key`
+  is not valid base64 of the right length, and `ota_password` is commented out.
+  Copying and building now fails with an error naming whichever you have not
+  set. CI no longer copies that template; it writes its own throwaway secrets
+  with a freshly generated key, so the tree contains no working key at all.
 
-  `hwr-pairing-example.yaml` also shipped `logger: level: DEBUG`, against the
-  advice its sibling example already carried: every log line is an API frame
-  fanned out to every subscriber, which is the heap-exhaustion path in issue
-  \#127. It is now commented out, as an opt-in for troubleshooting.
+  **Two examples were worse off than the three being fixed**, which the first
+  draft also missed while asserting in the README that every example was
+  covered. `dhw-demand-example.yaml` and `components/alpha_hwr/discovery_example.yaml`
+  declared a bare `api:` with no encryption whatsoever and, in the first case, an
+  `ota:` with no password — an unauthenticated API and unauthenticated OTA,
+  rather than merely a published one. Both now take the same secrets.
+
+  One behaviour worth stating because ESPHome does not warn about it: an *empty*
+  `ota_password` is accepted and silently disables OTA authentication entirely.
+  The template says so at the point of use, and the README repeats it.
+
+  `hwr-pairing-example.yaml` and `hwr-pump-schedule-example.yaml` also shipped
+  `logger: level: DEBUG`, against advice a sibling example already carried:
+  every log line is an API frame fanned out to every subscriber, which is the
+  heap-exhaustion path in issue \#127. Both are now commented out as an opt-in.
+  `discovery_example.yaml` keeps DEBUG, because printing scan results is the
+  entire purpose of a config you flash once to learn a MAC address — now with a
+  note saying not to carry that level into anything left running.
+
+  The `tests/ci-compile*.yaml` harnesses keep a placeholder key deliberately:
+  they run before CI seeds any secrets, they are not a recipe anyone is told to
+  flash, and giving them `!secret` would only reorder the workflow to no benefit.
+
+  `secrets-example.yaml` gains `ap_password`, which the fallback hotspot in
+  `hwr-pump-example.yaml` needs and the template never defined, and the README's
+  examples section leads with the `cp` step — which no document mentioned at all
+  while the examples were merely insecure rather than incomplete.
 
 - **The component no longer answers other devices' pairing requests, or acts on
   their pairing results.** BLE GAP events are broadcast rather than routed:

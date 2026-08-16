@@ -12,7 +12,12 @@ esphome:
 # Setup Instructions:
 # 1. Replace the MAC address below with your ALPHA HWR pump's BLE MAC address
 # 2. Set the three HA entity substitutions to match your installation
-# 3. Update WiFi credentials (or copy secrets-example.yaml to secrets.yaml)
+# 3. Create your secrets file and fill in your own values:
+#      cp secrets-example.yaml secrets.yaml
+#    Not optional: this config reads WiFi, the API encryption key and the
+#    OTA password from it, and the template's key and OTA password are
+#    deliberately unusable so that copying it and building fails rather
+#    than producing a node anyone can read or reflash.
 # 4. Flash to your ESP32
 #
 # Sensors published to Home Assistant:
@@ -53,9 +58,14 @@ wifi:
   password: !secret wifi_password
 
 api:
+  encryption:
+    key: !secret api_key
+
 logger:
+
 ota:
-  platform: esphome
+  - platform: esphome
+    password: !secret ota_password
 
 # ── Alpha HWR sensor IDs ───────────────────────────────────────────────────────
 #

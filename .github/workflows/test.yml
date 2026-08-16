@@ -189,12 +189,26 @@ jobs:
         run: esphome config tests/ci-compile-base.yaml
 
       # Some examples reference !secret. secrets.yaml is gitignored, so seed a
-      # throwaway one from the committed template. ESPHome resolves !secret
-      # relative to the config file, hence the copy beside the nested example.
+      # throwaway one here. ESPHome resolves !secret relative to the config
+      # file, hence the second copy beside the nested example.
+      #
+      # Deliberately NOT `cp secrets-example.yaml secrets.yaml`. That template
+      # ships an invalid api_key and a commented-out ota_password so that a user
+      # who copies it and builds gets an error instead of a node secured with a
+      # key published in this repository. CI therefore needs its own values, and
+      # generates the key rather than hardcoding one, so no working key exists
+      # in the tree at all.
       - name: Seed placeholder secrets
         run: |
-          cp secrets-example.yaml secrets.yaml
-          cp secrets-example.yaml components/alpha_hwr/secrets.yaml
+          KEY=$(python -c 'import base64, secrets; print(base64.b64encode(secrets.token_bytes(32)).decode())')
+          cat > secrets.yaml <<EOF
+          wifi_ssid: "ci-ssid"
+          wifi_password: "ci-wifi-password"
+          ap_password: "ci-ap-password"
+          api_key: "$KEY"
+          ota_password: "ci-ota-password"
+          EOF
+          cp secrets.yaml components/alpha_hwr/secrets.yaml
 
       # The published examples pin a release tag, so this catches drift between
       # the documented recipes and the packages they load.

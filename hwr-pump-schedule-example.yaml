@@ -49,8 +49,12 @@ wifi:
   password: !secret wifi_password
   fast_connect: true
 
-logger:
-  level: DEBUG
+# The alpha_hwr package sets `logger: level: INFO`. Every log line is an API
+# frame fanned out to every connected subscriber, so DEBUG is opt-in — uncomment
+# while troubleshooting, and prefer keeping at most one `esphome logs` stream
+# attached alongside Home Assistant (issue #127).
+# logger:
+#   level: DEBUG
 
 api:
   # Required by the alpha_hwr programmatic write services + write_settled event (issue #92)

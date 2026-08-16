@@ -371,17 +371,28 @@ After that, reconnects reuse the stored bond.
 
 ## Examples in this repo
 
-Every example reads WiFi, the API encryption key and the OTA password from
+Each example reads WiFi, the API encryption key and the OTA password from
 `secrets.yaml`, so start by creating one:
 
 ```bash
 cp secrets-example.yaml secrets.yaml   # then fill in your own values
 ```
 
-None of these files carries a working credential, and ESPHome refuses to build
-until each secret is defined. That is deliberate: an encryption key published in
-a public repository is not encryption, and a published OTA password lets
-anything on your LAN flash the node. `secrets.yaml` is gitignored.
+Filling it in is not optional. The template's `api_key` is deliberately not a
+valid key and its `ota_password` is deliberately commented out, so building
+straight after the copy fails with an error naming whichever you have not set.
+That is the point: no example in this repository carries a credential that would
+work if flashed, because an encryption key published in a public repository is
+not encryption, and a published OTA password lets anything on your LAN flash the
+node. `secrets.yaml` is gitignored.
+
+(The `tests/ci-compile*.yaml` harnesses do still hold a placeholder key. They
+exist so CI can compile the component before any secrets are seeded, they are
+not a recipe, and nothing instructs anyone to flash them.)
+
+One caveat ESPHome does not warn about: an *empty* `ota_password` is accepted and
+silently disables OTA authentication altogether. Set a real value rather than
+blanking it.
 
 - `hwr-pump-example.yaml` — basic read-only `alpha_hwr`
 - `hwr-pairing-example.yaml` — paired `alpha_hwr`
