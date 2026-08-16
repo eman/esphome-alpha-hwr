@@ -460,7 +460,12 @@
   unconditionally, so declining here would send a contradicting answer into an
   exchange already underway; `enable_pairing` governs what this component does,
   not whether `ble_client` consents. At a numeric-comparison request nothing
-  else responds, so the refusal is real.
+  else responds by default, so the refusal is real — and it is a behaviour
+  change worth naming: on a node with `enable_pairing: false`, a numeric
+  comparison request from the pump is now refused where it was previously
+  accepted. Reaching it takes a deliberate `io_capability` change, because
+  ESPHome's BLE stack sets "no input, no output" globally, which forces Just
+  Works and suppresses the request entirely.
 
 - **A BLE write that fails part-way through a packet no longer feeds the next
   command into the wreckage.** The failure path was identical whether zero or

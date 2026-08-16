@@ -469,7 +469,19 @@ void BLEConnectionManager::handle_auth_complete(const esp_ble_gap_cb_param_t *pa
   // is the worst of them: it latches the stranger's reason at AUTH rank, which
   // outranks every other hold, and then disconnects the pump.
   if (!gap_addr_is_pump_(auth_cmpl.bd_addr)) {
-    ESP_LOGV(TAG, "Ignoring AUTH_CMPL for another device");
+    // Logged at DEBUG, with both addresses, rather than dropped silently. This
+    // is the one gate whose false negative is fatal: if the pump ever stopped
+    // matching (a firmware change, a pump variant, an address-type quirk) the
+    // symptom is a link that opens, never subscribes and parks in SUBSCRIBING
+    // until the watchdog recycles it -- with nothing in the log to say why. The
+    // two addresses side by side name the cause immediately.
+    const uint8_t *ours = client_ != nullptr ? client_->get_remote_bda() : nullptr;
+    ESP_LOGD(TAG, "Ignoring AUTH_CMPL from %02X:%02X:%02X:%02X:%02X:%02X (pump is %02X:%02X:%02X:%02X:%02X:%02X)",
+             auth_cmpl.bd_addr[0], auth_cmpl.bd_addr[1], auth_cmpl.bd_addr[2],
+             auth_cmpl.bd_addr[3], auth_cmpl.bd_addr[4], auth_cmpl.bd_addr[5],
+             ours != nullptr ? ours[0] : 0, ours != nullptr ? ours[1] : 0,
+             ours != nullptr ? ours[2] : 0, ours != nullptr ? ours[3] : 0,
+             ours != nullptr ? ours[4] : 0, ours != nullptr ? ours[5] : 0);
     return;
   }
   char addr_str[18];
@@ -725,11 +737,24 @@ void BLEConnectionManager::handle_gap_event(esp_gap_ble_cb_event_t event, esp_bl
     }
       
     case ESP_GAP_BLE_KEY_EVT:
+      // Log-only, address-filtered on the same rationale as the passkey events:
+      // key exchange with somebody else's peer is not this component's business
+      // to narrate.
+      if (!gap_addr_is_pump_(param->ble_security.ble_key.bd_addr)) {
+        break;
+      }
       ESP_LOGD(TAG, "BLE key event (key exchange in progress)");
       ESP_LOGD(TAG, "  Key type: 0x%02x", param->ble_security.ble_key.key_type);
       break;
-      
+
     case ESP_GAP_BLE_REMOVE_BOND_DEV_COMPLETE_EVT:
+      // This component never removes a bond, so every one of these events is
+      // somebody else's -- a bluetooth_proxy unpair, most likely. Unfiltered, it
+      // reported "BLE bond removed successfully" about the pump when the pump's
+      // bond was untouched, which is the most misleading line in this switch.
+      if (!gap_addr_is_pump_(param->remove_bond_dev_cmpl.bd_addr)) {
+        break;
+      }
       if (param->remove_bond_dev_cmpl.status == ESP_BT_STATUS_SUCCESS) {
         ESP_LOGI(TAG, "BLE bond removed successfully");
       } else {
@@ -743,8 +768,13 @@ void BLEConnectionManager::handle_gap_event(esp_gap_ble_cb_event_t event, esp_bl
               param->ble_security.ble_req.bd_addr[0], param->ble_security.ble_req.bd_addr[1],
               param->ble_security.ble_req.bd_addr[2], param->ble_security.ble_req.bd_addr[3],
               param->ble_security.ble_req.bd_addr[4], param->ble_security.ble_req.bd_addr[5]);
-      // Unlike SEC_REQ, nothing in ESPHome handles this event, so this handler
-      // is the only responder and DECLINE is enforceable here.
+      // Unlike SEC_REQ, nothing in ESPHome answers this event *by default*, so
+      // DECLINE is enforceable here rather than advisory. It is not quite "the
+      // only responder": ESPHome ships an on_numeric_comparison_request trigger
+      // and a ble_client.numeric_comparison_reply action, so a config that
+      // wires those up on this same client would reply twice. Nothing in this
+      // repo's packages does, and a user who adds one has asked for manual
+      // control of exactly this event.
       switch (core::gap_security_action(gap_addr_is_pump_(param->ble_security.ble_req.bd_addr),
                                         pairing_enabled_)) {
         case core::GapSecurityAction::ACCEPT:

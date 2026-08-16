@@ -260,6 +260,13 @@ MUTATIONS=(
 # itself: stopping after one octet accepts every device with a matching OUI,
 # and dropping the unset-peer guard makes an all-zero event address match a
 # ble_client that has no address configured yet.
+#
+# Read the green here narrowly. All five mutate the *rule*; none can mutate its
+# *application*, because ble_connection_manager.cpp is compiled by no host test
+# -- so this block would still report 5/5 caught on a branch where every one of
+# the seven gates in handle_gap_event() had been deleted. What is pinned is that
+# the policy is right, not that it is wired up. The wiring is checked by the
+# ESP32 compile and on the bench.
 "gap-security-accepts-any-device|components/alpha_hwr/gap_security_policy.h|  if (!addr_is_ours) {\n    return GapSecurityAction::IGNORE;\n  }|  if (false) {\n    return GapSecurityAction::IGNORE;\n  }"
 "gap-security-ignores-enable-pairing|components/alpha_hwr/gap_security_policy.h|  return pairing_enabled ? GapSecurityAction::ACCEPT : GapSecurityAction::DECLINE;|  return GapSecurityAction::ACCEPT;"
 "gap-security-refuses-for-others|components/alpha_hwr/gap_security_policy.h|    return GapSecurityAction::IGNORE;\n  }\n  return pairing_enabled|    return GapSecurityAction::DECLINE;\n  }\n  return pairing_enabled"

@@ -44,8 +44,39 @@ static const uint8_t STRANGER_LAST[6] = {0xF8, 0xE6, 0x1A, 0x2B, 0x3C, 0x4E};
 static const uint8_t STRANGER_FIRST[6] = {0xF9, 0xE6, 0x1A, 0x2B, 0x3C, 0x4D};
 static const uint8_t UNSET[6] = {0, 0, 0, 0, 0, 0};
 
+// A perfectly ordinary address that happens to contain zero octets, including
+// in the position the unset-scan looks at first. Without it, "is this peer
+// unset?" can be reduced to `peer_addr[0] == 0` -- or its loop shortened to one
+// octet -- and every test above still passes, because no other address here
+// contains a zero anywhere. In production that reduction reads a pump at
+// 00:1E:2A:... as having no address configured and ignores its AUTH_CMPL
+// forever: encryption_pending_ never clears, the deferred CCCD write never
+// fires, and the session parks in SUBSCRIBING on every single connection.
+// 00:xx:xx is among the most common OUI prefixes there is, so this is a real
+// address, not a contrived one.
+static const uint8_t PUMP_WITH_ZEROS[6] = {0x00, 0x1E, 0x2A, 0x00, 0x3C, 0x4D};
+
 static void test_the_pump_matches_itself() {
   TEST_ASSERT(gap_addr_matches(PUMP, PUMP), "the configured pump address matches");
+}
+
+static void test_a_real_address_containing_zeroes_is_not_mistaken_for_unset() {
+  TEST_ASSERT(gap_addr_matches(PUMP_WITH_ZEROS, PUMP_WITH_ZEROS),
+              "an address with a zero first octet is a configured address, not an unset one");
+  TEST_ASSERT(!gap_addr_matches(PUMP, PUMP_WITH_ZEROS),
+              "...and it still rejects a different device");
+  TEST_ASSERT(gap_security_action(gap_addr_matches(PUMP_WITH_ZEROS, PUMP_WITH_ZEROS), true) ==
+                  GapSecurityAction::ACCEPT,
+              "...and its own pairing request is still accepted");
+}
+
+// The comparison length. Shortening it is caught by the near-miss loop below,
+// but lengthening it is not: comparing a seventh byte of a six-byte address
+// compares one object against itself in every test here and reads out of
+// bounds in production, where the two addresses are distinct objects.
+static void test_the_address_length_is_the_address_length() {
+  TEST_ASSERT(esphome::alpha_hwr::core::BD_ADDR_LEN == 6,
+              "a BLE address is six octets -- neither truncated nor over-read");
 }
 
 // A comparison that stops at the first byte, or runs one byte short, still
@@ -95,15 +126,6 @@ static void test_a_stranger_is_ignored_however_we_are_configured() {
               "pairing disabled: a stranger's request is ignored");
 }
 
-// IGNORE, not DECLINE. The stranger belongs to some other component, which may
-// want to pair with it; answering "no" for it is the same overreach as "yes".
-static void test_a_stranger_is_ignored_rather_than_refused() {
-  TEST_ASSERT(gap_security_action(false, true) != GapSecurityAction::DECLINE,
-              "a stranger is not refused on another component's behalf");
-  TEST_ASSERT(gap_security_action(false, false) != GapSecurityAction::DECLINE,
-              "a stranger is not refused on another component's behalf, pairing off");
-}
-
 // enable_pairing defaults to false and documents itself as passive telemetry
 // only. init_security() honoured it; the reply paths did not.
 static void test_enable_pairing_governs_our_own_pump() {
@@ -144,20 +166,6 @@ static void test_the_decision_table() {
   TEST_ASSERT(accepts == 1, "exactly one of the four input combinations accepts");
 }
 
-// The end-to-end shape the handlers rely on: an address off the wire, compared
-// against the configured peer, feeding the decision. Both halves have to be
-// wrong-able independently, which is why this composes them rather than
-// trusting the unit cases above.
-static void test_the_two_halves_compose() {
-  TEST_ASSERT(gap_security_action(gap_addr_matches(PUMP, PUMP), true) == GapSecurityAction::ACCEPT,
-              "pump address + pairing on: accept");
-  TEST_ASSERT(gap_security_action(gap_addr_matches(STRANGER_LAST, PUMP), true) ==
-                  GapSecurityAction::IGNORE,
-              "stranger address + pairing on: ignore");
-  TEST_ASSERT(gap_security_action(gap_addr_matches(PUMP, UNSET), true) == GapSecurityAction::IGNORE,
-              "pump address but no peer configured: ignore");
-}
-
 // Compiled with -Werror=switch, so this is a build-time assertion as much as a
 // test: both handlers in ble_connection_manager.cpp switch over this enum, and
 // a new action added without deciding what each of them does with it would
@@ -191,14 +199,14 @@ int main() {
   std::cout << "==========================================" << std::endl;
 
   test_the_pump_matches_itself();
+  test_a_real_address_containing_zeroes_is_not_mistaken_for_unset();
+  test_the_address_length_is_the_address_length();
   test_every_octet_is_compared();
   test_an_unconfigured_peer_matches_nothing();
   test_a_null_address_is_not_a_match();
   test_a_stranger_is_ignored_however_we_are_configured();
-  test_a_stranger_is_ignored_rather_than_refused();
   test_enable_pairing_governs_our_own_pump();
   test_the_decision_table();
-  test_the_two_halves_compose();
   test_every_action_is_accounted_for();
 
   std::cout << "\n==========================================" << std::endl;
