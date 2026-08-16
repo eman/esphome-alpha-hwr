@@ -33,6 +33,8 @@ void Authentication::start() {
   gate_waits_ = 0;
   replies_total_ = 0;
   packets_total_ = 0;
+  frames_total_ = 0;
+  outcome_ = HandshakeOutcome::NOT_RUN;
   ESP_LOGI(TAG, "Starting 3-stage authentication handshake");
 
   // Start Stage 1 immediately
@@ -44,6 +46,19 @@ void Authentication::cancel() {
     ESP_LOGW(TAG, "Authentication cancelled");
     running_ = false;
     auth_sequence_++;  // Invalidate any pending scheduler lambdas
+    // Clear the stage marker for symmetry with complete(), which does the
+    // same. It is an EQUIVALENT MUTANT and known to be one: removing it, or
+    // start()'s copy, or both, leaves the suite green, and that is correct
+    // rather than a coverage gap. Two things make a stale marker
+    // unobservable -- on_frame() returns early while !running_, and start()
+    // calls stage1_legacy_burst(0) synchronously, which assigns
+    // current_stage_ = 1 before control returns and therefore before any
+    // frame can be offered. A third adversarial pass reported the start()
+    // reset as "not equivalent, and reachable"; it is neither, and the
+    // experiment that showed so is recorded in tools/mutation_check.sh.
+    // Kept anyway, on the same defence-in-depth grounds as the redundant
+    // auth_sequence_++ in this function.
+    current_stage_ = 0;
   }
 }
 
@@ -87,6 +102,13 @@ uint8_t Authentication::packets_in_stage(uint8_t stage) {
 void Authentication::on_frame(const uint8_t *data, size_t len) {
   if (!running_)
     return;
+
+  // Counted BEFORE the class filter, and that ordering is the whole point of
+  // this counter existing separately: a frame of a class no stage maps to is
+  // still the pump talking. See complete().
+  if (data != nullptr && len > 0 && frames_total_ < UINT16_MAX)
+    frames_total_++;
+
   if (!auth_frame_answers_stage(data, len, current_stage_))
     return;
 
@@ -214,58 +236,75 @@ void Authentication::stage3_extensions() {
 void Authentication::complete() {
   if (!running_) return;
 
-  if (replies_total_ == 0) {
-    // The deaf link, named at the end of the handshake -- 2700 ms of scheduled
-    // delay on a pump that answers nothing, since every gate runs to its
-    // ceiling first. Not 1.5 s: that is the extra gate time, and an earlier
-    // version of this comment (and of the CHANGELOG) reported it as the time
-    // to the signal. The earliest indication is the stage-1 gate's
-    // PROCEED_UNANSWERED warning at 750 ms; this line is the summary.
+  // The decision, before the reporting. Kept as a value so it can be asserted:
+  // the mutation reverting SILENT's test to the reply count is invisible if
+  // this only ever reaches a log line.
+  outcome_ = frames_total_ == 0    ? HandshakeOutcome::SILENT
+             : replies_total_ == 0 ? HandshakeOutcome::UNRECOGNISED
+                                   : HandshakeOutcome::ANSWERED;
+
+  switch (outcome_) {
+    case HandshakeOutcome::SILENT: {
+    // Nothing came back at all, on any class -- the silent link, named at the
+    // end of the handshake (2700 ms of scheduled delay on a pump that answers
+    // nothing, since every gate runs to its ceiling first). The earliest
+    // indication is the stage-1 gate's PROCEED_UNANSWERED warning at 750 ms;
+    // this line is the summary.
     //
-    // Reported, not acted on: the inbound-data watchdog owns the teardown and
-    // its 60 s budget is measured (link_watchdog.h), whereas recycling on this
-    // signal would strand exactly the pump variant that fail-open exists to
-    // protect -- one that stays quiet until first polled would never reach the
-    // polling that would make it answer. What this buys is a named cause
-    // roughly 52 s before "No data from pump (60s)" in the worst case, 55 s
-    // typically -- not the 57 s a naive 60 - 2.7 gives, because the watchdog's
-    // window opens at connection-open and the handshake does not start there:
-    // 500 ms post-connect, up to 3 x 1000 ms discovery retries and 2000 ms
-    // stabilize come first (link_watchdog.h).
+    // Gated on frames_total_, not replies_total_. An earlier version used the
+    // reply count and justified it as "the only test that cannot
+    // false-POSITIVE -- if any frame came back, the link is not deaf". That
+    // was false, and the same commit shipped the test proving it:
+    // replies_total_ counts only the four classes auth_stage_for_reply_class()
+    // maps, so a pump ACKing the handshake on Class 3 -- a class
+    // test_frames_of_no_handshake_class_are_not_counted() asserts is not
+    // counted, and which does occur on this link -- answered ten of ten and
+    // would have been reported deaf.
     //
-    // **It has a false negative**, and the argument that excuses the gate's
-    // miscounting does not excuse this one. A frame is credited by class, and
-    // this pump pushes unsolicited Class 0x0A control-mode notifications during
-    // the handshake. A pump that ignored all ten packets but pushed one of
-    // those would reach here with replies_total_ == 1 and take the INFO branch
-    // below.
+    // What this counter claims is therefore narrow and true: no CRC-valid
+    // frame of any class arrived between start() and here. Two things still
+    // fall outside it, and neither is a defect in the test so much as the
+    // limit of what the handshake can observe: frames that fail CRC (dropped
+    // in transport.cpp before the observer runs) and frames that arrive after
+    // complete() (on_frame() returns early once !running_). A pump that only
+    // ever answers late, or only ever corrupt, is the watchdog's to catch.
     //
-    // Three tests were weighed, and this one is chosen for being the only one
-    // that cannot false-POSITIVE -- if any frame came back, the link is not
-    // deaf, whatever it was answering:
-    //
-    //   - stage_replies_[0] alone (Class 0x02 has no telemetry twin) reports
-    //     deafness on any firmware that answers the later stages but not the
-    //     legacy burst.
-    //   - stage_replies_[0] == 0 && stage_replies_[2] == 0 is stronger than
-    //     that -- an unsolicited Class 0x0A cannot satisfy it -- but still
-    //     reports deafness for a pump that answers only the unlock burst.
-    //     (An earlier version of this comment offered the first two as the
-    //     whole choice. They are not; this one is better than the pair and
-    //     still not free.)
-    //
-    // For a diagnostic whose only value is being trusted, under-reporting is
-    // the error to prefer, and the three per-stage PROCEED_UNANSWERED warnings
-    // still fire underneath it.
-    ESP_LOGE(TAG,
-             "Handshake complete but the pump answered none of its %u packets "
-             "- the link is open and deaf; expect the data watchdog to recycle "
-             "it",
-             (unsigned) packets_total_);
-  } else {
-    ESP_LOGI(TAG, "Authentication handshake complete (%u of %u packets answered)",
-             (unsigned) replies_total_, (unsigned) packets_total_);
+    // The head start over the watchdog is tens of seconds, not the 57 s a
+    // naive 60 - 2.7 would give: the watchdog's window opens at
+    // connection-open and the handshake does not start there (500 ms
+    // post-connect, discovery, 2000 ms stabilize come first). Taking
+    // link_watchdog.h's measured 5.90/6.17/5.94 s open-to-READY rather than
+    // its constants, which under-predict, this line lands ~7-8 s after open,
+    // so ~52 s. First cycle only: link_data_timeout_next() doubles the window
+    // after each recycle, so on a persistently silent pump the watchdog's
+    // message arrives later each time while this one stays put.
+      ESP_LOGE(TAG,
+               "Handshake complete but no frame of any kind arrived during it "
+               "(%u packets sent) - the link is open and silent; expect the "
+               "data watchdog to recycle it",
+               (unsigned) packets_total_);
+      break;
+    }
+    case HandshakeOutcome::UNRECOGNISED: {
+      // Something answered, but nothing on a class this handshake recognises.
+      // Not silence, so not the branch above; not an answered handshake either.
+      ESP_LOGW(TAG,
+               "Handshake complete: %u frames arrived but none on a class any "
+               "stage expects - the pump is talking, but not answering these "
+               "packets",
+               (unsigned) frames_total_);
+      break;
+    }
+    case HandshakeOutcome::ANSWERED: {
+      ESP_LOGI(TAG,
+               "Authentication handshake complete (%u of %u packets answered)",
+               (unsigned) replies_total_, (unsigned) packets_total_);
+      break;
+    }
+    case HandshakeOutcome::NOT_RUN:
+      break;  // unreachable: assigned above
   }
+
   running_ = false;
   current_stage_ = 0;
 

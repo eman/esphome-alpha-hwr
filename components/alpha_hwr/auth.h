@@ -49,6 +49,26 @@ class Transport;
  *   Python implementation: reference/alpha-hwr/src/alpha_hwr/core/authentication.py
  *   Protocol docs: https://eman.github.io/alpha-hwr/reimplementation/
  */
+/// What the handshake concluded about the pump, decided in
+/// Authentication::complete() from the two counters below.
+///
+/// A value rather than three log branches because the decision is the part
+/// with a judgement in it, and a decision only a log line reveals cannot be
+/// asserted: the mutation that reverts SILENT to its old, wrong test (the
+/// reply count instead of the frame count) was uncatchable while this was
+/// logging alone.
+enum class HandshakeOutcome : uint8_t {
+  /// No handshake has completed since construction or the last start().
+  NOT_RUN,
+  /// At least one packet was answered on the class its stage expects.
+  ANSWERED,
+  /// Frames arrived, but none on a class any stage maps. The pump is talking
+  /// and this code cannot tell whether it is agreeing.
+  UNRECOGNISED,
+  /// Nothing arrived at all. The link is open and silent.
+  SILENT,
+};
+
 class Authentication {
  public:
   /**
@@ -132,11 +152,10 @@ class Authentication {
   /**
    * @brief Replies counted during the handshake that just ran.
    *
-   * Zero means the pump answered nothing at all -- the deaf link, known by the
-   * end of the handshake rather than 60 s later via the inbound-data watchdog.
-   * See Authentication::complete() for when that is (2700 ms of scheduled
-   * delay, since every gate runs to its ceiling first) and for the false
-   * negative the class-based counting leaves in it. Valid after the completion
+   * Counts only frames of a class the handshake maps to a stage, so this is
+   * "packets answered", NOT "anything arrived" -- see frames_seen() for that,
+   * and Authentication::complete() for why the difference decides which one
+   * the deaf-link report is allowed to use. Valid after the completion
    * callback fires; reset by start().
    */
   uint16_t replies_seen() const { return replies_total_; }
@@ -147,6 +166,25 @@ class Authentication {
    * Ten on a completed handshake, fewer on one cut short.
    */
   uint16_t packets_sent() const { return packets_total_; }
+
+  /**
+   * @brief CRC-valid frames of ANY class seen while the handshake ran.
+   *
+   * Zero means nothing came back at all -- the deaf link, known by the end of
+   * the handshake rather than 60 s later via the inbound-data watchdog. This
+   * is deliberately a wider net than replies_seen(): a pump answering on a
+   * class this code does not map to a stage has still demonstrably answered,
+   * and reporting it as deaf would be a false alarm on the one diagnostic
+   * whose entire value is being believed. Reset by start().
+   */
+  uint16_t frames_seen() const { return frames_total_; }
+
+  /**
+   * @brief What the last completed handshake concluded. See HandshakeOutcome.
+   *
+   * Valid from the completion callback onward; reset to NOT_RUN by start().
+   */
+  HandshakeOutcome outcome() const { return outcome_; }
 
  private:
   Transport &transport_;  ///< Transport layer
@@ -165,6 +203,9 @@ class Authentication {
   uint8_t gate_waits_ = 0;
   uint16_t replies_total_ = 0;
   uint16_t packets_total_ = 0;
+  /// Frames of any class seen while running; see frames_seen().
+  uint16_t frames_total_ = 0;
+  HandshakeOutcome outcome_ = HandshakeOutcome::NOT_RUN;
 
   // Authentication stage functions
   void stage1_legacy_burst(int repeat_count);

@@ -139,35 +139,51 @@ constexpr uint8_t AUTH_REPLY_FRAME_START = 0x24;
 ///     observed 13.300 -> 14.108 span evenly over the five hops puts it near
 ///     243 ms, i.e. plausibly worse than any figure above. So the largest
 ///     latency in this capture is unknown, and 204 ms is a lower bound on it.
-///   - **The four are not commensurable.** They are measured to three
-///     different log lines -- transport "Packet complete", transport "Packet
-///     bytes", telemetry "Not Class 10" -- which the capture shows spanning
-///     4 ms at one point. The spread across stages is real; the precision is
-///     not.
+///   - **The four are not commensurable.** They are measured to whichever
+///     log line the issue happened to quote for each stage: two transport
+///     lines that are consecutive statements in the same block, and a
+///     telemetry line further downstream still -- the capture shows 8-12 ms
+///     between the transport and telemetry lines for one frame. The spread
+///     across stages is real; the precision is not.
 ///   - **The ratio is against the wrong quantity anyway.** The ceiling bounds
 ///     waiting *past the floor*, not latency *from the send*, so what a stage
 ///     actually tolerates is floor + 500 ms -- 700 ms at stage 2.
 ///
-/// What the number rests on is therefore the shape and not the decimal: every
-/// observed latency is a small multiple of 100 ms, the ceiling is several
-/// times that, and exceeding it costs nothing but the fail-open path.
+/// What the number rests on is therefore the shape and not the decimal: the
+/// observed latencies run from ~50 ms to ~200 ms, the unobserved one is
+/// bounded well above that, the ceiling is a few times the largest of them,
+/// and exceeding it costs nothing but the fail-open path.
 ///
 /// Three gates puts the handshake's worst case at 1200 + 1500 = 2700 ms of
 /// scheduled delay against the 1200 ms it takes today, which the inbound-data
 /// watchdog's budget absorbs -- see the sizing note in link_watchdog.h,
 /// updated for this.
 ///
-/// **Scheduled delay, not wall clock.** The host tests measure summed
-/// scheduled delay and never elapsed time, so neither figure is a wall-clock
-/// promise. How far apart they run is not established here either way: the one
-/// interval in the capture that is a bare timer with no BLE write inside it --
-/// the 200 ms stage-2 tail, 14.108 -> 14.312 -- ran at 204 ms, within 2%, and
-/// a gate tick is that kind of timer. The 808 ms that stage 2's five 50 ms
-/// hops took is not a counter-example: it contains five writes, so most of it
-/// is the transport's own 50 ms pacing rather than scheduler slop. (An earlier
-/// version of this note extrapolated a "3.2x" factor from that span and
-/// applied it to the ceiling, which was wrong twice over -- it misadded the
-/// span's scheduled delay, and it charged pacing to timers that send nothing.)
+/// **Scheduled delay, not wall clock**, and the capture says these run long:
+///
+///   - Stage 2's five 50 ms hops: 250 ms scheduled, 13.300 -> 14.108
+///     measured. **3.2x.**
+///   - Stage 1's last hop plus the 100 ms stage-1 tail: 200 ms scheduled,
+///     13.024 -> 13.300 measured. **1.4x.**
+///   - The 200 ms stage-2 tail: 14.108 -> 14.312 measured. **1.02x.**
+///
+/// Three measurements spanning 1.02x to 3.2x, which is not a distribution
+/// anything can be sized from, and this note does not pretend otherwise. Take
+/// the worst: a 500 ms ceiling is then ~1.6 s of real time and the 2700 ms
+/// worst case ~8.6 s -- still an order of magnitude inside the 60 s watchdog
+/// budget, which is the property that has to hold. The host tests measure
+/// summed scheduled delay and never elapsed time, so neither figure is a
+/// wall-clock promise.
+///
+/// Two corrections are folded into the above, both from adversarial review.
+/// The 3.2x figure was retracted once as "misadded" and is restored: 250 ms is
+/// the correct scheduled delay for that span (the 200 ms tail lies outside
+/// it), so the arithmetic was right and only the prose describing it was
+/// wrong. Its replacement -- that the 808 ms is mostly the transport's 50 ms
+/// send pacing -- was wrong on mechanism: send_command() only queues, all
+/// pacing lives in Transport::loop(), and the span is bracketed by two
+/// auth.cpp log lines on a set_timeout chain that does not wait for writes. It
+/// is scheduler slop, and the 1.02x tail is the outlier rather than the rule.
 constexpr uint8_t AUTH_GATE_MAX_WAITS = 10;
 
 /// Tick length for the wait above.
@@ -176,9 +192,11 @@ constexpr uint32_t AUTH_GATE_POLL_MS = 50;
 /// What a gate decides. PROCEED_UNANSWERED is separated from PROCEED_ANSWERED
 /// because the two mean opposite things about the link even though both
 /// advance: one is a pump that answered, the other is the ceiling expiring on
-/// a pump that did not, which is worth a warning. The first of those fires at
-/// 750 ms, the earliest the component learns anything about a deaf link;
-/// without it the 60 s watchdog is the first to say so.
+/// a pump that did not, which is worth a warning. The first of those fires
+/// 750 ms into the handshake, the earliest anything here reports a stage going
+/// unanswered; the summary in Authentication::complete() follows at 2700 ms.
+/// Both are measured from handshake start, while the watchdog's 60 s runs from
+/// connection-open -- see complete() for the head start that results.
 enum class AuthGate : uint8_t {
   PROCEED_ANSWERED,
   WAIT,

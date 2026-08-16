@@ -69,6 +69,17 @@ JOBS="${JOBS:-4}"
 # disabled -- and because it keeps that property true independently of the
 # arithmetic below it, which a later edit could change. Listing it here would
 # be an uncatchable entry rather than a coverage gap.
+#
+# Also deliberately absent: the `current_stage_ = 0;` assignments in
+# Authentication::start() and cancel(). Both are equivalent mutants, and so is
+# removing them together -- verified by experiment after a third adversarial
+# pass reported the start() one as "not equivalent, and reachable". It is
+# neither: start() calls stage1_legacy_burst(0) synchronously, which assigns
+# current_stage_ = 1 before start() returns, and therefore before any frame can
+# reach on_frame(); outside a running handshake on_frame() returns at the
+# !running_ guard, which has its own entry below. A stale marker is never
+# observable. Both assignments are kept as defence in depth, on the same
+# grounds as the redundant auth_sequence_++ above.
 MUTATIONS=(
 "crc-initial-value|components/alpha_hwr/codec.cpp|uint16_t crc = init;|uint16_t crc = init ^ 0x0001;"
 "crc-byte-order|components/alpha_hwr/frame_builder.cpp|packet_out[9] = (crc >> 8) & 0xFF;|packet_out[9] = crc & 0xFF;"
@@ -364,6 +375,17 @@ MUTATIONS=(
 # The saturation guard its own comment justifies: 256 same-class frames wrap
 # the byte to zero and reopen a gate the pump had already satisfied.
 "auth-reply-counter-wraps|components/alpha_hwr/auth.cpp|  if (stage_replies_[stage - 1] < 255)\n    stage_replies_[stage - 1]++;|  stage_replies_[stage - 1]++;"
+"auth-gate-expects-one-extension-packet-too-few|components/alpha_hwr/auth.cpp|    case 3: return 2;|    case 3: return 1;"
+# The guard that stops a cancelled handshake's counters being fed by frames
+# still arriving from the radio. cancel() cannot unschedule anything and the
+# radio does not stop, so this is the whole of what separates a dead handshake
+# from a live one on the inbound path.
+"auth-counts-frames-while-cancelled|components/alpha_hwr/auth.cpp|  if (!running_)\n    return;\n\n  // Counted BEFORE|  if (false)\n    return;\n\n  // Counted BEFORE"
+# The distinction between "answered nothing" and "sent nothing back at all".
+# Restores the false positive a third adversarial pass found: a pump ACKing the
+# handshake on Class 3 -- a class no stage maps, and one that occurs on this
+# link -- answered ten of ten and was reported as a silent link.
+"auth-silence-test-uses-reply-count|components/alpha_hwr/auth.cpp|  outcome_ = frames_total_ == 0    ? HandshakeOutcome::SILENT|  outcome_ = replies_total_ == 0    ? HandshakeOutcome::SILENT"
 #
 # Deliberately absent: removing the gate's ceiling
 # (`waits_used < max_waits` -> `true`). It is catchable in principle, but the

@@ -17,8 +17,8 @@
 // anyway, so READY is still reached on a completely deaf link, by design (the
 // fail-open reasoning is in auth_gate.h, and it is the same reasoning this
 // file used below when it declined to gate READY on received data). What
-// changed is that the deafness is now named at the moment it happens instead
-// of inferred from silence a minute later — see the zero-replies branch in
+// changed is that the silence is now named at the end of the handshake instead
+// of inferred a minute later — see the frames_total_ branch in
 // Authentication::complete(). The teardown is still this watchdog's.
 //
 // Notification subscription has the same shape. Of the six terminal paths
@@ -82,17 +82,18 @@
 // what keeps this a bounded number: without a ceiling on the gates the
 // handshake could outlast the watchdog that is supposed to catch it.
 //
-// The full +1.5 s is incurred when no stage is fully answered inside its
-// floor plus 500 ms — a deaf pump always, and equally a pump answering very
-// slowly, answering partially, or behind a congested link. The point worth
-// keeping is only that the deaf link is among them rather than excluded from
-// them: the growth lands on exactly the case this watchdog exists for. (Two
-// earlier versions of this note both overreached — the first said the growth
-// affects only a slow pump, the correction said only a silent one.) A pump that
-// answers everything costs nothing extra and reaches first inbound data during
-// the handshake, far inside the budget; a pump that answers nothing is 18.7 s
-// into a 60 s window instead of 17.2 s, which the ~41 s of remaining slack is
-// what makes acceptable.
+// The full +1.5 s is incurred when NO stage is fully answered inside its floor
+// plus 500 ms — a silent pump always, and a slow or congested one whenever the
+// shortfall reaches every stage. A pump short in only some stages pays only
+// those gates' ceilings, +0.5 s or +1.0 s. The point worth keeping is that the
+// silent link is among the cases rather than excluded from them: the growth
+// lands on exactly the case this watchdog exists for. (This paragraph has now
+// been wrong twice — first that the growth affects only a slow pump, then that
+// it affects only a silent one — which is why it now states a condition rather
+// than a category.) A pump that answers everything costs nothing extra and
+// reaches first inbound data during the handshake, far inside the budget; a
+// pump that answers nothing is 18.7 s into a 60 s window instead of 17.2 s,
+// which the ~41 s of remaining slack is what makes acceptable.
 //
 // That margin cannot be eroded by configuration: the interval is fixed at
 // PollingComponent(10000) in the constructor, and `update_interval` is not in

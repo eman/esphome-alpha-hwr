@@ -36,6 +36,7 @@
 uint32_t mock_millis = 0;
 
 using esphome::alpha_hwr::core::Authentication;
+using esphome::alpha_hwr::core::HandshakeOutcome;
 using esphome::alpha_hwr::core::Transport;
 using esphome::alpha_hwr::core::AUTH_CLASS10;
 using esphome::alpha_hwr::core::AUTH_EXT_1;
@@ -240,6 +241,8 @@ void test_an_answered_handshake_still_takes_1200_ms() {
   TEST_ASSERT(r.completions == 1, "And it completes once");
   TEST_ASSERT(r.auth.replies_seen() == 10,
               "All ten replies were counted");
+  TEST_ASSERT(r.auth.outcome() == HandshakeOutcome::ANSWERED,
+              "And the verdict is ANSWERED");
   TEST_ASSERT(r.auth.packets_sent() == 10, "Against ten packets sent");
 }
 
@@ -426,6 +429,110 @@ void test_a_flood_of_replies_cannot_wrap_the_counter() {
               "Stage 1's gate is satisfied — only stages 2 and 3, which the "
               "pump never answered here, wait out their ceilings. A wrapped "
               "counter would make it three");
+}
+
+// ── 2f. Silence vs. "answering on a class we do not map" ─────────────────────
+// The deaf-link report is gated on frames_seen(), not replies_seen(), and this
+// is the case that forced the distinction. A third adversarial pass showed the
+// old gate reporting "the pump answered none of its packets - the link is open
+// and deaf" for a pump that answered every single one, because it answered on
+// Class 3, which auth_stage_for_reply_class() does not map. A false alarm on
+// the one diagnostic whose entire value is being believed.
+void test_a_pump_answering_on_an_unmapped_class_is_not_silent() {
+  std::cout << "\n=== Answering on an unmapped class is not silence ==="
+            << std::endl;
+  mock_millis = 0;
+  AuthRig r;
+  r.auth.start();
+  r.drain();
+  for (int i = 0; i < 10; i++)
+    r.inject_reply(0x03, 11);  // Class 3 ACKs: real on this link, mapped to no stage
+  r.run_scheduled();
+
+  TEST_ASSERT(r.auth.replies_seen() == 0,
+              "None of them count as replies to a stage's packets");
+  TEST_ASSERT(r.auth.frames_seen() == 10,
+              "But all ten count as frames — the pump is demonstrably talking");
+  TEST_ASSERT(r.auth.outcome() == HandshakeOutcome::UNRECOGNISED,
+              "...so the verdict is UNRECOGNISED, not SILENT. Deciding this on "
+              "the reply count instead would report a pump that answered every "
+              "packet as a dead link");
+  TEST_ASSERT(r.completions == 1, "And the handshake completes");
+}
+
+void test_a_truly_silent_handshake_sees_no_frames() {
+  std::cout << "\n=== A silent pump is distinguishable from that ==="
+            << std::endl;
+  mock_millis = 0;
+  AuthRig r;
+  r.run_full_handshake();  // pump_answers stays false
+  TEST_ASSERT(r.auth.frames_seen() == 0,
+              "No frames at all — this, and only this, is the silent link");
+  TEST_ASSERT(r.auth.replies_seen() == 0, "And no replies either");
+  TEST_ASSERT(r.auth.outcome() == HandshakeOutcome::SILENT,
+              "And the verdict is SILENT");
+}
+
+// ── 2g. Nothing survives a cancel ────────────────────────────────────────────
+// cancel() leaves no scheduled work that can run (auth_sequence_), but frames
+// keep arriving from the radio regardless. Two guards stop them reaching a
+// dead handshake's counters, and a third adversarial pass found BOTH
+// individually removable with the suite green — which is what a property
+// resting on unasserted lines looks like.
+void test_frames_after_cancel_are_not_counted() {
+  std::cout << "\n=== Frames arriving after cancel() are ignored ==="
+            << std::endl;
+  mock_millis = 0;
+  AuthRig r;
+  r.auth.start();
+  r.drain();
+  r.auth.cancel();
+
+  const uint16_t frames_before = r.auth.frames_seen();
+  for (int i = 0; i < 5; i++)
+    r.inject_reply(0x02, 11);
+  TEST_ASSERT(r.auth.frames_seen() == frames_before,
+              "A cancelled handshake counts nothing further");
+  TEST_ASSERT(r.completions == 0, "And never reports completion");
+}
+
+void test_a_restart_after_cancel_starts_from_stage_1() {
+  std::cout << "\n=== A restart after a mid-handshake cancel starts at stage 1 ==="
+            << std::endl;
+  mock_millis = 0;
+  AuthRig r;
+
+  // Run into stage 3, then cancel — the disconnect path, which fires from
+  // alpha_hwr.cpp on any BLE drop and can land at any point in the handshake.
+  r.pump_answers = true;
+  r.auth.start();
+  r.drain();
+  while (r.next_to_run < r.scheduled.size() && r.sent.size() < 9) {
+    size_t i = r.next_to_run++;
+    r.virtual_elapsed_ms += r.scheduled[i].first;
+    r.scheduled[i].second();
+    r.drain();
+  }
+  TEST_ASSERT(r.sent.size() >= 9, "Reached stage 3 before cancelling");
+  r.auth.cancel();
+
+  // Reconnect. What is asserted below is the end-to-end property — a frame
+  // for a later stage is not credited during the restarted stage 1 — not the
+  // mechanism. Worth being explicit, because the mechanism is NOT the
+  // current_stage_ reset in cancel() or start(): stage1_legacy_burst(0) runs
+  // synchronously inside start() and assigns the marker before any frame can
+  // arrive, so both resets are equivalent mutants (see the note at cancel()).
+  // This case still earns its place — it is the only one that drives a cancel
+  // from mid-handshake back through a full restart — but it would pass with
+  // both resets deleted, and a name implying otherwise would be the kind of
+  // overclaim three review rounds have now been spent removing.
+  r.pump_answers = false;
+  r.auth.start();
+  r.drain();
+  r.inject_reply(0x0A, 22);
+  TEST_ASSERT(r.auth.replies_seen() == 0,
+              "A Class 10 frame during the restarted handshake's stage 1 is "
+              "not credited to stage 2");
 }
 
 // ── 2c. The observer takes nothing ───────────────────────────────────────────
@@ -682,6 +789,10 @@ int main() {
   test_frames_of_no_handshake_class_are_not_counted();
   test_a_telemetry_notification_during_stage_1_is_not_a_stage_2_reply();
   test_a_flood_of_replies_cannot_wrap_the_counter();
+  test_a_pump_answering_on_an_unmapped_class_is_not_silent();
+  test_a_truly_silent_handshake_sees_no_frames();
+  test_frames_after_cancel_are_not_counted();
+  test_a_restart_after_cancel_starts_from_stage_1();
   test_the_handshake_consumes_none_of_the_replies();
   test_a_corrupt_reply_is_not_counted();
   test_replies_do_not_carry_across_handshakes();
