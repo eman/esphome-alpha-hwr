@@ -126,7 +126,7 @@ MUTATIONS=(
 "continuation-falsifies-on-the-firing-threshold|components/dhw_demand/dhw_demand_logic.h|    if (in.demand_gpm <= in.release_gpm) {|    if (in.demand_gpm <= in.demand_flow_threshold) {"
 "continuation-releases-on-one-tick|components/dhw_demand/dhw_demand_logic.h|      return seen >= (uint32_t) in.release_ticks|      return seen >= 1u"
 "continuation-never-releases-on-a-streak|components/dhw_demand/dhw_demand_logic.h|      return seen >= (uint32_t) in.release_ticks\n                 ? ContinuationVerdict::MEASURED_STOPPED\n                 : ContinuationVerdict::STOPPING;|      return ContinuationVerdict::STOPPING;"
-"continuation-stopping-tick-drops-demand|components/dhw_demand/dhw_demand_logic.h|  return v == ContinuationVerdict::ACTIVE ||\n         v == ContinuationVerdict::CONFIRMED ||\n         v == ContinuationVerdict::STOPPING;|  return v == ContinuationVerdict::ACTIVE ||\n         v == ContinuationVerdict::CONFIRMED;"
+"continuation-stopping-tick-drops-demand|components/dhw_demand/dhw_demand_logic.h|         v == ContinuationVerdict::STOPPING;|         false;"
 "continuation-confirmation-never-reported|components/dhw_demand/dhw_demand_logic.h|    if (in.demand_gpm > in.demand_flow_threshold)\n      return ContinuationVerdict::CONFIRMED;|"
 "dhw-confirmation-does-not-refresh-expiry|components/dhw_demand/dhw_demand.cpp|    if (result.continuation == ContinuationVerdict::CONFIRMED) {\n      pre_pump_on_flow_since_ms_ = now;\n    }|"
 "dhw-stopping-streak-never-resets|components/dhw_demand/dhw_demand.cpp|    } else {\n      continuation_stopping_ticks_ = 0;\n    }|    }"
@@ -324,8 +324,26 @@ SURVIVORS=()
 CAUGHT=0
 
 for entry in "${MUTATIONS[@]}"; do
+  SURVIVED=0
+  BUILD_BROKEN=0
   IFS='|' read -r name file search replace <<< "$entry"
-  printf "%-24s " "$name"
+
+  # A '|' in the SEARCH field silently truncates it there, and the remainder is
+  # swallowed by `replace` -- so the entry applies a mutation nobody wrote.
+  #
+  # This CANNOT be detected by reassembling the four fields and comparing: the
+  # remainder is absorbed verbatim, delimiters included, so `name|file|search|
+  # replace` reproduces the original entry exactly even when the split was
+  # wrong. (I shipped that check first; it is worthless, and worth recording as
+  # such so it is not re-invented.) Nor can it be detected by counting
+  # delimiters, because replacements legitimately contain them.
+  #
+  # What catches it is downstream: a mangled entry produces code that does not
+  # compile, and the run below now reports that as its own outcome instead of
+  # scoring it "caught". See the note there. The rule for authors is simply:
+  # the search field must not contain a '|' -- if the line you want to anchor on
+  # has '||' in it, anchor on a neighbouring line. A '|' in the replacement is
+  # fine.
 
   APPLIED=$(SEARCH="$search" REPLACE="$replace" python3 - "$PROJECT_DIR/$file" <<'PY'
 import os, sys
@@ -349,6 +367,13 @@ PY
     restore_or_die
     continue
   fi
+
+  # A mutation that does not COMPILE proves nothing about the test suite, which
+  # is the only thing this check measures. It used to score as "caught": a
+  # failed build short-circuited the && below, leaving SURVIVED at 0. That made
+  # a mangled entry -- a search field truncated at a '|', say -- look like it
+  # was proving coverage it never tested. Build failures are now their own
+  # outcome, so entries have to produce code that compiles and is wrong.
 
   # Only the targets that actually compile this file. A mutation to
   # dhw_demand_logic.h cannot change what test_auth decides, and rebuilding it
@@ -383,18 +408,30 @@ PY
     # survived on the *previous* build. Cheap insurance against the exact
     # stale-binary artifact that has produced false survivors here before.
     ( cd "$TESTS_DIR" && rm -f "${SEL[@]}" )
-    if (cd "$TESTS_DIR" && make -j"$JOBS" "${SEL[@]}" >/dev/null 2>&1) && \
-       (cd "$TESTS_DIR" && for t in "${SEL[@]}"; do ./"$t" >/dev/null 2>&1 || exit 1; done); then
+    if ! (cd "$TESTS_DIR" && make -j"$JOBS" "${SEL[@]}" >/dev/null 2>&1); then
+      BUILD_BROKEN=1
+    elif (cd "$TESTS_DIR" && for t in "${SEL[@]}"; do ./"$t" >/dev/null 2>&1 || exit 1; done); then
       SURVIVED=1
     else
       SURVIVED=0
     fi
   else
-    if (cd "$TESTS_DIR" && make clean >/dev/null 2>&1 && make -j"$JOBS" test >/dev/null 2>&1); then
-      SURVIVED=1
+    if ! (cd "$TESTS_DIR" && make clean >/dev/null 2>&1 && make -j"$JOBS" test >/dev/null 2>&1); then
+      BUILD_BROKEN=1
     else
       SURVIVED=0
     fi
+  fi
+
+  if [[ "$BUILD_BROKEN" == "1" ]]; then
+    echo -e "${RED}✗ did not compile${NC}"
+    echo "    The mutated code does not build, so the suite was never run and"
+    echo "    this entry proves nothing about coverage. Usually the search"
+    echo "    field contains a '|' and was truncated there; sometimes the"
+    echo "    replacement is simply not valid C++. Fix the entry."
+    SURVIVORS+=("$name (did not compile)")
+    restore_or_die
+    continue
   fi
 
   if [[ "$SURVIVED" == "1" ]]; then
