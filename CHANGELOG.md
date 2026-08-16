@@ -363,6 +363,42 @@
   of `0s` stays disabled, and a budget configured larger than the ceiling is
   returned unchanged rather than clamped down (issue #176).
 
+- **A failed notification subscribe now names itself instead of being
+  rediscovered as a timeout.** `subscribe_to_notifications()` has six terminal
+  paths and discarded the answer on five. Four returned early after logging —
+  no client, no service, no characteristic, `esp_ble_gattc_register_for_notify`
+  failed — and since `subscribed_callback_()` is the only thing that advances
+  the session out of `SUBSCRIBING`, those four parked it there. The fifth, a
+  CCCD write that failed synchronously, fell through to the *same* callback as
+  success, so a failed subscribe was indistinguishable from a good one.
+
+  All five were caught by the 60 s data watchdog, and that design is unchanged:
+  one timer covers every cause, including a link that goes deaf later, which no
+  return code can see. What it could not do is say *which* thing failed, or say
+  anything at all for a minute. Each failure now latches its own reason on the
+  Pump Link Fault surface at the moment it happens, so a missing characteristic
+  reads as one instead of as "No data from pump (60s)".
+
+  The reporting is wired at the sites where those causes actually arise — the
+  service-discovery and characteristic-lookup paths — not only inside the
+  subscribe call, which those paths pre-empt with the same lookups.
+
+  It does **not** force an early disconnect. The subscribe decision point is
+  ~2–3 s after connection-open and a bonded reconnect re-arms in ~2 s, so
+  recycling there would run a ~6–8 s cycle against the watchdog's ~66 s — around
+  nine times more passes through the encryption-on-open window where a failure
+  can erase the bond. Naming the cause is the safe half; choosing the recycle
+  cadence belongs to the watchdog, which now backs off.
+
+  A failed CCCD write is recorded but does not *hold* its reason over the
+  disconnect that may follow: one of its documented synchronous causes is the
+  link already being gone, and holding would relabel a link loss as a subscribe
+  fault for the whole reconnect.
+
+  The decision lives in `subscribe_outcome.h` with host tests, following
+  `link_watchdog.h`, because `ble_connection_manager.cpp` is compiled by no host
+  test and anything expressed there is unverifiable (issue #175).
+
 - **`dhw_demand`: the `dhw_in_use` tier no longer overrules a measured
   no-draw.** The heater's in-use flag fired whenever the tiers above it
   declined — including when the subtraction had declined *because it measured
