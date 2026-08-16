@@ -164,42 +164,42 @@ void BLEConnectionManager::dump_services() {
   }
 }
 
-void BLEConnectionManager::subscribe_to_notifications() {
+SubscribeOutcome BLEConnectionManager::attempt_subscribe_() {
   if (!client_) {
     ESP_LOGW(TAG, "BLE client not available");
-    return;
+    return SubscribeOutcome::NO_CLIENT;
   }
-  
+
   auto *service = client_->get_service(service_uuid_);
   if (!service) {
     ESP_LOGW(TAG, "Service not found for notification subscription");
-    return;
+    return SubscribeOutcome::NO_SERVICE;
   }
-  
+
   auto *chr = client_->get_characteristic(service->uuid, characteristic_uuid_);
   if (!chr) {
     ESP_LOGW(TAG, "Characteristic not found");
-    return;
+    return SubscribeOutcome::NO_CHARACTERISTIC;
   }
-  
+
   // Register for notifications (tells ESP-IDF we want to receive them)
-  auto status = esp_ble_gattc_register_for_notify(client_->get_gattc_if(), 
-                                                   client_->get_remote_bda(), 
+  auto status = esp_ble_gattc_register_for_notify(client_->get_gattc_if(),
+                                                   client_->get_remote_bda(),
                                                    chr->handle);
   if (status) {
     ESP_LOGW(TAG, "Failed to register for notifications: %d", status);
-    return;
+    return SubscribeOutcome::REGISTER_FAILED;
   }
-  
+
   ESP_LOGI(TAG, "Registered for notifications (local)");
-  
+
   // Now write to the CCCD descriptor to enable notifications on the server side
   // CCCD handle is typically characteristic handle + 1
   uint16_t cccd_handle = chr->handle + 1;
   uint8_t notify_enable[] = {0x01, 0x00};  // 0x0001 = enable notifications
-  
+
   ESP_LOGI(TAG, "Writing to CCCD descriptor (handle 0x%04x) to enable notifications...", cccd_handle);
-  
+
   status = esp_ble_gattc_write_char_descr(
       client_->get_gattc_if(),
       client_->get_conn_id(),
@@ -208,14 +208,54 @@ void BLEConnectionManager::subscribe_to_notifications() {
       notify_enable,
       ESP_GATT_WRITE_TYPE_RSP,
       ESP_GATT_AUTH_REQ_NONE);
-  
+
   if (status) {
     ESP_LOGW(TAG, "Failed to write CCCD descriptor: %d", status);
-  } else {
-    ESP_LOGI(TAG, "CCCD write successful - notifications should now be enabled");
+    return SubscribeOutcome::CCCD_WRITE_FAILED;
   }
-  
-  // Notify component that subscription is complete
+
+  ESP_LOGI(TAG, "CCCD write successful - notifications should now be enabled");
+  return SubscribeOutcome::OK;
+}
+
+void BLEConnectionManager::report_subscribe_outcome_(SubscribeOutcome outcome) {
+  if (!subscribe_failed(outcome))
+    return;
+
+  // Name the cause at the moment it happens. Before issue #175 all five
+  // failures were logged and dropped, so the operator learned only what the
+  // watchdog says 60 s later -- "No data from pump", the symptom every one of
+  // them shares.
+  //
+  // The hold is what makes a blocking failure's reason survive the reconnect
+  // that follows. A CCCD write failure does not take it: one of its documented
+  // synchronous causes is the link already being gone, and holding over that
+  // would relabel a link loss as a subscribe fault for the whole episode.
+  last_failure_ = subscribe_outcome_to_string(outcome);
+  if (subscribe_outcome_holds_fault(outcome))
+    failure_hold_ = FailureHold::SUBSCRIBE;
+
+  ESP_LOGW(TAG, "Notification subscribe failed: %s",
+           subscribe_outcome_to_string(outcome));
+}
+
+void BLEConnectionManager::subscribe_to_notifications() {
+  const SubscribeOutcome outcome = attempt_subscribe_();
+  report_subscribe_outcome_(outcome);
+
+  // Reached on OK and on CCCD_WRITE_FAILED alike, and on nothing else: the four
+  // blocking outcomes return before this point and leave the session short of
+  // READY, which is what the data watchdog is for.
+  //
+  // The failed CCCD write is deliberately not treated as fatal. The pump may be
+  // bonded, and a bonded peer retains its CCCD across reconnections, so a link
+  // whose CCCD write could not be issued may already be subscribed from an
+  // earlier session. The dominant synchronous cause is ATT congestion, which is
+  // transient. Recycling on either prediction would tear down links that work.
+  // See subscribe_outcome.h.
+  if (subscribe_outcome_blocks_session(outcome))
+    return;
+
   if (subscribed_callback_) {
     subscribed_callback_();
   }
@@ -228,8 +268,14 @@ void BLEConnectionManager::force_disconnect(const char *reason) {
   // Terminated", which is true but says nothing; holding it keeps the actual
   // reason readable through the reconnect loop that follows. Cleared by
   // handle_notification() the moment data flows again.
-  last_failure_ = reason;
-  failure_hold_ = FailureHold::DATA;
+  // ...unless a subscribe step already named the actual cause. The watchdog
+  // reaches here 60 s after such a failure with "No data from pump", which is
+  // that failure's symptom, and overwriting would put the operator back on the
+  // generic string issue #175 exists to replace.
+  if (failure_hold_ != FailureHold::SUBSCRIBE) {
+    last_failure_ = reason;
+    failure_hold_ = FailureHold::DATA;
+  }
   if (client_ != nullptr) {
     client_->disconnect();
   }
@@ -341,6 +387,12 @@ void BLEConnectionManager::handle_service_discovery_complete(esp_gatt_if_t gattc
       } else {
         char uuid_buf[esphome::esp32_ble::UUID_STR_LEN];
         ESP_LOGW(TAG, "Characteristic NOT found: %s", characteristic_uuid_.to_str(uuid_buf));
+        // This, not attempt_subscribe_(), is where a missing characteristic
+        // actually surfaces -- the checks above run the same lookups, so the
+        // outcome of the same name inside attempt_subscribe_() is unreachable
+        // from here. Reporting only there would have put the whole benefit of
+        // issue #175 on a dead branch.
+        report_subscribe_outcome_(SubscribeOutcome::NO_CHARACTERISTIC);
       }
     } else {
       // Service NOT found - implement retry logic
@@ -363,8 +415,12 @@ void BLEConnectionManager::handle_service_discovery_complete(esp_gatt_if_t gattc
         }
       } else {
         ESP_LOGE(TAG, "Failed to find service after %d attempts", MAX_DISCOVERY_RETRIES);
+        // Retries exhausted: this is where a missing service really ends up.
+        report_subscribe_outcome_(SubscribeOutcome::NO_SERVICE);
       }
     }
+  } else {
+    report_subscribe_outcome_(SubscribeOutcome::NO_CLIENT);
   }
 }
 
@@ -378,7 +434,8 @@ void BLEConnectionManager::handle_notification(const esp_ble_gattc_cb_param_t *p
     // so a watchdog hold would otherwise never be released. Scoped to the
     // watchdog's own hold: see FailureHold for why an auth-failure hold must
     // survive notifications.
-    if (failure_hold_ == FailureHold::DATA)
+    if (failure_hold_ == FailureHold::DATA ||
+        failure_hold_ == FailureHold::SUBSCRIBE)
       failure_hold_ = FailureHold::NONE;
     if (notification_callback_) {
       notification_callback_(notify_evt->value, notify_evt->value_len);

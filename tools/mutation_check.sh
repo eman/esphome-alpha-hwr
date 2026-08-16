@@ -91,6 +91,18 @@ MUTATIONS=(
 "response-crc-trim|components/alpha_hwr/transport.cpp|if (expected_packet_length_ >= 4 && frame_len > expected_packet_length_) {|if (false) {"
 "register-read-vetoes-type-match|components/alpha_hwr/transport.cpp|bool wildcard_command = (cmd.expect_type_low_ver == 0x0000 && cmd.expect_type_high == 0x0000);|bool wildcard_command = true;"
 "register-read-guard-removed|components/alpha_hwr/transport.cpp|if (is_register_read && wildcard_command && !cmd.allow_register_read) {|if (false) {"
+# Subscribe-outcome policy (issue #175). The first restores the state where a
+# failed CCCD write was indistinguishable from a success. The second is the
+# opposite error and the more tempting one: recycling the link on every failure,
+# including the CCCD write, which tears down bonded links that were already
+# subscribed from an earlier session -- and each recycle re-enters the
+# encryption-on-open path where a failure can erase the bond (issue #14).
+"subscribe-cccd-failure-reads-as-success|components/alpha_hwr/subscribe_outcome.h|  return o != SubscribeOutcome::OK;|  return o != SubscribeOutcome::OK && o != SubscribeOutcome::CCCD_WRITE_FAILED;"
+"subscribe-holds-on-every-failure|components/alpha_hwr/subscribe_outcome.h|  return subscribe_outcome_blocks_session(o);|  return subscribe_failed(o);"
+# Found by a skeptic pass, both survived the original tests. The first points
+# the operator at the wrong cause, which defeats the whole purpose of naming
+# them; the second is the "distinctness is not correspondence" hole.
+"subscribe-fault-strings-swapped|components/alpha_hwr/subscribe_outcome.h|    case SubscribeOutcome::NO_SERVICE:\n      return \"Subscribe: service not found\";\n    case SubscribeOutcome::NO_CHARACTERISTIC:\n      return \"Subscribe: characteristic not found\";|    case SubscribeOutcome::NO_SERVICE:\n      return \"Subscribe: characteristic not found\";\n    case SubscribeOutcome::NO_CHARACTERISTIC:\n      return \"Subscribe: service not found\";"
 "link-watchdog-never-fires|components/alpha_hwr/link_watchdog.h|return static_cast<uint32_t>(now_ms - last_inbound_ms) > timeout_ms;|return false;"
 "link-watchdog-rollover-unsafe|components/alpha_hwr/link_watchdog.h|return static_cast<uint32_t>(now_ms - last_inbound_ms) > timeout_ms;|return now_ms > last_inbound_ms + timeout_ms;"
 
