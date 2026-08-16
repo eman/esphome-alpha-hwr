@@ -99,7 +99,7 @@ MUTATIONS=(
 "continuation-falsifies-on-the-firing-threshold|components/dhw_demand/dhw_demand_logic.h|    if (in.demand_gpm <= in.release_gpm) {|    if (in.demand_gpm <= in.demand_flow_threshold) {"
 "continuation-releases-on-one-tick|components/dhw_demand/dhw_demand_logic.h|      return seen >= (uint32_t) in.release_ticks|      return seen >= 1u"
 "continuation-never-releases-on-a-streak|components/dhw_demand/dhw_demand_logic.h|      return seen >= (uint32_t) in.release_ticks\n                 ? ContinuationVerdict::MEASURED_STOPPED\n                 : ContinuationVerdict::STOPPING;|      return ContinuationVerdict::STOPPING;"
-"continuation-stopping-tick-drops-demand|components/dhw_demand/dhw_demand_logic.h|  return v == ContinuationVerdict::ACTIVE ||\n         v == ContinuationVerdict::CONFIRMED ||\n         v == ContinuationVerdict::STOPPING;|  return v == ContinuationVerdict::ACTIVE ||\n         v == ContinuationVerdict::CONFIRMED;"
+"continuation-stopping-tick-drops-demand|components/dhw_demand/dhw_demand_logic.h|         v == ContinuationVerdict::STOPPING;|         false;"
 "continuation-confirmation-never-reported|components/dhw_demand/dhw_demand_logic.h|    if (in.demand_gpm > in.demand_flow_threshold)\n      return ContinuationVerdict::CONFIRMED;|"
 "dhw-confirmation-does-not-refresh-expiry|components/dhw_demand/dhw_demand.cpp|    if (result.continuation == ContinuationVerdict::CONFIRMED) {\n      pre_pump_on_flow_since_ms_ = now;\n    }|"
 "dhw-stopping-streak-never-resets|components/dhw_demand/dhw_demand.cpp|    } else {\n      continuation_stopping_ticks_ = 0;\n    }|    }"
@@ -284,6 +284,26 @@ CAUGHT=0
 
 for entry in "${MUTATIONS[@]}"; do
   IFS='|' read -r name file search replace <<< "$entry"
+
+  # `read` with four variables gives the last one everything after the third
+  # delimiter, so a '|' in the REPLACE field is harmless -- but one in the
+  # SEARCH field silently truncates it there, and the rest lands in `replace`.
+  # The entry then applies a mutation nobody wrote. That is worse than not
+  # applying: the mangled result usually fails to compile, and a build failure
+  # short-circuits the run below into reporting "caught", so the entry looks
+  # like it is proving coverage it never tested.
+  #
+  # Reassembling and comparing catches it for the cost of one string compare.
+  if [[ "$name|$file|$search|$replace" != "$entry" ]]; then
+    echo -e "${RED}✗ unparseable entry${NC}"
+    echo "    The search field contains a '|', so it was truncated there and"
+    echo "    the remainder was swallowed by the replacement. Pick an anchor"
+    echo "    line without a pipe -- '||' in the searched-for code is the usual"
+    echo "    cause. (A '|' in the REPLACEMENT is fine.)"
+    SURVIVORS+=("$name (unparseable entry)")
+    restore_or_die
+    continue
+  fi
   printf "%-24s " "$name"
 
   APPLIED=$(SEARCH="$search" REPLACE="$replace" python3 - "$PROJECT_DIR/$file" <<'PY'
@@ -308,6 +328,14 @@ PY
     restore_or_die
     continue
   fi
+
+  # NOTE on what "caught" means. Below, a failed build short-circuits the &&
+  # into leaving SURVIVED at 0, so a mutation that does not compile is reported
+  # as caught. In CI terms it would indeed be caught -- the build is red -- but
+  # it proves nothing about the test suite, which is what this check exists to
+  # measure. Entries should therefore be written to produce code that COMPILES
+  # and is wrong, not code that fails to parse. The unparseable-entry guard
+  # above closes the one way this used to happen silently.
 
   # Only the targets that actually compile this file. A mutation to
   # dhw_demand_logic.h cannot change what test_auth decides, and rebuilding it
