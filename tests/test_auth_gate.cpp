@@ -45,6 +45,33 @@ void test_a_fully_answered_stage_proceeds_immediately() {
               "2 of 2 replies: proceed without waiting");
 }
 
+// The quadrant the first version of this file left untested, and the one the
+// whole design is about: replies that arrive AFTER the gate has begun waiting.
+// Both the answered cases above sit at waits_used == 0 and both the waiting
+// cases sit at replies_seen < packets_sent, so nothing pinned what happens
+// when a late reply lands mid-wait. An adversarial pass demonstrated the hole
+// with a one-token mutation -- `replies_seen >= packets_sent && waits_used ==
+// 0`, a gate that stops honouring replies once it has started waiting -- and
+// the entire suite stayed green: the handshake would then always burn its full
+// ceiling, which is exactly the fixed-longer-timer behaviour this change
+// exists to avoid. Now in tools/mutation_check.sh as
+// auth-gate-ignores-late-replies.
+void test_a_late_reply_releases_a_waiting_gate() {
+  std::cout << "\n=== A reply arriving mid-wait releases the gate at once ==="
+            << std::endl;
+
+  for (uint8_t waited = 1; waited < AUTH_GATE_MAX_WAITS; waited++) {
+    TEST_ASSERT(auth_stage_gate(5, 5, waited, AUTH_GATE_MAX_WAITS) ==
+                    AuthGate::PROCEED_ANSWERED,
+                "5 of 5 proceeds however many ticks the gate had already "
+                "waited — it advances on the reply, not on a longer timer");
+  }
+  TEST_ASSERT(auth_stage_gate(2, 2, AUTH_GATE_MAX_WAITS - 1,
+                              AUTH_GATE_MAX_WAITS) == AuthGate::PROCEED_ANSWERED,
+              "Including on the very last tick before the ceiling, where the "
+              "verdict must be ANSWERED rather than the ceiling's UNANSWERED");
+}
+
 void test_a_short_stage_waits() {
   std::cout << "\n=== A stage still missing replies waits ===" << std::endl;
 
@@ -181,6 +208,7 @@ int main() {
   std::cout << "==========================================" << std::endl;
 
   test_a_fully_answered_stage_proceeds_immediately();
+  test_a_late_reply_releases_a_waiting_gate();
   test_a_short_stage_waits();
   test_the_ceiling_fails_open();
   test_extra_replies_do_not_hold_the_gate();

@@ -277,7 +277,7 @@ void Transport::on_notification(const uint8_t* data, size_t len) {
      // Ahead of the trim and the CRC check, where it has always been, so that
      // a frame about to be dropped as corrupt is still shown -- that is the
      // case the bytes are most wanted in.
-     if (reassembly_buffer_.size() >= 8) {
+     if (reassembly_buffer_.size() >= FRAME_DUMP_MIN_BYTES) {
        char hex[3 * FRAME_DUMP_BYTES + 1];
        const size_t n = std::min<size_t>(reassembly_buffer_.size(), FRAME_DUMP_BYTES);
        size_t off = 0;

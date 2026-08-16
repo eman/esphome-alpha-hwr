@@ -80,11 +80,18 @@
 // worst case is therefore 2700 ms, pushing worst-case-to-first-data to 18.7 s
 // against the same 60 s budget — ~41 s of slack rather than ~43 s. The cap is
 // what keeps this a bounded number: without a ceiling on the gates the
-// handshake could outlast the watchdog that is supposed to catch it. Note the
-// two figures move in opposite directions in the case that matters: the worst
-// case grows by 1.5 s only when the pump is answering slowly, and a pump
-// answering at all is one whose first inbound data arrives during the
-// handshake, far inside the budget.
+// handshake could outlast the watchdog that is supposed to catch it.
+//
+// The full +1.5 s is incurred exactly when the pump answers NOTHING, since
+// that is what runs all three gates to their ceilings — i.e. it lands on the
+// deaf link this watchdog exists for, not on some unrelated slow case. (An
+// earlier version of this note claimed the opposite, that the growth only
+// affects a pump answering slowly. It is the reverse, and the test that pins
+// the 2700 ms figure asserts zero replies in the same breath.) A pump that
+// answers everything costs nothing extra and reaches first inbound data during
+// the handshake, far inside the budget; a pump that answers nothing is 18.7 s
+// into a 60 s window instead of 17.2 s, which the ~41 s of remaining slack is
+// what makes acceptable.
 //
 // That margin cannot be eroded by configuration: the interval is fixed at
 // PollingComponent(10000) in the constructor, and `update_interval` is not in

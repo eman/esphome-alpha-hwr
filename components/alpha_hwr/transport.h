@@ -231,10 +231,16 @@ class Transport {
   /**
    * Watch every CRC-valid frame without consuming any of them.
    *
-   * The observer runs before response dispatch and cannot affect it: whatever
-   * it does, the frame still goes to a matching command callback or, failing
-   * that, to the packet callback. That is the whole point of it existing
-   * separately from both.
+   * The observer runs before response dispatch, and **not consuming is an
+   * obligation on the observer, not a property this class enforces.** It is
+   * handed a pointer into `reassembly_buffer_` while on_notification() is
+   * still working on that frame, so an observer that called reset() would
+   * leave the dispatch on the next line reading a cleared buffer, and one that
+   * re-entered on_notification() would overwrite the outer frame's bytes
+   * underneath it. Neither is reachable today — the sole observer is
+   * Authentication::on_frame(), which only reads — but a future observer must
+   * not queue commands, reset the transport, or feed it notifications. Read
+   * the bytes, record what you need, return.
    *
    * It exists for the authentication handshake (issue #174), which needs to
    * see the pump's replies to its ten packets but must not take them. Two
@@ -459,10 +465,14 @@ class Transport {
   static constexpr uint8_t FRAME_START_RESPONSE = 0x24;  ///< Response frame start byte
   static constexpr uint8_t FRAME_START_REQUEST = 0x27;   ///< Request frame start byte (echo)
   static constexpr size_t MAX_PENDING_HANDLERS = 10;     ///< Maximum pending response handlers
-  /// Header bytes shown in the verbose frame dump. Frames shorter than this
-  /// are dumped in full rather than skipped -- see the dump site for why that
-  /// matters.
+  /// Header bytes shown in the verbose frame dump. A frame between
+  /// FRAME_DUMP_MIN_BYTES and this is dumped in full rather than skipped --
+  /// see the dump site for why that matters.
   static constexpr size_t FRAME_DUMP_BYTES = 12;
+  /// Below this a frame is still skipped. It is the protocol's own minimum
+  /// (Start + Len + SvcH + SvcL + Class + OpSpec + CRC16), the same floor
+  /// parse_frame() rejects under, so anything shorter has no header to show.
+  static constexpr size_t FRAME_DUMP_MIN_BYTES = 8;
 };
 
 }  // namespace core

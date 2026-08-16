@@ -323,6 +323,13 @@ MUTATIONS=(
 # the transport, which is the other way to get the same outcome -- the replies
 # arrive, nothing is told about them, and every stage reads as unanswered.
 "auth-gate-never-waits|components/alpha_hwr/auth_gate.h|  if (replies_seen >= packets_sent)|  if (true)"
+# The subtler half, and the one an adversarial pass found surviving the first
+# version of these tests: a gate that honours replies only before it starts
+# waiting. It never advances early, so it breaks nothing visible -- it just
+# always burns the full ceiling, turning the self-correcting gate back into a
+# fixed longer timer. Killed now by test_a_late_reply_releases_a_waiting_gate()
+# and by the tightened bound in test_a_late_reply_is_waited_for...().
+"auth-gate-ignores-late-replies|components/alpha_hwr/auth_gate.h|  if (replies_seen >= packets_sent)|  if (replies_seen >= packets_sent \&\& waits_used == 0)"
 "auth-frame-observer-removed|components/alpha_hwr/transport.cpp|     if (frame_observer_) {|     if (false) {"
 # Both terms of what counts as a reply. Dropping the start-byte test lets the
 # echo of our own request answer itself; dropping the stage test credits a

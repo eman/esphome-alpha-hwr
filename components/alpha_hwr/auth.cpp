@@ -180,9 +180,11 @@ void Authentication::stage2_class10_burst(int repeat_count) {
       this->stage2_class10_burst(repeat_count + 1);
     });
   } else {
-    // Wait 200ms (Python uses 0.2s), then gate. This is the boundary the
-    // capture in issue #174 caught the old code crossing early: stage 2 was
-    // declared complete 81 ms before the reply to its fifth packet arrived.
+    // Wait 200ms (Python uses 0.2s), then gate. This is the tightest boundary
+    // in the capture behind issue #174: the fifth packet's reply landed 123 ms
+    // inside it. Inside, not outside -- the capture does not show a stage
+    // being walked past, and auth_gate.h records why the issue reads it as
+    // though it does.
     ESP_LOGD(TAG, "Stage 2 complete, waiting 200ms before Stage 3");
     schedule_(200, [this]() {
       this->gate_stage_(2, [this]() { this->stage3_extensions(); });
@@ -213,13 +215,31 @@ void Authentication::complete() {
   if (!running_) return;
 
   if (replies_total_ == 0) {
-    // The deaf link, ~1.5 s in rather than 60 s in. Reported, not acted on:
-    // the inbound-data watchdog owns the teardown and its 60 s budget is
-    // measured (link_watchdog.h), whereas recycling on this signal would
-    // strand exactly the pump variant that fail-open exists to protect -- one
-    // that stays quiet until first polled would never reach the polling that
-    // would make it answer. What this buys is a named cause at the moment it
-    // happens, instead of "No data from pump (60s)" a minute later.
+    // The deaf link, named at the end of the handshake -- 2700 ms of scheduled
+    // delay on a pump that answers nothing, since every gate runs to its
+    // ceiling first. Not 1.5 s: that is the extra gate time, and an earlier
+    // version of this comment (and of the CHANGELOG) reported it as the time
+    // to the signal. The earliest indication is the stage-1 gate's
+    // PROCEED_UNANSWERED warning at 750 ms; this line is the summary.
+    //
+    // Reported, not acted on: the inbound-data watchdog owns the teardown and
+    // its 60 s budget is measured (link_watchdog.h), whereas recycling on this
+    // signal would strand exactly the pump variant that fail-open exists to
+    // protect -- one that stays quiet until first polled would never reach the
+    // polling that would make it answer. What this buys is a named cause ~57 s
+    // before "No data from pump (60s)".
+    //
+    // **It has a false negative**, and the argument that excuses the gate's
+    // miscounting does not excuse this one. A frame is credited by class, and
+    // this pump pushes unsolicited Class 0x0A control-mode notifications during
+    // the handshake. A pump that ignored all ten packets but pushed one of
+    // those would reach here with replies_total_ == 1 and take the INFO branch
+    // below. Tightening the test to stage_replies_[0] (Class 0x02 has no
+    // telemetry twin) trades this for a false POSITIVE on any firmware that
+    // answers the other stages but not the legacy burst, which is the worse
+    // error for a diagnostic whose whole value is being trusted. The three
+    // per-stage PROCEED_UNANSWERED warnings still fire in that case, so the
+    // condition is under-reported rather than unreported.
     ESP_LOGE(TAG,
              "Handshake complete but the pump answered none of its %u packets "
              "- the link is open and deaf; expect the data watchdog to recycle "

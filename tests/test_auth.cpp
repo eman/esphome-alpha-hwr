@@ -305,9 +305,14 @@ void test_a_late_reply_is_waited_for_rather_than_walked_past() {
               "completing without them");
   TEST_ASSERT(r.virtual_elapsed_ms > 1200,
               "And it waited past the 500 ms floor to do so");
-  TEST_ASSERT(r.virtual_elapsed_ms < 1200 + 3 * GATE_CEILING_MS,
-              "But nowhere near the ceiling — it advanced as soon as the "
-              "replies landed, not on a fixed longer timer");
+  // Bounded by ONE ceiling, not three. Only stage 3's gate waits in this
+  // scenario, so `< 1200 + 3 * GATE_CEILING_MS` was 3x too loose to falsify
+  // anything: a gate that ignored the late replies and burned its full ceiling
+  // reached 1700 ms and still passed it. Measured, on the mutation that does
+  // exactly that: real code 1400 ms, mutant 1700 ms, old bound 2700 ms.
+  TEST_ASSERT(r.virtual_elapsed_ms < 1200 + GATE_CEILING_MS,
+              "And advanced strictly inside stage 3's own ceiling — as soon as "
+              "the replies landed, not on a fixed longer timer");
 }
 
 // ── 2c. The observer takes nothing ───────────────────────────────────────────

@@ -132,9 +132,12 @@ class Authentication {
   /**
    * @brief Replies counted during the handshake that just ran.
    *
-   * Zero means the pump answered nothing at all -- the deaf link, known about
-   * a second into the handshake rather than 60 s later via the inbound-data
-   * watchdog. Valid after the completion callback fires; reset by start().
+   * Zero means the pump answered nothing at all -- the deaf link, known by the
+   * end of the handshake rather than 60 s later via the inbound-data watchdog.
+   * See Authentication::complete() for when that is (2700 ms of scheduled
+   * delay, since every gate runs to its ceiling first) and for the false
+   * negative the class-based counting leaves in it. Valid after the completion
+   * callback fires; reset by start().
    */
   uint16_t replies_seen() const { return replies_total_; }
 

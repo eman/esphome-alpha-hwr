@@ -15,19 +15,41 @@
 // discarded as "Not Class 10". The Authentication object sees none of it.
 //
 // The pump is not silent. Two independent captures on the reporter's specimen
-// show a class-matched reply behind every one of the ten packets, about 40 ms
-// behind each: three 11-byte Class 2 replies to stage 1, five 22-byte Class 10
-// replies to stage 2, and a 9-byte Class 5 and 9-byte Class 11 reply to
-// stage 3. Ten packets, ten replies, in both logs.
+// show a class-matched reply behind every one of the ten packets: three
+// 11-byte Class 2 replies to stage 1, five 22-byte Class 10 replies to
+// stage 2, and a 9-byte Class 5 and 9-byte Class 11 reply to stage 3. Ten
+// packets, ten replies, in both logs. Reply latency, from the timestamps in
+// the issue: 51 ms (stage 1), 188 ms (stage 2), 150 and 204 ms (stage 3). The
+// issue's "about 40 ms behind each" characterises stage 1; it does not
+// generalise, and the spread across stages is what the ceiling below is sized
+// against.
 //
-// The consequence is not hypothetical either, and it is already visible in
-// that capture: stage 2 was declared complete at 14.108 while the reply to its
-// fifth packet arrived at 14.189. On the firmware in front of us the handshake
-// already walks past a stage before the pump has answered it. The delays trace
-// to the reference client's sleeps (`Python uses 0.1s` / `0.2s` / `0.5s`), so
-// the margin describes one specimen on one firmware; a firmware update, a
-// different pump generation or a congested link all move it, and nothing today
-// would report it if it did.
+// **What the capture does NOT show is a stage being walked past.** The issue
+// reads it as one -- "stage 2 was declared complete at 14.108 while the reply
+// to its fifth packet arrived at 14.189" -- and that inference is wrong, which
+// matters enough to record because this change was very nearly justified by
+// it. `14.108` is the log line, not the transition:
+//
+//     ESP_LOGD(TAG, "Stage 2 complete, waiting 200ms before Stage 3");
+//     scheduler_callback_(200, [...]{ this->stage3_extensions(); });
+//
+// The transition is 200 ms behind that line, and the capture confirms it --
+// `[16:24:14.312] Stage 3: Sending extension packets`, 204 ms later. So the
+// stage-2 boundary was at 14.312 and the fifth reply landed at 14.189, i.e.
+// **123 ms inside it**. Run against that capture the gate below changes
+// nothing: every stage evaluates fully answered at its floor and the handshake
+// is timing-identical to the code it replaces.
+//
+// The case for it is therefore the issue's first argument rather than its
+// second, and that argument does not need the race: the delays trace to the
+// reference client's sleeps (`Python uses 0.1s` / `0.2s` / `0.5s`), so what
+// they encode is one specimen's timing on one firmware. The measured margin at
+// the tightest boundary is 123 ms. A firmware update, a different pump
+// generation, a busier pump or a congested link all move it, nothing today
+// reports it if it goes negative, and advancing on a matched reply is
+// self-correcting at whatever speed the pump actually runs. This is
+// prospective robustness, bought at no cost to the answered case -- not the
+// repair of an observed failure.
 //
 // ---------------------------------------------------------------------------
 // Why a gate rather than a rewrite
@@ -101,11 +123,22 @@ constexpr uint8_t AUTH_REPLY_FRAME_START = 0x24;
 /// a duration so the decision needs no clock (the caller owns the scheduler,
 /// and the host test drives it). Ten ticks of AUTH_GATE_POLL_MS.
 ///
-/// Sizing: the replies in the capture trail their packets by ~40 ms, worst
-/// observed 190 ms. 500 ms is 2.6x that worst case. Three gates puts the
-/// handshake's worst case at 1200 + 1500 = 2700 ms against the 1200 ms it
-/// takes today, which the inbound-data watchdog's budget absorbs -- see the
-/// sizing note in link_watchdog.h, updated for this.
+/// Sizing: worst reply latency in the capture is 204 ms (the Class 11 reply to
+/// EXT_2, 14.312 -> 14.516). 500 ms is 2.45x that. Three gates puts the
+/// handshake's worst case at 1200 + 1500 = 2700 ms of scheduled delay against
+/// the 1200 ms it takes today, which the inbound-data watchdog's budget
+/// absorbs -- see the sizing note in link_watchdog.h, updated for this.
+///
+/// **Scheduled delay, not wall clock**, and the difference is not small on
+/// this device: in the same capture stage 2's five 50 ms hops plus its 200 ms
+/// tail -- 250 ms of scheduled delay in the pre-change code, since the tail
+/// timer starts once the fifth packet is queued -- spanned 13.300 to 14.108,
+/// about 3.2x. Under that much scheduler and transport-pacing slop a "500 ms"
+/// ceiling is nearer 1.6 s of real time and the 2700 ms worst case nearer
+/// 8.6 s. Still an order of magnitude inside the 60 s watchdog budget, which
+/// is the property that has to hold; the tick count is not a wall-clock
+/// promise and the host tests measure summed scheduled delay, never elapsed
+/// time.
 constexpr uint8_t AUTH_GATE_MAX_WAITS = 10;
 
 /// Tick length for the wait above.
@@ -169,12 +202,23 @@ inline uint8_t auth_stage_for_reply_class(uint8_t class_byte) {
 ///
 ///   - It must be a response frame (0x24). See AUTH_REPLY_FRAME_START.
 ///   - Its stage must not be ahead of the stage in flight. Class 0x0A is also
-///     the class of ordinary telemetry, and on a re-authentication over a live
-///     session a telemetry notification arriving during stage 1 is not an
-///     answer to a stage-2 packet that has not been sent yet. A telemetry frame
-///     arriving *during* stage 2 is still miscountable, and is left so
-///     knowingly: the floor bounds the damage to today's behaviour, and no
-///     field in the reply distinguishes them.
+///     the class of ordinary telemetry, and this pump pushes control-mode
+///     notifications unprompted -- link_watchdog.h records that they arrive
+///     *during* the handshake, which is why the component publishes no default
+///     control mode at setup. One of those landing during stage 1 is not an
+///     answer to a stage-2 packet that has not been sent yet.
+///
+///     (An earlier version of this note justified the test with "on a
+///     re-authentication over a live session". There is no such path:
+///     `authenticate()` has exactly one call site, the post-subscribe timer,
+///     and `start()` refuses re-entry while running. The unsolicited
+///     notification is the real reason and it is enough on its own.)
+///
+///     A telemetry frame arriving *during* stage 2 is still miscountable, and
+///     is left so knowingly: the floor bounds the damage to today's behaviour,
+///     and no field in the reply distinguishes them. That argument covers the
+///     gate; where it does NOT reach is the zero-replies deaf-link report --
+///     see Authentication::complete().
 ///
 /// @param len is checked here rather than at the call site so that a runt can
 /// never index past the class byte.

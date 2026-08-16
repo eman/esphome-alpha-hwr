@@ -109,13 +109,18 @@ test_write_operations: test_write_operations.cpp $(WRITE_OP_SRCS) $(DEPS)
 
 AUTH_SRCS = ../components/alpha_hwr/auth.cpp ../components/alpha_hwr/transport.cpp ../components/alpha_hwr/frame_builder.cpp ../components/alpha_hwr/frame_parser.cpp ../components/alpha_hwr/codec.cpp
 
+# -Werror=switch belongs on THIS target, not on test_auth_gate. AuthGate's
+# three verdicts are switched over in Authentication::gate_stage_(), which
+# lives in auth.cpp -- compiled here and nowhere else. It was originally put on
+# test_auth_gate, which compiles only test_auth_gate.cpp and contains no switch
+# over AuthGate at all, so the guard asserted nothing: an adversarial pass added
+# a fourth enumerator and this target emitted a bare -Wswitch warning (exit 0)
+# while test_auth_gate compiled silently. The failure mode is the one named --
+# an unhandled verdict falls out of the switch straight into `gate_waits_ = 0;
+# advance();`, i.e. it advances the stage.
 test_auth: test_auth.cpp $(AUTH_SRCS) $(DEPS)
-	$(CXX) $(CXXFLAGS) test_auth.cpp $(AUTH_SRCS) -o test_auth $(LDFLAGS)
+	$(CXX) $(CXXFLAGS) -Werror=switch test_auth.cpp $(AUTH_SRCS) -o test_auth $(LDFLAGS)
 
-# -Werror=switch here for the same reason as the two targets above: AuthGate's
-# three verdicts are switched over in Authentication::gate_stage_(), and a
-# fourth added without deciding what it does to the handshake must fail the
-# build rather than fall through to "advance anyway".
 test_auth_gate: test_auth_gate.cpp ../components/alpha_hwr/auth_gate.h $(DEPS)
 	$(CXX) $(CXXFLAGS) -Werror=switch test_auth_gate.cpp -o test_auth_gate $(LDFLAGS)
 

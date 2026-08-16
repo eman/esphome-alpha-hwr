@@ -66,20 +66,29 @@
   command callback, so the transport took its "no response expected" branch and
   every answer the pump sent went to the telemetry parser instead of the
   handshake. The pump is not silent: two captures show a class-matched reply
-  behind each of the ten packets, ~40 ms behind each. And the race is not
-  hypothetical — in that capture stage 2 was declared complete 81 ms *before*
-  the reply to its fifth packet arrived, on current firmware, with nothing that
-  would have reported it.
+  behind each of the ten packets, at 51 / 188 / 150 / 204 ms across the three
+  stages.
+
+  **The capture does not show a stage being walked past**, and the issue's
+  reading that it does is mistaken — `14.108` is the "Stage 2 complete" log
+  line, which precedes the transition by the 200 ms timer, and the capture's
+  own `14.312` stage-3 send confirms it. The fifth reply at `14.189` landed
+  123 ms *inside* the boundary. Run against that capture this change is
+  timing-identical to the code it replaces. What justifies it is the report's
+  other argument: the delays are transcribed from the reference client's
+  sleeps, so they encode one specimen's timing on one firmware, the measured
+  margin at the tightest boundary is 123 ms, and nothing reports it if a
+  firmware update or a congested link takes it negative.
 
   Each stage boundary is now gated on the stage's packets having been answered.
   The existing delays become floors rather than the whole schedule, so an
-  answered handshake still takes exactly 1200 ms and nothing is ever sent
-  sooner than before; a pump that answers late stretches the handshake to fit
-  instead of being walked past. **The gate fails open**: after 500 ms of extra
-  wait an unanswered stage proceeds anyway, so a pump variant that stays quiet
-  during the handshake authenticates exactly as it does today, only later.
-  Worst case is 2700 ms against the inbound-data watchdog's 60 s budget, whose
-  sizing note is updated for it.
+  answered handshake still takes the same 1200 ms of scheduled delay and
+  nothing is ever sent sooner than before; a pump that answers late stretches
+  the handshake to fit instead of being walked past. **The gate fails open**:
+  after 500 ms of extra wait an unanswered stage proceeds anyway, so a pump
+  variant that stays quiet during the handshake authenticates exactly as it
+  does today, only later. Worst case is 2700 ms of scheduled delay against the
+  inbound-data watchdog's 60 s budget, whose sizing note is updated for it.
 
   The replies are *observed*, not consumed — a new non-consuming
   `Transport::set_frame_observer()` hook that runs ahead of response dispatch
@@ -88,11 +97,16 @@
   matched response is consumed, so the Class 10 control-mode notification the
   pump sends during stage 2 would have stopped being decoded and published.
 
-  A handshake the pump answers not at all is now named as such at the moment it
-  happens, ~1.5 s in, rather than inferred from silence when the data watchdog
-  recycles the link a minute later. It is reported, not acted on: the teardown
-  stays with the watchdog, whose 60 s budget is measured, because recycling on
-  this signal would strand the one pump variant fail-open exists to protect.
+  A handshake the pump answers not at all is now named as such by the end of
+  the handshake — the per-stage warning at 750 ms, the summary when it
+  completes at 2700 ms — rather than inferred from silence when the data
+  watchdog recycles the link a minute later. It is reported, not acted on: the
+  teardown stays with the watchdog, whose 60 s budget is measured, because
+  recycling on this signal would strand the one pump variant fail-open exists
+  to protect. Frames are credited by class, so an unsolicited control-mode
+  notification during the handshake can mask a pump that answered nothing;
+  the per-stage warnings still fire, and the trade against the alternative
+  false positive is recorded at the site.
 
   Not addressed, for want of evidence: whether a *rejected* auth step is
   detectable. The 9- and 11-byte replies sat under the frame dump's 12-byte
