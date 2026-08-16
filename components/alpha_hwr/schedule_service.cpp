@@ -28,15 +28,20 @@ namespace services {
 
 static const char *TAG = "schedule_service";
 
-// Local UTC offset (seconds east of UTC) for the current instant, from the
-// timezone ESPHome configured (via setenv TZ). Used to shift single-event
-// timestamps into the pump's LOCAL-Unix clock domain (see utc_to_local_unix).
-// A single "now" offset is applied to both write and read so the round trip is
-// exact; near a DST boundary a far-future event could be off by the DST hour —
-// acceptable for nowcast/vacation and consistent with how build_event_window
-// already resolves DST at creation time.
-// local_utc_offset_seconds() now lives in schedule_service.h alongside the
-// conversions that use it, so the host tests can reach it directly.
+// Single-event timestamps cross the wire in the pump's LOCAL-Unix clock domain
+// while SingleEvent itself always holds UTC, so both directions shift by the
+// local UTC offset -- but they do NOT share one offset, and the description
+// that used to sit here (a single "now" offset applied to both, exact by
+// construction) has not been true since issue #179's companion fix.
+//
+// Writes resolve the offset at the event's own UTC instant, which they have.
+// Reads have only the wire-local value, so they refine: an approximate offset
+// from the local value, then the real one from the approximate UTC. See
+// local_unix_to_utc_resolved() in schedule_service.h, which also records what
+// the round trip does and does not guarantee across a DST boundary.
+//
+// local_utc_offset_seconds() lives in that header too, beside the conversions
+// that use it, so the host tests can reach it directly.
 
 // Day names for parsing schedule entries
 static const char *DAY_NAMES[7] = {"Monday",   "Tuesday", "Wednesday",
