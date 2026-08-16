@@ -34,10 +34,11 @@ void AlphaHwrApiBridge::setup(AlphaHwrComponent *component) {
   //
   // Every command string that is registered below is therefore public API on
   // two counts, and test_write_operations.cpp::test_command_strings() pins all
-  // fifteen: editing one of those strings in write_command_to_string() renames
-  // a Home Assistant service along with the event field. SET_REMOTE_MODE is the
-  // one command with no service here — the Remote Mode switch is entity-only —
-  // so its string moves the event field alone.
+  // sixteen: editing one of those strings in write_command_to_string() renames
+  // a Home Assistant service along with the event field. Two commands have no
+  // service here — SET_REMOTE_MODE (the Remote Mode switch is entity-only) and
+  // SET_CLOCK (the RTC sync is autonomous, submitted by the periodic check with
+  // origin INTERNAL) — so their strings move the event field alone.
   //
   // What that test cannot reach: this file is compiled only against the real
   // ESPHome API headers, so no host test builds it and the mutation check has
@@ -183,6 +184,13 @@ void AlphaHwrApiBridge::fire_write_settled(const WriteResult &result) {
       // the pump's run state, and reusing it here would make one event key
       // mean two unrelated things to anything parsing write_settled.
       put_bool("remote_enabled", result.enabled);
+      break;
+    case WriteCommand::SET_CLOCK:
+      // How far the pump's clock sits from the node's, measured after the
+      // write. Absent when no readback decoded a time; a timeout can still
+      // carry one, if an earlier attempt in the ladder decoded and later ones
+      // did not.
+      put_float("clock_offset_s", result.clock_offset_s, "%.0f");
       break;
     case WriteCommand::SET_PUMP_STATE:
       // Coupled selector: report both underlying flags plus the derived state

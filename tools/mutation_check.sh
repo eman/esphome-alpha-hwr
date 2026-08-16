@@ -118,6 +118,39 @@ MUTATIONS=(
 # the regression worth pinning: the user stops being told which of the two
 # things is broken.
 "single-event-envelope-after-overview|components/alpha_hwr/write_operation_service.cpp|  if (op->slot >= static_cast<int16_t>(services::SINGLE_EVENT_SLOT_LIMIT)) {|  if (false && op->slot >= static_cast<int16_t>(services::SINGLE_EVENT_SLOT_LIMIT)) {"
+# The clock confirm, in its load-bearing pieces.
+#
+# The first restores the defect the operation was written to fix: report the
+# write as confirmed without reading anything back. That is what the old
+# standalone path did -- callback(true) on the line after send -- and it stamped
+# "Last Clock Sync" and suppressed the next attempt for 24 h whether or not the
+# pump ever got the frame. If this survives, the confirm is decorative.
+"clock-confirm-assumes-success|components/alpha_hwr/write_operation_service.cpp|      if (offset >= -late_allowance && offset <= CLOCK_TOLERANCE_S) {|      if (true) {"
+# Makes the accept window symmetric, which is how it started. The pump lags us
+# by however long the frame sat in the FIFO transport queue behind other
+# commands, carrying a time built before the wait; that lag is ours. A flat
+# window calls it the pump's failure as soon as one blocked APDU is in front of
+# the write, and retries every 15 minutes while the link stays busy.
+"clock-confirm-symmetric-window|components/alpha_hwr/write_operation_service.cpp|      const int64_t late_allowance =\n          static_cast<int64_t>(elapsed_ms / 1000) + CLOCK_TOLERANCE_S;|      const int64_t late_allowance = CLOCK_TOLERANCE_S;"
+# Drops the shared local-fields resolution, so the node's exact epoch is compared
+# against a readback that ESPHome re-resolved from ambiguous local fields. Equal
+# for all but one hour a year, and an hour apart inside the DST fall-back fold --
+# where it settles a correct sync REJECTED "3600 s off" until 02:00 local.
+"clock-confirm-dst-fold|components/alpha_hwr/write_operation_service.cpp|      node_now.recalc_timestamp_local();|      // mutated: skip the shared resolution"
+# Restores the readback test that calls a decoded 2000-01-01 "unreadable": a
+# pump whose RTC a power cut has cleared is exactly the state a sync exists to
+# repair, and is_valid()'s 2019 floor reports it as nothing having come back.
+"clock-confirm-decode-test|components/alpha_hwr/write_operation_service.cpp|    if (pump_time.fields_in_range() && time_service_.current_time(node_now)) {|    if (pump_time.is_valid() && time_service_.current_time(node_now)) {"
+# The 2021 floor on what we are willing to write. is_valid() alone stops at 2019,
+# so an ESP32 that partially restored time writes a year-old clock to the pump.
+"clock-submit-sntp-floor|components/alpha_hwr/write_operation_service.cpp|  const bool have_writable_time = op->clock_now.is_valid() && op->clock_now.year >= 2021;|  const bool have_writable_time = op->clock_now.is_valid();"
+# The clock write's APDU header: object, sub-id, type, version and declared size.
+# Six bytes this change renamed from an opaque blob, and until the wire test
+# asserted the whole frame all three of these survived the suite -- the simulator
+# matches on apdu[1..4] and reads apdu[11..], so the middle was unguarded.
+"clock-apdu-type|components/alpha_hwr/time_service.cpp|  apdu[5] = 0x01;   // Type high (321 = 0x0141)|  apdu[5] = 0x99;   // Type high (321 = 0x0141)"
+"clock-apdu-version|components/alpha_hwr/time_service.cpp|  apdu[7] = 0x02;   // Object version|  apdu[7] = 0x77;   // Object version"
+"clock-apdu-declared-size|components/alpha_hwr/time_service.cpp|  apdu[10] = 0x0B;  // Size low (11 bytes)|  apdu[10] = 0x05;  // Size low (11 bytes)"
 # Restores issue #179's off-by-one: a seven-byte Class 7 header instead of six,
 # which cost every device-info string its first character. It survived for as
 # long as it did because the only test fixture was generated from the same wrong

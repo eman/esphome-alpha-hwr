@@ -90,7 +90,7 @@ READ_CHAIN_SRCS = ../components/alpha_hwr/history_service.cpp ../components/alph
 test_read_chain_lifetime: test_read_chain_lifetime.cpp $(READ_CHAIN_SRCS) $(DEPS)
 	$(CXX) $(CXXFLAGS) test_read_chain_lifetime.cpp $(READ_CHAIN_SRCS) -o test_read_chain_lifetime $(LDFLAGS)
 
-WRITE_OP_SRCS = ../components/alpha_hwr/write_operation_service.cpp ../components/alpha_hwr/schedule_codec.cpp ../components/alpha_hwr/control_service.cpp ../components/alpha_hwr/schedule_service.cpp ../components/alpha_hwr/transport.cpp ../components/alpha_hwr/session.cpp ../components/alpha_hwr/frame_builder.cpp ../components/alpha_hwr/frame_parser.cpp ../components/alpha_hwr/codec.cpp
+WRITE_OP_SRCS = ../components/alpha_hwr/write_operation_service.cpp ../components/alpha_hwr/time_service.cpp ../components/alpha_hwr/schedule_codec.cpp ../components/alpha_hwr/control_service.cpp ../components/alpha_hwr/schedule_service.cpp ../components/alpha_hwr/transport.cpp ../components/alpha_hwr/session.cpp ../components/alpha_hwr/frame_builder.cpp ../components/alpha_hwr/frame_parser.cpp ../components/alpha_hwr/codec.cpp
 
 test_schedule_codec: test_schedule_codec.cpp ../components/alpha_hwr/schedule_codec.cpp $(DEPS)
 	$(CXX) $(CXXFLAGS) test_schedule_codec.cpp ../components/alpha_hwr/schedule_codec.cpp -o test_schedule_codec $(LDFLAGS)
@@ -98,8 +98,14 @@ test_schedule_codec: test_schedule_codec.cpp ../components/alpha_hwr/schedule_co
 test_telemetry_units: test_telemetry_units.cpp ../components/alpha_hwr/telemetry_decoder.cpp ../components/alpha_hwr/codec.cpp $(DEPS)
 	$(CXX) $(CXXFLAGS) test_telemetry_units.cpp ../components/alpha_hwr/telemetry_decoder.cpp ../components/alpha_hwr/codec.cpp -o test_telemetry_units $(LDFLAGS)
 
+# -DUSE_TIME is not optional here. TimeService::current_time() -- the function
+# that decides whether the pump is written at all, and that carries the SNTP
+# floor -- lives inside that ifdef; without the define this target compiles the
+# three-line #else stub and reports the real one as covered when it was never
+# built. SET_CLOCK's confirm calls it on every readback, so the whole comparison
+# would be untested too.
 test_write_operations: test_write_operations.cpp $(WRITE_OP_SRCS) $(DEPS)
-	$(CXX) $(CXXFLAGS) test_write_operations.cpp $(WRITE_OP_SRCS) -o test_write_operations $(LDFLAGS)
+	$(CXX) $(CXXFLAGS) -DUSE_TIME test_write_operations.cpp $(WRITE_OP_SRCS) -o test_write_operations $(LDFLAGS)
 
 AUTH_SRCS = ../components/alpha_hwr/auth.cpp ../components/alpha_hwr/transport.cpp ../components/alpha_hwr/frame_builder.cpp ../components/alpha_hwr/frame_parser.cpp ../components/alpha_hwr/codec.cpp
 

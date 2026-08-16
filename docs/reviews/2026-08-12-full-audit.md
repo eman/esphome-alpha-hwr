@@ -667,6 +667,29 @@ release, and no CI job runs `esphome config`.
   *Strongest evidence of accidental omission, which the finder missed:* `enable_remote()`/
   `disable_remote()` sit at `alpha_hwr.h:659-666` immediately below `pump_start`/`pump_stop`/
   `set_control_mode`, which all correctly submit to `write_op_service_`.
+
+  **Closed.** Remote mode moved to `submit_set_remote_mode()` in `e0ef766`, the day after this
+  report; the clock is now `SET_CLOCK`. Two claims here were wrong, and both were wrong in the
+  same direction — toward "P3, architectural tidiness":
+
+  - *"Both already carry confirms the finder did not credit."* `set_clock_async` carried no
+    confirm of any kind. It called `callback(true)` on the line after the send, unconditionally,
+    beneath a comment promising a verification read that does not exist. The finder was right and
+    the refutation was not.
+  - *"The real gap is narrower: no serialization, no `op_id`, no `write_settled` event."* The real
+    gap was a lie reaching a user-facing sensor. That `true` stamps "Last Clock Sync" and arms the
+    24-hour suppression timer, so a write that never left the node showed a fresh timestamp and
+    then declined to retry for a day, with the pump running its schedule off whatever clock it
+    held. Nothing about "single-step constant-frame write, cannot fuse stale cache" — true as far
+    as it goes — bears on that.
+
+  Both errors came from reading the *frame construction* and stopping there. The failure was three
+  lines further down.
+
+  One thing the fix turned up that neither pass saw: making the callback honest is not sufficient
+  on its own. `update()` runs every 10 s and only stamped the throttle on success, so an honest
+  failure would have produced a clock write every 10 seconds forever. The retry timer is stamped at
+  submission now, with a 15-minute interval after a sync that did not confirm.
 - **Two alleged bypasses are dead code** — the schedule layer writes and `set_state` are referenced
   only from **commented-out** YAML (`packages/alpha_hwr_schedule.yaml:155,158`;
   `hwr-pump-example.yaml:98,103`); `ScheduleService::clear_entry` has zero callers.
