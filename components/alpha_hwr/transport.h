@@ -414,6 +414,29 @@ class Transport {
   /// frame completes far inside this window.
   static constexpr uint32_t REASSEMBLY_TIMEOUT_MS = 1000;
 
+  // Hold-off after a write that failed PART-WAY through a packet.
+  //
+  // The peer is then holding the head of a frame whose length byte promises
+  // more, and a receiver built like this one appends whatever arrives next
+  // rather than treating a frame start as a fresh packet -- see
+  // on_notification(). Sending the next command straight away therefore feeds
+  // it into the wreckage: it is swallowed, and its caller waits out a full
+  // command timeout with nothing to show. The ordinary 50 ms pacing is not
+  // remotely enough, and it is measured from the last SUCCESSFUL chunk, so it
+  // is already satisfied when the failure happens.
+  //
+  // Derived from REASSEMBLY_TIMEOUT_MS rather than written out, so the two
+  // cannot drift: we hold for as long as our own receiver would need to
+  // abandon a partial, plus a margin, and that is the best available estimate
+  // of the pump's behaviour -- its reassembler cannot be observed from here.
+  // The cost is paid only on a partial write, which is a rare fault.
+  static constexpr uint32_t PEER_RESYNC_HOLD_MS = REASSEMBLY_TIMEOUT_MS + 100;
+
+  /// Set when a write failed with bytes already on the wire; blocks the next
+  /// send until the peer's partial frame must have gone stale.
+  bool peer_resync_pending_{false};
+  uint32_t peer_resync_started_ms_{0};
+
   // Callback for complete packets
   PacketCallback packet_callback_;            ///< Called when packet is complete
   WriteCallback write_callback_{nullptr};    ///< Callback for BLE writes
