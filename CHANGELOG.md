@@ -6,8 +6,10 @@
 
 - **`link_recycles` and `link_max_gap`** — two optional diagnostic sensors for
   the inbound-data watchdog (issue #176). `link_recycles` counts consecutive
-  recycles that produced no data and resets on any inbound notification, so it
-  reads 0 in normal operation and an automation can threshold on it; the Pump
+  recycles that produced no data and resets on a notification received once the
+  session is ready (a deaf pump still answers the handshake, so those frames
+  cannot count as proof the link works), so it reads 0 in normal operation and
+  an automation can threshold on it; the Pump
   Link Fault sensor shows a reason only *during* a reconnect and clears on
   recovery, which makes repeated recycles a flap cadence somebody has to be
   watching to notice rather than a value. `link_max_gap` records the longest
@@ -471,8 +473,12 @@
   encryption request can fail and erase the bond.
 
   A recycle that produces no data now doubles the window for the next one, up to
-  a ceiling of one hour, and any inbound notification resets it to the
-  configured value. A link that can recover still does on the first or second
+  a ceiling of one hour, and a notification received once the session is ready
+  resets it to the configured value — ready-gated because a deaf pump still
+  answers the handshake, so resetting on those frames would clear the window
+  once per session and the backoff would never engage. A widened window is not
+  reset by the reconnect either, so it also governs the next connection's
+  handshake. A link that can recover still does on the first or second
   try; a permanently deaf one drops to about 28 recycles a day. A `data_timeout`
   of `0s` stays disabled, and a budget configured larger than the ceiling is
   returned unchanged rather than clamped down (issue #176).

@@ -483,10 +483,12 @@ void AlphaHwrComponent::check_link_liveness_() {
   // would misstate the trigger once the window has grown.
   const uint32_t expired_ms = this->link_data_timeout_current_ms_;
 
-  // Consecutive recycles that produced no data (issue #176). Reset only by an
-  // inbound notification, so it reads 0 in normal operation and an automation
-  // can threshold on it -- a value to alert on rather than a flap cadence
-  // somebody has to be watching to notice.
+  // Consecutive recycles that produced no data (issue #176). Reset only by a
+  // notification received while the session is READY (see the reset site in the
+  // notification callback: handshake frames do not count as proof the link
+  // works), so it reads 0 in normal operation and an automation can threshold
+  // on it -- a value to alert on rather than a flap cadence somebody has to be
+  // watching to notice.
   this->link_recycles_without_data_++;
 
   // Widen the next window. See link_data_timeout_next(): a recoverable link

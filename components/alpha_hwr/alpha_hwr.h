@@ -572,9 +572,11 @@ private:
   // too. Initialised from the configured value in setup().
   uint32_t link_data_timeout_current_ms_{60000};
 
-  // Consecutive recycles with no data in between. Reset by an inbound
-  // notification, so it reads 0 in normal operation and an automation can
-  // threshold on it instead of having to detect a flap cadence live.
+  // Consecutive recycles with no data in between. Reset by a notification
+  // received while the session is READY -- the same gate as the backoff window
+  // above, and for the same reason -- so it reads 0 in normal operation and an
+  // automation can threshold on it instead of having to detect a flap cadence
+  // live.
   uint32_t link_recycles_without_data_{0};
 
   // Longest quiet interval observed since boot, for choosing the data_timeout
