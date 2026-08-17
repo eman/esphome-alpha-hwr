@@ -31,7 +31,6 @@
   nothing, because a mock that invents the asynchronous half can hide the bug it
   was written to catch.
 
-
 - **`link_recycles` and `link_max_gap`** — two optional diagnostic sensors for
   the inbound-data watchdog (issue #176). `link_recycles` counts consecutive
   recycles that produced no data and resets on a notification received once the
@@ -517,7 +516,37 @@
   Both pieces are drawn on the cell's own row rather than bleeding the tail onto
   the next day: the row shows what the cell contains, and which calendar day the
   pump runs the tail on is unverified.
+- **`upload_schedule` refused any window that crosses midnight** (issue #174
+  audit). `parse_upload_payload()` rejected `begin >= end`, which meant the bulk
+  path could not round-trip a grid the rest of the system can already produce:
+  `set_schedule_entry` accepts such a window (its only ordering rule, via
+  `ScheduleService::validate_entries`, is `begin != end`) and the Grundfos GO
+  app can create one. Reading that grid back and uploading it was refused — a
+  user could not bulk-restore their own schedule.
 
+  Upload is now exactly congruent with the single-entry path: both reject only
+  the zero-length window. The hash byte layout is unchanged.
+
+  **What is not established:** what the pump *does* with such a window at
+  runtime. It stores and echoes one back verbatim (bench-verified: 22:00–02:00
+  written to an empty cell, read back as `[1320,120]`), but a byte round trip is
+  not behaviour — this project has already been burned by a value that
+  round-tripped byte-identically while being wrong. Whether the pump runs
+  22:00–02:00, only 22:00–24:00, only 00:00–02:00, or nothing is unobserved.
+  Settling it means watching motor RPM across a midnight boundary.
+
+  **Known limitation, not fixed here:** the Lovelace card cannot display or edit
+  these windows, and this predates the change — a crossing cell created by the
+  GO app or `set_schedule_entry` already reaches it. It renders a negative width
+  clamped to a 4 px sliver, its editor silently refuses to create one, and
+  dragging such a block silently un-crosses it, which rewrites the user's
+  overnight window. Tracked separately.
+
+  Also relaxed the same rule in `tools/write_bench.py`, which mirrored it. Note
+  the cost: transposing start and end (`8,0,7,0` meaning 07:00–08:00) now writes
+  a 23-hour window instead of erroring. The single-entry path always had that
+  hole; the two are now consistent rather than one guarding what the other does
+  not.
 
 - **A temperature-range write could overwrite the pump's own on/off-time limits
   with fabricated values** (issue #174 audit). The config write echoes those
@@ -573,7 +602,6 @@
   two-bit field, and reading `0xB3` as an opcode rather than as SET-plus-51 is
   exactly how the length came to be copied.
 
-
 - **The four packets a connection opens with were sent blind, and three of them
   could not have been matched even if they had asked to be** (issue #174). The
   transport's Class 10 path requires `data[4] == 0x0A` and a frame of at least
@@ -617,7 +645,6 @@
   same `0b00`-is-INFO mislabel where it had spread to `frame_builder.cpp` and
   `time_service.cpp`. Bytes unchanged throughout; the encoding is corroborated
   by two independent bench-derived frames already in the tree.
-
 
 - **A pump whose clock is never synced now says so, instead of silently letting
   schedule windows drift.** The pump keeps its own RTC and runs schedule windows
@@ -1164,7 +1191,6 @@
   sensor that is malformed or not yet cached — so batching would turn a stale
   read-back into data loss. Ordinary edits are one to three writes, fewer than
   an upload costs.
-
 
 - **A DHW draw that stopped mid-recirculation went on being reported until the
   pump stopped.** The pump-on continuation tier presumes a draw established

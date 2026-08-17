@@ -83,8 +83,28 @@ bool parse_upload_payload(const std::string &data, UploadRequest *out,
       return fail("minute must be 0-59: " + parts[i]);
     int begin = v[2] * 60 + v[3];
     int end = v[4] * 60 + v[5];
-    if (begin >= end)
-      return fail("start must precede end (same-day interval): " + parts[i]);
+    // A window whose end is earlier than its start crosses midnight. Accepting
+    // it is not about *enabling* such windows -- it is about not refusing to
+    // round-trip ones that already exist.
+    //
+    // set_schedule_entry accepts them (its only ordering rule, via
+    // ScheduleService::validate_entries, is that begin != end), and the GO app
+    // can create them, so a grid containing one is reachable without this path
+    // ever being used. Reading that grid back and uploading it was then
+    // refused -- the user could not bulk-restore their own schedule. Upload is
+    // now exactly congruent with the single-entry path: both reject only the
+    // zero-length window.
+    //
+    // What is NOT established, and is deliberately not claimed: what the pump
+    // DOES with such a window at runtime. It stores and echoes one back
+    // verbatim -- bench-verified, 22:00-02:00 written to an empty cell and read
+    // back as [1320,120] -- but a byte round trip is not behaviour, and this
+    // project has already been burned by a value that round-tripped
+    // byte-identically while being wrong (the local-Unix-time bug). Whether the
+    // pump runs 22:00-02:00, 22:00-24:00, 00:00-02:00 or nothing is unobserved.
+    // Settling it needs RPM watched across a midnight boundary.
+    if (begin == end)
+      return fail("start and end are the same minute: " + parts[i]);
     if (seen[v[0]][v[1]])
       return fail("duplicate (layer, day) cell: " + parts[i]);
     seen[v[0]][v[1]] = true;

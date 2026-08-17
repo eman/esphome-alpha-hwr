@@ -402,6 +402,12 @@ MUTATIONS=(
 # is not new coverage -- the comment here previously credited it to the wiring
 # test alone, which overstated what that test added. Kept because it is a cheap
 # check that the two agree.
+# The upload codec must accept a window that crosses midnight. It rejected them
+# for a long time as an "inverted interval", which made the bulk path the only
+# one that could not express a window the single-entry service, schedule_entry.h
+# and the pump itself all support -- and broke read-then-upload for any grid
+# containing one. Only the zero-length case is refused now.
+"upload-rejects-midnight-crossing|components/alpha_hwr/schedule_codec.cpp|    if (begin == end)|    if (begin >= end)"
 # The temperature-range write must refuse when the pump's own on/off-time
 # LIMITS were never read. Those five bytes are echoed back verbatim (issue
 # #106) and are only captured when the Sub 430 reply is long enough; a shorter

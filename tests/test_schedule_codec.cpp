@@ -81,8 +81,35 @@ static void test_parse_rejects() {
               "minute 60 rejected");
   TEST_ASSERT(!codec::parse_upload_payload("v1,1;0,0,7,0,7,0", &req, &err),
               "zero-length interval rejected");
-  TEST_ASSERT(!codec::parse_upload_payload("v1,1;0,0,8,0,7,0", &req, &err),
-              "inverted interval rejected");
+  // 08:00 -> 07:00 crosses midnight. Accepting it is not about enabling such
+  // windows: set_schedule_entry already accepts them (its only ordering rule,
+  // via validate_entries, is begin != end) and the GO app can create them, so
+  // a grid containing one exists without upload being involved. Refusing it
+  // here meant the user could not bulk-restore their own schedule.
+  //
+  // Deliberately not asserted here: what the pump does with such a window at
+  // runtime. It stores and echoes one back verbatim, which is a byte round
+  // trip, not behaviour.
+  TEST_ASSERT(codec::parse_upload_payload("v1,1;0,0,8,30,7,45", &req, &err),
+              "a window crossing midnight is accepted");
+  TEST_ASSERT(req.entries.size() == 1 && req.entries[0].begin_hour == 8 &&
+                  req.entries[0].begin_minute == 30 &&
+                  req.entries[0].end_hour == 7 && req.entries[0].end_minute == 45,
+              "...and all four fields survive parsing unchanged, not normalised");
+
+  // The round trip the refusal actually broke: a crossing cell must reach the
+  // wire image as the bytes it was given, and hash stably.
+  {
+    codec::UploadRequest cross;
+    std::string e2;
+    TEST_ASSERT(codec::parse_upload_payload("v1,1;0,0,22,0,2,0", &cross, &e2),
+                "a 22:00-02:00 cell parses");
+    uint8_t image[42] = {0};
+    codec::build_layer_image(cross, 0, image);
+    TEST_ASSERT(image[0] == 0x01 && image[2] == 22 && image[3] == 0 &&
+                    image[4] == 2 && image[5] == 0,
+                "...and reaches the layer image as 22,0 -> 2,0, unreordered");
+  }
   TEST_ASSERT(
       !codec::parse_upload_payload("v1,1;0,0,6,0,7,0;0,0,8,0,9,0", &req, &err),
       "duplicate (layer, day) rejected");
