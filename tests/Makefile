@@ -93,9 +93,6 @@ test_dhw_demand_logic: test_dhw_demand_logic.cpp ../components/dhw_demand/dhw_de
 test_dhw_demand_component: test_dhw_demand_component.cpp ../components/dhw_demand/dhw_demand.cpp $(DEPS)
 	$(CXX) $(CXXFLAGS) test_dhw_demand_component.cpp ../components/dhw_demand/dhw_demand.cpp -o test_dhw_demand_component $(LDFLAGS)
 
-test_component_wiring: test_component_wiring.cpp $(WRITE_OP_SRCS) ../components/alpha_hwr/auth.cpp ../components/alpha_hwr/telemetry_service.cpp ../components/alpha_hwr/sensor_publisher.cpp ../components/alpha_hwr/device_info_service.cpp ../components/alpha_hwr/event_log_service.cpp ../components/alpha_hwr/history_service.cpp ../components/alpha_hwr/api_bridge.cpp ../components/alpha_hwr/telemetry_decoder.cpp ../components/alpha_hwr/ble_connection_manager.cpp ../components/alpha_hwr/alpha_hwr.cpp $(DEPS)
-	$(CXX) $(CXXFLAGS) -DUSE_TIME test_component_wiring.cpp $(WRITE_OP_SRCS) ../components/alpha_hwr/auth.cpp ../components/alpha_hwr/telemetry_service.cpp ../components/alpha_hwr/sensor_publisher.cpp ../components/alpha_hwr/device_info_service.cpp ../components/alpha_hwr/event_log_service.cpp ../components/alpha_hwr/history_service.cpp ../components/alpha_hwr/api_bridge.cpp ../components/alpha_hwr/telemetry_decoder.cpp ../components/alpha_hwr/ble_connection_manager.cpp ../components/alpha_hwr/alpha_hwr.cpp -o test_component_wiring $(LDFLAGS)
-
 test_session: test_session.cpp ../components/alpha_hwr/session.cpp $(DEPS)
 	$(CXX) $(CXXFLAGS) test_session.cpp ../components/alpha_hwr/session.cpp -o test_session $(LDFLAGS)
 
@@ -114,6 +111,17 @@ test_read_chain_lifetime: test_read_chain_lifetime.cpp $(READ_CHAIN_SRCS) $(DEPS
 	$(CXX) $(CXXFLAGS) test_read_chain_lifetime.cpp $(READ_CHAIN_SRCS) -o test_read_chain_lifetime $(LDFLAGS)
 
 WRITE_OP_SRCS = ../components/alpha_hwr/write_operation_service.cpp ../components/alpha_hwr/time_service.cpp ../components/alpha_hwr/schedule_codec.cpp ../components/alpha_hwr/control_service.cpp ../components/alpha_hwr/schedule_service.cpp ../components/alpha_hwr/transport.cpp ../components/alpha_hwr/session.cpp ../components/alpha_hwr/frame_builder.cpp ../components/alpha_hwr/frame_parser.cpp ../components/alpha_hwr/codec.cpp
+
+# Placed AFTER WRITE_OP_SRCS is defined, and that is load-bearing: make expands
+# prerequisites immediately but recipes lazily, so a rule listing $(WRITE_OP_SRCS)
+# above its definition gets an EMPTY prerequisite list while still compiling the
+# files. Editing session.cpp, transport.cpp or any of the other eight then runs a
+# stale binary -- silently, and only in the human workflow, since
+# tools/mutation_check.sh rm -f's its target first.
+
+test_component_wiring: test_component_wiring.cpp $(WRITE_OP_SRCS) ../components/alpha_hwr/auth.cpp ../components/alpha_hwr/telemetry_service.cpp ../components/alpha_hwr/sensor_publisher.cpp ../components/alpha_hwr/device_info_service.cpp ../components/alpha_hwr/event_log_service.cpp ../components/alpha_hwr/history_service.cpp ../components/alpha_hwr/api_bridge.cpp ../components/alpha_hwr/telemetry_decoder.cpp ../components/alpha_hwr/ble_connection_manager.cpp ../components/alpha_hwr/alpha_hwr.cpp $(DEPS)
+	$(CXX) $(CXXFLAGS) -DUSE_TIME test_component_wiring.cpp $(WRITE_OP_SRCS) ../components/alpha_hwr/auth.cpp ../components/alpha_hwr/telemetry_service.cpp ../components/alpha_hwr/sensor_publisher.cpp ../components/alpha_hwr/device_info_service.cpp ../components/alpha_hwr/event_log_service.cpp ../components/alpha_hwr/history_service.cpp ../components/alpha_hwr/api_bridge.cpp ../components/alpha_hwr/telemetry_decoder.cpp ../components/alpha_hwr/ble_connection_manager.cpp ../components/alpha_hwr/alpha_hwr.cpp -o test_component_wiring $(LDFLAGS)
+
 
 test_schedule_codec: test_schedule_codec.cpp ../components/alpha_hwr/schedule_codec.cpp $(DEPS)
 	$(CXX) $(CXXFLAGS) test_schedule_codec.cpp ../components/alpha_hwr/schedule_codec.cpp -o test_schedule_codec $(LDFLAGS)

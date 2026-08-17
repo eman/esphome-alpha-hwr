@@ -1,10 +1,16 @@
 // Host-test stand-in for ESP-IDF's <esp_gap_ble_api.h>.
 //
-// Same rule as the GATTC mock: only what components/alpha_hwr reads. The
-// ESP_AUTH_SMP_* list is reproduced in full because ble_connection_manager.cpp
-// switches over it to build a user-facing failure string, and a switch missing
-// an enumerator would compile here while the real firmware reported "unknown"
-// for a reason it can in fact name.
+// Same rule as the GATTC mock: only what components/alpha_hwr reads, and every
+// value is the real ESP-IDF value rather than a plausible-looking one.
+//
+// The ESP_AUTH_SMP_* list matters twice over. It is reproduced in full because
+// ble_connection_manager.cpp switches over it to build a user-facing failure
+// string, and a switch missing an enumerator would compile here while the
+// firmware reported "unknown" for a reason it can name. And the *values* are
+// real (78-102, contiguous) because that same code formats the reason as
+// "%s (0x%02x)" into Pump Link Status -- an earlier version of this file
+// numbered them 0x01-0x1A with an invented gap, so a test asserting a hex code
+// would have agreed with itself and disagreed with every pump.
 
 #pragma once
 
@@ -19,31 +25,31 @@ enum esp_bt_status_t {
 
 // ── Security-manager failure reasons ────────────────────────────────────────
 enum esp_ble_auth_fail_reason_t {
-  ESP_AUTH_SMP_PASSKEY_FAIL = 0x01,
-  ESP_AUTH_SMP_OOB_FAIL = 0x02,
-  ESP_AUTH_SMP_PAIR_AUTH_FAIL = 0x03,
-  ESP_AUTH_SMP_CONFIRM_VALUE_FAIL = 0x04,
-  ESP_AUTH_SMP_PAIR_NOT_SUPPORT = 0x05,
-  ESP_AUTH_SMP_ENC_KEY_SIZE = 0x06,
-  ESP_AUTH_SMP_INVALID_CMD = 0x07,
-  ESP_AUTH_SMP_UNKNOWN_ERR = 0x08,
-  ESP_AUTH_SMP_REPEATED_ATTEMPT = 0x09,
-  ESP_AUTH_SMP_INVALID_PARAMETERS = 0x0A,
-  ESP_AUTH_SMP_DHKEY_CHK_FAIL = 0x0B,
-  ESP_AUTH_SMP_NUM_COMP_FAIL = 0x0C,
-  ESP_AUTH_SMP_BR_PARING_IN_PROGR = 0x0D,
-  ESP_AUTH_SMP_XTRANS_DERIVE_NOT_ALLOW = 0x0E,
-  ESP_AUTH_SMP_INTERNAL_ERR = 0x10,
-  ESP_AUTH_SMP_UNKNOWN_IO = 0x11,
-  ESP_AUTH_SMP_INIT_FAIL = 0x12,
-  ESP_AUTH_SMP_CONFIRM_FAIL = 0x13,
-  ESP_AUTH_SMP_BUSY = 0x14,
-  ESP_AUTH_SMP_ENC_FAIL = 0x15,
-  ESP_AUTH_SMP_STARTED = 0x16,
-  ESP_AUTH_SMP_RSP_TIMEOUT = 0x17,
-  ESP_AUTH_SMP_DIV_NOT_AVAIL = 0x18,
-  ESP_AUTH_SMP_UNSPEC_ERR = 0x19,
-  ESP_AUTH_SMP_CONN_TOUT = 0x1A,
+  ESP_AUTH_SMP_PASSKEY_FAIL = 78,
+  ESP_AUTH_SMP_OOB_FAIL = 79,
+  ESP_AUTH_SMP_PAIR_AUTH_FAIL = 80,
+  ESP_AUTH_SMP_CONFIRM_VALUE_FAIL = 81,
+  ESP_AUTH_SMP_PAIR_NOT_SUPPORT = 82,
+  ESP_AUTH_SMP_ENC_KEY_SIZE = 83,
+  ESP_AUTH_SMP_INVALID_CMD = 84,
+  ESP_AUTH_SMP_UNKNOWN_ERR = 85,
+  ESP_AUTH_SMP_REPEATED_ATTEMPT = 86,
+  ESP_AUTH_SMP_INVALID_PARAMETERS = 87,
+  ESP_AUTH_SMP_DHKEY_CHK_FAIL = 88,
+  ESP_AUTH_SMP_NUM_COMP_FAIL = 89,
+  ESP_AUTH_SMP_BR_PARING_IN_PROGR = 90,
+  ESP_AUTH_SMP_XTRANS_DERIVE_NOT_ALLOW = 91,
+  ESP_AUTH_SMP_INTERNAL_ERR = 92,
+  ESP_AUTH_SMP_UNKNOWN_IO = 93,
+  ESP_AUTH_SMP_INIT_FAIL = 94,
+  ESP_AUTH_SMP_CONFIRM_FAIL = 95,
+  ESP_AUTH_SMP_BUSY = 96,
+  ESP_AUTH_SMP_ENC_FAIL = 97,
+  ESP_AUTH_SMP_STARTED = 98,
+  ESP_AUTH_SMP_RSP_TIMEOUT = 99,
+  ESP_AUTH_SMP_DIV_NOT_AVAIL = 100,
+  ESP_AUTH_SMP_UNSPEC_ERR = 101,
+  ESP_AUTH_SMP_CONN_TOUT = 102,
 };
 
 enum esp_ble_sm_param_t {
@@ -78,18 +84,25 @@ struct esp_ble_conn_update_params_t {
 
 // ── Events ──────────────────────────────────────────────────────────────────
 enum esp_gap_ble_cb_event_t {
+  ESP_GAP_BLE_AUTH_CMPL_EVT = 8,
+  ESP_GAP_BLE_KEY_EVT = 9,
+  ESP_GAP_BLE_SEC_REQ_EVT = 10,
+  ESP_GAP_BLE_PASSKEY_NOTIF_EVT = 11,
   ESP_GAP_BLE_PASSKEY_REQ_EVT = 12,
-  ESP_GAP_BLE_SEC_REQ_EVT = 14,
-  ESP_GAP_BLE_PASSKEY_NOTIF_EVT = 15,
-  ESP_GAP_BLE_KEY_EVT = 16,
-  ESP_GAP_BLE_AUTH_CMPL_EVT = 17,
-  ESP_GAP_BLE_NC_REQ_EVT = 29,
-  ESP_GAP_BLE_REMOVE_BOND_DEV_COMPLETE_EVT = 32,
+  ESP_GAP_BLE_NC_REQ_EVT = 16,
+  ESP_GAP_BLE_REMOVE_BOND_DEV_COMPLETE_EVT = 23,
 };
 
 // ── Callback parameter union ────────────────────────────────────────────────
 union esp_ble_gap_cb_param_t {
-  struct ble_security_t {
+  /// esp_ble_sec_t is a UNION in the real SDK, and that aliasing is
+  /// load-bearing rather than incidental: every member starts with bd_addr, so
+  /// ble_connection_manager.cpp can read `ble_security.ble_req.bd_addr` for
+  /// ESP_GAP_BLE_NC_REQ_EVT even though the stack fills `key_notif` for that
+  /// event. This mock declared it a struct with four disjoint members, which
+  /// made those different bytes -- so a test staging the member the SDK
+  /// actually fills would have failed against correct firmware.
+  union ble_security_t {
     struct ble_req_t {
       esp_bd_addr_t bd_addr;
     } ble_req;
