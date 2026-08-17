@@ -1034,6 +1034,30 @@ void WriteOperationService::run_set_temperature_range_(uint32_t seq) {
     return;
   }
 
+  // Refuse before touching anything. The config write echoes the pump's own
+  // min/max on/off-time LIMITS back verbatim (issue #106), and those five
+  // bytes are only present once an Obj 91 Sub 430 read has landed. Until then
+  // the cache holds ControlService's historical constants, and sending those
+  // would overwrite the pump's real limits with a fabrication -- silently, as
+  // a side effect of setting a temperature.
+  //
+  // Reachable without any malformed frame: invalidate_cache() clears this on
+  // every disconnect, and the HA service path reaches submit_set_temperature_
+  // range() without check_ready() (the entity path is gated, api_bridge.cpp is
+  // not). A service call during the initial read chain, or in a reconnect
+  // window, or after a Sub 430 read that timed out, lands here with the limits
+  // unknown.
+  //
+  // Checked here rather than beside the write below because a refusal must not
+  // leave the pump switched into temperature-range mode while reporting that
+  // nothing happened.
+  if (!control_.temp_limits_known()) {
+    finish_(seq, WriteStatus::REJECTED,
+            "pump on/off-time limits not read yet; refusing to write "
+            "temperature range with fabricated limits");
+    return;
+  }
+
   op->phase = Phase::WRITING;
   // Post-#98 there is no reason to touch the run state or a setpoint just to
   // enter temperature-range mode: use the unfused mode change, then write the
@@ -1047,23 +1071,6 @@ void WriteOperationService::run_set_temperature_range_(uint32_t seq) {
   schedule_([this, seq]() {
     Operation *op = find_(seq);
     if (op == nullptr || op->phase == Phase::DONE) return;
-
-    // Refuse rather than guess. The config write echoes the pump's own
-    // min/max on/off-time LIMITS back verbatim (issue #106), and those bytes
-    // are only captured when the Sub 430 read was long enough to carry them.
-    // If it was not, the cache still holds the constructor's historical
-    // constants -- and sending those would overwrite the pump's real limits
-    // with a fabrication, silently, as a side effect of setting a temperature.
-    //
-    // Nothing checked this before. It is unreachable on the bench specimen,
-    // whose reply is exactly long enough, so this is a guard against a
-    // firmware or pump generation that answers shorter rather than a repair.
-    if (!control_.temp_limits_known()) {
-      finish_(seq, WriteStatus::REJECTED,
-              "pump on/off-time limits not read yet; refusing to write "
-              "temperature range with fabricated limits");
-      return;
-    }
 
     control_.write_temp_range_config(op->temp_min, op->temp_max, op->autoadapt,
       [this, seq](bool acked) {

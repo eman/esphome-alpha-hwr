@@ -194,8 +194,8 @@ struct Harness {
   int frames_class3_run{0}; // Class 3 START/STOP commands
   int frames_class3_remote{0}; // Class 3 remote enable/disable commands
   int frames_dhw_read{0};   // Obj 91 Sub 421 reads
-  int frames_dhw_write{0};
-  int frames_temp_write{0};  // Obj 91 Sub 421 writes
+  int frames_dhw_write{0};   // Obj 91 Sub 421 writes
+  int frames_temp_write{0};  // Obj 91 Sub 430 temperature-range writes (OpSpec 0x97)
   int frames_clock_read{0};   // Obj 94 Sub 101 reads
   int frames_clock_write{0};  // Obj 94 Sub 100 writes
   std::vector<uint8_t> last_clock_write;  // the whole 22-byte clock-write APDU
@@ -624,10 +624,12 @@ struct Harness {
   /// simulated time it needs perturbs the clock-drift assertions elsewhere in
   /// this file -- so only the tests that write a temperature range pay for it.
   ///
-  /// Without this the tail stayed at ControlService's historical constants for
-  /// every test here, and every temperature-range write was echoing a
-  /// fabrication -- invisibly, because nothing checked whether the pump's
-  /// limits had ever been read. That is now refused rather than sent.
+  /// test_temp_range_preserves_limits() already did this inline, and asserts
+  /// the pump's real tail is echoed back -- so it is not true that every
+  /// temperature-range write in this file was sending fabricated limits. What
+  /// was true is that the tests which did not prime it were writing the
+  /// historical constants without noticing, because nothing checked. Those
+  /// now either prime it or assert the refusal.
   void prime_temp_limits() {
     control.sync_cache_async(nullptr);
     advance(500);
@@ -1209,27 +1211,33 @@ static void test_origin_and_seq_reported() {
               "accepted result echoes matching requested and settled values");
 }
 
-// The pump's on/off-time LIMITS are echoed back verbatim by the config write
-// (issue #106). They are only captured when the Sub 430 reply is long enough
-// to carry them, while the temperature values the cache is otherwise judged by
-// arrive earlier in the same payload -- so a shorter reply leaves the cache
-// looking valid and the limits unknown.
+// The config write echoes the pump's own min/max on/off-time LIMITS back
+// verbatim (issue #106). Those five bytes exist only once an Obj 91 Sub 430
+// read has landed; before that the cache holds ControlService's historical
+// constants, and sending them would overwrite the pump's real limits with a
+// fabrication as a side effect of setting a temperature.
 //
-// Writing then would send ControlService's historical constants as if they
-// were the pump's own limits, silently overwriting them as a side effect of
-// setting a temperature. Refused instead.
+// The reachable trigger needs no malformed frame and no unusual pump:
+// invalidate_cache() clears the flag on every disconnect, and the HA service
+// path reaches submit_set_temperature_range() without check_ready() -- the
+// entity path is gated, api_bridge.cpp is not. So a service call during the
+// initial read chain, in a reconnect window, or after a Sub 430 read that
+// timed out arrives here with the limits unknown. That is what this models:
+// the Obj 91 read simply has not happened.
 //
-// Unreachable on the bench specimen, whose reply is exactly long enough
-// (payload_len 17, offset 3, measured 2026-08-17). This guards a firmware or
-// pump generation that answers shorter.
+// An earlier version of this test shortened the reply instead, which was the
+// wrong scenario twice over. Opspec 0x15 *declares* 21 body bytes, and the
+// transport trims every frame to the length its header states, so a matched
+// Sub 430 reply always yields payload_len 17 -- the short reply could not
+// occur, and the fixture that produced it contradicted its own opspec. A pump
+// that genuinely answered shorter would send a different opspec, fail the
+// match, and time out, leaving the cache invalid anyway.
 static void test_temperature_range_refused_when_limits_unknown() {
-  std::cout << "\n=== set_temperature_range: refused when the pump's limits were never read ==="
+  std::cout << "\n=== set_temperature_range: refused before the pump's limits have been read ==="
             << std::endl;
   Harness h;
   h.sim.mode_byte = 0x02;
-  h.sim.obj91_includes_limits = false;  // reply carries temperatures but no tail
-  h.prime_cache();
-  h.prime_temp_limits();
+  h.prime_cache();  // deliberately NOT prime_temp_limits(): no Obj 91 read yet
 
   h.write_op.submit_set_temperature_range(30.0f, 50.0f, true, "tr_nolimits");
   h.advance(15000);
@@ -1242,6 +1250,9 @@ static void test_temperature_range_refused_when_limits_unknown() {
               "and the detail says why, rather than blaming a missing ACK");
   TEST_ASSERT(h.frames_temp_write == 0,
               "no temperature-range config frame reached the pump at all");
+  TEST_ASSERT(h.frames_0a01 == 0,
+              "and the pump was not switched into temperature-range mode either -- "
+              "a refusal must not leave a side effect behind");
 }
 
 static void test_temperature_range_accepted() {

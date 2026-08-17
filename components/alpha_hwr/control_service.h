@@ -438,17 +438,21 @@ class ControlService {
     /// Has the pump's own on/off-time LIMITS block been read back yet?
     ///
     /// write_temp_range_config() echoes those five bytes verbatim so a
-    /// temperature write does not zero them (issue #106). They are only
-    /// captured when the Obj 91 Sub 430 reply is long enough to carry them --
-    /// `payload_len >= offset + 14` -- while the temperature values this cache
-    /// is otherwise judged by land at `offset + 9`. So a shorter reply leaves
-    /// is_cache_valid() true and this false, and the write would echo the
-    /// constructor's historical constants over whatever the pump actually has.
+    /// temperature write does not zero them (issue #106). They arrive only
+    /// with an Obj 91 Sub 430 reply; until one lands, the array below holds
+    /// this class's historical constants, which are not the pump's limits.
     ///
-    /// Measured on the bench specimen (2026-08-17): payload_len is 17 and
-    /// offset is 3, so the tail is exactly satisfied and this reads true on
-    /// every connect. The gap is a firmware or pump generation that answers
-    /// shorter, and the point of exposing this is that nothing checked it.
+    /// This is cleared by invalidate_cache() on every disconnect, so it is
+    /// false for a window on every reconnect -- and the HA service path reaches
+    /// the write without check_ready() (the entity path is gated,
+    /// api_bridge.cpp is not). A service call in that window would otherwise
+    /// send the constants as if they were the pump's own.
+    ///
+    /// Note what it does NOT catch: the reply's declared size (payload[2]) is
+    /// ignored, so a pump whose type-1012 struct is shorter inside a
+    /// full-length frame would have five bytes of padding captured as limits
+    /// and this would read true. Deriving the tail bound from the declared
+    /// size is the check for that, and is not made here.
     bool temp_limits_known() const { return temp_limits_tail_valid_; }
 
    private:
