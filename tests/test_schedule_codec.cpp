@@ -81,8 +81,18 @@ static void test_parse_rejects() {
               "minute 60 rejected");
   TEST_ASSERT(!codec::parse_upload_payload("v1,1;0,0,7,0,7,0", &req, &err),
               "zero-length interval rejected");
-  TEST_ASSERT(!codec::parse_upload_payload("v1,1;0,0,8,0,7,0", &req, &err),
-              "inverted interval rejected");
+  // 08:00 -> 07:00 is not inverted, it is a window that crosses midnight, and
+  // the rest of the system supports it: schedule_entry.h models it, the
+  // single-entry service imposes no ordering rule, and the pump stores and
+  // reports it back verbatim (bench-verified 22:00-02:00 -> [1320,120]).
+  // Rejecting it here made upload the only path that could not express such a
+  // window, and broke the read-then-upload round trip for any grid containing
+  // one.
+  TEST_ASSERT(codec::parse_upload_payload("v1,1;0,0,8,0,7,0", &req, &err),
+              "a window crossing midnight is accepted");
+  TEST_ASSERT(req.entries.size() == 1 && req.entries[0].begin_hour == 8 &&
+                  req.entries[0].end_hour == 7,
+              "...and its times survive parsing unchanged, not normalised");
   TEST_ASSERT(
       !codec::parse_upload_payload("v1,1;0,0,6,0,7,0;0,0,8,0,9,0", &req, &err),
       "duplicate (layer, day) rejected");

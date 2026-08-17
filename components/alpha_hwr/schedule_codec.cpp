@@ -83,8 +83,19 @@ bool parse_upload_payload(const std::string &data, UploadRequest *out,
       return fail("minute must be 0-59: " + parts[i]);
     int begin = v[2] * 60 + v[3];
     int end = v[4] * 60 + v[5];
-    if (begin >= end)
-      return fail("start must precede end (same-day interval): " + parts[i]);
+    // A window whose end is earlier than its start crosses midnight, and that
+    // is legitimate: schedule_entry.h models it (crosses_midnight(), and a
+    // duration that wraps), the single-entry service accepts it with no
+    // ordering rule at all, and the pump stores and reports it back verbatim
+    // -- bench-verified 2026-08-17, 22:00-02:00 written to an empty cell and
+    // read back as [1320,120].
+    //
+    // Rejecting it here made the bulk path the only one that could not express
+    // a window the rest of the system supports, and broke the documented
+    // round-trip: read a grid containing such a cell, upload it back, and the
+    // upload was refused. Only the degenerate zero-length case is rejected now.
+    if (begin == end)
+      return fail("start and end are the same minute: " + parts[i]);
     if (seen[v[0]][v[1]])
       return fail("duplicate (layer, day) cell: " + parts[i]);
     seen[v[0]][v[1]] = true;

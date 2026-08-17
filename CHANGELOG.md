@@ -517,6 +517,24 @@
   Both pieces are drawn on the cell's own row rather than bleeding the tail onto
   the next day: the row shows what the cell contains, and which calendar day the
   pump runs the tail on is unverified.
+- **`upload_schedule` refused any window that crosses midnight** (issue #174
+  audit). `parse_upload_payload()` rejected `begin >= end` as "start must
+  precede end (same-day interval)", which made the bulk path the only one that
+  could not express a window the rest of the system supports:
+  `schedule_entry.h` models midnight crossing explicitly (`crosses_midnight()`,
+  and a duration that wraps), the `set_schedule_entry` service imposes no
+  ordering rule at all, and the pump stores and reports such a window back
+  verbatim — bench-verified by writing 22:00–02:00 to an empty cell and reading
+  it back as `[1320,120]`.
+
+  The practical cost was the documented round trip: read a grid containing such
+  a cell, upload it back, and the upload was refused. A user could create the
+  entry singly and then be unable to bulk-restore their own schedule.
+
+  Only the degenerate zero-length window (start == end) is rejected now. The
+  same rule is relaxed in `tools/write_bench.py`, which mirrored it. The upload
+  hash byte layout is unchanged, so this is not a breaking change for an
+  external scheduler.
 
 
 - **A temperature-range write could overwrite the pump's own on/off-time limits

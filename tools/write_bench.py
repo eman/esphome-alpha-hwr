@@ -445,8 +445,8 @@ def build_upload(enabled: str, entry_args: list[str]) -> tuple[str, str]:
             die(f"hour must be 0-23: {spec!r}")
         if not (0 <= sm <= 59 and 0 <= em <= 59):
             die(f"minute must be 0-59: {spec!r}")
-        if sh * 60 + sm >= eh * 60 + em:
-            die(f"start must precede end (same-day interval): {spec!r}")
+        if sh * 60 + sm == eh * 60 + em:
+            die(f"start and end are the same minute: {spec!r}")
         if (layer, day) in seen:
             die(f"duplicate (layer, day) cell: {spec!r}")
         seen.add((layer, day))
