@@ -991,6 +991,29 @@ doc recipes with it.
   the new CLEAR test adds a second, CLEAR-side kill rather than a first one. Same correction as
   the sentence above: two rejection paths were claimed unreached, one was.
 
+  **A third skeptic then found two branches the new tests reach but do not pin**, both of which
+  the commit message claimed were covered:
+
+  - **The `!want_enabled ||` short-circuit** — the reason a clear's confirm ignores the entry's
+    times. Deleting it left the suite at 447/0, because after a normal clear the pump's cell is
+    all zeros and the operation's own begin/end are zero too, so the extra comparison is trivially
+    true. It only matters for a pump that clears the *enabled* byte and leaves the hour/minute
+    bytes behind — nothing in the protocol forbids that, and such a pump would settle **every**
+    clear `rejected`, quoting the stale times back as the entry it "still holds". The simulator
+    now models one, and the predicate is hoisted into `times_are_a_verdict` so the mutation entry
+    has a pipe-free line to anchor to.
+  - **The mismatch retry ladder** — no assertion named it. A pump that acks the layer write and
+    commits it a beat later answers the first confirm read with the pre-write image; without the
+    ladder that is a `rejected` for a write that took. The simulator can now defer a layer write
+    to the read after next.
+
+  The same pass also showed one assertion was **unkillable**: `overview_writes == 0` on the
+  out-of-range test. Removing the bounds guard does not produce a stray write — it produces a 20 s
+  stall, because `read_entries_async` refuses an out-of-range layer by returning false *without
+  invoking its callback*, and `run_schedule_entry_` ignored that return. That return is now
+  handled (the guard keeps it unreachable; this keeps it unreachable if the guard ever moves), and
+  the assertion is replaced by one that can fail: the operation settles **before any time passes**.
+
 ## Leads refuted
 
 - `register_response_handler` has **zero callers** repo-wide — the `pending_handlers_`
