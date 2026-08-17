@@ -5,11 +5,14 @@
 // a mock is a place for a future test to accidentally assert something the real
 // stack does differently.
 //
-// The numeric values of the *status* enumerators are load-bearing only in that
-// the code compares against these same names, so they are internally
-// consistent. The disconnect reason codes carry their real BLE values because
-// ble_connection_manager.cpp maps them to user-facing fault strings and logs
-// them as hex, so a test reading `0x13` should see the same thing a pump does.
+// **Every value here is the real ESP-IDF value**, taken from
+// components/bt/host/bluedroid/api/include/api/ in the IDF the firmware builds
+// against. An earlier version of this file invented ordinals and claimed only
+// that they were "internally consistent" -- which is true and useless: these
+// values reach user-visible strings (ble_connection_manager.cpp formats
+// auth_cmpl.fail_reason as "%s (0x%02x)" into Pump Link Status), so a test
+// asserting a hex code would have passed on host and printed something else on
+// hardware. Name-comparison alone does not make fabricated values safe.
 
 #pragma once
 
@@ -21,7 +24,7 @@
 // ── Status ──────────────────────────────────────────────────────────────────
 enum esp_gatt_status_t {
   ESP_GATT_OK = 0x00,
-  ESP_GATT_ALREADY_OPEN = 0x09,
+  ESP_GATT_ALREADY_OPEN = 0x91,
 };
 
 // ── Disconnect / connection-close reasons ───────────────────────────────────
@@ -65,20 +68,17 @@ struct esp_gatt_id_t {
 struct esp_gatt_srvc_id_t {
   esp_gatt_id_t id;
   bool is_primary;
-  /// ble_connection_manager.cpp reads `srvc_id.uuid.len` directly rather than
-  /// going through `id`, so the field it uses is the one provided here.
-  esp_bt_uuid_t uuid;
 };
 
 // ── Events ──────────────────────────────────────────────────────────────────
 enum esp_gattc_cb_event_t {
   ESP_GATTC_OPEN_EVT = 2,
-  ESP_GATTC_DISCONNECT_EVT = 5,
-  ESP_GATTC_SEARCH_RES_EVT = 6,
-  ESP_GATTC_SEARCH_CMPL_EVT = 7,
+  ESP_GATTC_SEARCH_CMPL_EVT = 6,
+  ESP_GATTC_SEARCH_RES_EVT = 7,
+  ESP_GATTC_WRITE_DESCR_EVT = 9,
   ESP_GATTC_NOTIFY_EVT = 10,
   ESP_GATTC_REG_FOR_NOTIFY_EVT = 38,
-  ESP_GATTC_WRITE_DESCR_EVT = 40,
+  ESP_GATTC_DISCONNECT_EVT = 41,
 };
 
 using esp_gatt_if_t = uint8_t;
@@ -101,11 +101,17 @@ union esp_ble_gattc_cb_param_t {
     esp_bd_addr_t remote_bda;
   } disconnect;
 
+  /// Field order and types copied from the real header. `srvc_id` is an
+  /// esp_gatt_id_t -- which carries `.uuid` -- not an esp_gatt_srvc_id_t. This
+  /// mock previously used the latter and invented a top-level `uuid` on it to
+  /// make production compile, with a comment blaming production for reading
+  /// `srvc_id.uuid`. Production was right; the mock was wrong.
   struct gattc_search_res_evt_param {
     uint16_t conn_id;
-    esp_gatt_srvc_id_t srvc_id;
     uint16_t start_handle;
     uint16_t end_handle;
+    esp_gatt_id_t srvc_id;
+    bool is_primary;
   } search_res;
 
   struct gattc_search_cmpl_evt_param {

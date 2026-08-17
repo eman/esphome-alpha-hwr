@@ -398,11 +398,15 @@ MUTATIONS=(
 # matched nothing. mutation_check.sh reports that loudly as "could not apply"
 # and exits 1 rather than scoring it Survived -- so a stale entry is a red
 # build, not a silent hole. Retargeted at the same property: EXT_1 first.
-# The end-to-end path: a GATT link driven event by event, the opening sequence
-# answered frame by frame, and the initial read chain run until Pump Ready turns
-# on. If the handshake never reports completion the session never reaches READY,
-# and nothing downstream of it happens -- which is the whole chain in one
-# assertion.
+# Killed by tests/test_auth.cpp as well as by the end-to-end wiring test, so it
+# is not new coverage -- the comment here previously credited it to the wiring
+# test alone, which overstated what that test added. Kept because it is a cheap
+# check that the two agree.
+# Pump Ready must need BOTH caches. Until tests/test_component_wiring.cpp grew a
+# case that withholds the schedule overview, every scenario filled both, so the
+# gate was only ever observed agreeing and could be reduced to `return true`
+# with the whole suite green.
+"ready-gate-ignores-caches|components/alpha_hwr/alpha_hwr.cpp|  return control_service_.is_cache_valid() && schedule_service_.is_overview_cache_valid();|  return true;"
 "auth-never-reports-completion|components/alpha_hwr/auth.cpp|  if (completion_callback_) {|  if (false) {"
 # The BLE lifecycle wiring, host-testable since issue #174's audit tail. Both
 # of these shipped untested: alpha_hwr.cpp and ble_connection_manager.cpp were
