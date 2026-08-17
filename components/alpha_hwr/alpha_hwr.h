@@ -1191,6 +1191,7 @@ public:
     event_log_service_.read_entries_async(
         [this, on_complete](
             bool success, const std::vector<services::EventLogEntry> &entries) {
+          (void) entries;  // display comes from the service's own formatter
           if (success) {
 #ifdef USE_TEXT_SENSOR
             if (this->event_log_text_sensor_) {
@@ -1213,6 +1214,7 @@ public:
     history_service_.read_trends_async(
         [this, on_complete](bool success,
                             const std::vector<services::TrendSeries> &trends) {
+          (void) trends;  // display comes from the service's own formatter
           if (success) {
 #ifdef USE_TEXT_SENSOR
             if (this->history_text_sensor_) {
@@ -1386,6 +1388,7 @@ public:
     ESP_LOGD(TAG, "Refreshing schedule from pump...");
     this->read_schedule_entries_async(
         -1, [this](bool success, const std::vector<ScheduleEntry> &entries) {
+          (void) entries;  // the cache is read back from the service instead
           if (!success) {
             ESP_LOGW(TAG, "Failed to read schedule for display update");
             return;

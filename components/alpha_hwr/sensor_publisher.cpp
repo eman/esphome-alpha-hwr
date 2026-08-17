@@ -160,6 +160,7 @@ void SensorPublisher::publish_temperature(const protocol::TemperatureTelemetry& 
 }
 
 void SensorPublisher::publish_alarms(const std::vector<uint16_t>& codes) {
+  (void) codes;  // used only in the USE_TEXT_SENSOR build
 #ifdef USE_TEXT_SENSOR
   if (alarms_sensor_ == nullptr) {
     return;
@@ -180,6 +181,7 @@ void SensorPublisher::publish_alarms(const std::vector<uint16_t>& codes) {
 }
 
 void SensorPublisher::publish_warnings(const std::vector<uint16_t>& codes) {
+  (void) codes;  // used only in the USE_TEXT_SENSOR build
 #ifdef USE_TEXT_SENSOR
   if (warnings_sensor_ == nullptr) {
     return;

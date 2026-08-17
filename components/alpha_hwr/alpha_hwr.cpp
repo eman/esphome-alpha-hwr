@@ -345,6 +345,8 @@ void AlphaHwrComponent::setup() {
   control_service_.set_mode_change_callback([this](services::ControlMode mode,
                                                    uint8_t operation_mode,
                                                    float setpoint) {
+    (void) operation_mode;
+    (void) setpoint;
 #ifdef USE_TEXT_SENSOR
     // Only publish if the control service has a valid mode from the pump
     if (this->control_mode_sensor_ && this->control_service_.is_mode_valid()) {
@@ -430,7 +432,10 @@ void AlphaHwrComponent::setup() {
       });
 
   schedule_service_.set_state_change_callback(
-      [this](bool enabled) { this->publish_schedule_hash(); });
+      [this](bool enabled) {
+        (void) enabled;  // the hash is recomputed from the cache, not the flag
+        this->publish_schedule_hash();
+      });
 
   // Control mode text sensor will be populated when we receive the passive
   // notification from the pump during authentication. Do NOT publish a
