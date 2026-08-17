@@ -398,6 +398,12 @@ MUTATIONS=(
 # matched nothing. mutation_check.sh reports that loudly as "could not apply"
 # and exits 1 rather than scoring it Survived -- so a stale entry is a red
 # build, not a silent hole. Retargeted at the same property: EXT_1 first.
+# The end-to-end path: a GATT link driven event by event, the opening sequence
+# answered frame by frame, and the initial read chain run until Pump Ready turns
+# on. If the handshake never reports completion the session never reaches READY,
+# and nothing downstream of it happens -- which is the whole chain in one
+# assertion.
+"auth-never-reports-completion|components/alpha_hwr/auth.cpp|  if (completion_callback_) {|  if (false) {"
 # The BLE lifecycle wiring, host-testable since issue #174's audit tail. Both
 # of these shipped untested: alpha_hwr.cpp and ble_connection_manager.cpp were
 # compiled only by `esphome compile`, so nothing could fail when they broke.

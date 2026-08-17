@@ -14,6 +14,7 @@
 #pragma once
 
 #include <cstdint>
+#include <vector>
 
 #include "esp_bt_defs.h"
 
@@ -141,6 +142,10 @@ union esp_ble_gattc_cb_param_t {
 struct EspGattcMockCalls {
   int close = 0;
   int write_char = 0;
+  /// Every frame written to the characteristic, in order. The component's
+  /// transport writes here, so this is how a test sees what it sent and
+  /// decides what the pump should answer.
+  std::vector<std::vector<uint8_t>> writes;
   int search_service = 0;
   int register_for_notify = 0;
   int write_char_descr = 0;
@@ -158,10 +163,12 @@ inline esp_err_t esp_ble_gattc_close(esp_gatt_if_t, uint16_t) {
   return esp_gattc_mock().next_result;
 }
 
-inline esp_err_t esp_ble_gattc_write_char(esp_gatt_if_t, uint16_t, uint16_t, uint16_t,
-                                          uint8_t *, esp_gatt_write_type_t,
-                                          esp_gatt_auth_req_t) {
+inline esp_err_t esp_ble_gattc_write_char(esp_gatt_if_t, uint16_t, uint16_t,
+                                          uint16_t value_len, uint8_t *value,
+                                          esp_gatt_write_type_t, esp_gatt_auth_req_t) {
   esp_gattc_mock().write_char++;
+  if (value != nullptr && value_len > 0)
+    esp_gattc_mock().writes.emplace_back(value, value + value_len);
   return esp_gattc_mock().next_result;
 }
 

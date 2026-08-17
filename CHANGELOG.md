@@ -20,7 +20,13 @@
   disconnect the pump (the #201 defect, now asserted end to end rather than only
   at the pure predicate).
 
-  Two mutation entries pin it. The mocks are deliberately thin: where the real
+  **The full connection now runs end to end in a host test**: a GATT link
+  brought up event by event, the opening sequence's ten packets answered frame
+  by frame with CRC-valid replies through the real transport, and the initial
+  read chain driven until `Pump Ready` turns on — then off again on
+  disconnect. Nothing is called on the component's behalf. Three mutation
+  entries pin it, including one that stops the handshake reporting completion,
+  which takes the whole chain down with it. The mocks are deliberately thin: where the real
   stack would do something asynchronous the mock records the call and does
   nothing, because a mock that invents the asynchronous half can hide the bug it
   was written to catch.
