@@ -491,6 +491,31 @@
 
 ### Fixed
 
+- **A temperature-range write could overwrite the pump's own on/off-time limits
+  with fabricated values** (issue #174 audit). The config write echoes those
+  five bytes back verbatim so setting a temperature does not zero them (issue
+  #106) — but they exist only once an Obj 91 Sub 430 read has landed. Until
+  then the cache holds `ControlService`'s historical constants, which are not
+  the pump's limits.
+
+  `invalidate_cache()` clears that flag on every disconnect, and the Home
+  Assistant service path reaches the write **without** `check_ready()` — the
+  entity path is gated, `api_bridge.cpp` is not. So an
+  `esphome.<node>.set_temperature_range` call during the initial read chain, in
+  a reconnect window, or after a Sub 430 read that timed out, would send the
+  constants as the pump's own limits, silently, as a side effect of setting a
+  temperature.
+
+  `temp_limits_tail_valid_` already tracked this and **nothing consulted it**.
+  The write is now refused, with a detail saying why, and refused *before* the
+  mode change — so it cannot leave the pump switched into temperature-range
+  mode while reporting that nothing happened.
+
+  Known limit, recorded rather than fixed: the reply's declared size is
+  ignored, so a pump whose type-1012 struct is shorter inside a full-length
+  frame would have padding captured as its limits and this check would not
+  notice.
+
 - **Two Class 10 writes declared a payload length they did not carry**
   (issue #174). APDU byte 1 is `0booLLLLLL` — operation in the top two bits,
   payload byte count in the low six — and two frames got the count wrong. The

@@ -433,6 +433,29 @@ class ControlService {
     // component historically sent, used only before the first read.
     uint8_t cached_temp_limits_tail_[5]{0x00, 0x00, 0x00, 0x16, 0x00};
     bool temp_limits_tail_valid_{false};
+
+   public:
+    /// Has the pump's own on/off-time LIMITS block been read back yet?
+    ///
+    /// write_temp_range_config() echoes those five bytes verbatim so a
+    /// temperature write does not zero them (issue #106). They arrive only
+    /// with an Obj 91 Sub 430 reply; until one lands, the array below holds
+    /// this class's historical constants, which are not the pump's limits.
+    ///
+    /// This is cleared by invalidate_cache() on every disconnect, so it is
+    /// false for a window on every reconnect -- and the HA service path reaches
+    /// the write without check_ready() (the entity path is gated,
+    /// api_bridge.cpp is not). A service call in that window would otherwise
+    /// send the constants as if they were the pump's own.
+    ///
+    /// Note what it does NOT catch: the reply's declared size (payload[2]) is
+    /// ignored, so a pump whose type-1012 struct is shorter inside a
+    /// full-length frame would have five bytes of padding captured as limits
+    /// and this would read true. Deriving the tail bound from the declared
+    /// size is the check for that, and is not made here.
+    bool temp_limits_known() const { return temp_limits_tail_valid_; }
+
+   private:
   // Sub-ID constants for setpoint registers (Reference: control.py lines 137-141)
   static constexpr uint16_t SUB_SPEED_SETPOINT = 13;
   static constexpr uint16_t SUB_PRESSURE_SETPOINT = 15;
