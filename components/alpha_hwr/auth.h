@@ -75,10 +75,15 @@ class Authentication {
 
   /// How long a matched read waits for its reply before giving up on it.
   ///
-  /// Round trips measured on one pump are 54-108 ms at normal log level, and
-  /// up to 276 ms at VERBOSE, where roughly 4 ms per emitted log line dominates
-  /// the interval (issue #174). A second is ~10x the former and ~3.6x the
-  /// latter.
+  /// Round trips reported on one pump are 54-108 ms at normal log level, and up
+  /// to 276 ms at VERBOSE, where roughly 4 ms per emitted log line dominates the
+  /// interval (issue #174). A second pump averages ~175 ms at INFO, measured
+  /// across the five reads of a bench handshake (2026-08-16). A second is ~5.7x
+  /// that average and ~3.6x the worst VERBOSE figure.
+  ///
+  /// The spread between those two specimens -- 54 to 175 ms on the same
+  /// operation at the same log level -- is the argument for this whole change,
+  /// and it is why the number below is deliberately loose rather than tuned.
   ///
   /// The cost of it being too small is nil: a read that times out is treated
   /// exactly as one that was answered, so the sequence proceeds either way. The
@@ -119,10 +124,19 @@ class Authentication {
    * scheduler, and stages 1 and 3 are driven by the transport's command
    * callbacks.
    *
-   * How long it takes is now mostly the pump's answer: stage 2's 450 ms of
-   * scheduled delay (5 x 50 ms plus a 200 ms tail) plus five round trips, so
-   * roughly 700-1000 ms against the measured 54-108 ms per reply -- close to
-   * the 1200 ms the all-timers version always took, and no longer a constant.
+   * How long it takes is now mostly the pump's answer. Measured end to end on
+   * a real pump (2026-08-16): 1330 ms, of which 450 ms is stage 2's scheduled
+   * delay (5 x 50 ms plus a 200 ms tail), leaving ~880 ms across the five
+   * matched reads -- about 175 ms each, averaged, since the per-packet lines
+   * are DEBUG and this was captured at INFO.
+   *
+   * So it is slightly *longer* than the 1200 ms the all-timers version always
+   * took, not shorter, and that is the expected trade: the old number was a
+   * constant that ignored the pump, and this one tracks it. Note the ~175 ms
+   * is well above the 54-108 ms reported on another specimen at the same log
+   * level, which is the variation between pumps and links that the transcribed
+   * delays could never have accommodated.
+   *
    * A pump that answers nothing takes that 450 ms plus five REPLY_TIMEOUT_MS,
    * about 5.5 s, and still completes.
    */
