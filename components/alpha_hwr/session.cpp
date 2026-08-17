@@ -1,7 +1,7 @@
 /**
  * Session State Management Implementation
  * 
- * Reference: reference/alpha-hwr/src/alpha_hwr/core/session.py
+ * Reference: https://github.com/eman/alpha-hwr (src/alpha_hwr/core/session.py)
  */
 
 #include "session.h"
@@ -30,16 +30,12 @@ const char* Session::get_state_name() const {
       return "AUTHENTICATING";
     case SessionState::READY:
       return "READY";
-    case SessionState::ERROR:
-      return "ERROR";
     default:
       return "UNKNOWN";
   }
 }
 
-bool Session::is_connected() const {
-  return (state_ != SessionState::IDLE && state_ != SessionState::ERROR);
-}
+bool Session::is_connected() const { return state_ != SessionState::IDLE; }
 
 void Session::transition_to(SessionState new_state, const char* reason) {
   if (state_ == new_state) {
@@ -58,7 +54,6 @@ void Session::transition_to(SessionState new_state, const char* reason) {
 
 void Session::on_connected() {
   transition_to(SessionState::SERVICE_DISCOVERY, "BLE connected, starting discovery");
-  last_error_.clear();
 }
 
 void Session::on_service_found() {
@@ -96,19 +91,6 @@ void Session::on_authenticated() {
 
 void Session::on_disconnected() {
   transition_to(SessionState::IDLE, "BLE disconnected");
-  last_error_.clear();
-}
-
-void Session::on_error(const char* error_message) {
-  state_ = SessionState::ERROR;
-  last_error_ = (error_message != nullptr) ? error_message : "Unknown error";
-  ESP_LOGE(TAG, "Session ERROR: %s", last_error_.c_str());
-}
-
-void Session::reset() {
-  ESP_LOGD(TAG, "Resetting session");
-  state_ = SessionState::IDLE;
-  last_error_.clear();
 }
 
 }  // namespace core

@@ -398,6 +398,13 @@ MUTATIONS=(
 # matched nothing. mutation_check.sh reports that loudly as "could not apply"
 # and exits 1 rather than scoring it Survived -- so a stale entry is a red
 # build, not a silent hole. Retargeted at the same property: EXT_1 first.
+# The session FSM had no tests at all until issue #174's audit tail, which is
+# how a documented ERROR state with no way into it survived. These pin the
+# transitions that do exist, so the removal of the ones that did not stays
+# honest.
+"session-is-connected-always-true|components/alpha_hwr/session.cpp|bool Session::is_connected() const { return state_ != SessionState::IDLE; }|bool Session::is_connected() const { return true; }"
+"session-authenticated-does-not-reach-ready|components/alpha_hwr/session.cpp|  transition_to(SessionState::READY,|  transition_to(SessionState::AUTHENTICATING,"
+"session-disconnect-does-not-reach-idle|components/alpha_hwr/session.cpp|  transition_to(SessionState::IDLE,|  transition_to(SessionState::READY,"
 # Both halves of the APDU length invariant (issue #174). Byte 1 declares the
 # payload byte count in bits 5-0, and two frames shipped declaring a count they
 # did not carry: the single-event write borrowed the layer write's 0xB3 (51)

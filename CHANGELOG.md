@@ -432,6 +432,35 @@
   `clear_entry()` was already removed; the `clear_entry_async()` deleted here is
   a different method that was also never called.
 
+### Removed
+
+- **The session's ERROR state, which nothing could enter** (issue #174 audit).
+  `session.h` documented six states and a `* -> ERROR : Any operation fails
+  critically` transition, complete with an ASCII diagram. `Session::on_error()`
+  and `Session::reset()` had no caller anywhere in the component, so that
+  transition could not occur — and `is_error()`, `get_last_error()` and
+  `last_error_` were dead behind it.
+
+  Removed rather than wired up, because the state was redundant with what the
+  component actually does. A failure that matters ends the BLE link, which
+  arrives as `on_disconnected()` -> IDLE and is recycled by the inbound-data
+  watchdog; the user-facing cause is reported by the fault-string hold, which
+  carries more than a state could. The clearest evidence it was never a distinct
+  state is that `is_connected()`, the only predicate that ever inspected it,
+  treated ERROR exactly as IDLE.
+
+### Added
+
+- **Host tests for the session FSM** — `tests/test_session.cpp`, 36 assertions.
+  The state machine had been documented in prose and in a diagram and checked by
+  nothing, which is how a state with no way into it survived. Every transition
+  that exists is now pinned, from every state, along with two behaviours a
+  reader would not guess: `on_authenticating()` is reachable from READY for
+  re-authentication and is idempotent, and the out-of-order guards **warn and
+  then transition anyway** rather than refusing — so anything able to call
+  `on_authenticated()` after a disconnect would drive the session to READY. That
+  safety lives in the callers, not in the FSM, and the test now says so.
+
 ### Fixed
 
 - **Two Class 10 writes declared a payload length they did not carry**
