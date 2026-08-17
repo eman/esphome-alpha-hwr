@@ -497,6 +497,66 @@ MUTATIONS=(
 "dhw-release-hold-not-reported|components/dhw_demand/dhw_demand.cpp|    method = \"demand_release_hold\";\n    confidence = 0.5f;|    confidence = 0.5f;"
 "dhw-flow-onset-unqualified|components/dhw_demand/dhw_demand.cpp|  bool prev_flow_present_pump_off = prev_tick_confirms_flow_onset(\n      prev_flow_, flow_threshold_, prev_pump_confirmed_off_);|  bool prev_flow_present_pump_off = prev_tick_confirms_flow_onset(\n      prev_flow_, flow_threshold_, true);"
 "control-enabled-from-opmode|components/alpha_hwr/control_service.cpp|  // AUTO (0) or USER_DEFINED (4) = enabled, STOP (1) = disabled\n  pump_enabled_ = (operation_mode != static_cast<uint8_t>(OperationMode::STOP));|  // AUTO (0) or USER_DEFINED (4) = enabled, STOP (1) = disabled\n  pump_enabled_ = true;"
+# The Home Assistant surface. api_bridge.cpp had NO mutation target before
+# tests/test_api_bridge.cpp, and could not have had one: the mock defines.h
+# omitted the USE_API family, so the file compiled out to an object with zero
+# symbols even though it sat in test_component_wiring's link line. Its own
+# setup() comment named the hazard -- "pairing a handler with the wrong
+# enumerator below compiles, passes the whole suite and passes the firmware
+# build" -- and the first entry here is that hazard, in its invisible form:
+# same signature, same argument list, plausible name. Only calling the service
+# and reading the command back off the settle event catches it.
+"bridge-handler-paired-with-wrong-command|components/alpha_hwr/api_bridge.cpp|  register_service(&AlphaHwrApiBridge::on_set_schedule_entry,\n                   name(WriteCommand::SET_SCHEDULE_ENTRY), {\"data\", \"op_id\"});|  register_service(&AlphaHwrApiBridge::on_clear_schedule_entry,\n                   name(WriteCommand::SET_SCHEDULE_ENTRY), {\"data\", \"op_id\"});"
+# `enabled` on a schedule command is the SCHEDULE flag, not the run state. The
+# docs claimed the opposite for a long time and so did the comment beside the
+# remote-mode key; sourcing it from result.enabled would make the claim true
+# and every schedule event wrong.
+"bridge-schedule-enabled-from-run-state|components/alpha_hwr/api_bridge.cpp|      put_bool(\"enabled\", result.sched_enabled);|      put_bool(\"enabled\", result.enabled);"
+# Remote mode must not overload `enabled`, which already means two things.
+"bridge-remote-mode-overloads-enabled|components/alpha_hwr/api_bridge.cpp|      put_bool(\"remote_enabled\", result.enabled);|      put_bool(\"enabled\", result.enabled);"
+# schedule_hash on the event, not only on the sensor: it exists so a client can
+# learn what the pump holds without polling the sensor and racing the
+# republish. It was emitted and documented nowhere until the step-7 pass.
+"bridge-upload-omits-schedule-hash|components/alpha_hwr/api_bridge.cpp|        if (!result.schedule_hash.empty()) data[\"schedule_hash\"] = result.schedule_hash;|        // mutated: no schedule_hash on the event"
+# node makes an event self-identifying across a multi-controller install
+# (issue #113), where HA's device_id is opaque and re-add-unstable.
+"bridge-event-drops-the-node-name|components/alpha_hwr/api_bridge.cpp|  data[\"node\"] = App.get_name();|  // mutated: no node on the event"
+# A malformed request settles INVALID at the bridge -- deterministic, never
+# worth a retry -- rather than REJECTED, which invites one.
+# The bridge's argument parsing, which had never been compiled by a test and
+# was wrong three ways for input any HA user can send. Each rule gets its own
+# pipe-free line in parse_int_field() so it can be anchored here.
+"bridge-parser-accepts-trailing-garbage|components/alpha_hwr/api_bridge.cpp|  if (!consumed_everything) return false;|  // mutated: ignore anything after the number"
+# Deliberately absent: a mutation on parse_int_field's ERANGE check. strtol
+# clamps to LONG_MAX/LONG_MIN on overflow, and every call site passes a range
+# far inside those, so `v > hi` / `v < lo` already reject anything ERANGE could
+# flag -- an equivalent mutant no test can kill. The check stays as defence for
+# a future caller with a wider range; it is not load-bearing today, and an
+# entry claiming otherwise would be a false guarantee. Confirmed by experiment:
+# the mutation survived the full suite.
+"bridge-parser-accepts-leading-junk|components/alpha_hwr/api_bridge.cpp|  if (!starts_cleanly) return false;|  // mutated: let strtol skip whitespace and signs"
+# Timestamps are compared AFTER narrowing to the wire's 32 bits; comparing the
+# wider parse let an ordered pair reach the pump reversed.
+"bridge-epoch-range-not-checked|components/alpha_hwr/api_bridge.cpp|  if (!parse_int_field(s, 0, 4294967295L, &v)) return false;|  if (!parse_int_field(s, 0, 999999999999L, &v)) return false;"
+"bridge-epoch-order-checked-before-narrowing|components/alpha_hwr/api_bridge.cpp|  return *begin < *end;|  return true;"
+# An infinity is not a number a client can parse. The contract is a real value
+# or no key -- the same reason NaN was excluded.
+"bridge-float-emits-infinity|components/alpha_hwr/api_bridge.cpp|    if (!std::isfinite(value)) return;|    if (std::isnan(value)) return;"
+# reject_ echoes its argument into an event map that gets copied into an API
+# message on a device with tens of KB of heap.
+"bridge-detail-echo-unbounded|components/alpha_hwr/api_bridge.cpp|  constexpr size_t MAX_ECHO = 64;|  constexpr size_t MAX_ECHO = 1000000;"
+# A write that never reached the pump must not report a concrete pump state.
+# Both caches can be invalid, and -1 is what the event encoding already had.
+"bridge-pump-state-invents-a-known-state|components/alpha_hwr/alpha_hwr.h|    auto tri = [](bool known, bool value) -> int8_t { return known ? (value ? 1 : 0) : -1; };|    auto tri = [](bool known, bool value) -> int8_t { (void) known; return value ? 1 : 0; };"
+# state_name(pump_auto, schedule_on) is asymmetric, so its arguments can be
+# swapped without a compiler complaint: a running unscheduled pump would then
+# report "off". The test fixtures were symmetric (both flags 1) and could not
+# see it; they cover both asymmetric combinations now.
+"bridge-state-name-args-swapped|components/alpha_hwr/api_bridge.cpp|        data[\"state\"] = ux::state_name(result.enabled != 0, result.sched_enabled != 0);|        data[\"state\"] = ux::state_name(result.sched_enabled != 0, result.enabled != 0);"
+# -1 means "not known". Without the guard, -1 != 0 reads as true and a write
+# that never reached the pump reports a fabricated state.
+"bridge-state-fabricated-from-unknown-flags|components/alpha_hwr/api_bridge.cpp|      if (result.enabled >= 0 && result.sched_enabled >= 0) {|      if (true) {"
+"bridge-parse-failure-settles-rejected|components/alpha_hwr/api_bridge.cpp|  result.status = WriteStatus::INVALID;|  result.status = WriteStatus::REJECTED;"
 )
 
 if [[ "${1:-}" == "--list" ]]; then
