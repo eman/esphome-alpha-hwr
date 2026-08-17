@@ -4,6 +4,34 @@
 
 ### Added
 
+- **The component's BLE lifecycle is host-tested** — `tests/test_component_wiring.cpp`,
+  16 assertions, plus the ESP-IDF and ESPHome mocks that make it possible
+  (issue #174 audit tail). `alpha_hwr.cpp` and `ble_connection_manager.cpp` are
+  the two largest files in the repo, 2,090 lines between them, and
+  `esphome compile` was the only thing that ever built either. They own every
+  GATT and GAP event the pump can produce.
+
+  The tests drive the real entry points — `gattc_event_handler()`,
+  `gap_event_handler()`, `setup()`, `loop()` — and observe through `Pump Ready`,
+  which is what a user sees, rather than through private state. Covered: the
+  scan filter's accept and reject cases, that a failed GATT open starts nothing,
+  that readiness is not a timer, that a disconnect reports not-ready, and that
+  GAP events are filtered by address so a stranger's pairing failure cannot
+  disconnect the pump (the #201 defect, now asserted end to end rather than only
+  at the pure predicate).
+
+  **The full connection now runs end to end in a host test**: a GATT link
+  brought up event by event, the opening sequence's ten packets answered frame
+  by frame with CRC-valid replies through the real transport, and the initial
+  read chain driven until `Pump Ready` turns on — then off again on
+  disconnect. Nothing is called on the component's behalf. Three mutation
+  entries pin it, including one that stops the handshake reporting completion,
+  which takes the whole chain down with it. The mocks are deliberately thin: where the real
+  stack would do something asynchronous the mock records the call and does
+  nothing, because a mock that invents the asynchronous half can hide the bug it
+  was written to catch.
+
+
 - **`link_recycles` and `link_max_gap`** — two optional diagnostic sensors for
   the inbound-data watchdog (issue #176). `link_recycles` counts consecutive
   recycles that produced no data and resets on a notification received once the

@@ -3,6 +3,11 @@
 #include <algorithm>
 #include <cinttypes>
 #include <cstdio>
+// memcpy/memcmp. This was missing: the file compiled anyway because the
+// ESP-IDF toolchain's headers pull <cstring> in transitively, and so does
+// libc++. libstdc++ does not, so host-compiling this file for the first time
+// (issue #174 audit tail) turned it into a hard error rather than luck.
+#include <cstring>
 #include <vector>
 
 namespace esphome {
@@ -301,6 +306,7 @@ void BLEConnectionManager::on_session_ready() {
 }
 
 void BLEConnectionManager::handle_connection_opened(const esp_ble_gattc_cb_param_t *param) {
+  (void) param;  // status was already checked by the caller
   ESP_LOGI(TAG, "BLE connection opened. Pairing enabled: %s", pairing_enabled_ ? "YES" : "NO");
   
   // Pump Link Status: capture the bond state for this connection once, before the
@@ -493,7 +499,7 @@ void BLEConnectionManager::handle_auth_complete(const esp_ble_gap_cb_param_t *pa
     return;
   }
   char addr_str[18];
-  sprintf(addr_str, "%02X:%02X:%02X:%02X:%02X:%02X",
+  snprintf(addr_str, sizeof(addr_str), "%02X:%02X:%02X:%02X:%02X:%02X",
           auth_cmpl.bd_addr[0], auth_cmpl.bd_addr[1], auth_cmpl.bd_addr[2],
           auth_cmpl.bd_addr[3], auth_cmpl.bd_addr[4], auth_cmpl.bd_addr[5]);
   
@@ -698,7 +704,7 @@ void BLEConnectionManager::handle_gap_event(esp_gap_ble_cb_event_t event, esp_bl
 
     case ESP_GAP_BLE_SEC_REQ_EVT: {
       char addr_str[18];
-      sprintf(addr_str, "%02X:%02X:%02X:%02X:%02X:%02X",
+      snprintf(addr_str, sizeof(addr_str), "%02X:%02X:%02X:%02X:%02X:%02X",
               param->ble_security.ble_req.bd_addr[0], param->ble_security.ble_req.bd_addr[1],
               param->ble_security.ble_req.bd_addr[2], param->ble_security.ble_req.bd_addr[3],
               param->ble_security.ble_req.bd_addr[4], param->ble_security.ble_req.bd_addr[5]);
@@ -735,7 +741,7 @@ void BLEConnectionManager::handle_gap_event(esp_gap_ble_cb_event_t event, esp_bl
         break;
       }
       char addr_str[18];
-      sprintf(addr_str, "%02X:%02X:%02X:%02X:%02X:%02X",
+      snprintf(addr_str, sizeof(addr_str), "%02X:%02X:%02X:%02X:%02X:%02X",
               param->ble_security.key_notif.bd_addr[0], param->ble_security.key_notif.bd_addr[1],
               param->ble_security.key_notif.bd_addr[2], param->ble_security.key_notif.bd_addr[3],
               param->ble_security.key_notif.bd_addr[4], param->ble_security.key_notif.bd_addr[5]);
@@ -772,7 +778,7 @@ void BLEConnectionManager::handle_gap_event(esp_gap_ble_cb_event_t event, esp_bl
       
     case ESP_GAP_BLE_NC_REQ_EVT: {
       char addr_str[18];
-      sprintf(addr_str, "%02X:%02X:%02X:%02X:%02X:%02X",
+      snprintf(addr_str, sizeof(addr_str), "%02X:%02X:%02X:%02X:%02X:%02X",
               param->ble_security.ble_req.bd_addr[0], param->ble_security.ble_req.bd_addr[1],
               param->ble_security.ble_req.bd_addr[2], param->ble_security.ble_req.bd_addr[3],
               param->ble_security.ble_req.bd_addr[4], param->ble_security.ble_req.bd_addr[5]);
@@ -809,7 +815,7 @@ void BLEConnectionManager::handle_gap_event(esp_gap_ble_cb_event_t event, esp_bl
         break;
       }
       char addr_str[18];
-      sprintf(addr_str, "%02X:%02X:%02X:%02X:%02X:%02X",
+      snprintf(addr_str, sizeof(addr_str), "%02X:%02X:%02X:%02X:%02X:%02X",
               param->ble_security.ble_req.bd_addr[0], param->ble_security.ble_req.bd_addr[1],
               param->ble_security.ble_req.bd_addr[2], param->ble_security.ble_req.bd_addr[3],
               param->ble_security.ble_req.bd_addr[4], param->ble_security.ble_req.bd_addr[5]);

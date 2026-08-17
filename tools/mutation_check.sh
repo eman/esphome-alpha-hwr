@@ -398,6 +398,21 @@ MUTATIONS=(
 # matched nothing. mutation_check.sh reports that loudly as "could not apply"
 # and exits 1 rather than scoring it Survived -- so a stale entry is a red
 # build, not a silent hole. Retargeted at the same property: EXT_1 first.
+# Killed by tests/test_auth.cpp as well as by the end-to-end wiring test, so it
+# is not new coverage -- the comment here previously credited it to the wiring
+# test alone, which overstated what that test added. Kept because it is a cheap
+# check that the two agree.
+# Pump Ready must need BOTH caches. Until tests/test_component_wiring.cpp grew a
+# case that withholds the schedule overview, every scenario filled both, so the
+# gate was only ever observed agreeing and could be reduced to `return true`
+# with the whole suite green.
+"ready-gate-ignores-caches|components/alpha_hwr/alpha_hwr.cpp|  return control_service_.is_cache_valid() && schedule_service_.is_overview_cache_valid();|  return true;"
+"auth-never-reports-completion|components/alpha_hwr/auth.cpp|  if (completion_callback_) {|  if (false) {"
+# The BLE lifecycle wiring, host-testable since issue #174's audit tail. Both
+# of these shipped untested: alpha_hwr.cpp and ble_connection_manager.cpp were
+# compiled only by `esphome compile`, so nothing could fail when they broke.
+"scan-filter-ignores-product-bytes|components/alpha_hwr/ble_connection_manager.cpp|      if (d.size() >= 6 && d[3] == product_family && d[4] == product_type) {|      if (d.size() >= 6) {"
+"gap-addr-filter-accepts-anyone|components/alpha_hwr/ble_connection_manager.h|    return client_ != nullptr && core::gap_addr_matches(bda, client_->get_remote_bda());|    return client_ != nullptr;"
 # The session FSM had no tests at all until issue #174's audit tail, which is
 # how a documented ERROR state with no way into it survived. These pin the
 # transitions that do exist, so the removal of the ones that did not stays
