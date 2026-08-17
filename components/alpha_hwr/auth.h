@@ -13,14 +13,11 @@ class Transport;
 /**
  * @brief Sends the opening packet sequence a connection starts with.
  *
- * Ten packets in three stages, on a fixed timeline:
+ * Ten packets in three stages:
  *
- *   Stage 1: the Class 2 identity read, sent 3x at 50 ms, then 100 ms
+ *   Stage 1: the Class 2 identity read, sent 3x, each awaiting its reply
  *   Stage 2: the Class 10 operation-status read, sent 5x at 50 ms, then 200 ms
- *   Stage 3: the Class 5 and Class 11 INFO queries, back to back, then 500 ms
- *
- * Two things about that description are deliberate, because both were wrong
- * here until issue #174 decoded the frames.
+ *   Stage 3: the Class 5 then Class 11 INFO queries, each awaiting its reply
  *
  * **They are reads.** Not an authentication handshake, and not writes of any
  * kind: two GETs and two INFO queries, none of which addresses anything
@@ -30,19 +27,26 @@ class Transport;
  * now a description of what they were believed to be rather than of what they
  * do.
  *
- * **The delays are transcriptions, not requirements.** Each is one of the
- * reference client's `asyncio.sleep()` values, and they were carried across as
- * "timing requirements ... allows pump processing" without anything measuring
- * a pump. What has since been measured, on one specimen: the pump answers all
- * ten packets, class-matched, in 54-108 ms at normal log level. So the delays
- * are not tracking anything the pump does, and nothing in this class notices
- * whether a reply arrived -- send_packet() passes no callback, so every reply
- * falls through to the telemetry path, where the Class 10 ones are decoded as
- * passive notifications and the rest are discarded for not being Class 10.
+ * **The delays were transcriptions, not requirements.** Each was one of the
+ * reference client's `asyncio.sleep()` values, carried across and then
+ * documented as "timing requirements ... allows pump processing" without
+ * anything having measured a pump. Worse, nothing here noticed whether a reply
+ * ever arrived: send_packet() passed no callback, so all ten replies fell
+ * through to the telemetry path, where the Class 10 ones were decoded as
+ * passive notifications and the rest discarded for not being Class 10. A pump
+ * that answered nothing and a pump that answered everything looked identical
+ * from in here (issue #174).
  *
- * Issue #174 covers both, and the fix for the second is to stop sending these
- * as timed blind writes and let the transport match their replies like any
- * other read.
+ * Stages 1 and 3 no longer work that way. Their packets go out as ordinary
+ * matched reads and the next step is taken when the transport either matches
+ * the reply or gives up waiting for it, so the pacing is the pump's rather than
+ * a transcribed constant's -- a slower pump stretches the sequence instead of
+ * being talked over, and a faster one is not waited on. Nothing is required to
+ * answer: an unanswered read advances the sequence exactly as an answered one
+ * does, and complete() says which happened.
+ *
+ * Stage 2 still runs on its timers, for a reason specific to its class that is
+ * recorded at stage2_class10_burst().
  *
  * Reference: https://github.com/eman/alpha-hwr (Python implementation) and
  *   https://eman.github.io/alpha-hwr/reimplementation/ (protocol notes; the
@@ -60,12 +64,30 @@ class Authentication {
   
   /**
    * @brief Callback function type for scheduling delayed tasks
-   * 
+   *
+   * Still used by stage 2, and only by stage 2 -- see stage2_class10_burst().
+   * Stages 1 and 3 are paced by the pump's replies and schedule nothing.
+   *
    * @param delay_ms Delay in milliseconds
    * @param callback Function to call after delay
    */
   using SchedulerCallback = std::function<void(uint32_t delay_ms, std::function<void()> callback)>;
-  
+
+  /// How long a matched read waits for its reply before giving up on it.
+  ///
+  /// Round trips measured on one pump are 54-108 ms at normal log level, and
+  /// up to 276 ms at VERBOSE, where roughly 4 ms per emitted log line dominates
+  /// the interval (issue #174). A second is ~10x the former and ~3.6x the
+  /// latter.
+  ///
+  /// The cost of it being too small is nil: a read that times out is treated
+  /// exactly as one that was answered, so the sequence proceeds either way. The
+  /// cost of it being too large is a silent pump stretching the sequence, which
+  /// is why it is not simply the transport's 3000 ms default -- five unanswered
+  /// reads at that default would spend 15 s of the link watchdog's 60 s budget
+  /// before anything else got to run. At 1000 ms the same worst case is 5 s.
+  static constexpr uint32_t REPLY_TIMEOUT_MS = 1000;
+
   /**
    * @brief Construct an Authentication handler
    */
@@ -93,11 +115,16 @@ class Authentication {
   /**
    * @brief Start the authentication handshake
    * 
-   * Initiates the 3-stage authentication sequence. This is a non-blocking
-   * operation that uses ESPHome's scheduler to manage timing.
-   * 
-   * The handshake will complete in approximately 1 second, after which
-   * the completion callback will be invoked.
+   * Initiates the 3-stage sequence. Non-blocking: stage 2 uses ESPHome's
+   * scheduler, and stages 1 and 3 are driven by the transport's command
+   * callbacks.
+   *
+   * How long it takes is now mostly the pump's answer: stage 2's 450 ms of
+   * scheduled delay (5 x 50 ms plus a 200 ms tail) plus five round trips, so
+   * roughly 700-1000 ms against the measured 54-108 ms per reply -- close to
+   * the 1200 ms the all-timers version always took, and no longer a constant.
+   * A pump that answers nothing takes that 450 ms plus five REPLY_TIMEOUT_MS,
+   * about 5.5 s, and still completes.
    */
   void start();
   
@@ -115,22 +142,34 @@ class Authentication {
    * @return true if handshake is running
    */
   bool is_running() const { return running_; }
-  
+
+
  private:
   Transport &transport_;  ///< Transport layer
   SchedulerCallback scheduler_callback_;  ///< Callback to schedule delayed tasks
   CompletionCallback completion_callback_;  ///< Callback for completion
   bool running_ = false;  ///< True if authentication is in progress
   uint32_t auth_sequence_ = 0;  ///< Sequence counter to invalidate stale lambdas
-  
-  // Authentication stage functions
+
+  /// Replies matched to a packet this sequence sent, counted per connection.
+  uint8_t replies_matched_ = 0;
+  /// Packets sent with a callback -- i.e. the ones a reply is expected for.
+  uint8_t reads_sent_ = 0;
+
+  // Sequence stage functions
   void stage1_legacy_burst(int repeat_count);
   void stage2_class10_burst(int repeat_count);
   void stage3_extensions();
   void complete();
-  
-  // Helper function to send a packet
+
+  /// Send a packet blind: no callback, nothing waits for a reply.
   bool send_packet(const uint8_t* data, size_t len);
+
+  /// Send a packet as a matched read and run @p on_reply when the transport
+  /// either matches its reply or gives up waiting. The bool it receives says
+  /// which, and every caller proceeds regardless -- see complete().
+  bool send_read(const uint8_t* data, size_t len,
+                 std::function<void(bool answered, const uint8_t *frame, size_t frame_len)> on_reply);
 };
 
 // ============================================================================
@@ -173,24 +212,58 @@ class Authentication {
 //                          11 operation illegal
 //     LLLLLL payload byte count
 //
-// This is the rule the packets below are decoded under, and it is worth being
-// explicit that it does not rest on the third-party documentation alone. Three
-// independent places in this repo, all bench-derived, fix the same bits:
+// The request half is what this file relies on. The reply half is documented
+// rather than observed, and transport.cpp reaches a flatter conclusion from the
+// captures: byte 5 of a reply is simply the APDU body length, `byte5 ==
+// total_len - 8` holding for all 24,233 CRC-valid inbound frames without
+// exception. The two are not in conflict -- they agree on every frame anyone
+// here has seen -- but only because an acknowledge of `00` and no acknowledge
+// field at all look identical. Nothing in this repo has ever observed a reply
+// whose top two bits were set, so every "ack ok" noted below is the reading the
+// documentation gives those bits and not a measurement. If the pump does
+// populate the field, one refused operation would settle it; none has been
+// captured.
 //
-//   - TimeService::send_set_clock_command() sends OpSpec 0x94 = 0b10_010100
-//     and carries 20 body bytes, confirmed against a frame the pump accepted.
-//     That pins SET = 0b10 and the low six bits as a length.
-//   - frame_builder.cpp::build_data_object_set() builds every Class 10 SET as
-//     "bit 7 set, bits 6-0 = length" -- the same encoding, arrived at
-//     separately.
-//   - Issue #46 established on the bench that 0xC1 (0b11) and 0x81 (0b10) are
-//     different operations to this pump: the Class 3 remote-mode command sent
-//     as 0xC1 was refused every time and only took effect as 0x81.
+// The rule itself comes from the GENIbus documentation. What this repo adds is
+// bench evidence constraining it, and the two legs below are worth separating
+// because they establish different halves and neither establishes both.
 //
-// With SET fixed at 0b10, an OpSpec of 0x03 is 0b00 -- a GET -- and the three
-// bytes after it are a payload length of three, not an address plus a value.
-// That single misreading is where "register 0x9495, unlock code 0x96" came
-// from, and everything downstream of it.
+//   - The low bits are a payload length, and bit 7 distinguishes SET.
+//     TimeService::send_set_clock_command() sends OpSpec 0x94 with exactly 20
+//     body bytes after it (1 obj + 2 sub + 2 type + 1 version + 3 size + 11
+//     data), and 0x94 & 0x3F == 20. That frame is bench-confirmed in
+//     time_service.h: written at 20:39:07 and read back as 20:39:08.
+//
+//   - The top bits select an operation, and 0b11 is not 0b10. Issue #46 sent
+//     the Class 3 remote-mode command as 0xC1 and as 0x81 back to back against
+//     a real pump. Both carry a 1-byte payload -- the APDU is 3 bytes either
+//     way -- so the length field is identical and the top bits are the only
+//     difference. 0x81 took effect; 0xC1 never did, and came back `[03 01 AC]`.
+//
+// Note what that reply is, because it was recorded as a rejection and is not
+// one: byte 5 of 0x01 is acknowledge 0b00, ok, with one payload byte. The pump
+// answered the INFO query correctly and INFO simply does not change anything.
+// It is the same one-byte shape as the two INFO replies below (0xA1, 0x80),
+// which makes it a third instance of it, and evidence for 0b11 = INFO rather
+// than against.
+//
+// What neither leg establishes is the *width* of the operation field. Every
+// length this component sends bar one is under 32, so a three-bit operation
+// with a five-bit length reads them identically -- and that rival reading is
+// live in the tree, at schedule_service.h, which labels 0x93 "OpSpec 4" and
+// 0xB3 "OpSpec 5". The two readings diverge on exactly two frames, in opposite
+// directions: the 53-byte layer write (51 body bytes) is right under the
+// two-bit reading and wrong under the three-bit one, and the 21-byte
+// single-event write (19 body bytes) is the reverse. Both send 0xB3. So one of
+// those two frames is malformed and the tree cannot say which; it is not
+// settled here, and nothing below leans on it.
+//
+// None of that ambiguity touches this file's conclusion. It is bit 7 that
+// separates 0x03 from a SET, and an OpSpec of 0x03 has no bits set at all
+// under either reading: a GET, with a payload length of three. The three bytes
+// after it are that payload -- not an address plus a value. That single
+// misreading is where "register 0x9495, unlock code 0x96" came from, and
+// everything downstream of it.
 //
 // ---------------------------------------------------------------------------
 // What is still unknown
@@ -221,18 +294,24 @@ class Authentication {
  *   94 95 96 Item IDs 148, 149, 150 -- unit_family, unit_type, unit_version
  *   EB 47    CRC-16-CCITT
  *
- * Observed reply: `24 07 F8 E7 02 03 34 07 02 89 7A` -- ack ok, three values,
- * 52 / 7 / 2. Family 52 type 7 is the ALPHA HWR, which agrees with what the
- * Class 7 device-info strings report later in the connection.
+ * Observed reply: `24 07 F8 E7 02 03 34 07 02 89 7A` -- three values, 52 / 7 / 2.
+ *
+ * Those first two are values this component already knows: alpha_hwr.h defines
+ * PRODUCT_FAMILY_ALPHA = 0x34 (52) and PRODUCT_TYPE_HWR = 0x07, and the BLE
+ * scan filter matches on them in the manufacturer advertisement before a
+ * connection is made at all. So the pump's answer here agrees with the
+ * advertisement that selected it. (The Class 7 device-info strings are not the
+ * corroboration -- they carry a product name, serial and versions, no numeric
+ * family or type.)
  *
  * This was described here as a SET of register 0x9495 carrying unlock code
  * 0x96. It is a read of three identification items, and the pump answers it
  * with its own identity.
  *
- * Nothing reads that answer today. It is the earliest point in a connection at
- * which the component could confirm it is talking to an ALPHA HWR and not to
- * some other Grundfos product with a different object map -- earlier than the
- * Class 7 product name, and already paid for.
+ * Nothing reads that answer today. Doing so would be a cross-check of the
+ * connected device against the advertisement the scan filter matched, rather
+ * than a first line of defence -- the filter is that -- which is why it is
+ * noted here and not built.
  */
 static const uint8_t AUTH_LEGACY[] = {0x27, 0x07, 0xE7, 0xF8, 0x02, 0x03, 0x94, 0x95, 0x96, 0xEB, 0x47};
 
@@ -250,17 +329,33 @@ static const uint8_t AUTH_LEGACY[] = {0x27, 0x07, 0xE7, 0xF8, 0x02, 0x03, 0x94, 
  *   C5 5A    CRC-16-CCITT
  *
  * The object and sub were previously read backwards here, as "Sub-ID 0x5600,
- * Object ID 0x0006". Object first is the order frame_builder.h already uses
- * for its telemetry registers (0x580000 = Obj 88 Sub 0), and the reply settles
- * it independently: it comes back identified as 0x0001 / 0x2F01, which
- * RESPONSE_IDENTIFIERS names as Obj 86 Sub 5-10, operation status.
+ * Object ID 0x0006". Object first is what every Class 10 address this component
+ * actually puts on the wire does: control_service.cpp builds the same shape
+ * with `apdu[2] = 0x56` commented "Object 86 (1 byte!)", and the clock and
+ * schedule writes are object-then-2-byte-sub as well. Be warned that the
+ * repo's *labels* are not consistent about it -- several call sites and
+ * parameter names say "Sub" for the byte that carries the object -- but the
+ * addresses are.
+ *
+ * The reply cannot settle the ordering, and was cited here as though it could.
+ * Its bytes 6-9 are a type header, not an echo: transport.cpp establishes from
+ * 21,236 captured responses that a reply carries no object and no sub-id at
+ * all, only the type of the object the request asked for. 0x0001 / 0x2F01 is
+ * that type, and the Obj 86 Sub 7 read answers with the identical header, so
+ * it does not even distinguish which sub was asked for.
  *
  * Observed reply: `24 12 F8 E7 0A 0E 00 01 2F 01 00 00 07 00 01 02 44 CE 40 00
  * EE 74` -- ack ok, 14 payload bytes. TelemetryService already decodes this
  * exact frame as a control-mode notification and publishes it; the reporter's
  * capture read mode=2, op_mode=1, setpoint=1650.00, and 44 CE 40 00 is
- * IEEE-754 1650.0, their actual constant-speed setpoint. Four bytes
- * (00 00 07 00) are still unaccounted for.
+ * IEEE-754 1650.0, their actual constant-speed setpoint.
+ *
+ * The `00 00 07 00` that looks unaccounted for is not: `00 00 07` is the
+ * ordinary three-byte size header and 7 is exactly the number of object-data
+ * bytes after it, and the fourth byte is control_source, which
+ * ControlService::update_mode_from_notification() reads (2 = remote/digital,
+ * 1 = local/panel). The captured 0 is outside that set, which is the only part
+ * still open.
  *
  * So the pump's reply to this one is already understood and already useful --
  * it is the same object the mode and setpoint controls write to. It arrives

@@ -414,32 +414,39 @@ void Transport::check_timeouts(uint32_t timeout_ms) {
 }
 
 bool Transport::try_dispatch_response(const uint8_t* data, size_t len) {
-  // Class 3 and Class 7 responses can be as short as 8 bytes (e.g. a Class 3
-  // command ACK: [Start][Len][Dest][SvcH][Class][Ack][CRC-H][CRC-L]) -- well
-  // under the 12-byte minimum the Class 10 DataObject path below requires.
-  // Handle their wildcard-by-class-byte matching first, before that length
-  // gate, so short responses aren't discarded before we even look at them.
+  // Replies on the wildcard-matched classes can be as short as 8 bytes (e.g. a
+  // Class 3 command ACK: [Start][Len][Dest][SvcH][Class][Ack][CRC-H][CRC-L], or
+  // the 9-byte Class 5 and Class 11 INFO replies) -- well under the 12-byte
+  // minimum the Class 10 DataObject path below requires. Handle their
+  // wildcard-by-class-byte matching first, before that length gate, so short
+  // responses aren't discarded before we even look at them.
   if (len >= 5 && this->state_ == State::AWAITING_RESPONSE && !this->command_queue_.empty()) {
     auto &cmd = this->command_queue_.front();
     // What class was the *queued* command itself sent as? (byte 4 of the
     // outgoing GENI frame is the class byte, same offset as in responses.)
-    // Only match a Class 3/7 response against a command that was actually
-    // sent as that same class -- otherwise an unrelated Class 10 telemetry
+    // Only match such a response against a command that was actually sent as
+    // that same class -- otherwise an unrelated Class 10 telemetry
     // notification could be mistaken for the response to a queued Class 3
     // command (or vice versa).
     uint8_t queued_class = (cmd.packet.size() > 4) ? cmd.packet[4] : 0x00;
 
+    // Class 2: measured-data reads (the identity read, issue #174).
     // Class 3: command ACK ([03 00] = success/clean, [03 01 xx] = rejected/
     // descriptor-only -- see ControlService::send_remote_mode_command()).
+    // Class 5 / 11: INFO replies, one payload byte (issue #174).
     // Class 7: device info strings, etc.
-    // Both use a different packet structure than Class 10 DataObjects, so
+    // All use a different packet structure than Class 10 DataObjects, so
     // when expect_type_low_ver == 0 && expect_type_high == 0 we match by class byte
     // alone -- but only when the queued command was sent as that class.
-    if (protocol::class3_or_7_wildcard_matches(
+    // is_wildcard_matched_class() carries why that term is what makes this safe.
+    if (protocol::class_wildcard_matches(
             queued_class, data[4],
             cmd.expect_type_low_ver == 0x0000 && cmd.expect_type_high == 0x0000)) {
-      ESP_LOGV(TAG, "Class %d response matched (wildcard match by class byte)",
-               data[4] == protocol::CLASS_3_COMMAND_ACK ? 3 : 7);
+      // Print the class that actually matched. This used to read
+      // `data[4] == CLASS_3 ? 3 : 7`, a two-way pick that was exhaustive when
+      // only two classes could reach it and silently reports 7 for every other.
+      ESP_LOGV(TAG, "Class %u response matched (wildcard match by class byte)",
+               static_cast<unsigned>(data[4]));
       if (cmd.callback) {
         cmd.callback(true, data, len);
       }
@@ -448,12 +455,12 @@ bool Transport::try_dispatch_response(const uint8_t* data, size_t len) {
       return true;
     }
 
-    // If the queued command was itself Class 3 or Class 7 but this response
-    // is neither (e.g. a Class 10 telemetry notification arrived first),
+    // If the queued command was itself on a wildcard-matched class but this
+    // response is not (e.g. a Class 10 telemetry notification arrived first),
     // it's definitely not our answer -- let it fall through to the general
     // packet callback instead of risking the Class 10 wildcard path below
     // matching it by accident.
-    if (protocol::ignore_unrelated_while_awaiting_class3_or_7(queued_class, data[4])) {
+    if (protocol::ignore_unrelated_while_awaiting_wildcard_class(queued_class, data[4])) {
       ESP_LOGV(TAG, "Awaiting Class %d response, ignoring unrelated Class 0x%02X packet",
                queued_class, data[4]);
       return false;

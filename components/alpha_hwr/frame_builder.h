@@ -86,8 +86,13 @@ void build_class10_read(uint32_t register_addr, uint8_t *packet_out, uint8_t sou
  * 
  * Notes:
  * OpSpec for Class 10 SET:
- * - Bit 7: Always 1 for SET (0x80)
- * - Bits 6-0: Length of SubID + ObjID + Data (minimum 4)
+ * - Bits 7-6: the operation; 0b10 is SET
+ * - Bits 5-0: Length of SubID + ObjID + Data (minimum 4), which is why the
+ *   payload cap below is 59 rather than 123
+ *
+ * "Bits 6-0 = length" was the wording here, and the code has always disagreed
+ * with it -- build_data_object_set() masks 0x3F, six bits, and ORs in 0x80,
+ * leaving bit 6 clear. Six bits is also what the caps in the .cpp assume.
  * 
  * Reference: alpha_hwr/protocol/frame_builder.py::build_data_object_set()
  */
