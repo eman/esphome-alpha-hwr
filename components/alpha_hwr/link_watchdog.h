@@ -5,10 +5,18 @@
 // Inbound-data watchdog for the GENI link.
 //
 // The session FSM tracks the *handshake*, not whether the pump is answering.
-// Authentication is a pure scheduler chain: auth.cpp sends its packets on
-// timers and calls the completion callback 1200 ms later (150 + 100 + 250 + 200
-// + 500) without ever inspecting a reply, so READY is reached whether or not a
-// single byte came back.
+// READY is still reached whether or not the pump replies -- but the reason is
+// no longer that nothing looks.
+//
+// This used to read "a pure scheduler chain ... 1200 ms later (150 + 100 + 250
+// + 200 + 500) without ever inspecting a reply". That stopped being true when
+// issue #174 made the opening sequence reply-driven. Stages 1 and 3 now send
+// matched reads and advance when the transport either matches the reply or
+// gives up on it, and complete() reports how many of the five were answered.
+// What survives is the *policy*: an unanswered read advances the sequence
+// exactly as an answered one does, deliberately, because two logs from one
+// specimen justify waiting for a reply and not requiring one. So a deaf pump
+// still reaches READY, and this watchdog is still the thing that notices.
 //
 // Notification subscription has the same shape. Of the six terminal paths
 // through BLEConnectionManager::subscribe_to_notifications(), four return
@@ -58,11 +66,39 @@
 //
 // The worst case is the handshake, not steady state, because the window is
 // timed from connection-open and update() is a free-running poller the
-// handshake does not synchronise with: 500 ms post-connect + 3 x 1000 ms
-// discovery retries + 2000 ms stabilize + ~1200 ms auth chain = 6.7 s to READY,
-// then up to 10 s to the next poll and 500 ms to its schedule read — 17.2 s
-// worst case to first inbound data, leaving ~43 s of slack. Measured on
-// hardware: open to READY was 5.90/6.17/5.94 s across three reconnects.
+// handshake does not synchronise with. The fixed part is 500 ms post-connect +
+// 3 x 1000 ms discovery retries + 2000 ms stabilize = 5.5 s, then up to 10 s to
+// the next poll and 500 ms to its schedule read = 10.5 s after READY.
+//
+// The opening sequence is what varies, and since issue #174 it varies with the
+// pump rather than with a constant:
+//
+//   answered      450 ms of stage-2 timers + 5 round trips.  Measured 1.33 s on
+//                 the bench specimen, whose replies average ~175 ms.
+//   unanswered    450 ms + 5 x REPLY_TIMEOUT_MS (1000 ms) = 5.45 s. This is the
+//                 case the watchdog exists for, so it is the one that sizes it.
+//   callback lost 450 ms + SEQUENCE_BACKSTOP_MS (15 s) = 15.45 s. Only reachable
+//                 if the transport drops a queued callback -- see auth.h -- and
+//                 quoted because it is the true ceiling, not because it is
+//                 expected.
+//
+// So: 5.5 + 5.45 + 10.5 = 21.5 s worst case to first inbound data against the
+// 60 s default, leaving ~38 s of slack; and 5.5 + 15.45 + 10.5 = 31.5 s even
+// with the backstop firing, leaving ~28 s. Both fit, which is the property this
+// note exists to establish -- the previous arithmetic reached 17.2 s from an
+// auth chain that no longer takes 1200 ms.
+//
+// Measured on hardware: the opening sequence itself takes 1.33 s on the bench
+// specimen (2026-08-17), start of handshake to completion, with all five reads
+// answered. That is the only segment issue #174 changed, and it is the segment
+// quoted above.
+//
+// The open-to-READY figures previously recorded here -- 5.90/6.17/5.94 s across
+// three reconnects -- predate the change and are NOT re-measured. They remain
+// indicative rather than current: the fixed 5.5 s before the handshake is
+// unaffected, so the expected shift is roughly the difference between the old
+// 1.2 s constant and whatever the pump now takes to answer. Re-measure before
+// relying on them.
 //
 // That margin cannot be eroded by configuration: the interval is fixed at
 // PollingComponent(10000) in the constructor, and `update_interval` is not in
