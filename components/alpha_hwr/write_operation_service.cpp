@@ -1047,6 +1047,24 @@ void WriteOperationService::run_set_temperature_range_(uint32_t seq) {
   schedule_([this, seq]() {
     Operation *op = find_(seq);
     if (op == nullptr || op->phase == Phase::DONE) return;
+
+    // Refuse rather than guess. The config write echoes the pump's own
+    // min/max on/off-time LIMITS back verbatim (issue #106), and those bytes
+    // are only captured when the Sub 430 read was long enough to carry them.
+    // If it was not, the cache still holds the constructor's historical
+    // constants -- and sending those would overwrite the pump's real limits
+    // with a fabrication, silently, as a side effect of setting a temperature.
+    //
+    // Nothing checked this before. It is unreachable on the bench specimen,
+    // whose reply is exactly long enough, so this is a guard against a
+    // firmware or pump generation that answers shorter rather than a repair.
+    if (!control_.temp_limits_known()) {
+      finish_(seq, WriteStatus::REJECTED,
+              "pump on/off-time limits not read yet; refusing to write "
+              "temperature range with fabricated limits");
+      return;
+    }
+
     control_.write_temp_range_config(op->temp_min, op->temp_max, op->autoadapt,
       [this, seq](bool acked) {
         Operation *op = find_(seq);

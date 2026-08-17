@@ -433,6 +433,25 @@ class ControlService {
     // component historically sent, used only before the first read.
     uint8_t cached_temp_limits_tail_[5]{0x00, 0x00, 0x00, 0x16, 0x00};
     bool temp_limits_tail_valid_{false};
+
+   public:
+    /// Has the pump's own on/off-time LIMITS block been read back yet?
+    ///
+    /// write_temp_range_config() echoes those five bytes verbatim so a
+    /// temperature write does not zero them (issue #106). They are only
+    /// captured when the Obj 91 Sub 430 reply is long enough to carry them --
+    /// `payload_len >= offset + 14` -- while the temperature values this cache
+    /// is otherwise judged by land at `offset + 9`. So a shorter reply leaves
+    /// is_cache_valid() true and this false, and the write would echo the
+    /// constructor's historical constants over whatever the pump actually has.
+    ///
+    /// Measured on the bench specimen (2026-08-17): payload_len is 17 and
+    /// offset is 3, so the tail is exactly satisfied and this reads true on
+    /// every connect. The gap is a firmware or pump generation that answers
+    /// shorter, and the point of exposing this is that nothing checked it.
+    bool temp_limits_known() const { return temp_limits_tail_valid_; }
+
+   private:
   // Sub-ID constants for setpoint registers (Reference: control.py lines 137-141)
   static constexpr uint16_t SUB_SPEED_SETPOINT = 13;
   static constexpr uint16_t SUB_PRESSURE_SETPOINT = 15;

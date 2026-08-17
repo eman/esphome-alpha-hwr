@@ -491,6 +491,30 @@
 
 ### Fixed
 
+- **A temperature-range write could overwrite the pump's own on/off-time limits
+  with fabricated values** (issue #174 audit). The config write echoes those
+  five bytes back verbatim so setting a temperature does not zero them (issue
+  #106) — but they are only captured when the Obj 91 Sub 430 reply is long
+  enough to carry them (`payload_len >= offset + 14`), while the temperature
+  values the cache is otherwise judged by arrive at `offset + 9`. A shorter
+  reply therefore leaves `is_cache_valid()` true and the limits unknown, and
+  the write would send `ControlService`'s historical constants as if they were
+  the pump's own — silently, as a side effect of setting a temperature.
+
+  `temp_limits_tail_valid_` already tracked this and **nothing consulted it**.
+  The write is now refused with a detail saying why, rather than sent with a
+  guess.
+
+  Measured on the bench specimen: `payload_len` is 17 and `offset` is 3, so the
+  tail is exactly satisfied and the limits are always known — the write behaves
+  as before there, confirmed on hardware. This guards a firmware or pump
+  generation that answers shorter.
+
+  The test harness had the same blind spot: `prime_cache()` never read Obj 91,
+  so every temperature-range write asserted in the suite was echoing the
+  historical constants, and nothing noticed because nothing checked.
+
+
 - **Two Class 10 writes declared a payload length they did not carry**
   (issue #174). APDU byte 1 is `0booLLLLLL` — operation in the top two bits,
   payload byte count in the low six — and two frames got the count wrong. The

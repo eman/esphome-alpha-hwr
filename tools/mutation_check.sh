@@ -402,6 +402,12 @@ MUTATIONS=(
 # is not new coverage -- the comment here previously credited it to the wiring
 # test alone, which overstated what that test added. Kept because it is a cheap
 # check that the two agree.
+# The temperature-range write must refuse when the pump's own on/off-time
+# LIMITS were never read. Those five bytes are echoed back verbatim (issue
+# #106) and are only captured when the Sub 430 reply is long enough; a shorter
+# reply leaves the cache looking valid and the limits unknown, and writing then
+# sends ControlService's historical constants as if they were the pump's.
+"temp-write-ignores-unknown-limits|components/alpha_hwr/write_operation_service.cpp|    if (!control_.temp_limits_known()) {|    if (false) {"
 # Pump Ready must need BOTH caches. Until tests/test_component_wiring.cpp grew a
 # case that withholds the schedule overview, every scenario filled both, so the
 # gate was only ever observed agreeing and could be reduced to `return true`

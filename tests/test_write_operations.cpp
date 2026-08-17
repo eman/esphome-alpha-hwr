@@ -194,7 +194,8 @@ struct Harness {
   int frames_class3_run{0}; // Class 3 START/STOP commands
   int frames_class3_remote{0}; // Class 3 remote enable/disable commands
   int frames_dhw_read{0};   // Obj 91 Sub 421 reads
-  int frames_dhw_write{0};  // Obj 91 Sub 421 writes
+  int frames_dhw_write{0};
+  int frames_temp_write{0};  // Obj 91 Sub 421 writes
   int frames_clock_read{0};   // Obj 94 Sub 101 reads
   int frames_clock_write{0};  // Obj 94 Sub 100 writes
   std::vector<uint8_t> last_clock_write;  // the whole 22-byte clock-write APDU
@@ -344,6 +345,7 @@ struct Harness {
     } else if (opspec == 0x97 && apdu_len >= 25) {
       // Temperature-range config write; capture the limits tail for the
       // preservation assertion (issue #106).
+      frames_temp_write++;
       bool aa = apdu[11] != 0;
       float mn = protocol::decode_float_be(apdu + 12);
       float mx = protocol::decode_float_be(apdu + 16);
@@ -612,6 +614,23 @@ struct Harness {
   void prime_cache() {
     control.get_mode_async(nullptr);
     advance(100);
+  }
+
+  /// Read Obj 91 Sub 430, which is what supplies the pump's own on/off-time
+  /// LIMITS tail. prime_cache() does not reach it: the config read is a
+  /// separate call, and get_mode_async() alone does not chain into it.
+  ///
+  /// Kept separate rather than folded into prime_cache() because the extra
+  /// simulated time it needs perturbs the clock-drift assertions elsewhere in
+  /// this file -- so only the tests that write a temperature range pay for it.
+  ///
+  /// Without this the tail stayed at ControlService's historical constants for
+  /// every test here, and every temperature-range write was echoing a
+  /// fabrication -- invisibly, because nothing checked whether the pump's
+  /// limits had ever been read. That is now refused rather than sent.
+  void prime_temp_limits() {
+    control.sync_cache_async(nullptr);
+    advance(500);
   }
 
   int events_for(const std::string &op_id) {
@@ -1190,11 +1209,47 @@ static void test_origin_and_seq_reported() {
               "accepted result echoes matching requested and settled values");
 }
 
+// The pump's on/off-time LIMITS are echoed back verbatim by the config write
+// (issue #106). They are only captured when the Sub 430 reply is long enough
+// to carry them, while the temperature values the cache is otherwise judged by
+// arrive earlier in the same payload -- so a shorter reply leaves the cache
+// looking valid and the limits unknown.
+//
+// Writing then would send ControlService's historical constants as if they
+// were the pump's own limits, silently overwriting them as a side effect of
+// setting a temperature. Refused instead.
+//
+// Unreachable on the bench specimen, whose reply is exactly long enough
+// (payload_len 17, offset 3, measured 2026-08-17). This guards a firmware or
+// pump generation that answers shorter.
+static void test_temperature_range_refused_when_limits_unknown() {
+  std::cout << "\n=== set_temperature_range: refused when the pump's limits were never read ==="
+            << std::endl;
+  Harness h;
+  h.sim.mode_byte = 0x02;
+  h.sim.obj91_includes_limits = false;  // reply carries temperatures but no tail
+  h.prime_cache();
+  h.prime_temp_limits();
+
+  h.write_op.submit_set_temperature_range(30.0f, 50.0f, true, "tr_nolimits");
+  h.advance(15000);
+
+  TEST_ASSERT(h.events_for("tr_nolimits") == 1, "exactly one terminal event");
+  const WriteResult *r = h.result_for("tr_nolimits");
+  TEST_ASSERT(r && r->status == WriteStatus::REJECTED,
+              "the write is refused rather than sent with fabricated limits");
+  TEST_ASSERT(r && r->detail.find("limits not read") != std::string::npos,
+              "and the detail says why, rather than blaming a missing ACK");
+  TEST_ASSERT(h.frames_temp_write == 0,
+              "no temperature-range config frame reached the pump at all");
+}
+
 static void test_temperature_range_accepted() {
   std::cout << "\n=== set_temperature_range: accepted via unfused mode change ===" << std::endl;
   Harness h;
   h.sim.mode_byte = 0x02;
   h.prime_cache();
+  h.prime_temp_limits();
   int commits_before = h.commit_count;
 
   h.write_op.submit_set_temperature_range(30.0f, 50.0f, true, "tr1");
@@ -1216,6 +1271,7 @@ static void test_temperature_range_no_ack() {
   Harness h;
   h.sim.mode_byte = 0x02;
   h.prime_cache();
+  h.prime_temp_limits();
   h.sim.ack_temp_write = false;
 
   h.write_op.submit_set_temperature_range(30.0f, 50.0f, false, "tr2");
@@ -2837,6 +2893,7 @@ int main() {
   test_validation_invalid();
   test_setpoints_different_modes_both_run();
   test_origin_and_seq_reported();
+  test_temperature_range_refused_when_limits_unknown();
   test_temperature_range_accepted();
   test_temperature_range_no_ack();
   test_temperature_range_invalid();
