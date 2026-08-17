@@ -119,6 +119,10 @@ struct WriteResult {
   int16_t layer{-1};
   int16_t day{-1};
   int16_t slot{-1};
+  // Single events only: 0x01 = Stop (the pump held off across the window --
+  // what a vacation is), 0x02 = a one-time Run. 0 means "not a single event",
+  // which is what keeps the key off every other command's settle event.
+  uint8_t single_event_action{0};
   std::string begin_hhmm;
   std::string end_hhmm;
   uint32_t begin_ts{0};

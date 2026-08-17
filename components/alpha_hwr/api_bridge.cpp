@@ -330,6 +330,13 @@ void AlphaHwrApiBridge::fire_write_settled(const WriteResult &result) {
         data["day_name"] = DAY_NAMES[result.day];
       }
       if (result.slot >= 0) data["slot"] = std::to_string(result.slot);
+      // Which KIND of single event. A vacation is a Stop event rather than a
+      // command of its own, so it settles under `set_single_event` -- and
+      // without this key a client could not tell "run the pump once at 6am"
+      // from "hold the pump off for a week". They are opposite intents
+      // arriving under one name.
+      if (result.single_event_action == 0x01) data["event_type"] = "stop";
+      if (result.single_event_action == 0x02) data["event_type"] = "run";
       if (!result.begin_hhmm.empty()) data["begin"] = result.begin_hhmm;
       if (!result.end_hhmm.empty()) data["end"] = result.end_hhmm;
       if (result.begin_ts > 0) data["begin_ts"] = std::to_string(result.begin_ts);
