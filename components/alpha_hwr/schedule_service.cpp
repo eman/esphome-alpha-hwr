@@ -831,7 +831,12 @@ void ScheduleService::write_single_event_async(
 
   uint8_t apdu[21]; // 11 header + 10 data
   apdu[0] = 0x0A;
-  apdu[1] = 0xB3;
+  // OpSpec 0x93 = SET + 19 payload bytes, which is what this frame carries
+  // (1 obj + 2 sub + 2 type + 1 version + 3 size + 10 data). It sent 0xB3 --
+  // SET + 51 -- copied from the layer write below, whose 53-byte APDU really
+  // does carry 51. Bench-verified that this pump accepts either, so it was
+  // never a visible failure; see the header note.
+  apdu[1] = 0x93;
   apdu[2] = 84;
   apdu[3] = (sub_id >> 8) & 0xFF;
   apdu[4] = sub_id & 0xFF;

@@ -756,11 +756,17 @@ bool ControlService::send_set_mode_request(ControlMode mode) {
 
 void ControlService::set_class10_setpoint(float value, uint16_t sub_id, uint16_t obj_id) {
   // Reference: control.py::_set_class10_setpoint() lines 1100-1132
-  // OpSpec 0x84 = SET + 4 bytes
-  // APDU: [0x0A][0x84][SubH][SubL][ObjH][ObjL][Float32BE]
+  // APDU: [0x0A][0x88][SubH][SubL][ObjH][ObjL][Float32BE]
+  //
+  // OpSpec 0x88 = SET (bits 7-6 = 0b10) + 8 payload bytes. The payload is
+  // everything after the OpSpec, which is the two ID pairs plus the float, not
+  // the float alone -- this said 0x84 ("SET + 4 bytes") for a long time,
+  // counting only the value and declaring half the frame. Bench-verified that
+  // both are accepted by this pump, so it was never a visible failure; see the
+  // header note.
   uint8_t apdu[10];
   apdu[0] = 0x0A;  // Class 10
-  apdu[1] = 0x84;  // OpSpec: SET + 4 bytes
+  apdu[1] = 0x88;  // OpSpec: SET + 8 payload bytes (2 sub + 2 obj + 4 float)
   apdu[2] = (sub_id >> 8) & 0xFF;
   apdu[3] = sub_id & 0xFF;
   apdu[4] = (obj_id >> 8) & 0xFF;

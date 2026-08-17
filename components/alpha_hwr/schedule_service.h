@@ -17,13 +17,25 @@
  *   - Format: 3-byte header + (7 days × 6 bytes) = 45 bytes total
  *   - Each entry: [Enabled][Action][StartH][StartM][EndH][EndM]
  *
- * - Enable/Disable: Class 10, OpSpec 0x93 (OpSpec 4, Length 19)
+ * - Enable/Disable: Class 10, OpSpec 0x93 = SET + 19 payload bytes
  *   - Writes to Object 84, SubID 1
  *   - Modifies complete 10-byte ClockProgramOverview structure
  *
- * - Write entries: Class 10, OpSpec 0xB3 (OpSpec 5, Length varies)
+ * - Write layer entries: Class 10, OpSpec 0xB3 = SET + 51 payload bytes
  *   - Writes to Object 84, SubID 1000-1004
- *   - Payload: 42 bytes (7 days × 6 bytes)
+ *   - Payload: 42 bytes (7 days x 6 bytes), in a 53-byte APDU
+ *
+ * - Write single events: Class 10, OpSpec 0x93 = SET + 19 payload bytes
+ *   - Writes to Object 84, SubID 900+
+ *   - Payload: 10 bytes, in the same 21-byte APDU shape as Enable/Disable
+ *
+ * These were described as "OpSpec 4" and "OpSpec 5" with "Length varies",
+ * which is a three-bit reading of a two-bit field. Byte 1 is `0booLLLLLL`:
+ * operation in bits 7-6, payload byte count in bits 5-0. The length does not
+ * vary for a given frame shape -- it is fixed by the shape, and 0xB3 and 0x93
+ * differ only in that count. Reading them as opcodes 5 and 4 is what let the
+ * single-event write ship with the layer write's length for a long time
+ * (issue #174).
  */
 
 #pragma once
