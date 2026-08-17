@@ -586,7 +586,9 @@ async def to_code(config):
     # index-based setter: the name is the only thing that tells an operator what
     # a counter means, and a name/index/threshold mismatch is invisible in a
     # reading. Resolving the setter by name makes drift a build failure.
-    for threshold_s, key in zip(LINK_GAP_THRESHOLDS_S, CONF_LINK_GAPS_OVER):
+    for threshold_s, key in zip(
+        LINK_GAP_THRESHOLDS_S, CONF_LINK_GAPS_OVER, strict=True
+    ):
         if key in config:
             sens = await sensor.new_sensor(config[key])
             cg.add(getattr(var, f"set_link_gaps_over_{threshold_s}s_sensor")(sens))

@@ -213,10 +213,67 @@ With `data_timeout: 0s` the sensor still records intervals, but there is no
 budget for them to be read against and no recycle to cut them short — it becomes
 a plain "longest quiet period on a live link" number.
 
-For a deliberate data-gathering run, set `data_timeout` well above what you
-expect (`600s`, say) for a few weeks. The watchdog still recovers a deaf link,
-just more slowly, and only a budget the pump never reaches shows the shape of
-the tail instead of just the fact that a ceiling exists.
+#### The gap histogram
+
+`link_max_gap` reports the worst interval. It cannot report how *many* there
+were, and that is the question the default actually turns on: a budget of `T`
+fires once for every quiet interval longer than `T`, so the number of those per
+day is the cost of choosing `T`. Eight more optional sensors report it.
+
+| Entity | Reads |
+| --- | --- |
+| `link_gaps_over_15s` … `link_gaps_over_90s` | Quiet intervals longer than 15/20/30/45/60/90 seconds, since boot |
+| `link_gaps_truncated` | Of those intervals, how many were cut short by a recycle or a drop instead of ending on their own |
+| `link_watch_time` | Seconds of live link the counts were drawn from |
+
+Each `link_gaps_over_Ns` counter is, exactly, **the number of times a
+`data_timeout` of N seconds would have fired** — the comparison is the same one
+the watchdog makes. So `link_gaps_over_45s` divided by `link_watch_time` is the
+recycle rate a `45s` default would have cost this installation, measured rather
+than predicted.
+
+The rungs are chosen against the timings in the section above: 15s and 20s are
+one missed poll cycle, 30s and 45s straddle the 21.5s and 31.5s worst cases for
+reaching first data after a connect, 60s is the shipped default, and 90s is
+above it deliberately — without a rung there the data cannot distinguish an
+excursion of 70s (which a longer default would cover) from one lasting minutes
+(a genuine link death, which *should* recycle).
+
+`link_watch_time` counts only time the link was up, so a rate computed from it
+is per day of connected pump, not per calendar day. It is also the coverage
+check: if it is far below the wall-clock length of your run, the counts came
+from less observation than you think.
+
+> **Set `data_timeout` above the top rung before you start, or the counters
+> lie.** The watchdog closes a quiet interval as soon as the budget expires, so
+> under the `60s` default nothing can ever be recorded above 60s — the `90s`
+> counter reads zero however badly the pump behaves, and the `60s` counter is
+> really "how many recycles", not "how many gaps that long". The backoff makes
+> it worse by widening the budget after each recycle, so the cutoff moves during
+> the run. Use `data_timeout: 600s` for a measurement run. The component logs a
+> warning at boot if the histogram is configured under a budget too small for
+> it, and `link_gaps_truncated` is how you check afterwards: it counts the
+> intervals that were cut off rather than observed.
+
+Unlike `link_max_gap` these are `total_increasing`, so Home Assistant's
+long-term statistics recognise the reset at each boot and keep accumulating —
+which is what makes a run measured in weeks survive the OTAs and restarts it
+will certainly meet. Read them from the statistics graph, not the current state.
+
+`tools/link_gap_report.py` reads all of this off one or more nodes, pools it,
+and prints the recycle rate each candidate default would have cost, with the
+decision rule it applies printed alongside the answer.
+
+#### Running a measurement run
+
+1. Set `data_timeout: 600s` on every pump taking part. The watchdog still
+   recovers a deaf link, just more slowly.
+2. Declare the histogram entities (`packages/alpha_hwr_pairing.yaml` names them
+   already).
+3. Leave it for a few weeks of ordinary service — not a bench session, since the
+   point is what normal operation does.
+4. Run `tools/link_gap_report.py` against the nodes, and check
+   `link_gaps_truncated` and `link_watch_time` before believing the rates.
 
 ## Examples
 
