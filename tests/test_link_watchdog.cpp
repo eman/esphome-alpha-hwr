@@ -831,9 +831,9 @@ void test_gap_thresholds_censored_predicate() {
   TEST_ASSERT(link_gap_thresholds_censored(60000),
               "The shipped 60s default cannot observe the top rungs");
   TEST_ASSERT(link_gap_thresholds_censored(90000),
-              "A budget equal to the top rung cannot observe it either -- the "
-              "watchdog fires strictly past the window, so nothing lands above "
-              "it");
+              "A budget equal to the top rung censors it too -- the only "
+              "samples that can reach it are ones the watchdog cut off, so the "
+              "counter quietly becomes a recycle count");
   TEST_ASSERT(!link_gap_thresholds_censored(91000),
               "One second past the top rung is enough to observe all of them");
   TEST_ASSERT(!link_gap_thresholds_censored(600000),

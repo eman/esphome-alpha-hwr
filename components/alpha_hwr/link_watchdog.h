@@ -260,10 +260,16 @@ static constexpr size_t LINK_GAP_BUCKETS =
 ///
 /// An interval is closed by the watchdog at whatever window is in force, on the
 /// first 1 s tick strictly past it, so with budget B no sample can exceed
-/// B + ~1 s unless a drop ended it instead. Every threshold at or above B
-/// therefore reads a structural zero however badly the pump behaves — which
-/// reads exactly like "the budget was never close", the conclusion the
-/// histogram exists to stop anyone reaching by accident.
+/// B + ~1 s unless a drop ended it instead. Two different failures follow, and
+/// the comparison is `<=` because both of them matter:
+///
+///   - A threshold ABOVE B reads a structural zero however badly the pump
+///     behaves, which reads exactly like "the budget was never close" — the
+///     conclusion this histogram exists to stop anyone reaching by accident.
+///   - A threshold AT B is not zero, it is worse: the only samples that can
+///     reach it are the ones the watchdog itself cut off, so the counter
+///     silently changes meaning from "quiet intervals this long" to "recycles".
+///     Those are different numbers and only one of them answers the question.
 ///
 /// 0 is not censored: with the watchdog disabled nothing truncates an interval.
 inline bool link_gap_thresholds_censored(uint32_t data_timeout_ms) {

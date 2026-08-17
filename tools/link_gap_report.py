@@ -205,6 +205,11 @@ class NodeTotals:
         for key, value in (record.get("over") or {}).items():
             current[f"over{int(key)}"] = float(value)
             self.reported.add(int(key))
+            # A node may report a rung this tool has not heard of, if the
+            # firmware's ladder has moved on. Carry it rather than raising:
+            # an unknown rung is still a usable data point, and a report that
+            # crashes on the newer node is worse than one that shows it.
+            self.over.setdefault(int(key), 0.0)
 
         # One reset test for the whole record, on watched time: it is the field
         # that always moves on a live link, so a counter that merely happens not
