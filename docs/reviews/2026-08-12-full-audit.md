@@ -936,10 +936,12 @@ doc recipes with it.
 
   **Step 6/7 checked; both had gaps, and I got step 7 wrong on the first pass.**
 
-  My first reading said step 7 held: every registered service is in `docs/programmatic-interface.md`
-  with its arguments — true, all sixteen, argument lists included — and every event key is "described
-  somewhere". A skeptic pass refuted the second half. Checking that keys are *mentioned* is not
-  checking that they are *documented*, and one key is not mentioned at all:
+  My first reading said step 7 held: every service registered in `api_bridge.cpp` is in
+  `docs/programmatic-interface.md` with its arguments — true, all sixteen registrations, argument
+  lists included (fourteen command-named plus `set_vacation`/`clear_vacation`; `SET_CLOCK` and
+  `SET_PUMP_STATE` register no service at all) — and every event key is "described somewhere". A
+  skeptic pass refuted the second half. Checking that keys are *mentioned* is not checking that
+  they are *documented*, and one key is not mentioned at all:
 
   - **`schedule_hash` is emitted on every `upload_schedule` settle and appears nowhere in the doc
     as an event field.** Its only two mentions are the text *sensor* of the same name. That is the
@@ -965,16 +967,29 @@ doc recipes with it.
   All six are fixed in the doc; the two stale code comments are corrected with them.
 
   Step 6 (host test: accepted, one failure status, one terminal event) did **not** hold either.
-  `CLEAR_SCHEDULE_ENTRY` was the only command with no case in `tests/test_write_operations.cpp`
-  at all — its sole appearance was the string table in `test_command_strings()`. It is otherwise
-  fully wired: service, `submit_*`, facade passthrough, resource key, watchdog budget, event
-  fields. `SET_SCHEDULE_ENABLED` had the accepted case only, so its confirm comparator was never
-  asked a question it answered no to.
+  `CLEAR_SCHEDULE_ENTRY` had no case in `tests/test_write_operations.cpp` — its sole appearance
+  was the string table in `test_command_strings()`. It is otherwise fully wired: service,
+  `submit_*`, facade passthrough, resource key, watchdog budget, event fields.
+  `SET_SCHEDULE_ENABLED` had the accepted case only, so its confirm comparator was never asked a
+  question it answered no to.
 
-  Nothing was broken underneath. The four previously unreached branches — the blank entry the
-  clear composes, the enabled-flag-only confirm, and the two rejection paths that must report the
-  pump's state rather than the request — all behave correctly, and four `mutation_check.sh`
-  entries now hold them there.
+  A skeptic instrumented the dispatch switch on the pre-change tree and ran the whole suite: **14
+  of the 16 commands dispatch, and two never do.** The second is `SET_PUMP_STATE`, so
+  "`CLEAR_SCHEDULE_ENTRY` was the *only* command with no case" — which an earlier draft of this
+  note said, and the PR body with it — is false. `SET_PUMP_STATE` cannot have a run/confirm case
+  (it is never enqueued; the bridge composes it from two flag writes), and
+  `tests/test_pump_schedule_ux.cpp:78` covers its state parsing and all three compositions. What
+  is genuinely untested is its **aggregate settle event**, built in `api_bridge.cpp` — which no
+  host test compiles at all. That is a real residual step-6 gap, and closing it means host-testing
+  the bridge, not adding a case to this file.
+
+  Nothing was broken underneath. **Three** branches were previously unreached — the blank entry
+  the clear composes, the enabled-flag-only confirm, and `confirm_schedule_enabled_`'s rejection
+  report — all correct, now held by `mutation_check.sh` entries. The fourth entry
+  (`confirm_schedule_entry_`'s `op->enabled = actual.is_enabled()`) is on a line **shared with
+  SET**, and the pre-existing `test_schedule_entry_verify_mismatch` already killed that mutation;
+  the new CLEAR test adds a second, CLEAR-side kill rather than a first one. Same correction as
+  the sentence above: two rejection paths were claimed unreached, one was.
 
 ## Leads refuted
 

@@ -1667,17 +1667,24 @@ static void test_schedule_entry_no_overview() {
   TEST_ASSERT(h.sim.overview_writes == 0, "no overview/commit write was sent");
 }
 
-// CLEAR_SCHEDULE_ENTRY was the one WriteCommand with no case in this file at
-// all — service, submit_*, facade passthrough, watchdog budget, resource key
-// and event fields all wired, and nothing exercising any of it. AGENTS §9
-// step 6 asks for accepted, one failure status and the one-terminal-event
-// invariant per command; these three are that, for the command that had none.
+// CLEAR_SCHEDULE_ENTRY had no case in this file — service, submit_*, facade
+// passthrough, watchdog budget, resource key and event fields all wired, and
+// nothing exercising any of it. AGENTS §9 step 6 asks for accepted, one
+// failure status and the one-terminal-event invariant per command; these
+// three are that, for a command that had none.
+//
+// (SET_PUMP_STATE is equally caseless here, so this was not "the only one".
+// It is never enqueued as an Operation -- the bridge composes it from two
+// flag writes -- so it has no run/confirm path to test; test_pump_schedule_ux
+// covers its state parsing. Its aggregate settle event, built in
+// api_bridge.cpp, is genuinely untested, but no host test compiles that file.)
 //
 // The clear path is not simply "set with the enabled bit off": it composes a
 // blank ScheduleEntry rather than the requested one, and its confirm
 // comparator matches on the enabled flag alone (the times are meaningless
 // once the day is off). Those two branches in run_schedule_entry_ and
-// confirm_schedule_entry_ were reached by nothing before this.
+// confirm_schedule_entry_ were reached by nothing before this — verified by
+// instrumenting both and running the whole pre-change suite: zero hits.
 static void test_clear_schedule_entry_accepted() {
   std::cout << "\n=== clear_schedule_entry: verified accepted ===" << std::endl;
   Harness h;

@@ -139,6 +139,13 @@ MUTATIONS=(
 # for. Reporting the request back is the failure that reads as success: the
 # event says the entry is gone (or the schedule enabled) while the pump still
 # holds the opposite, so a client has no way to see the write did not take.
+#
+# Only the second of these two was previously unguarded. The entry line is
+# shared with SET, and test_schedule_entry_verify_mismatch already killed a
+# mutation of it (submit_set_schedule_entry sets op.enabled = true, and that
+# test asserts the settled sched_enabled is 0). Kept anyway: it is now killed
+# from the CLEAR side as well, and the entry names the invariant rather than
+# leaving it implicit in a test about SET.
 "clear-entry-reject-reports-the-request|components/alpha_hwr/write_operation_service.cpp|      op->enabled = actual.is_enabled();|      // mutated: keep the requested flag instead of the pump's"
 "schedule-enabled-reject-reports-the-request|components/alpha_hwr/write_operation_service.cpp|      op->enabled = actual;|      // mutated: keep the requested flag instead of the pump's"
 # The clock confirm, in its load-bearing pieces.
