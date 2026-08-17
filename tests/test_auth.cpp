@@ -338,6 +338,45 @@ void test_stage2_replies_are_not_consumed() {
               "consumed and the control-mode publish would stop");
 }
 
+// ── 2b-iv. The backstop, against the failure it exists for ──────────────
+// Stages 1 and 3 are continued only by the transport's command callback, and
+// Transport::reset() clears its queue *without* invoking that callback --
+// reachable on a live link when the reassembly buffer overruns, i.e. from one
+// corrupt inbound fragment. Without the backstop the sequence simply stops:
+// no further packet, no completion, running_ stuck true so even a fresh
+// start() is refused, and the session never leaves AUTHENTICATING.
+//
+// The fail-open test above does not reach this: it stops short of
+// SEQUENCE_BACKSTOP_MS deliberately, so a backstop that did nothing at all
+// would pass it.
+void test_the_backstop_rescues_a_dropped_callback() {
+  std::cout << "\n=== The backstop completes a sequence whose callback was dropped ==="
+            << std::endl;
+  mock_millis = 0;
+  AuthRig r;
+  r.auto_answer = false;
+  r.auth.start();
+  r.advance(300);
+  TEST_ASSERT(r.auth.reads_sent() == 1, "One read is outstanding");
+
+  // Drop it, exactly as an overrun does.
+  r.transport.reset();
+
+  // Well past REPLY_TIMEOUT_MS: the timeout cannot save this either, because
+  // the command it would have timed out is gone from the queue.
+  r.advance(5 * Authentication::REPLY_TIMEOUT_MS);
+  TEST_ASSERT(r.sent.size() == 1, "The sequence is dead -- no further packet");
+  TEST_ASSERT(r.completions == 0, "...it has not completed");
+  TEST_ASSERT(r.auth.is_running(),
+              "...and it is still marked running, so a fresh start() would be refused");
+
+  // Now let the backstop come due.
+  r.advance(Authentication::SEQUENCE_BACKSTOP_MS);
+  TEST_ASSERT(r.completions == 1, "The backstop completes the sequence");
+  TEST_ASSERT(!r.auth.is_running(),
+              "...and clears running_, so the next connection can start one");
+}
+
 // ── 2c. Fail open ────────────────────────────────────────────────────────────
 // A pump that answers nothing must still reach READY. Two logs from one
 // specimen justify waiting for a reply; they do not justify requiring one, and
@@ -577,6 +616,7 @@ int main() {
   test_a_read_is_not_left_until_it_is_answered();
   test_the_read_timeout_actually_in_force_is_the_constant();
   test_stage2_replies_are_not_consumed();
+  test_the_backstop_rescues_a_dropped_callback();
   test_an_unanswered_sequence_still_completes();
   test_auth_packets_carry_valid_crcs();
   test_start_while_running_is_ignored();

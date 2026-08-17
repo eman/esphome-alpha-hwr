@@ -84,7 +84,7 @@ size_t build_data_object_set(uint16_t sub_id, uint16_t obj_id,
   return crc_offset + 2;
 }
 
-// Build INFO command for reading register value
+// Build a register-read command (a GET, despite the name -- see the header).
 // Reference: alpha_hwr/protocol/frame_builder.py::build_command_info()
 size_t build_command_info(uint8_t class_byte, uint32_t register_addr,
                            uint8_t *packet_out, uint8_t source) {

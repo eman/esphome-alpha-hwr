@@ -101,11 +101,19 @@ size_t build_data_object_set(uint16_t sub_id, uint16_t obj_id,
                               uint8_t *packet_out, uint8_t source = SOURCE_ADDRESS);
 
 /**
- * Build INFO command for reading register value.
- * 
- * INFO commands are used to read register values. They're typically
- * used for Class 2/3 operations (legacy telemetry reads).
- * 
+ * Build a register-read command for Class 2/3 (legacy telemetry reads).
+ *
+ * **The name is wrong, and the function is uncalled.** It builds a GET: the
+ * OpSpec it emits is `0b00` in bits 7-6 with the register length in bits 5-0.
+ * INFO is `0b11` -- a different operation, asking for an item's scaling
+ * metadata rather than its value. Issue #46 is what confusing the two costs: a
+ * Class 3 command sent as `0xC1` (INFO) instead of `0x81` (SET) was answered
+ * correctly as an INFO query and so never took effect.
+ *
+ * The comments are corrected rather than the identifier because nothing in the
+ * repo calls this function; renaming or deleting it is a separate change
+ * (issue #174).
+ *
  * Frame Structure:
  * [27] [Length] [E7] [F8] [Class] [OpSpec] [Register...] [CRC-H] [CRC-L]
  * 

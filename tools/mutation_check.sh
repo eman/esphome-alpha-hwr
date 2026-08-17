@@ -398,6 +398,12 @@ MUTATIONS=(
 # matched nothing. mutation_check.sh reports that loudly as "could not apply"
 # and exits 1 rather than scoring it Survived -- so a stale entry is a red
 # build, not a silent hole. Retargeted at the same property: EXT_1 first.
+# The backstop must actually complete a stalled sequence. Stages 1 and 3 are
+# continued only by the transport's command callback, and Transport::reset()
+# drops it without invoking it -- so an inert backstop restores a node that sits
+# in AUTHENTICATING forever, connected and never ready. Nothing tested it until
+# tests/test_auth.cpp began resetting the transport with a read pending.
+"auth-backstop-is-inert|components/alpha_hwr/auth.cpp|      if (!this->running_) return;              // Finished normally; nothing to do.|      if (true) return;"
 # Stage 2 must stay a blind send. Matching its Class 10 reply consumes the
 # frame, and that frame is the operation-status notification TelemetryService
 # publishes control mode, operation mode and setpoint from on every connect --

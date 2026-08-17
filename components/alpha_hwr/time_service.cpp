@@ -39,7 +39,7 @@ void TimeService::get_clock_async(std::function<void(ESPTime)> callback) {
   // length). Called INFO here previously; INFO is 0b11, a different operation.
   uint8_t apdu[5];
   apdu[0] = 0x0A;  // Class 10
-  apdu[1] = 0x03;  // OpSpec INFO (GET/read)
+  apdu[1] = 0x03;  // OpSpec: GET, 3 payload bytes
   apdu[2] = OBJECT_ID_RTC & 0xFF;  // Object ID (94)
   apdu[3] = (SUB_ID_DATETIME_ACTUAL >> 8) & 0xFF;  // Sub-ID high (0x00)
   apdu[4] = SUB_ID_DATETIME_ACTUAL & 0xFF;  // Sub-ID low (0x65 = 101)
