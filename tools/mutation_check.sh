@@ -72,7 +72,7 @@ JOBS="${JOBS:-4}"
 MUTATIONS=(
 "crc-initial-value|components/alpha_hwr/codec.cpp|uint16_t crc = init;|uint16_t crc = init ^ 0x0001;"
 "crc-byte-order|components/alpha_hwr/frame_builder.cpp|packet_out[9] = (crc >> 8) & 0xFF;|packet_out[9] = crc & 0xFF;"
-"class-match-equality|components/alpha_hwr/response_match.h|incoming_class == queued_class &&|true &&"
+"class-match-equality|components/alpha_hwr/response_match.h|if (incoming_class != queued_class) return false;|if (false) return false;"
 "frame-length-guard|components/alpha_hwr/frame_parser.cpp|if (len < expected_total) {|if (false) {"
 "schedule-day-bound|components/alpha_hwr/schedule_codec.cpp|if (v[1] > 6) return fail|if (v[1] > 99) return fail"
 # Restores the DST readback defect: resolving the offset from the local value
@@ -89,7 +89,17 @@ MUTATIONS=(
 # all, which makes it the place to close them.
 "dst-offset-ignores-sub-hour-zones|components/alpha_hwr/schedule_service.h|(lt.tm_min - gt.tm_min) * 60|0 * (lt.tm_min - gt.tm_min) * 60"
 "dst-offset-year-rollover-branch|components/alpha_hwr/schedule_service.h|    day_delta = (lt.tm_year > gt.tm_year) ? 1 : -1;|    day_delta = 0;"
-"ignore-unrelated-gate|components/alpha_hwr/response_match.h|return is_class3_or_7(queued_class) && !is_class3_or_7(incoming_class);|return false;"
+"ignore-unrelated-gate|components/alpha_hwr/response_match.h|  if (!is_wildcard_matched_class(queued_class)) return false;\n  return !is_wildcard_matched_class(incoming_class);|  return false;"
+# The wildcard-matched class set (issue #174). Membership is the whole safety
+# argument for admitting classes 2, 5 and 11, so both directions are pinned:
+# dropping a member silently stops matching that class's replies and sends the
+# sequence back to advancing on nothing, and admitting Class 10 lets an
+# unsolicited telemetry notification answer any queued Class 10 command. Written
+# without `||` on purpose -- this script splits its entries on `|`, so a search
+# or replacement string containing one is truncated and the mutation never runs.
+"class-set-drop-class2|components/alpha_hwr/response_match.h|  if (class_byte == CLASS_2_MEASURED_DATA) return true;|  if (false) return true;"
+"class-set-drop-class5|components/alpha_hwr/response_match.h|  if (class_byte == CLASS_5_REFERENCE_VALUES) return true;|  if (false) return true;"
+"class-set-admit-class10|components/alpha_hwr/response_match.h|  return class_byte == CLASS_11_MEASURED_16BIT;|  return class_byte == CLASS_11_MEASURED_16BIT ? true : (class_byte == 0x0A);"
 "remote-mode-confirm-fresh|components/alpha_hwr/write_operation_service.cpp|bool confirmed = success && fresh && control_.remote_state_valid_ &&|bool confirmed = success && control_.remote_state_valid_ &&"
 # Restores the exact naming defect issue #159 reported: the service was called
 # `pump_set_state`, its settle event answered `set_pump_state`. Since api_bridge
@@ -383,7 +393,24 @@ MUTATIONS=(
 "motor-speed-on-threshold|components/dhw_demand/dhw_demand_logic.h|    return motor_speed >= 10.0f;|    return motor_speed > 10.0f;"
 "motor-channel-precedence-swapped|components/dhw_demand/dhw_demand_logic.h|  if (!std::isnan(motor_speed))\n    return motor_speed >= 10.0f;\n  if (!std::isnan(motor_current))\n    return motor_current >= pump_off_current_threshold;|  if (!std::isnan(motor_current))\n    return motor_current >= pump_off_current_threshold;\n  if (!std::isnan(motor_speed))\n    return motor_speed >= 10.0f;"
 "auth-stage2-repeat-count|components/alpha_hwr/auth.cpp|  if (repeat_count < 5) {|  if (repeat_count < 4) {"
-"auth-extension-packet-order|components/alpha_hwr/auth.cpp|  send_packet(AUTH_EXT_1, sizeof(AUTH_EXT_1));\n  send_packet(AUTH_EXT_2, sizeof(AUTH_EXT_2));|  send_packet(AUTH_EXT_2, sizeof(AUTH_EXT_2));\n  send_packet(AUTH_EXT_1, sizeof(AUTH_EXT_1));"
+# Stage 3 stopped being two blind sends when issue #174 made it two matched
+# reads, so this entry's old search string (two consecutive send_packet calls)
+# matched nothing. mutation_check.sh reports that loudly as "could not apply"
+# and exits 1 rather than scoring it Survived -- so a stale entry is a red
+# build, not a silent hole. Retargeted at the same property: EXT_1 first.
+# The backstop must actually complete a stalled sequence. Stages 1 and 3 are
+# continued only by the transport's command callback, and Transport::reset()
+# drops it without invoking it -- so an inert backstop restores a node that sits
+# in AUTHENTICATING forever, connected and never ready. Nothing tested it until
+# tests/test_auth.cpp began resetting the transport with a read pending.
+"auth-backstop-is-inert|components/alpha_hwr/auth.cpp|      if (!this->running_) return;              // Finished normally; nothing to do.|      if (true) return;"
+# Stage 2 must stay a blind send. Matching its Class 10 reply consumes the
+# frame, and that frame is the operation-status notification TelemetryService
+# publishes control mode, operation mode and setpoint from on every connect --
+# so this mutation silently stops that publish. It survived the whole suite
+# until tests/test_auth.cpp began counting frames reaching the packet callback.
+"auth-stage2-must-stay-blind|components/alpha_hwr/auth.cpp|    send_packet(AUTH_CLASS10, sizeof(AUTH_CLASS10));|    send_read(AUTH_CLASS10, sizeof(AUTH_CLASS10), [](bool, const uint8_t *, size_t) {});"
+"auth-extension-packet-order|components/alpha_hwr/auth.cpp|  send_read(AUTH_EXT_1, sizeof(AUTH_EXT_1), [this](bool, const uint8_t *, size_t) {|  send_read(AUTH_EXT_2, sizeof(AUTH_EXT_2), [this](bool, const uint8_t *, size_t) {"
 "sensor-pub-media-temp-range-removed|components/alpha_hwr/sensor_publisher.cpp|    if (temp.media_temperature_c >= -20 && temp.media_temperature_c <= 100) {|    if (true) {"
 "sensor-pub-alarm-dedup-removed|components/alpha_hwr/sensor_publisher.cpp|  if (alarms_sensor_->has_state() && alarms_sensor_->state == codes_str) {|  if (false) {"
 "sensor-pub-head-rate-gap-reset-removed|components/alpha_hwr/sensor_publisher.cpp|      if (dt_s > 30.0f) {|      if (false) {"

@@ -19,12 +19,17 @@ namespace protocol {
  * [Start] [Length] [ServiceID-H] [ServiceID-L/Source] [APDU...] [CRC-H] [CRC-L]
  * 
  * Where:
- * - Start: 0x27 (FRAME_START for requests)
- * - Length: Number of bytes from ServiceID to end of APDU (not including CRC)
- * - ServiceID-H: 0xE7 (GENI service)
- * - ServiceID-L/Source: 0xF8 (standard) or 0x0A (alternative)
+ * - Start: 0x27 (FRAME_START for requests; replies start 0x24)
+ * - Length: Number of bytes from the destination address to the end of the
+ *   APDU (not including CRC). Frame total is Length + 4.
+ * - Destination: 0xE7, the pump
+ * - Source: 0xF8 (standard) or 0x0A (alternative), us
  * - APDU: Application Protocol Data Unit (class, opspec, data)
  * - CRC: CRC-16-CCITT checksum
+ *
+ * The two address bytes were described here as one 16-bit "Service ID (GENI)".
+ * They are a destination and a source, and the pump's replies show it: they
+ * come back with the pair reversed, `24 .. F8 E7 ..` (issue #174).
  * 
  * Reference: alpha_hwr/protocol/frame_builder.py
  */
@@ -81,8 +86,13 @@ void build_class10_read(uint32_t register_addr, uint8_t *packet_out, uint8_t sou
  * 
  * Notes:
  * OpSpec for Class 10 SET:
- * - Bit 7: Always 1 for SET (0x80)
- * - Bits 6-0: Length of SubID + ObjID + Data (minimum 4)
+ * - Bits 7-6: the operation; 0b10 is SET
+ * - Bits 5-0: Length of SubID + ObjID + Data (minimum 4), which is why the
+ *   payload cap below is 59 rather than 123
+ *
+ * "Bits 6-0 = length" was the wording here, and the code has always disagreed
+ * with it -- build_data_object_set() masks 0x3F, six bits, and ORs in 0x80,
+ * leaving bit 6 clear. Six bits is also what the caps in the .cpp assume.
  * 
  * Reference: alpha_hwr/protocol/frame_builder.py::build_data_object_set()
  */
@@ -91,11 +101,19 @@ size_t build_data_object_set(uint16_t sub_id, uint16_t obj_id,
                               uint8_t *packet_out, uint8_t source = SOURCE_ADDRESS);
 
 /**
- * Build INFO command for reading register value.
- * 
- * INFO commands are used to read register values. They're typically
- * used for Class 2/3 operations (legacy telemetry reads).
- * 
+ * Build a register-read command for Class 2/3 (legacy telemetry reads).
+ *
+ * **The name is wrong, and the function is uncalled.** It builds a GET: the
+ * OpSpec it emits is `0b00` in bits 7-6 with the register length in bits 5-0.
+ * INFO is `0b11` -- a different operation, asking for an item's scaling
+ * metadata rather than its value. Issue #46 is what confusing the two costs: a
+ * Class 3 command sent as `0xC1` (INFO) instead of `0x81` (SET) was answered
+ * correctly as an INFO query and so never took effect.
+ *
+ * The comments are corrected rather than the identifier because nothing in the
+ * repo calls this function; renaming or deleting it is a separate change
+ * (issue #174).
+ *
  * Frame Structure:
  * [27] [Length] [E7] [F8] [Class] [OpSpec] [Register...] [CRC-H] [CRC-L]
  * 

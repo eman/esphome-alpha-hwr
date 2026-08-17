@@ -434,6 +434,51 @@
 
 ### Fixed
 
+- **The four packets a connection opens with were sent blind, and three of them
+  could not have been matched even if they had asked to be** (issue #174). The
+  transport's Class 10 path requires `data[4] == 0x0A` and a frame of at least
+  11 bytes, so a Class 2 reply failed the first test and the 9-byte Class 5 and
+  Class 11 replies failed the second. So all four went out with no callback and
+  the sequence advanced on four delay values transcribed from the reference
+  client's `asyncio.sleep()` calls. Nothing noticed whether the pump answered:
+  a pump that replied to all ten packets and a pump that replied to none were
+  indistinguishable from inside the sequence.
+
+  Classes 2, 5 and 11 now join Classes 3 and 7 in the transport's
+  wildcard-matched set, and stages 1 and 3 send their packets as ordinary
+  matched reads that advance when the reply lands or the wait expires — so the
+  pacing is the pump's, and 750 ms of transcribed delay goes with it. Nothing
+  is required to answer; an unanswered read advances the sequence exactly as an
+  answered one does, and completion now reports which happened. Both matching
+  predicates already required the *queued* command to be of the same class and
+  nothing else in the component queues those classes, so no existing traffic
+  changes path.
+
+  Stage 2 keeps its timers deliberately: its Class 10 reply is the
+  operation-status frame the telemetry path decodes and publishes on every
+  connect, and matching a command *consumes* the frame. Recorded at the site
+  with what sharing it would take.
+
+  Bench-verified: 5/5 reads answered, control-mode publishing intact, 1330 ms
+  end to end. That is slightly longer than the 1200 ms the fixed delays always
+  took — this pump averages ~175 ms per reply where the specimen in the issue
+  reports 54-108 ms, which is the variation a transcribed constant cannot
+  accommodate and the reason for the change.
+
+- **The opening packets were documented as an unlock handshake and are four
+  reads** (issue #174). The second APDU byte is `0booLLLLLL` — operation in the
+  top two bits, payload length in the low six — so the `0x03` that was read as
+  "SET" is a GET with a 3-byte payload, and "register 0x9495, unlock code 0x96"
+  was a misparse of a length field. The packets read `unit_family`, `unit_type`
+  and `unit_version`; the operation-status object (Obj 86 Sub 6, which was
+  documented with object and sub reversed); and two INFO queries. Corrected in
+  `auth.h`, along with the two address bytes described as one 16-bit "Service
+  ID" — the pump's replies swap them, which a constant does not do — and the
+  same `0b00`-is-INFO mislabel where it had spread to `frame_builder.cpp` and
+  `time_service.cpp`. Bytes unchanged throughout; the encoding is corroborated
+  by two independent bench-derived frames already in the tree.
+
+
 - **A pump whose clock is never synced now says so, instead of silently letting
   schedule windows drift.** The pump keeps its own RTC and runs schedule windows
   off it; nothing else corrects that clock. When a sync cannot happen, the

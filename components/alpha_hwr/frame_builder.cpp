@@ -84,7 +84,7 @@ size_t build_data_object_set(uint16_t sub_id, uint16_t obj_id,
   return crc_offset + 2;
 }
 
-// Build INFO command for reading register value
+// Build a register-read command (a GET, despite the name -- see the header).
 // Reference: alpha_hwr/protocol/frame_builder.py::build_command_info()
 size_t build_command_info(uint8_t class_byte, uint32_t register_addr,
                            uint8_t *packet_out, uint8_t source) {
@@ -109,8 +109,14 @@ size_t build_command_info(uint8_t class_byte, uint32_t register_addr,
     reg_len = 1;
   }
   
-  // OpSpec: INFO operation (bits 7-6 = 00), length = register bytes
-  // OS_INFO = 0x00, so OpSpec byte is just the register length
+  // OpSpec: bits 7-6 are the operation and bits 5-0 the payload length, so
+  // with GET = 0b00 the byte is just the register length.
+  //
+  // Named INFO here for a long time, which is a different operation: INFO is
+  // 0b11 and would make this 0xC1 | reg_len. The bytes are unchanged -- 0b00
+  // is what this always emitted -- but the two are not interchangeable, and
+  // issue #46 is what that costs when they are confused (a Class 3 command
+  // sent as 0xC1 instead of 0x81 was refused by the pump every time).
   uint8_t op_length_byte = reg_len;
   
   // Calculate frame length
