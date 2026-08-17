@@ -934,16 +934,37 @@ doc recipes with it.
   `write_temp_range_config` echoing an unvalidated cache, the midnight-crossing upload codec gap,
   the §9 step 6/7 documentation gaps.
 
-  **Step 6/7 checked; the two halves did not come out the same way.**
+  **Step 6/7 checked; both had gaps, and I got step 7 wrong on the first pass.**
 
-  Step 7 (document the service + event fields) holds for all sixteen commands. Every registered
-  service appears in `docs/programmatic-interface.md` with its arguments, and every key
-  `fire_write_settled()` can emit is described there — including the four the per-command summary
-  paragraph omits (`schedule_enabled`, `state`, `layers_written`/`layers_skipped`,
-  `schedule_hash`), which are documented in the `set_pump_state` and `upload_schedule` sections
-  instead. No gap.
+  My first reading said step 7 held: every registered service is in `docs/programmatic-interface.md`
+  with its arguments — true, all sixteen, argument lists included — and every event key is "described
+  somewhere". A skeptic pass refuted the second half. Checking that keys are *mentioned* is not
+  checking that they are *documented*, and one key is not mentioned at all:
 
-  Step 6 (host test: accepted, one failure status, one terminal event) did **not** hold.
+  - **`schedule_hash` is emitted on every `upload_schedule` settle and appears nowhere in the doc
+    as an event field.** Its only two mentions are the text *sensor* of the same name. That is the
+    step-7 failure proper, and it defeats the field's purpose: it exists so a client can learn what
+    the pump holds straight off the event instead of polling the sensor and racing the republish.
+  - **The doc asserted a false invariant.** It said `enabled` "on every other command is the pump's
+    run state". On all six schedule commands `enabled` is the *schedule* flag —
+    `fire_write_settled()`'s `default:` branch fills it from `sched_enabled`. The same wrong claim
+    sat in the code comment at `api_bridge.cpp` that justified naming remote mode's key
+    `remote_enabled`.
+  - **`partial` was missing from the canonical status list**, appearing only inside the
+    `upload_schedule` section — so a client switching on `status` off the documented enumeration
+    drops a reachable terminal status.
+  - **`layers_written`/`layers_skipped` were scoped to `partial`** in the doc; they are emitted on
+    every upload settle, and their format (comma-separated layer indices) was never stated.
+  - **`clock_offset_s` on `timeout` documented an unreachable case.** A readback that decodes
+    settles the operation immediately, so only undecodable attempts retry and a `timeout` always
+    carries NAN. Both the doc and two code comments claimed the opposite.
+  - **`seq` is `"0"` on the two event kinds the API bridge builds itself** (bridge-level `invalid`,
+    and the aggregate `set_pump_state`), because neither passes through the queue that numbers
+    them. The doc's `node` + `seq` uniqueness claim was false for exactly those.
+
+  All six are fixed in the doc; the two stale code comments are corrected with them.
+
+  Step 6 (host test: accepted, one failure status, one terminal event) did **not** hold either.
   `CLEAR_SCHEDULE_ENTRY` was the only command with no case in `tests/test_write_operations.cpp`
   at all — its sole appearance was the string table in `test_command_strings()`. It is otherwise
   fully wired: service, `submit_*`, facade passthrough, resource key, watchdog budget, event

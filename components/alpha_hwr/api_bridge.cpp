@@ -180,16 +180,18 @@ void AlphaHwrApiBridge::fire_write_settled(const WriteResult &result) {
       put_float("flow", result.flow, "%.3f");
       break;
     case WriteCommand::SET_REMOTE_MODE:
-      // `remote_enabled`, not `enabled`: on every other command that key is
-      // the pump's run state, and reusing it here would make one event key
-      // mean two unrelated things to anything parsing write_settled.
+      // `remote_enabled`, not `enabled`: that key already carries two
+      // meanings -- the pump's run state on the control commands, the
+      // schedule flag on every schedule command (the default: branch below
+      // fills it from result.sched_enabled) -- and a third would be one too
+      // many for anything parsing write_settled.
       put_bool("remote_enabled", result.enabled);
       break;
     case WriteCommand::SET_CLOCK:
       // How far the pump's clock sits from the node's, measured after the
-      // write. Absent when no readback decoded a time; a timeout can still
-      // carry one, if an earlier attempt in the ladder decoded and later ones
-      // did not.
+      // write. Absent when no readback decoded a time -- which is every
+      // TIMEOUT, since a decoded readback settles the operation on the spot
+      // and only undecodable attempts retry.
       put_float("clock_offset_s", result.clock_offset_s, "%.0f");
       break;
     case WriteCommand::SET_PUMP_STATE:

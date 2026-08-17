@@ -359,10 +359,11 @@ void WriteOperationService::finish_(uint32_t seq, WriteStatus status, const std:
       // The measured offset, not the time we asked for: on every terminal
       // status except ACCEPTED the requested value is the one thing already
       // known, and what the reader needs is how far out the pump still is.
-      // NAN when no readback ever decoded a time. That is the usual TIMEOUT,
-      // but not the same thing as one: a ladder whose first readback decoded
-      // out of tolerance and whose retries then failed to decode settles
-      // TIMEOUT carrying the real measurement it did get.
+      // NAN when no readback ever decoded a time, which is exactly the
+      // TIMEOUT case: confirm_set_clock_ finishes ACCEPTED or REJECTED the
+      // moment a readback decodes, so the retry ladder only ever runs on
+      // attempts that measured nothing. A TIMEOUT therefore always carries
+      // NAN here. (This comment used to claim the opposite.)
       result.clock_offset_s = op.clock_offset_s;
       break;
     case WriteCommand::SET_SINGLE_EVENT:

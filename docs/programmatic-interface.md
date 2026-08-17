@@ -158,8 +158,10 @@ whose clock still disagrees settles `rejected` with the remaining offset in
 about whether the pump is wrong.
 
 `clock_offset_s` carries the measured offset in seconds, positive when the pump
-runs ahead. It is normally absent on `timeout`, though a run whose first
-readback decoded and whose retries did not will carry the measurement it got.
+runs ahead. It is always absent on `timeout`: a readback that decodes is the
+verdict on the spot, `accepted` or `rejected`, so only the undecodable branch
+ever retries — and a run that reaches `timeout` is one where nothing ever
+decoded and no offset was ever measured.
 
 One asymmetry is worth knowing if you watch these events. The time written into
 the frame is built when the operation runs, and the BLE transport sends one
@@ -221,9 +223,23 @@ Per layer the component performs a mandatory fresh read, **skips layers whose
 image already matches** (zero BLE writes on a no-change re-upload), writes
 changed layers as one 42-byte whole-layer frame each, commits, settles, and
 readback-verifies. Terminal statuses: `accepted` (all confirmed; detail
-`no-op` when everything was skipped), `partial` (mixed — the event carries
-`layers_written` / `layers_skipped`), `rejected`, `timeout`, `superseded`.
-Watchdog budget: 150 s.
+`no-op` when everything was skipped), `partial` (mixed), `rejected`,
+`timeout`, `superseded`. Watchdog budget: 150 s.
+
+Three event fields are specific to this command, and all three are present on
+**every** `upload_schedule` settle, not only the partial ones:
+
+| Field | Value |
+| --- | --- |
+| `layers_written` | comma-separated layer indices actually written, e.g. `"0,2"`; empty when none were |
+| `layers_skipped` | comma-separated layer indices whose image already matched, same format |
+| `schedule_hash` | the same `v1:<16hex>` value as the `schedule_hash` sensor, recomputed after the operation |
+
+`schedule_hash` is worth reading straight off the event rather than polling
+the sensor: it is emitted once any wire work happened — including on a
+rejection where every layer failed, because a failed layer has still been read
+back and that readback refreshed the cache. It is empty only when the
+operation ended before touching the pump.
 
 ### Schedule hash (sync verification)
 
@@ -256,12 +272,15 @@ event_type: esphome.alpha_hwr_write_settled
 data:
   op_id: "restore-speed-1"   # the id you passed; may be empty
   command: "set_setpoint"    # which write this was — the service name you called
-  status: "clamped"          # accepted | clamped | rejected | invalid | timeout | superseded
+  status: "clamped"          # accepted | clamped | rejected | invalid | timeout
+                             #   | superseded | partial (upload_schedule only)
   detail: "pump stored 1650" # short reason when relevant
   origin: "service"          # service (API call) | entity (dashboard write)
                              #   | internal (the component's own self-repair)
   node: "recirc-controller"  # this controller's ESPHome node name
-  seq: "42"                  # submission-order sequence number (per boot and per controller)
+  seq: "42"                  # submission-order sequence number (per boot and per
+                             #   controller); "0" on events the API bridge builds
+                             #   itself — see below
   # the command's settled values:
   mode: "constant_speed"
   value: "1650"
@@ -309,6 +328,11 @@ Statuses:
   own terminal event. Supersede is per-value: e.g. only a second setpoint
   write to the *same mode* supersedes a queued one; setpoints for different
   modes are independent values and both run.
+- **`partial`** — `upload_schedule` only: some layers confirmed and some did
+  not, or every layer was written but the pump did not take the
+  schedule-enabled flag. `layers_written` / `layers_skipped` say which.
+  No other command can produce it, but a client switching on `status` needs
+  the case.
 
 Settled-value fields per command: `mode`/`value`/`enabled` for the control
 commands; `temp_min`/`temp_max`/`autoadapt`; `on_minutes`/`off_minutes`/`flow`
@@ -316,9 +340,21 @@ commands; `temp_min`/`temp_max`/`autoadapt`; `on_minutes`/`off_minutes`/`flow`
 including fields the request kept — a keep-everything-but-one write doubles
 as a read of the others); `layer`/`day`/`day_name`/`begin`/`end`/`enabled`
 for schedule entries; `slot`/`begin_ts`/`end_ts`/`enabled` for single events;
-`event_count` for the refreshes; `remote_enabled` for `set_remote_mode`
-(a separate key from `enabled`, which on every other command is the pump's
-run state); `clock_offset_s` for `set_clock`. For `accepted`/`clamped`/`rejected` these
+`event_count` for the refreshes; `enabled`/`schedule_enabled`/`state` for
+`set_pump_state`; `layers_written`/`layers_skipped`/`schedule_hash` for
+`upload_schedule`; `remote_enabled` for `set_remote_mode`;
+`clock_offset_s` for `set_clock`.
+
+**`enabled` means two different things**, so check which command you are
+looking at: on the control commands it is the pump's run state, and on every
+schedule command (`set_schedule_entry`, `clear_schedule_entry`,
+`set_schedule_enabled`, `set_single_event`, `clear_single_event`,
+`upload_schedule`) it is the *schedule* flag — whether that entry, that slot
+or the weekly program is on. `set_pump_state` reports both, under `enabled`
+and `schedule_enabled`. `set_remote_mode` deliberately uses a third key,
+`remote_enabled`, rather than overloading `enabled` a third time.
+
+For `accepted`/`clamped`/`rejected` these
 carry what the pump **actually holds** (from the readback), not what was
 requested. The original request is echoed alongside in `requested_*` fields
 (`requested_mode`, `requested_value`, `requested_temp_min`/`_max`,
@@ -331,6 +367,14 @@ Event ordering note: settle events for `superseded` operations fire at
 submission time, so they can arrive **before** the terminal events of
 operations submitted earlier. Use the `seq` field when reconstructing
 submission order from logs.
+
+Two kinds of event never reach the operation queue and so carry `seq: "0"`:
+a request the API bridge rejects as `invalid` before submitting it (an
+unparsable `data` string, an unknown mode or state name), and the aggregate
+`set_pump_state` event, which is composed at the bridge from the two flag
+writes underneath it. Real sequence numbers start at 1, so `"0"` identifies
+them. Correlate these by `op_id`; `node` + `seq` identifies an event uniquely
+only among the ones the queue numbered.
 
 ## Writing a client
 
