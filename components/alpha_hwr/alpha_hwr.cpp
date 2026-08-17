@@ -23,6 +23,22 @@ void AlphaHwrComponent::setup() {
 
   this->link_boot_ms_ = millis();  // Pump Link Status: mark the startup window
 
+  // `time_id` is optional in the schema and load-bearing in practice, and its
+  // absence used to be reported only at DEBUG -- invisible at the INFO level
+  // this component ships. What the user sees instead is a pump whose schedule
+  // windows quietly drift, because the pump runs them off its own RTC and
+  // nothing is ever correcting it. Say so once, where it can be read.
+  if (!this->has_wall_clock_()) {
+    ESP_LOGW(TAG, "No time_id configured - the pump clock will never be synced");
+    ESP_LOGW(TAG, "  The pump runs schedule windows off its own RTC, which drifts");
+    ESP_LOGW(TAG, "  Add `time_id:` pointing at a time component to enable syncing");
+    // Deliberately does not arm the repeat throttle. setup() runs at
+    // setup_priority::DATA, well before the API server is up and long before any
+    // network log client can attach, so this pass reaches the serial console
+    // only. The repeat from check_and_sync_time() is what an `esphome logs`
+    // reader actually sees.
+  }
+
   if (this->ready_sensor_) {
     this->ready_sensor_->publish_state(false);
   }
@@ -1031,9 +1047,10 @@ bool AlphaHwrComponent::submit_clock_sync_(const char *reason) {
       });
 
   if (!submitted) {
-    // Nothing was written and no BLE traffic was spent -- typically the link is
-    // not synchronized yet (the boot chain reaches here before it is) or SNTP
-    // has not answered. Leave the stamp alone so the next update() (10 s) tries
+    // Nothing was written and no BLE traffic was spent. Only one cause reaches
+    // here now: the pump's state cache is not synchronized yet. The other two
+    // this used to name -- no time_id, and a time source that never answered --
+    // are turned away by check_and_sync_time()'s gate before this runs. Leave the stamp alone so the next update() (10 s) tries
     // again, rather than backing off 15 minutes over a check that costs nothing
     // to repeat. DEBUG, not WARN: on the bench this fires twice at every boot
     // and is followed ten seconds later by a sync that works.
@@ -1049,7 +1066,47 @@ bool AlphaHwrComponent::submit_clock_sync_(const char *reason) {
   return true;
 }
 
+void AlphaHwrComponent::warn_clock_not_syncing_(const char *why) {
+  // Throttled, because the conditions that reach here persist for the life of
+  // the run -- an unthrottled warning on a 10 s poll would be the same spin it
+  // replaces, only louder. Hourly is often enough that a log reader attaching
+  // at any point sees it, and rare enough to be free.
+  const uint32_t now = millis();
+  if (this->clock_warn_last_ms_ != 0 &&
+      (now - this->clock_warn_last_ms_) < CLOCK_WARN_INTERVAL_MS) {
+    return;
+  }
+  this->clock_warn_last_ms_ = (now == 0) ? 1 : now;  // 0 is the "never warned" sentinel
+  ESP_LOGW(TAG, "Pump clock is not being synced: %s", why);
+  ESP_LOGW(TAG, "  Schedule windows run on the pump's own RTC, which drifts");
+}
+
 void AlphaHwrComponent::check_and_sync_time() {
+  // Decide whether a sync is even possible before running the retry machinery
+  // below, which is built for conditions that resolve on their own. See
+  // clock_sync_gate.h for why the three non-syncing states have to be told
+  // apart rather than collapsed into one early return.
+  const core::ClockSyncAction action = core::clock_sync_action(
+      this->has_wall_clock_(), this->time_service_.wall_clock_is_set(), millis(),
+      core::CLOCK_SOURCE_GRACE_MS);
+  // Switched rather than reduced to a ternary on purpose: the ternary that
+  // stood here mapped every warning state that was not WARN_NO_TIME_ID onto the
+  // "time source has not answered" message, so a state added later would have
+  // been reported to the user as the wrong cause, silently. A switch with no
+  // default makes that a compiler diagnostic instead.
+  switch (action) {
+    case core::ClockSyncAction::SYNC:
+      break;
+    case core::ClockSyncAction::WAIT:
+      return;
+    case core::ClockSyncAction::WARN_NO_TIME_ID:
+      this->warn_clock_not_syncing_("no time_id is configured");
+      return;
+    case core::ClockSyncAction::WARN_NO_SOURCE:
+      this->warn_clock_not_syncing_("its configured time source has not answered");
+      return;
+  }
+
   uint32_t now = millis();
 
   // Handle millis() rollover (every ~49 days)

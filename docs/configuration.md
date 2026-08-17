@@ -25,10 +25,91 @@ events fire.
 | Option | Type | Default | Description |
 | --- | --- | --- | --- |
 | `ble_client_id` | string | **required** | BLE client ID for pump connection |
+| `time_id` | ID | none | A `time:` component to sync the pump's clock from. Optional in the schema, but see below — without it the pump's clock is never set. |
 | `enable_pairing` | boolean | `false` | Enable BLE pairing for control and enhanced telemetry |
 | `reconnect_settle_time` | time | `2s` | Delay after disconnect before reconnecting |
 | `control_state_poll_interval` | time | `30s` | Interval for periodic control state polling. Set to `0s` to disable. |
 | `data_timeout` | time | `60s` | Tear the BLE link down after this long with no data from the pump, so the normal reconnect runs. Set to `0s` to disable. |
+
+### `time_id`
+
+Optional in the schema, and the thing most worth checking if pump schedules fire
+at the wrong time.
+
+The pump keeps its own real-time clock and runs schedule windows off it. Nothing
+else corrects that clock, so `time_id` is what keeps it honest: point it at a
+`time:` component and the component writes the pump's clock at boot and daily
+thereafter, retrying every 15 minutes until one confirms.
+
+Leave it out and no clock write ever happens. The pump keeps running schedules
+off an RTC that nobody is setting, and the drift is silent — telemetry, control
+and the schedule editor all keep working, so nothing looks wrong until a window
+opens at the wrong hour. A node in that state says so at startup on the serial
+console:
+
+```
+[W][alpha_hwr]: No time_id configured - the pump clock will never be synced
+[W][alpha_hwr]:   The pump runs schedule windows off its own RTC, which drifts
+[W][alpha_hwr]:   Add `time_id:` pointing at a time component to enable syncing
+```
+
+That line is serial-only: component setup runs long before the API server
+accepts a log client, and ESPHome keeps no backlog for late subscribers. What an
+`esphome logs` session sees is this instead, repeated at most hourly once the
+pump link is up:
+
+```
+[W][alpha_hwr]: Pump clock is not being synced: no time_id is configured
+[W][alpha_hwr]:   Schedule windows run on the pump's own RTC, which drifts
+```
+
+Both entry packages — `alpha_hwr_base.yaml` and `alpha_hwr_pairing.yaml` —
+already wire this up, so this applies to configs that declare `alpha_hwr:` by
+hand:
+
+```yaml
+time:
+  - platform: homeassistant
+    id: hwr_time
+
+alpha_hwr:
+  ble_client_id: hwr_pump_client
+  time_id: hwr_time
+```
+
+Any `time:` platform works — `homeassistant`, `sntp`, or an RTC. The component
+waits for the source to actually be set before writing (it requires a year of
+2021 or later), so a node that boots before its time source answers syncs on a
+later poll rather than writing a bogus clock. That wait is on the 10-second poll,
+not the 15-minute retry: the retry interval applies once a write has been
+attempted and did not confirm.
+
+A configured `time_id` whose source never answers fails the same way and is the
+likelier case, since both entry packages set the option: a `homeassistant` time
+platform on a node that cannot reach Home Assistant looks configured and never
+produces a clock. That is reported too, after a 15-minute grace window so a node
+that is merely still booting is not accused:
+
+```
+[W][alpha_hwr]: Pump clock is not being synced: its configured time source has not answered
+[W][alpha_hwr]:   Schedule windows run on the pump's own RTC, which drifts
+```
+
+Both repeat at most hourly, and both repeat from the 10-second poll, which runs
+only while the pump link is up — a node that has never connected reports on
+serial alone.
+
+What this does *not* catch: `settimeofday()` is one way, so a time source that
+answers once and then becomes unreachable leaves the system clock running and
+valid. The pump keeps being written, from an ESP RTC that nobody is correcting,
+and no warning fires. What is detected is a clock that was never set, not one
+that stopped being kept.
+
+If you use `alpha_hwr_pairing.yaml`, the **Last Clock Sync** text sensor reports
+when a write was last confirmed by the pump and **Clock Drift** reports how far
+off the pump was when it was found; the two together are the way to check this
+is working. `alpha_hwr_base.yaml` declares neither, so on that package and on
+hand-written blocks the log is the only signal.
 
 ### `data_timeout`
 

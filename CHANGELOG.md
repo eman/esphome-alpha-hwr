@@ -434,6 +434,61 @@
 
 ### Fixed
 
+- **A pump whose clock is never synced now says so, instead of silently letting
+  schedule windows drift.** The pump keeps its own RTC and runs schedule windows
+  off it; nothing else corrects that clock. When a sync cannot happen, the
+  symptom is a schedule firing at the wrong hour days later, with every sensor
+  still reporting healthily.
+
+  Three lookalike states were collapsed into one silent retry. `time_id` not
+  configured is permanent — the option is optional in the schema and was absent
+  from every document in the repo. A configured `time_id` whose source never
+  answers is the *likelier* failure, precisely because both entry packages set
+  the option: a `homeassistant` time platform on a node that cannot reach Home
+  Assistant looks configured and never produces a clock. And a source that
+  simply has not answered *yet* is normal at boot and must stay quiet. Only
+  elapsed time separates the last two, so a silent source is reported once it has
+  stayed silent for 15 minutes while the transient case says nothing. A missing
+  `time_id` needs no window — no amount of waiting can change that answer — and
+  is reported from the first check. Both repeat at most hourly.
+
+  Neither permanent state drives the retry loop any more. That loop deliberately
+  does not stamp an attempt when nothing was written, so a sync blocked by a pump
+  that is not yet synchronized is retried on the next poll rather than backed off
+  fifteen minutes — correct for a condition that resolves itself, a spin when
+  applied to one that cannot. Every 10-second poll walked the full path to fail
+  at the same place, forever.
+
+  On the cost of that spin: at the INFO level this component ships at, ESPHome
+  compiles `ESP_LOGD` out entirely, so it was a few compares per poll and no log
+  output at all — which is also why the old reports were invisible rather than
+  merely quiet. On a node built at `logger: level: DEBUG` it was four lines per
+  poll across 8,640 polls a day, each one an API frame fanned out to every
+  subscriber. An earlier draft of this entry claimed the API-frame cost applied
+  at INFO; it cannot, and the two halves of that argument were mutually
+  exclusive.
+
+  The startup warning reaches the serial console only — component setup runs at
+  `setup_priority::DATA`, long before the API server accepts a log client, and
+  ESPHome keeps no backlog for late subscribers — so the hourly repeat is what an
+  `esphome logs` session actually sees. An earlier draft warned only at startup
+  and would have been invisible to most users, which is the same defect it set
+  out to fix. The repeat runs from the poll, so it needs the pump link to be up;
+  a node that has never connected reports on serial alone.
+
+  Two limits worth stating rather than implying. `settimeofday()` is one way, so
+  a source that answers once and then dies leaves the system clock free-running
+  and valid — the pump keeps being written from a drifting ESP RTC and this
+  warning cannot see it; what is detected is a clock that was never set, not one
+  that stopped being corrected. And the grace window is measured from boot, so a
+  node whose BLE link takes longer than 15 minutes to come up has no window left
+  on its first check and may emit one pair of lines before settling.
+
+  `time_id` is also now in the `alpha_hwr` options table in
+  `docs/configuration.md`, with a section on what breaks without it. The packages
+  set it, so only configs writing an `alpha_hwr:` block by hand were exposed to
+  the missing-option case — the silent-source case reaches everyone.
+
 - **No example configuration carries a credential that would work if flashed.**
   `hwr-pump-example.yaml`, `hwr-pairing-example.yaml` and
   `hwr-pump-schedule-example.yaml` each inlined a real API encryption key and a

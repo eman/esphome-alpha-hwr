@@ -13,6 +13,20 @@ namespace esphome {
 namespace alpha_hwr {
 namespace services {
 
+/// Year below which a wall clock is treated as "not set yet".
+///
+/// ESPTime::is_valid() only bounds the fields and floors the year at 2019,
+/// which a freshly booted RTC can satisfy without any time source having
+/// answered. The pump deserves a clock somebody actually set, so this floor is
+/// the "synced" test. Named because two callers ask the same question and a
+/// second copy of the literal is how they would drift apart.
+constexpr uint16_t CLOCK_SYNCED_YEAR_FLOOR = 2021;
+
+/// True when @p t looks like a clock a time source has actually set.
+inline bool clock_is_synced(const ESPTime &t) {
+  return t.is_valid() && t.year >= CLOCK_SYNCED_YEAR_FLOOR;
+}
+
 /**
  * @brief Time management service for Grundfos ALPHA HWR pumps.
  *
@@ -103,6 +117,15 @@ class TimeService {
    *   writing to the pump.
    */
   bool current_time(ESPTime &out) const;
+
+  /// True when a configured time source has produced a plausible wall clock.
+  ///
+  /// The same test current_time() applies, without the logging or the out
+  /// parameter, so a caller can ask "is there a clock yet?" every poll without
+  /// emitting a line each time it asks. Splitting them is what lets
+  /// check_and_sync_time() decide whether to warn before it decides whether to
+  /// write.
+  bool wall_clock_is_set() const;
 
  private:
   core::Transport *transport_;
