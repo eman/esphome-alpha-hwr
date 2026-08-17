@@ -12,7 +12,6 @@
  * SUBSCRIBING      : Enabling notifications on GENI characteristic
  * AUTHENTICATING   : Authentication handshake in progress
  * READY            : Fully operational (authenticated + subscribed)
- * ERROR            : Error state requiring reconnection
  * 
  * State Transitions:
  * ------------------
@@ -20,8 +19,21 @@
  * SERVICE_DISCOVERY -> SUBSCRIBING : GENI service found
  * SUBSCRIBING -> AUTHENTICATING : Notifications enabled
  * AUTHENTICATING -> READY       : Authentication complete
- * * -> ERROR                    : Any operation fails critically
  * * -> IDLE                     : Disconnect
+ *
+ * There is no ERROR state, and this is deliberate rather than an omission.
+ * One was declared here for a long time, documented as "any operation fails
+ * critically" -- but nothing ever entered it: `on_error()` and `reset()` had no
+ * caller anywhere in the component, so the transition the diagram promised
+ * could not occur (issue #174 audit).
+ *
+ * It is redundant with what the component actually does. A failure that matters
+ * ends the BLE link, which lands here as `on_disconnected()` -> IDLE, and the
+ * inbound-data watchdog recycles from there; the user-facing cause is reported
+ * by the fault-string hold (`failure_hold.h`), which carries more than a state
+ * could. The one predicate that ever inspected ERROR, `is_connected()`, treated
+ * it exactly as IDLE -- which is the clearest statement that it was not a
+ * distinct state. Re-add it if a caller ever genuinely needs one.
  * 
  * Architecture Note:
  * ------------------
@@ -30,14 +42,13 @@
  * tracks the HIGHER-LEVEL application state specific to the GENI
  * protocol handshake sequence.
  * 
- * Reference: reference/alpha-hwr/src/alpha_hwr/core/session.py
+ * Reference: https://github.com/eman/alpha-hwr (src/alpha_hwr/core/session.py)
  */
 
 #pragma once
 
 #include "esphome/core/component.h"
 #include <cstdint>
-#include <string>
 
 namespace esphome {
 namespace alpha_hwr {
@@ -79,12 +90,7 @@ enum class SessionState : uint8_t {
    * Fully operational. Auth complete, notifications enabled.
    * All operations (read, write, control) are permitted.
    */
-  READY = 4,
-  
-  /**
-   * Error state. Something failed and requires reconnection.
-   */
-  ERROR = 5
+  READY = 4
 };
 
 /**
@@ -121,7 +127,7 @@ enum class SessionState : uint8_t {
  *    │  READY   │─────────────────────┘
  *    └──────────┘  on_disconnected()
  *           
- *    Any state can transition to ERROR on failure
+ *    Any state returns to IDLE on disconnect
  * ```
  * 
  * Usage Example:
@@ -150,7 +156,7 @@ enum class SessionState : uint8_t {
  * }
  * ```
  * 
- * Reference: reference/alpha-hwr/src/alpha_hwr/core/session.py
+ * Reference: https://github.com/eman/alpha-hwr (src/alpha_hwr/core/session.py)
  */
 class Session {
  public:
@@ -202,15 +208,6 @@ class Session {
   void on_disconnected();
   
   /**
-   * Transition to ERROR state.
-   * 
-   * Called when a critical error occurs that requires reconnection.
-   * 
-   * @param error_message Description of the error
-   */
-  void on_error(const char* error_message);
-  
-  /**
    * Get current state.
    * 
    * @return Current SessionState
@@ -253,38 +250,16 @@ class Session {
   bool is_ready() const { return state_ == SessionState::READY; }
   
   /**
-   * Check if session is in error state.
-   * 
-   * @return true if in ERROR state
-   */
-  bool is_error() const { return state_ == SessionState::ERROR; }
-  
-  /**
    * Check if connected (any operational state).
    * 
-   * Connected means: not IDLE and not ERROR.
+   * Connected means: anything but IDLE.
    * 
    * @return true if state is SERVICE_DISCOVERY, SUBSCRIBING, AUTHENTICATING, or READY
    */
   bool is_connected() const;
   
-  /**
-   * Get last error message (if in ERROR state).
-   * 
-   * @return Error message or nullptr if no error
-   */
-  const char* get_last_error() const { return last_error_.empty() ? nullptr : last_error_.c_str(); }
-  
-  /**
-   * Reset to IDLE state.
-   * 
-   * Clears error state and prepares for reconnection.
-   */
-  void reset();
-  
  private:
   SessionState state_;
-  std::string last_error_;
   
   /**
    * Internal helper to transition state with logging.

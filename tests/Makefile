@@ -15,7 +15,7 @@ MOCK_HDRS = $(shell find mocks -name '*.h' 2>/dev/null)
 DEPS = $(COMPONENT_HDRS) $(MOCK_HDRS)
 
 # Test executables
-TESTS = test_protocol test_frame_parser test_read_chain_lifetime test_control_service test_control_state test_dhw_demand_logic test_dhw_demand_component test_transport_matching test_transport_fsm test_schedule_service test_write_operations test_schedule_codec test_telemetry_units test_pump_schedule_ux test_publish_gate test_dhw_publish_gate test_link_watchdog test_auth test_sensor_publisher test_telemetry_service test_device_info_service test_initial_read_retry test_subscribe_outcome test_failure_hold test_gap_security_policy test_clock_sync_gate
+TESTS = test_protocol test_frame_parser test_read_chain_lifetime test_control_service test_control_state test_dhw_demand_logic test_dhw_demand_component test_transport_matching test_transport_fsm test_schedule_service test_write_operations test_schedule_codec test_telemetry_units test_pump_schedule_ux test_publish_gate test_dhw_publish_gate test_link_watchdog test_auth test_sensor_publisher test_telemetry_service test_device_info_service test_initial_read_retry test_subscribe_outcome test_failure_hold test_gap_security_policy test_clock_sync_gate test_session
 
 # Default target
 all: $(TESTS)
@@ -92,6 +92,9 @@ test_dhw_demand_logic: test_dhw_demand_logic.cpp ../components/dhw_demand/dhw_de
 # block referencing an out-of-scope variable once got through 905 green tests.
 test_dhw_demand_component: test_dhw_demand_component.cpp ../components/dhw_demand/dhw_demand.cpp $(DEPS)
 	$(CXX) $(CXXFLAGS) test_dhw_demand_component.cpp ../components/dhw_demand/dhw_demand.cpp -o test_dhw_demand_component $(LDFLAGS)
+
+test_session: test_session.cpp ../components/alpha_hwr/session.cpp $(DEPS)
+	$(CXX) $(CXXFLAGS) test_session.cpp ../components/alpha_hwr/session.cpp -o test_session $(LDFLAGS)
 
 test_transport_matching: test_transport_matching.cpp ../components/alpha_hwr/response_match.h $(DEPS)
 	$(CXX) $(CXXFLAGS) test_transport_matching.cpp -o test_transport_matching $(LDFLAGS)
@@ -201,6 +204,7 @@ test: $(TESTS)
 	@./test_failure_hold
 	@./test_gap_security_policy
 	@./test_clock_sync_gate
+	@./test_session
 	@echo ""
 	@echo "=========================================="
 	@echo "Running Transport Matching Tests..."
