@@ -610,7 +610,12 @@ struct Harness {
     }
   }
 
-  // Prime the control cache from the sim (a mode read + obj91 read round trip).
+  // Prime the control cache from the sim with a MODE read only.
+  //
+  // The parenthetical here used to claim "a mode read + obj91 read round trip".
+  // It does not reach the Obj 91 read: get_mode_async() does not chain into it,
+  // and temp_limits_known() is false after this returns. Use prime_temp_limits()
+  // when a test needs the pump's on/off-time limits.
   void prime_cache() {
     control.get_mode_async(nullptr);
     advance(100);
@@ -624,12 +629,16 @@ struct Harness {
   /// simulated time it needs perturbs the clock-drift assertions elsewhere in
   /// this file -- so only the tests that write a temperature range pay for it.
   ///
-  /// test_temp_range_preserves_limits() already did this inline, and asserts
-  /// the pump's real tail is echoed back -- so it is not true that every
-  /// temperature-range write in this file was sending fabricated limits. What
-  /// was true is that the tests which did not prime it were writing the
-  /// historical constants without noticing, because nothing checked. Those
-  /// now either prime it or assert the refusal.
+  /// Be precise about what this buys. test_temp_range_preserves_limits()
+  /// already primed inline and already asserted the pump's real tail is echoed
+  /// back -- it is the only test that kills a mutation of the echo itself, on
+  /// this branch and before it. So calling this from the other two tests adds
+  /// no coverage of the echo; it exists to stop the new limits guard rejecting
+  /// writes those tests are about. It is a fixture repair the guard forced,
+  /// not a coverage win.
+  ///
+  /// What was true before: those two tests were writing the historical
+  /// constants (00 00 00 16 00) and nothing looked.
   void prime_temp_limits() {
     control.sync_cache_async(nullptr);
     advance(500);
