@@ -86,8 +86,8 @@ struct AuthRig {
   /// the backstop is armed first and due last, so a rig that fired in
   /// registration order would run it before the sequence it exists to rescue.
   struct Timer {
-    uint32_t due_at;
-    uint32_t requested_delay;
+    uint32_t due_at{0};
+    uint32_t requested_delay{0};
     std::function<void()> fn;
     bool ran{false};
   };
