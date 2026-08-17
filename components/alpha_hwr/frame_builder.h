@@ -19,12 +19,17 @@ namespace protocol {
  * [Start] [Length] [ServiceID-H] [ServiceID-L/Source] [APDU...] [CRC-H] [CRC-L]
  * 
  * Where:
- * - Start: 0x27 (FRAME_START for requests)
- * - Length: Number of bytes from ServiceID to end of APDU (not including CRC)
- * - ServiceID-H: 0xE7 (GENI service)
- * - ServiceID-L/Source: 0xF8 (standard) or 0x0A (alternative)
+ * - Start: 0x27 (FRAME_START for requests; replies start 0x24)
+ * - Length: Number of bytes from the destination address to the end of the
+ *   APDU (not including CRC). Frame total is Length + 4.
+ * - Destination: 0xE7, the pump
+ * - Source: 0xF8 (standard) or 0x0A (alternative), us
  * - APDU: Application Protocol Data Unit (class, opspec, data)
  * - CRC: CRC-16-CCITT checksum
+ *
+ * The two address bytes were described here as one 16-bit "Service ID (GENI)".
+ * They are a destination and a source, and the pump's replies show it: they
+ * come back with the pair reversed, `24 .. F8 E7 ..` (issue #174).
  * 
  * Reference: alpha_hwr/protocol/frame_builder.py
  */
