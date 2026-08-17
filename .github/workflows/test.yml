@@ -1,13 +1,30 @@
 name: CI
 
 on:
+  # `push` is restricted to main deliberately. It used to be unrestricted,
+  # which meant every push to a branch with an open PR fired *both* events and
+  # ran the entire suite twice -- two mutation checks at ~10 minutes each, two
+  # sanitizer runs, two of everything. The concurrency group below could not
+  # collapse them because it keys on `event_name`, which puts the push run and
+  # the pull_request run in separate groups by construction.
+  #
+  # With this restriction the two events can no longer collide on one ref: a
+  # PR branch gets refs/pull/N/merge from `pull_request`, main gets
+  # refs/heads/main from `push`.
+  #
+  # The trade is that a branch with no PR open gets no CI. `workflow_dispatch`
+  # covers that case on demand, and the change-detection job below actually
+  # gets *more* accurate for PRs, because the pull_request base is the merge
+  # base rather than the previous push -- so a PR whose latest push is docs-only
+  # still sees the code changes made earlier in the same PR.
   push:
+    branches: [ "main" ]
   pull_request:
     branches: [ "main" ]
   workflow_dispatch:
 
-# A push to a branch with an open PR fires both events; cancel superseded
-# runs per ref so the queue stays short.
+# Cancel superseded runs per ref so the queue stays short. `event_name` stays
+# in the key so a manual re-run does not cancel an in-flight push on main.
 concurrency:
   group: ${{ github.workflow }}-${{ github.event_name }}-${{ github.ref }}
   cancel-in-progress: true
