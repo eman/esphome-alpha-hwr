@@ -497,6 +497,33 @@ MUTATIONS=(
 "dhw-release-hold-not-reported|components/dhw_demand/dhw_demand.cpp|    method = \"demand_release_hold\";\n    confidence = 0.5f;|    confidence = 0.5f;"
 "dhw-flow-onset-unqualified|components/dhw_demand/dhw_demand.cpp|  bool prev_flow_present_pump_off = prev_tick_confirms_flow_onset(\n      prev_flow_, flow_threshold_, prev_pump_confirmed_off_);|  bool prev_flow_present_pump_off = prev_tick_confirms_flow_onset(\n      prev_flow_, flow_threshold_, true);"
 "control-enabled-from-opmode|components/alpha_hwr/control_service.cpp|  // AUTO (0) or USER_DEFINED (4) = enabled, STOP (1) = disabled\n  pump_enabled_ = (operation_mode != static_cast<uint8_t>(OperationMode::STOP));|  // AUTO (0) or USER_DEFINED (4) = enabled, STOP (1) = disabled\n  pump_enabled_ = true;"
+# The Home Assistant surface. api_bridge.cpp had NO mutation target before
+# tests/test_api_bridge.cpp, and could not have had one: the mock defines.h
+# omitted the USE_API family, so the file compiled out to an object with zero
+# symbols even though it sat in test_component_wiring's link line. Its own
+# setup() comment named the hazard -- "pairing a handler with the wrong
+# enumerator below compiles, passes the whole suite and passes the firmware
+# build" -- and the first entry here is that hazard, in its invisible form:
+# same signature, same argument list, plausible name. Only calling the service
+# and reading the command back off the settle event catches it.
+"bridge-handler-paired-with-wrong-command|components/alpha_hwr/api_bridge.cpp|  register_service(&AlphaHwrApiBridge::on_set_schedule_entry,\n                   name(WriteCommand::SET_SCHEDULE_ENTRY), {\"data\", \"op_id\"});|  register_service(&AlphaHwrApiBridge::on_clear_schedule_entry,\n                   name(WriteCommand::SET_SCHEDULE_ENTRY), {\"data\", \"op_id\"});"
+# `enabled` on a schedule command is the SCHEDULE flag, not the run state. The
+# docs claimed the opposite for a long time and so did the comment beside the
+# remote-mode key; sourcing it from result.enabled would make the claim true
+# and every schedule event wrong.
+"bridge-schedule-enabled-from-run-state|components/alpha_hwr/api_bridge.cpp|      put_bool(\"enabled\", result.sched_enabled);|      put_bool(\"enabled\", result.enabled);"
+# Remote mode must not overload `enabled`, which already means two things.
+"bridge-remote-mode-overloads-enabled|components/alpha_hwr/api_bridge.cpp|      put_bool(\"remote_enabled\", result.enabled);|      put_bool(\"enabled\", result.enabled);"
+# schedule_hash on the event, not only on the sensor: it exists so a client can
+# learn what the pump holds without polling the sensor and racing the
+# republish. It was emitted and documented nowhere until the step-7 pass.
+"bridge-upload-omits-schedule-hash|components/alpha_hwr/api_bridge.cpp|        data[\"schedule_hash\"] = result.schedule_hash;|        // mutated: no schedule_hash on the event"
+# node makes an event self-identifying across a multi-controller install
+# (issue #113), where HA's device_id is opaque and re-add-unstable.
+"bridge-event-drops-the-node-name|components/alpha_hwr/api_bridge.cpp|  data[\"node\"] = App.get_name();|  // mutated: no node on the event"
+# A malformed request settles INVALID at the bridge -- deterministic, never
+# worth a retry -- rather than REJECTED, which invites one.
+"bridge-parse-failure-settles-rejected|components/alpha_hwr/api_bridge.cpp|  result.status = WriteStatus::INVALID;|  result.status = WriteStatus::REJECTED;"
 )
 
 if [[ "${1:-}" == "--list" ]]; then

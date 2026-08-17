@@ -12,3 +12,12 @@
 #define USE_SENSOR
 #define USE_BINARY_SENSOR
 #define USE_TEXT_SENSOR
+
+// The API bridge's three gates. Without these, api_bridge.h compiles the whole
+// file out: it sat in test_component_wiring's link line producing an empty
+// object with zero symbols, so "api_bridge.cpp is in a test target" was true
+// and meaningless. The shipped packages enable all three, so this is what a
+// real build compiles.
+#define USE_API
+#define USE_API_CUSTOM_SERVICES
+#define USE_API_HOMEASSISTANT_SERVICES

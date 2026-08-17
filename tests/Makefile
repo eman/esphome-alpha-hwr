@@ -15,7 +15,7 @@ MOCK_HDRS = $(shell find mocks -name '*.h' 2>/dev/null)
 DEPS = $(COMPONENT_HDRS) $(MOCK_HDRS)
 
 # Test executables
-TESTS = test_protocol test_frame_parser test_read_chain_lifetime test_control_service test_control_state test_dhw_demand_logic test_dhw_demand_component test_transport_matching test_transport_fsm test_schedule_service test_write_operations test_schedule_codec test_telemetry_units test_pump_schedule_ux test_publish_gate test_dhw_publish_gate test_link_watchdog test_auth test_sensor_publisher test_telemetry_service test_device_info_service test_initial_read_retry test_subscribe_outcome test_failure_hold test_gap_security_policy test_clock_sync_gate test_session test_component_wiring
+TESTS = test_protocol test_frame_parser test_read_chain_lifetime test_control_service test_control_state test_dhw_demand_logic test_dhw_demand_component test_transport_matching test_transport_fsm test_schedule_service test_write_operations test_schedule_codec test_telemetry_units test_pump_schedule_ux test_publish_gate test_dhw_publish_gate test_link_watchdog test_auth test_sensor_publisher test_telemetry_service test_device_info_service test_initial_read_retry test_subscribe_outcome test_failure_hold test_gap_security_policy test_clock_sync_gate test_session test_component_wiring test_api_bridge
 
 # Default target
 all: $(TESTS)
@@ -122,6 +122,13 @@ WRITE_OP_SRCS = ../components/alpha_hwr/write_operation_service.cpp ../component
 test_component_wiring: test_component_wiring.cpp $(WRITE_OP_SRCS) ../components/alpha_hwr/auth.cpp ../components/alpha_hwr/telemetry_service.cpp ../components/alpha_hwr/sensor_publisher.cpp ../components/alpha_hwr/device_info_service.cpp ../components/alpha_hwr/event_log_service.cpp ../components/alpha_hwr/history_service.cpp ../components/alpha_hwr/api_bridge.cpp ../components/alpha_hwr/telemetry_decoder.cpp ../components/alpha_hwr/ble_connection_manager.cpp ../components/alpha_hwr/alpha_hwr.cpp $(DEPS)
 	$(CXX) $(CXXFLAGS) -DUSE_TIME test_component_wiring.cpp $(WRITE_OP_SRCS) ../components/alpha_hwr/auth.cpp ../components/alpha_hwr/telemetry_service.cpp ../components/alpha_hwr/sensor_publisher.cpp ../components/alpha_hwr/device_info_service.cpp ../components/alpha_hwr/event_log_service.cpp ../components/alpha_hwr/history_service.cpp ../components/alpha_hwr/api_bridge.cpp ../components/alpha_hwr/telemetry_decoder.cpp ../components/alpha_hwr/ble_connection_manager.cpp ../components/alpha_hwr/alpha_hwr.cpp -o test_component_wiring $(LDFLAGS)
 
+# The Home Assistant surface. Same source set as test_component_wiring because
+# the bridge is reached through the component, and api_bridge.cpp needs the
+# whole write-operation layer behind it to settle anything.
+test_api_bridge: test_api_bridge.cpp $(WRITE_OP_SRCS) ../components/alpha_hwr/auth.cpp ../components/alpha_hwr/telemetry_service.cpp ../components/alpha_hwr/sensor_publisher.cpp ../components/alpha_hwr/device_info_service.cpp ../components/alpha_hwr/event_log_service.cpp ../components/alpha_hwr/history_service.cpp ../components/alpha_hwr/api_bridge.cpp ../components/alpha_hwr/telemetry_decoder.cpp ../components/alpha_hwr/ble_connection_manager.cpp ../components/alpha_hwr/alpha_hwr.cpp $(DEPS)
+	$(CXX) $(CXXFLAGS) -DUSE_TIME test_api_bridge.cpp $(WRITE_OP_SRCS) ../components/alpha_hwr/auth.cpp ../components/alpha_hwr/telemetry_service.cpp ../components/alpha_hwr/sensor_publisher.cpp ../components/alpha_hwr/device_info_service.cpp ../components/alpha_hwr/event_log_service.cpp ../components/alpha_hwr/history_service.cpp ../components/alpha_hwr/api_bridge.cpp ../components/alpha_hwr/telemetry_decoder.cpp ../components/alpha_hwr/ble_connection_manager.cpp ../components/alpha_hwr/alpha_hwr.cpp -o test_api_bridge $(LDFLAGS)
+
+
 
 test_schedule_codec: test_schedule_codec.cpp ../components/alpha_hwr/schedule_codec.cpp $(DEPS)
 	$(CXX) $(CXXFLAGS) test_schedule_codec.cpp ../components/alpha_hwr/schedule_codec.cpp -o test_schedule_codec $(LDFLAGS)
@@ -217,6 +224,7 @@ test: $(TESTS)
 	@./test_clock_sync_gate
 	@./test_session
 	@./test_component_wiring
+	@./test_api_bridge
 	@echo ""
 	@echo "=========================================="
 	@echo "Running Transport Matching Tests..."
