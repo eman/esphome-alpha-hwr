@@ -34,7 +34,28 @@ class ESPBTUUID {
     return u;
   }
 
-  static ESPBTUUID from_raw(const std::string &) { return ESPBTUUID(); }
+  /// Parses the canonical hyphenated 128-bit form. Not a formality: the GENI
+  /// characteristic UUID is built this way, and a from_raw() that returned a
+  /// default-constructed UUID (as this mock first did) would compare equal to
+  /// every other default, so any characteristic would satisfy a lookup for it.
+  static ESPBTUUID from_raw(const std::string &text) {
+    ESPBTUUID u;
+    u.uuid_.len = ESP_UUID_LEN_128;
+    int nibble = 0;
+    for (char c : text) {
+      int v;
+      if (c >= '0' && c <= '9') v = c - '0';
+      else if (c >= 'a' && c <= 'f') v = c - 'a' + 10;
+      else if (c >= 'A' && c <= 'F') v = c - 'A' + 10;
+      else continue;  // hyphens
+      if (nibble >= 32) break;
+      uint8_t &b = u.uuid_.uuid.uuid128[nibble / 2];
+      if (nibble % 2 == 0) b = static_cast<uint8_t>(v << 4);
+      else b = static_cast<uint8_t>(b | v);
+      nibble++;
+    }
+    return u;
+  }
 
   esp_bt_uuid_t get_uuid() const { return uuid_; }
 
@@ -46,6 +67,11 @@ class ESPBTUUID {
 
   bool operator==(const ESPBTUUID &o) const {
     if (uuid_.len != o.uuid_.len) return false;
+    if (uuid_.len == ESP_UUID_LEN_128) {
+      for (int i = 0; i < 16; i++)
+        if (uuid_.uuid.uuid128[i] != o.uuid_.uuid.uuid128[i]) return false;
+      return true;
+    }
     return uuid_.uuid.uuid16 == o.uuid_.uuid.uuid16;
   }
 

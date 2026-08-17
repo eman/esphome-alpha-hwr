@@ -25,6 +25,7 @@
 #include <vector>
 
 #include "../components/alpha_hwr/alpha_hwr.h"
+#include "fixture_crc.h"
 #include "esphome/core/application.h"
 
 uint32_t mock_millis = 0;
@@ -78,13 +79,71 @@ struct Rig {
 
   void setup() { component.setup(); }
 
-  /// Advance time and let the component's loop run, the way ESPHome would.
-  void advance(uint32_t ms, int steps = 10) {
+  /// Advance time and let the component run, the way ESPHome would: loop(),
+  /// then any timer that has come due, then deliver whatever the pump owes.
+  uint32_t last_update_ms{0};
+
+  void advance(uint32_t ms, int steps = 20) {
     for (int i = 0; i < steps; i++) {
       mock_millis += ms / steps;
       component.loop();
+      component.mock_run_due_timeouts();
+      // PollingComponent's interval is not driven by the mock -- ESPHome calls
+      // update() itself on a schedule, and Pump Ready is published from there,
+      // so the rig has to supply the same cadence or the chain completes and
+      // nothing ever reports it.
+      if (mock_millis - last_update_ms >= component.get_update_interval()) {
+        last_update_ms = mock_millis;
+        component.update();
+      }
+      answer_outstanding_writes();
     }
   }
+
+  /// Bring the GATT link up as far as the pump being subscribed: open, service
+  /// discovered, notifications registered. Each step is a real event through
+  /// the real handler.
+  void connect_and_subscribe() {
+    service.uuid = esphome::alpha_hwr::GRUNDFOS_SERVICE_UUID;
+    characteristic.uuid = esphome::alpha_hwr::GENI_CHAR_UUID;
+    characteristic.handle = 42;
+    service.characteristics.push_back(&characteristic);
+    client.mock_set_service(&service);
+    client.mock_set_characteristic(&characteristic);
+
+    open(ESP_GATT_OK);
+
+    esp_ble_gattc_cb_param_t cmpl{};
+    cmpl.search_cmpl.status = ESP_GATT_OK;
+    cmpl.search_cmpl.conn_id = 1;
+    component.gattc_event_handler(ESP_GATTC_SEARCH_CMPL_EVT, 1, &cmpl);
+
+    esp_ble_gattc_cb_param_t reg{};
+    reg.reg_for_notify.status = ESP_GATT_OK;
+    reg.reg_for_notify.handle = 42;
+    component.gattc_event_handler(ESP_GATTC_REG_FOR_NOTIFY_EVT, 1, &reg);
+  }
+
+  /// Feed a frame back as a GATT notification, the way the pump's replies
+  /// arrive. Goes in through the real handler, so reassembly and CRC checking
+  /// are production code.
+  void notify(std::vector<uint8_t> frame) {
+    esp_ble_gattc_cb_param_t p{};
+    p.notify.conn_id = 1;
+    p.notify.handle = 42;
+    p.notify.is_notify = true;
+    p.notify.value = frame.data();
+    p.notify.value_len = static_cast<uint16_t>(frame.size());
+    component.gattc_event_handler(ESP_GATTC_NOTIFY_EVT, 1, &p);
+  }
+
+  size_t answered_writes{0};
+
+  /// Answer anything the component has written that we know a reply for.
+  /// Deliberately answers only the frames a test has taught it about: an
+  /// unrecognised request goes unanswered, which is what a real pump that does
+  /// not implement something would do.
+  void answer_outstanding_writes();
 
   void open(esp_gatt_status_t status) {
     esp_ble_gattc_cb_param_t p{};
@@ -102,6 +161,73 @@ struct Rig {
 
   bool ready_is_on() const { return ready.state; }
 };
+
+/// The pump's answer to each request the opening sequence and the initial read
+/// chain send. Frames carry real CRCs, stamped with the production routine via
+/// with_crc(), so the transport's own checking is exercised rather than
+/// bypassed.
+///
+/// Shapes are the ones captured from hardware and recorded in auth.h and
+/// transport.cpp; only the CRC is recomputed here.
+/// Wrap a DataObject body in the response envelope the transport expects:
+/// type identifiers at bytes 8-9, a 3-byte size header, then the body.
+static std::vector<uint8_t> data_object_frame(uint8_t type_hi, uint8_t type_lo,
+                                              const uint8_t *body, size_t body_len) {
+  std::vector<uint8_t> f = {0x24, 0x00, 0xF8, 0xE7, 0x0A, 0x13, 0x00, 0x00,
+                            type_hi, type_lo, 0x00, 0x00,
+                            static_cast<uint8_t>(body_len)};
+  f.insert(f.end(), body, body + body_len);
+  f.push_back(0x00);
+  f.push_back(0x00);
+  f[1] = static_cast<uint8_t>(f.size() - 4);
+  return with_crc(std::move(f));
+}
+
+void Rig::answer_outstanding_writes() {
+  auto &writes = esp_gattc_mock().writes;
+  while (answered_writes < writes.size()) {
+    const std::vector<uint8_t> &req = writes[answered_writes++];
+    if (req.size() < 6) continue;
+    const uint8_t cls = req[4];
+    const uint8_t opspec = req[5];
+
+    if (cls == 0x02) {  // identity read
+      notify(with_crc({0x24, 0x07, 0xF8, 0xE7, 0x02, 0x03, 0x34, 0x07, 0x02, 0x00, 0x00}));
+    } else if (cls == 0x05) {  // Class 5 INFO
+      notify(with_crc({0x24, 0x05, 0xF8, 0xE7, 0x05, 0x01, 0xA1, 0x00, 0x00}));
+    } else if (cls == 0x0B) {  // Class 11 INFO
+      notify(with_crc({0x24, 0x05, 0xF8, 0xE7, 0x0B, 0x01, 0x80, 0x00, 0x00}));
+    } else if (cls == 0x0A && opspec == 0x03 && req.size() >= 9) {
+      const uint8_t obj = req[6];
+      const uint16_t sub = static_cast<uint16_t>((req[7] << 8) | req[8]);
+      if (obj == 0x56) {
+        // Operation status (Obj 86) -- the frame captured on hardware, and what
+        // populates the control-mode cache.
+        notify(with_crc({0x24, 0x12, 0xF8, 0xE7, 0x0A, 0x0E, 0x00, 0x01, 0x2F, 0x01,
+                         0x00, 0x00, 0x07, 0x00, 0x01, 0x02, 0x44, 0xCE, 0x40, 0x00,
+                         0x00, 0x00}));
+      } else if (obj == 91 && sub == 430) {
+        // Temperature-range config. Answered with OpSpec 0x15, which is the
+        // size-specific reply this read is matched on (issue #106). Supplies
+        // autoadapt and the two setpoints, the last three fields
+        // ControlService::is_cache_valid() waits for.
+        notify(with_crc({0x24, 0x16, 0xF8, 0xE7, 0x0A, 0x15, 0x00, 0x03, 0xF4, 0x02,
+                         0x00, 0x00, 0x0E, 0x01,
+                         0x42, 0x0C, 0x00, 0x00,   // 35.0
+                         0x42, 0x1B, 0x99, 0x9A,   // 38.9
+                         0x00, 0x00, 0x00, 0x00}));
+      } else if (obj == 84 && sub == 1) {
+        // ClockProgramOverview (Obj 84 Sub 1) -- the other cache Pump Ready
+        // waits on. Built with the same envelope as the write-operation
+        // suite's fixture rather than hand-rolled: my first attempt was a byte
+        // short, which fails the payload_len >= 13 guard silently.
+        const uint8_t overview[10] = {0x8C, 5, 0x05, 0x05, 0x01,
+                                      0x01, 0x00, 0x00, 0x00, 0x00};
+        notify(data_object_frame(0xDA, 0x01, overview, sizeof(overview)));
+      }
+    }
+  }
+}
 
 /// An advertisement shaped like a real ALPHA HWR.
 ///
@@ -304,6 +430,45 @@ void test_the_component_registers_with_the_ble_client() {
               "Construction registers the component as a BLE node exactly once");
 }
 
+// ── The whole chain, end to end ─────────────────────────────────────────────
+// This is what the previous round could not reach: a GATT link brought up
+// event by event, the opening read sequence answered frame by frame, and the
+// initial read chain driven to the point where `Pump Ready` turns on. Nothing
+// is called on the component's behalf -- every step goes in through a real
+// handler, and every reply is a CRC-valid frame through the real transport.
+void test_the_full_connection_reaches_pump_ready() {
+  std::cout << "\n=== The full chain reaches Pump Ready ===" << std::endl;
+
+  Rig r;
+  r.setup();
+  r.connect_and_subscribe();
+  TEST_ASSERT(!r.ready_is_on(), "Subscribed, but not ready -- nothing has been read yet");
+
+  // The opening sequence waits 2 s after subscribe, then runs; the initial read
+  // chain follows it on its own timers. Drive well past both.
+  r.advance(60000, 600);
+
+  TEST_ASSERT(esp_gattc_mock().writes.size() >= 10,
+              "The opening sequence's ten packets were written to the characteristic");
+  TEST_ASSERT(r.ready_is_on(),
+              "Pump Ready turns on once the session is authenticated and both "
+              "caches are populated");
+}
+
+// ── ...and goes off again when the link drops ───────────────────────────────
+void test_ready_clears_on_disconnect() {
+  std::cout << "\n=== Pump Ready clears when the link drops ===" << std::endl;
+
+  Rig r;
+  r.setup();
+  r.connect_and_subscribe();
+  r.advance(60000, 600);
+  TEST_ASSERT(r.ready_is_on(), "Ready first");
+
+  r.disconnect(ESP_GATT_CONN_TIMEOUT);
+  TEST_ASSERT(!r.ready_is_on(), "...and not ready after the link drops");
+}
+
 int main() {
   std::cout << "===========================================================" << std::endl;
   std::cout << "  Component BLE Wiring Test Suite" << std::endl;
@@ -317,6 +482,8 @@ int main() {
   test_pairing_disabled_declines_even_the_pump();
   test_a_strangers_auth_failure_does_not_disconnect_the_pump();
   test_the_component_registers_with_the_ble_client();
+  test_the_full_connection_reaches_pump_ready();
+  test_ready_clears_on_disconnect();
 
   std::cout << "\n==========================================" << std::endl;
   std::cout << "Results: " << tests_passed << " passed, " << tests_failed
