@@ -434,6 +434,36 @@
 
 ### Fixed
 
+- **Two Class 10 writes declared a payload length they did not carry**
+  (issue #174). APDU byte 1 is `0booLLLLLL` — operation in the top two bits,
+  payload byte count in the low six — and two frames got the count wrong. The
+  single-event schedule write sent `0xB3`, which declares 51 payload bytes,
+  in a 21-byte APDU carrying 19; it had borrowed the value from the layer
+  write, whose 53-byte APDU really does carry 51. The Class 10 setpoint write
+  sent `0x84`, declaring 4, counting only its float value and not the four
+  object/sub ID bytes in front of it.
+
+  Neither was a visible failure, and both are now bench-verified as such: the
+  pump accepts the wrong length and the right one alike, so single-event
+  writes and setpoint writes have been working throughout. What was wrong was
+  the frames, not the behaviour — and a firmware or pump generation that did
+  check the field would have broken with no diagnostic.
+
+  Corrected to `0x93` (SET + 19) and `0x88` (SET + 8), both bench-verified
+  against a real pump: the single event lands and reads back, and the setpoint
+  write switches mode and reads back the commanded value.
+
+  The regression test is a general invariant rather than two constants: the
+  write-operation suite now checks *every* APDU any test sends against its own
+  declared length, so a future frame with the same defect fails without anyone
+  having to think of it. It found the setpoint write immediately, which was not
+  the frame it was written for. The documentation that made this easy to get
+  wrong is corrected too — `schedule_service.h` described these as "OpSpec 4"
+  and "OpSpec 5" with "Length varies", which is a three-bit reading of a
+  two-bit field, and reading `0xB3` as an opcode rather than as SET-plus-51 is
+  exactly how the length came to be copied.
+
+
 - **The four packets a connection opens with were sent blind, and three of them
   could not have been matched even if they had asked to be** (issue #174). The
   transport's Class 10 path requires `data[4] == 0x0A` and a frame of at least

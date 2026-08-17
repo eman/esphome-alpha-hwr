@@ -398,6 +398,15 @@ MUTATIONS=(
 # matched nothing. mutation_check.sh reports that loudly as "could not apply"
 # and exits 1 rather than scoring it Survived -- so a stale entry is a red
 # build, not a silent hole. Retargeted at the same property: EXT_1 first.
+# Both halves of the APDU length invariant (issue #174). Byte 1 declares the
+# payload byte count in bits 5-0, and two frames shipped declaring a count they
+# did not carry: the single-event write borrowed the layer write's 0xB3 (51)
+# for a 19-byte payload, and the Class 10 setpoint write counted only its float
+# and not the four ID bytes before it. This pump accepts either, so neither was
+# a visible failure -- tests/test_write_operations.cpp now checks every frame
+# any test sends against its own declared length.
+"single-event-opspec-length|components/alpha_hwr/schedule_service.cpp|  // never a visible failure; see the header note.\n  apdu[1] = 0x93;|  // never a visible failure; see the header note.\n  apdu[1] = 0xB3;"
+"class10-setpoint-opspec-length|components/alpha_hwr/control_service.cpp|  apdu[1] = 0x88;  // OpSpec: SET + 8 payload bytes (2 sub + 2 obj + 4 float)|  apdu[1] = 0x84;"
 # The backstop must actually complete a stalled sequence. Stages 1 and 3 are
 # continued only by the transport's command callback, and Transport::reset()
 # drops it without invoking it -- so an inert backstop restores a node that sits

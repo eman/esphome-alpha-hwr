@@ -159,6 +159,11 @@ struct PumpSim {
   }
 };
 
+// Accumulated across every Harness in this file, so the check below covers
+// every write any test in it performs rather than one representative case.
+static int g_apdu_length_violations = 0;
+static std::vector<std::string> g_apdu_length_violation_detail;
+
 struct Harness {
   Transport transport;
   Session session;
@@ -241,10 +246,40 @@ struct Harness {
     }
   }
 
+  /// Every APDU must declare the payload length it actually carries.
+  ///
+  /// Byte 1 is `0booLLLLLL`: the operation in bits 7-6, the payload byte count
+  /// in bits 5-0. The payload is everything after the class and OpSpec bytes,
+  /// so `(opspec & 0x3F) == apdu_len - 2` for every request this component
+  /// sends -- GET, SET and command alike.
+  ///
+  /// Checked here rather than asserted per-write because that is what makes it
+  /// a net: it catches any frame the component builds, including ones added
+  /// later. It was added after a single-event schedule write shipped for a long
+  /// time declaring 51 bytes while carrying 19, which the existing tests could
+  /// not see because their mock matched on the wrong OpSpec value too.
+  void check_apdu_length(const uint8_t *apdu, size_t apdu_len) {
+    if (apdu_len < 2) return;
+    const size_t declared = apdu[1] & 0x3F;
+    const size_t actual = apdu_len - 2;
+    if (declared == actual) return;
+    g_apdu_length_violations++;
+    char buf[128];
+    snprintf(buf, sizeof(buf),
+             "class 0x%02X opspec 0x%02X declares %zu payload bytes, carries %zu",
+             apdu[0], apdu[1], declared, actual);
+    // Distinct shapes only -- one bad frame sent by fifty tests is one defect.
+    const std::string entry(buf);
+    for (const auto &seen : g_apdu_length_violation_detail)
+      if (seen == entry) return;
+    g_apdu_length_violation_detail.push_back(entry);
+  }
+
   void handle_frame(const std::vector<uint8_t> &frame) {
     if (frame.size() < 6) return;
     const uint8_t *apdu = frame.data() + 4;
     size_t apdu_len = frame.size() - 6;
+    check_apdu_length(apdu, apdu_len);
 
     // Class 3 run-state commands: [0x03, 0x81, 0x06 START | 0x05 STOP].
     if (apdu_len >= 3 && apdu[0] == 0x03 && apdu[1] == 0x81 &&
@@ -294,7 +329,7 @@ struct Harness {
       // Unfused mode change (0x0A01, PR #98)
       frames_0a01++;
       if (sim.honor_mode_change) sim.mode_byte = apdu[13];
-    } else if (opspec == 0x84 && apdu_len >= 10) {
+    } else if (opspec == 0x88 && apdu_len >= 10) {
       // Setpoint register write
       frames_register++;
       int sub = (apdu[2] << 8) | apdu[3];
@@ -382,7 +417,7 @@ struct Harness {
         frames_layer_write++;
         if (sim.honor_layer_writes) memcpy(sim.layers[sub - 1000], apdu + 11, 42);
         inject_layer_frame(static_cast<uint8_t>(sub - 1000));
-      } else if (opspec == 0xB3 && sub >= 900 && sub < 935 && apdu_len >= 21) {
+      } else if (opspec == 0x93 && sub >= 900 && sub < 935 && apdu_len >= 21) {
         // Single-event write (10 bytes at apdu+11)
         if (sim.honor_layer_writes) memcpy(sim.single_events[sub - 900], apdu + 11, 10);
         inject_single_event_frame(static_cast<uint8_t>(sub - 900));
@@ -2868,6 +2903,14 @@ int main() {
   test_partial_upload_republishes_schedule_display();
   test_all_layers_failed_upload_republishes();
   test_republish_predicate_arms();
+
+  // Every APDU any test above sent, checked against its own declared length.
+  std::cout << "\n=== Every APDU declares the payload length it carries ==="
+            << std::endl;
+  for (const auto &d : g_apdu_length_violation_detail)
+    std::cout << "  " << d << std::endl;
+  TEST_ASSERT(g_apdu_length_violations == 0,
+              "No frame declares a payload length it does not carry");
 
   std::cout << "\n===========================================================" << std::endl;
   std::cout << "  Test Results" << std::endl;

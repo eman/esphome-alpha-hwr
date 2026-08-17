@@ -117,10 +117,12 @@ void test_schedule_write_payload() {
   // build it is undefined behaviour rather than a red test).
   if (full_packet.size() >= 9) {
     // Check the payload details
-    // APDU: Class=10 (0x0A), OpSpec=5 (0xB3), Obj=84 (0x54), Sub=1001 (0x03E9)
+    // APDU: Class=10 (0x0A), OpSpec 0xB3 = SET + 51, Obj=84 (0x54), Sub=1001 (0x03E9)
     // GENI format: [0x27][LEN][DST][SRC] + APDU
     TEST_ASSERT(full_packet[4] == 0x0A, "Class 10 (Settings)");
-    TEST_ASSERT(full_packet[5] == 0xB3, "OpSpec 5 (Write)");
+    TEST_ASSERT(full_packet[5] == 0xB3,
+                "OpSpec 0xB3 = SET + 51 payload bytes, which is what a 53-byte "
+                "layer APDU carries");
     TEST_ASSERT(full_packet[6] == 0x54, "Object 84 (ClockProgram)");
     TEST_ASSERT(full_packet[7] == 0x03 && full_packet[8] == 0xE9, "SubID 1001 (Layer 1)");
   }
