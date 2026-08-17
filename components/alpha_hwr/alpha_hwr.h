@@ -720,15 +720,31 @@ public:
   // pump so a partial failure (e.g. the second write fails) reports the real
   // end state. The underlying flag writes surface as their own op_id="" settle
   // events (like entity writes); this call adds the one event under the op_id.
+  //
+  // The two flags reach `on_complete` as TRI-STATE int8_t -- 1, 0, or -1 for
+  // "not known". Both caches can be invalid (a disconnect clears them, and the
+  // run-state cache also goes invalid after an unconfirmed write), and the two
+  // reads here return that validity: is_pump_enabled_valid(), and get_state()'s
+  // own return. Both used to be discarded, and the flags were passed as plain
+  // bools, so a rejected call reported a CONCRETE state -- typically
+  // `enabled: false, schedule_enabled: false, state: "off"` -- for a pump
+  // nothing had been written to and whose real state was unknown. An automation
+  // reading `state` concluded the pump was off. The bridge already had the
+  // right encoding for unknown and a guard to use it; nothing could ever
+  // produce it, so the guard was dead.
   void submit_set_pump_state(
       ux::PumpScheduleTarget target,
-      std::function<void(services::WriteStatus, bool, bool, const std::string &)> on_complete) {
+      std::function<void(services::WriteStatus, int8_t, int8_t, const std::string &)> on_complete) {
     using services::WriteStatus;
+    auto tri = [](bool known, bool value) -> int8_t { return known ? (value ? 1 : 0) : -1; };
     if (!check_ready("set_pump_state")) {
-      bool ce = control_service_.is_pump_enabled();
       bool cs = false;
-      schedule_service_.get_state(&cs);
-      if (on_complete) on_complete(WriteStatus::REJECTED, ce, cs, "pump not connected/synchronized");
+      const bool cs_known = schedule_service_.get_state(&cs);
+      if (on_complete) {
+        on_complete(WriteStatus::REJECTED,
+                    tri(control_service_.is_pump_enabled_valid(), control_service_.is_pump_enabled()),
+                    tri(cs_known, cs), "pump not connected/synchronized");
+      }
       return;
     }
 
@@ -743,14 +759,17 @@ public:
     if (!need_engaged && !need_scheduled) {
       // No-op: already in the requested state. Still fire exactly one terminal
       // result so a client waiting on this op_id never hangs.
-      if (on_complete) on_complete(WriteStatus::ACCEPTED, cur_engaged, cur_scheduled, "no change");
+      // Both flags are known here by construction: need_* is true whenever
+      // either is unknown, so reaching this branch means both reads were valid.
+      if (on_complete) on_complete(WriteStatus::ACCEPTED, cur_engaged ? 1 : 0,
+                                   cur_scheduled ? 1 : 0, "no change");
       return;
     }
 
     struct Agg {
       int pending{0};
       WriteStatus worst{WriteStatus::ACCEPTED};
-      std::function<void(WriteStatus, bool, bool, const std::string &)> on_complete;
+      std::function<void(WriteStatus, int8_t, int8_t, const std::string &)> on_complete;
     };
     auto agg = std::make_shared<Agg>();
     agg->pending = (need_engaged ? 1 : 0) + (need_scheduled ? 1 : 0);
@@ -765,13 +784,16 @@ public:
         agg->worst = st;
       }
       if (--agg->pending > 0) return;
-      bool ae = self->control_service_.is_pump_enabled();
       bool as = false;
-      self->schedule_service_.get_state(&as);
+      const bool as_known = self->schedule_service_.get_state(&as);
+      const int8_t ae = self->control_service_.is_pump_enabled_valid()
+                            ? (self->control_service_.is_pump_enabled() ? 1 : 0)
+                            : -1;
+      const int8_t asx = as_known ? (as ? 1 : 0) : -1;
       bool ok = agg->worst == WriteStatus::ACCEPTED || agg->worst == WriteStatus::CLAMPED;
       std::string detail =
           ok ? "" : std::string("a sub-write settled ") + services::write_status_to_string(agg->worst);
-      if (agg->on_complete) agg->on_complete(agg->worst, ae, as, detail);
+      if (agg->on_complete) agg->on_complete(agg->worst, ae, asx, detail);
     };
 
     // Order avoids a transient dead/gated state: disable the schedule before

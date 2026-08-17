@@ -95,6 +95,110 @@ void AlphaHwrApiBridge::setup(AlphaHwrComponent *component) {
   ESP_LOGI(BRIDGE_TAG, "Programmatic write services registered");
 }
 
+// ---------------------------------------------------------------------------
+// Strict argument parsing
+// ---------------------------------------------------------------------------
+//
+// These replace sscanf("%d,%d,...") in the handlers below. sscanf was wrong
+// three separate ways for input that any Home Assistant user or script can
+// send, and all three turned a MALFORMED request into a SUCCESSFUL write to a
+// plausible-looking target -- strictly worse than the terminal `invalid` the
+// reject_ path exists to produce:
+//
+//   * Trailing garbage is ignored. "3.9" cleared slot 3; "1abc" cleared slot 1;
+//     "0,0,6,0,8,0GARBAGE" was accepted as a schedule entry.
+//   * Integer overflow is undefined behaviour, and on the host it WRAPPED into
+//     the valid range: clear_single_event "4294967296" wrapped to 0 and cleared
+//     slot 0. The range guard let it through because the wrapped value is in
+//     range. Which side of the wrap you land on decided whether the guard
+//     worked, so "2147483648" happened to be caught and "4294967296" did not.
+//   * "%lu" ACCEPTS a leading minus and negates it, so "-2,-1" became a valid
+//     ordered pair of huge timestamps.
+//
+// The file already held the right standard in two places -- on_set_schedule_enabled
+// demands exactly "0" or "1", and parse_upload_payload is strict throughout --
+// so the sscanf handlers were the outliers.
+//
+// One more reason not to lean on the host's behaviour here: `unsigned long` is
+// 8 bytes on this host and 4 on the ESP32, so a host test can never observe
+// what the firmware's sscanf would do with an out-of-range timestamp. Parsing
+// into a fixed-width type and range-checking it explicitly makes the two agree.
+
+/// Whole-string decimal parse. Rejects an empty field, leading/trailing
+/// characters of any kind (including whitespace), and anything outside
+/// [lo, hi]. Returns false rather than a clamped value: a request the bridge
+/// cannot read exactly is one it must not guess at.
+static bool parse_int_field(const std::string &s, long lo, long hi, long *out) {
+  if (s.empty()) return false;
+  // strtol skips leading whitespace and accepts '+'/'-'; the explicit check
+  // here makes both a rejection, so " 7" and "+7" are refused rather than
+  // silently accepted as 7.
+  const bool starts_cleanly = (s[0] == '-') || (s[0] >= '0' && s[0] <= '9');
+  if (!starts_cleanly) return false;
+  errno = 0;
+  char *end = nullptr;
+  const long v = std::strtol(s.c_str(), &end, 10);
+  // Each condition is hoisted into its own name and its own statement so
+  // mutation_check.sh has a pipe-free line per rule to anchor to: entries are
+  // split with IFS='|', which truncates any search string containing `||`.
+  const bool overflowed = (errno == ERANGE);
+  const bool consumed_everything = (end != s.c_str()) && (*end == '\0');
+  if (overflowed) return false;
+  if (!consumed_everything) return false;
+  if (v < lo) return false;
+  if (v > hi) return false;
+  *out = v;
+  return true;
+}
+
+/// Split on ',' into exactly `want` fields. A missing, extra or empty field is
+/// a rejection; so is any field that is not a whole decimal number in range.
+static bool parse_int_csv(const std::string &data, size_t want, const long *lo, const long *hi,
+                          long *out) {
+  size_t start = 0;
+  for (size_t i = 0; i < want; i++) {
+    const size_t comma = data.find(',', start);
+    const bool last = (i + 1 == want);
+    if (last != (comma == std::string::npos)) return false;  // too few / too many
+    const std::string field =
+        last ? data.substr(start) : data.substr(start, comma - start);
+    if (!parse_int_field(field, lo[i], hi[i], &out[i])) return false;
+    start = comma + 1;
+  }
+  return true;
+}
+
+/// Epoch seconds: a whole non-negative decimal that fits the 32-bit value the
+/// wire carries. The width check is explicit rather than a cast, so a value the
+/// pump cannot hold is refused instead of truncated into a different instant.
+static bool parse_epoch_field(const std::string &s, uint32_t *out) {
+  long v = 0;
+  if (!parse_int_field(s, 0, 4294967295L, &v)) return false;
+  *out = static_cast<uint32_t>(v);
+  return true;
+}
+
+static bool parse_epoch_pair(const std::string &data, uint32_t *begin, uint32_t *end) {
+  const size_t comma = data.find(',');
+  if (comma == std::string::npos) return false;
+  if (data.find(',', comma + 1) != std::string::npos) return false;
+  if (!parse_epoch_field(data.substr(0, comma), begin)) return false;
+  if (!parse_epoch_field(data.substr(comma + 1), end)) return false;
+  // Compared AFTER both are narrowed to the wire's width, so a pair that only
+  // looks ordered at 64-bit precision cannot reach the pump reversed.
+  return *begin < *end;
+}
+
+/// Bound an argument echoed back into `detail`. The event map is copied into an
+/// ESPHome API message on a device with tens of KB of usable heap, and every
+/// reject_ caller echoes its raw argument -- so an oversized service call was a
+/// heap spike the bridge chose to take.
+static std::string echo_arg(const std::string &s) {
+  constexpr size_t MAX_ECHO = 64;
+  if (s.size() <= MAX_ECHO) return s;
+  return s.substr(0, MAX_ECHO) + "... (" + std::to_string(s.size()) + " chars)";
+}
+
 void AlphaHwrApiBridge::fire_write_settled(const WriteResult &result) {
   std::map<std::string, std::string> data;
   data["op_id"] = result.op_id;
@@ -114,15 +218,21 @@ void AlphaHwrApiBridge::fire_write_settled(const WriteResult &result) {
   if (result.requested_mode != ControlMode::NONE) {
     data["requested_mode"] = ControlService::mode_to_string(result.requested_mode);
   }
-  if (!std::isnan(result.requested_value)) {
-    char rbuf[32];
+  if (std::isfinite(result.requested_value)) {
+    char rbuf[48];
     snprintf(rbuf, sizeof(rbuf), "%.4g", result.requested_value);
     data["requested_value"] = rbuf;
   }
-  if (!std::isnan(result.requested_temp_min)) {
-    char rbuf[32];
+  // Guarded independently. Sharing one guard meant a request with a valid min
+  // and a NaN max emitted requested_temp_max: "nan" -- reachable from the
+  // service, which does not validate its floats.
+  if (std::isfinite(result.requested_temp_min)) {
+    char rbuf[48];
     snprintf(rbuf, sizeof(rbuf), "%.1f", result.requested_temp_min);
     data["requested_temp_min"] = rbuf;
+  }
+  if (std::isfinite(result.requested_temp_max)) {
+    char rbuf[48];
     snprintf(rbuf, sizeof(rbuf), "%.1f", result.requested_temp_max);
     data["requested_temp_max"] = rbuf;
   }
@@ -134,19 +244,26 @@ void AlphaHwrApiBridge::fire_write_settled(const WriteResult &result) {
   if (result.requested_off_minutes >= 0) {
     data["requested_off_minutes"] = std::to_string(result.requested_off_minutes);
   }
-  if (!std::isnan(result.requested_flow)) {
-    char fbuf[32];
+  if (std::isfinite(result.requested_flow)) {
+    char fbuf[48];
     snprintf(fbuf, sizeof(fbuf), "%.3f", result.requested_flow);
     data["requested_flow"] = fbuf;
   }
   if (!result.requested_begin_hhmm.empty()) {
     data["requested_begin"] = result.requested_begin_hhmm;
+  }
+  if (!result.requested_end_hhmm.empty()) {
     data["requested_end"] = result.requested_end_hhmm;
   }
 
-  char buf[32];
+  // 48, not 32: "%.1f" of a float near FLT_MAX needs 41 characters, and
+  // snprintf truncating it yielded a different, plausible-looking number.
+  char buf[48];
   auto put_float = [&](const char *key, float value, const char *fmt) {
-    if (std::isnan(value)) return;
+    // isfinite, not !isnan: an infinity formatted as "inf" breaks the same
+    // contract NaN was excluded for -- a key is either a number the client can
+    // parse or absent, never a word.
+    if (!std::isfinite(value)) return;
     snprintf(buf, sizeof(buf), fmt, value);
     data[key] = buf;
   };
@@ -220,9 +337,12 @@ void AlphaHwrApiBridge::fire_write_settled(const WriteResult &result) {
       put_bool("enabled", result.sched_enabled);
       if (result.event_count >= 0) data["event_count"] = std::to_string(result.event_count);
       if (result.command == WriteCommand::UPLOAD_SCHEDULE) {
-        data["layers_written"] = result.layers_written;
-        data["layers_skipped"] = result.layers_skipped;
-        data["schedule_hash"] = result.schedule_hash;
+        // Omitted rather than emitted empty, like every other key here. An
+        // empty schedule_hash on a payload the bridge rejected before any wire
+        // work reads as "the upload ran and the grid hashes to nothing".
+        if (!result.layers_written.empty()) data["layers_written"] = result.layers_written;
+        if (!result.layers_skipped.empty()) data["layers_skipped"] = result.layers_skipped;
+        if (!result.schedule_hash.empty()) data["schedule_hash"] = result.schedule_hash;
       }
       break;
     }
@@ -295,12 +415,12 @@ void AlphaHwrApiBridge::on_set_pump_state(std::string state, std::string op_id) 
   ux::PumpScheduleTarget target;
   if (!ux::parse_pump_state(state.c_str(), &target)) {
     reject_(WriteCommand::SET_PUMP_STATE, op_id,
-            "unknown state '" + state + "' (off|engaged|scheduled)");
+            "unknown state '" + echo_arg(state) + "' (off|engaged|scheduled)");
     return;
   }
   component_->submit_set_pump_state(
-      target, [this, op_id](services::WriteStatus status, bool actual_engaged,
-                            bool actual_scheduled, const std::string &detail) {
+      target, [this, op_id](services::WriteStatus status, int8_t actual_engaged,
+                            int8_t actual_scheduled, const std::string &detail) {
         // Surface the composed op's most-severe leg (accepted / timeout /
         // superseded / rejected …) so automations can retry/back off correctly,
         // rather than flattening every failure to `rejected`.
@@ -310,8 +430,11 @@ void AlphaHwrApiBridge::on_set_pump_state(std::string state, std::string op_id) 
         result.origin = services::WriteOrigin::SERVICE;
         result.status = status;
         result.detail = detail;
-        result.enabled = actual_engaged ? 1 : 0;
-        result.sched_enabled = actual_scheduled ? 1 : 0;
+        // Tri-state, straight through: -1 means the cache could not tell us,
+        // and put_bool()/the `state` guard in fire_write_settled() then omit
+        // the key rather than asserting a state nothing read back.
+        result.enabled = actual_engaged;
+        result.sched_enabled = actual_scheduled;
         fire_write_settled(result);
       });
 }
@@ -331,13 +454,11 @@ void AlphaHwrApiBridge::on_upload_schedule(std::string data, std::string op_id) 
 }
 
 void AlphaHwrApiBridge::on_set_schedule_entry(std::string data, std::string op_id) {
-  int vals[6];
-  int n = sscanf(data.c_str(), "%d,%d,%d,%d,%d,%d",
-                 &vals[0], &vals[1], &vals[2], &vals[3], &vals[4], &vals[5]);
-  if (n != 6 || vals[0] < 0 || vals[0] > 4 || vals[1] < 0 || vals[1] > 6 ||
-      vals[2] < 0 || vals[2] > 23 || vals[3] < 0 || vals[3] > 59 ||
-      vals[4] < 0 || vals[4] > 23 || vals[5] < 0 || vals[5] > 59) {
-    reject_(WriteCommand::SET_SCHEDULE_ENTRY, op_id, "parse error: " + data);
+  static const long LO[6] = {0, 0, 0, 0, 0, 0};
+  static const long HI[6] = {4, 6, 23, 59, 23, 59};
+  long vals[6];
+  if (!parse_int_csv(data, 6, LO, HI, vals)) {
+    reject_(WriteCommand::SET_SCHEDULE_ENTRY, op_id, "parse error: " + echo_arg(data));
     return;
   }
   component_->submit_set_schedule_entry(
@@ -347,17 +468,20 @@ void AlphaHwrApiBridge::on_set_schedule_entry(std::string data, std::string op_i
 }
 
 void AlphaHwrApiBridge::on_clear_schedule_entry(std::string data, std::string op_id) {
-  int l, d;
-  if (sscanf(data.c_str(), "%d,%d", &l, &d) != 2 || l < 0 || l > 4 || d < 0 || d > 6) {
-    reject_(WriteCommand::CLEAR_SCHEDULE_ENTRY, op_id, "parse error: " + data);
+  static const long LO[2] = {0, 0};
+  static const long HI[2] = {4, 6};
+  long v[2];
+  if (!parse_int_csv(data, 2, LO, HI, v)) {
+    reject_(WriteCommand::CLEAR_SCHEDULE_ENTRY, op_id, "parse error: " + echo_arg(data));
     return;
   }
-  component_->submit_clear_schedule_entry(static_cast<uint8_t>(l), static_cast<uint8_t>(d), op_id);
+  component_->submit_clear_schedule_entry(static_cast<uint8_t>(v[0]), static_cast<uint8_t>(v[1]),
+                                          op_id);
 }
 
 void AlphaHwrApiBridge::on_set_schedule_enabled(std::string data, std::string op_id) {
   if (data != "0" && data != "1") {
-    reject_(WriteCommand::SET_SCHEDULE_ENABLED, op_id, "parse error: " + data);
+    reject_(WriteCommand::SET_SCHEDULE_ENABLED, op_id, "parse error: " + echo_arg(data));
     return;
   }
   component_->submit_set_schedule_enabled(data == "1", op_id);
@@ -368,19 +492,18 @@ void AlphaHwrApiBridge::on_refresh_schedule(std::string op_id) {
 }
 
 void AlphaHwrApiBridge::on_set_single_event(std::string data, std::string op_id) {
-  unsigned long begin_ts = 0, end_ts = 0;
-  if (sscanf(data.c_str(), "%lu,%lu", &begin_ts, &end_ts) != 2 || begin_ts >= end_ts) {
-    reject_(WriteCommand::SET_SINGLE_EVENT, op_id, "parse error: " + data);
+  uint32_t begin_ts = 0, end_ts = 0;
+  if (!parse_epoch_pair(data, &begin_ts, &end_ts)) {
+    reject_(WriteCommand::SET_SINGLE_EVENT, op_id, "parse error: " + echo_arg(data));
     return;
   }
-  component_->submit_set_single_event(static_cast<uint32_t>(begin_ts),
-                                      static_cast<uint32_t>(end_ts), op_id);
+  component_->submit_set_single_event(begin_ts, end_ts, op_id);
 }
 
 void AlphaHwrApiBridge::on_clear_single_event(std::string data, std::string op_id) {
-  int idx = 0;
-  if (sscanf(data.c_str(), "%d", &idx) != 1 || idx < 0 || idx > 99) {
-    reject_(WriteCommand::CLEAR_SINGLE_EVENT, op_id, "parse error: " + data);
+  long idx = 0;
+  if (!parse_int_field(data, 0, 99, &idx)) {
+    reject_(WriteCommand::CLEAR_SINGLE_EVENT, op_id, "parse error: " + echo_arg(data));
     return;
   }
   component_->submit_clear_single_event(static_cast<uint8_t>(idx), op_id);
@@ -392,13 +515,12 @@ void AlphaHwrApiBridge::on_refresh_single_events(std::string op_id) {
 
 void AlphaHwrApiBridge::on_set_vacation(std::string data, std::string op_id) {
   // A vacation is a multi-day Stop single-event overriding the weekly schedule.
-  unsigned long begin_ts = 0, end_ts = 0;
-  if (sscanf(data.c_str(), "%lu,%lu", &begin_ts, &end_ts) != 2 || begin_ts >= end_ts) {
-    reject_(WriteCommand::SET_SINGLE_EVENT, op_id, "parse error: " + data);
+  uint32_t begin_ts = 0, end_ts = 0;
+  if (!parse_epoch_pair(data, &begin_ts, &end_ts)) {
+    reject_(WriteCommand::SET_SINGLE_EVENT, op_id, "parse error: " + echo_arg(data));
     return;
   }
-  component_->submit_set_vacation(static_cast<uint32_t>(begin_ts),
-                                  static_cast<uint32_t>(end_ts), op_id);
+  component_->submit_set_vacation(begin_ts, end_ts, op_id);
 }
 
 void AlphaHwrApiBridge::on_clear_vacation(std::string op_id) {

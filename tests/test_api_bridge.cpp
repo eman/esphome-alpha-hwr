@@ -22,6 +22,20 @@
 // handler paired with the wrong enumerator answers to the wrong name, and the
 // event says so.
 //
+// KNOWN BLIND SPOT, found by an adversarial pass that applied all 98
+// same-arity handler mispairings by hand. 96 die here. The two that survive
+// are `set_single_event` <-> `set_vacation`, because both settle under the
+// same command string (`set_single_event`) and `command` is the only
+// discriminator these tests have. That pair is not a technicality: a vacation
+// is submitted as a STOP single event, so a `set_single_event` call bound to
+// `on_set_vacation` turns the pump OFF over the caller's window instead of
+// running it. Status and detail are identical on both paths too.
+//
+// Telling them apart needs something the settle event does not currently
+// carry -- the single event's type -- or a connected component that can be
+// asked what reached the pump. Neither belongs in this file, so the gap is
+// recorded rather than papered over.
+//
 // The component is left unconnected on purpose. Every submitted operation then
 // settles REJECTED at the ready check, which is a terminal event like any
 // other -- enough to prove dispatch, argument parsing and the event contract
@@ -232,14 +246,31 @@ static void test_each_service_settles_as_the_command_it_is_named_for() {
                 std::string("'") + c.service + "' settles as command '" + c.settles_as + "'");
     TEST_ASSERT(BridgeHarness::field(*ev, "origin") == "service",
                 std::string("'") + c.service + "' reports origin service");
+    // The comment above this test claims these arguments "reach the operation
+    // layer". Without this assertion that was unverified, and three handlers
+    // could be made to reject every valid input at the bridge with the suite
+    // still green -- reject_() reports the same `command`. The ready check is
+    // the operation layer's, so seeing it proves the bridge parsed and
+    // submitted rather than refusing.
+    TEST_ASSERT(BridgeHarness::field(*ev, "status") == "rejected",
+                std::string("'") + c.service + "' reached the write layer's ready check");
+    TEST_ASSERT(BridgeHarness::field(*ev, "detail") == "pump not connected/synchronized",
+                std::string("'") + c.service + "' reports why, and `detail` is not empty");
   }
 }
 
 // set_pump_state is composed at the bridge from two flag writes, so it is the
-// one service whose aggregate event the operation layer never builds. Its
-// op_id must still get exactly one terminal event.
-static void test_set_pump_state_aggregates_to_one_event() {
-  std::cout << "\n=== set_pump_state: one aggregate event for the caller's op_id ===" << std::endl;
+// one service whose terminal event the operation layer never builds. Its op_id
+// must still get exactly one.
+//
+// Scope, stated because an earlier name overclaimed it: unconnected, this
+// never reaches the aggregation. submit_set_pump_state bails at check_ready and
+// calls on_complete directly, so the Agg fan-in -- worst-severity selection,
+// the pending counter, the leg events -- is NOT exercised here and a mutation
+// of it survives. Covering that needs a ready component, which belongs with
+// the write-operation tests.
+static void test_set_pump_state_fires_one_event_when_it_never_reaches_the_pump() {
+  std::cout << "\n=== set_pump_state: one terminal event for the caller's op_id ===" << std::endl;
   BridgeHarness h;
 
   TEST_ASSERT(mock_call_service("set_pump_state", {std::string("engaged"), std::string("ps1")}),
@@ -297,6 +328,132 @@ static void test_unparsable_arguments_settle_invalid_at_the_bridge() {
   }
 }
 
+// Everything below was found by a review pass that could only run once this
+// file existed: api_bridge.cpp had never been compiled by a test, so its
+// argument parsing had never had a machine over it.
+//
+// sscanf ignored trailing characters and wrapped on overflow, which did not
+// merely lose the request -- it turned malformed input into a SUCCESSFUL write
+// to a plausible-looking target. `clear_single_event` with "4294967296"
+// wrapped to 0 and cleared slot 0. That is strictly worse than failing.
+static void test_partially_numeric_arguments_are_rejected() {
+  std::cout << "\n=== partially numeric arguments are rejected, not silently rounded ==="
+            << std::endl;
+
+  struct Case {
+    const char *service;
+    const char *data;
+    const char *why;
+  };
+  const std::vector<Case> cases = {
+      // Trailing garbage: sscanf stopped at the first bad character and kept
+      // what it had.
+      {"clear_single_event", "3.9", "a fractional slot is not slot 3"},
+      {"clear_single_event", "1abc", "a number with a tail is not that number"},
+      {"clear_single_event", " 7", "leading whitespace is not a valid slot"},
+      {"clear_single_event", "0xJUNK", "hex-looking junk is not slot 0"},
+      {"set_schedule_entry", "0,0,6,0,8,0GARBAGE", "a trailing tail invalidates the entry"},
+      {"set_schedule_entry", "0,0,6,0,8,0,99,88", "extra fields invalidate the entry"},
+      {"clear_schedule_entry", "0,0extra", "a trailing tail invalidates the target"},
+      // Overflow: undefined behaviour that wrapped INTO the valid range, so
+      // the range guard passed. "4294967296" cleared slot 0.
+      {"clear_single_event", "4294967296", "an overflowing slot must not wrap to 0"},
+      // Wide enough to set ERANGE even where long is 64-bit, so the overflow
+      // guard itself is exercised rather than the range check standing in for it.
+      {"clear_single_event", "99999999999999999999", "a value past LONG_MAX is refused"},
+      {"set_schedule_entry", "99999999999999999999,0,6,0,8,0", "...in a csv field too"},
+      {"set_schedule_entry", "4294967296,0,6,0,8,0", "an overflowing layer must not wrap to 0"},
+      {"clear_schedule_entry", "4294967296,0", "an overflowing layer must not wrap to 0"},
+      // "%lu" accepted a leading minus and negated it into a huge value.
+      {"set_single_event", "-2,-1", "negative timestamps must not negate into 2106"},
+      {"set_vacation", "-2,-1", "...for a vacation either"},
+      // Ordered at 64-bit precision, reversed once narrowed to the wire's
+      // 32 bits. The comparison now happens after narrowing.
+      {"set_single_event", "4294967295,4294967296", "an out-of-range end must not truncate to 0"},
+      // BOTH out of range. These narrow to 0 and 1 -- an ordered, plausible
+      // pair -- so only the explicit width check refuses them; the
+      // post-narrowing order comparison cannot.
+      {"set_single_event", "4294967296,4294967297", "a pair past the wire's width is refused"},
+      {"set_vacation", "4294967296,4294967297", "...for a vacation too"},
+      // Both in range and reversed, so the width check passes them and only
+      // the ordering rule can refuse. Without this the ordering comparison was
+      // never reached by any case in this table.
+      {"set_single_event", "2000,1000", "an end before its begin is refused"},
+      {"set_single_event", "1000,1000", "a zero-length window is refused"},
+      {"set_vacation", "2000,1000", "...for a vacation too"},
+      // Empty and separator-only fields.
+      {"clear_schedule_entry", "0,", "an empty field is not a zero"},
+      {"clear_schedule_entry", ",0", "...in either position"},
+      {"set_single_event", "1000,", "an empty end timestamp is not a zero"},
+  };
+
+  for (const auto &c : cases) {
+    BridgeHarness h;
+    TEST_ASSERT(mock_call_service(c.service, {std::string(c.data), std::string("p1")}),
+                std::string("'") + c.service + "' accepts the call");
+    const auto *ev = h.only_event();
+    TEST_ASSERT(ev != nullptr, std::string("'") + c.data + "' fired exactly one terminal event");
+    if (ev == nullptr) continue;
+    TEST_ASSERT(BridgeHarness::field(*ev, "status") == "invalid",
+                std::string(c.service) + " '" + c.data + "': " + c.why);
+  }
+}
+
+// The counterpart: well-formed input must still be accepted, or the strictness
+// above would be indistinguishable from rejecting everything.
+static void test_well_formed_arguments_still_reach_the_operation_layer() {
+  std::cout << "\n=== well-formed arguments are still accepted ===" << std::endl;
+
+  struct Case {
+    const char *service;
+    const char *data;
+  };
+  const std::vector<Case> cases = {
+      {"clear_single_event", "0"},
+      {"clear_single_event", "99"},
+      {"set_schedule_entry", "4,6,23,59,23,59"},
+      {"set_schedule_entry", "0,0,0,0,0,0"},
+      {"clear_schedule_entry", "4,6"},
+      {"set_single_event", "0,4294967295"},
+      {"set_vacation", "1000,2000"},
+  };
+
+  for (const auto &c : cases) {
+    BridgeHarness h;
+    TEST_ASSERT(mock_call_service(c.service, {std::string(c.data), std::string("p2")}),
+                std::string("'") + c.service + "' accepts the call");
+    const auto *ev = h.only_event();
+    if (ev == nullptr) {
+      TEST_ASSERT(false, std::string(c.data) + " fired exactly one terminal event");
+      continue;
+    }
+    // Unconnected, so the operation layer refuses it -- but at the READY check,
+    // which means the bridge parsed it and submitted it.
+    TEST_ASSERT(BridgeHarness::field(*ev, "status") == "rejected",
+                std::string(c.service) + " '" + c.data + "' parsed and reached the write layer");
+  }
+}
+
+// Every reject_ caller echoes its argument into `detail`, and the event map is
+// copied into an API message on a device with tens of KB of usable heap. An
+// unbounded echo made an oversized service call the bridge's problem.
+static void test_an_oversized_argument_is_not_echoed_whole() {
+  std::cout << "\n=== a huge argument is truncated in `detail`, not echoed back ===" << std::endl;
+  BridgeHarness h;
+  const std::string huge(200000, 'x');
+
+  TEST_ASSERT(mock_call_service("set_schedule_entry", {huge, std::string("p3")}),
+              "the service accepts the call");
+  const auto *ev = h.only_event();
+  TEST_ASSERT(ev != nullptr, "exactly one terminal event");
+  if (ev == nullptr) return;
+  const std::string detail = BridgeHarness::field(*ev, "detail");
+  TEST_ASSERT(BridgeHarness::field(*ev, "status") == "invalid", "still settles invalid");
+  TEST_ASSERT(detail.size() < 200, "detail is bounded rather than 200 KB");
+  TEST_ASSERT(detail.find("200000 chars") != std::string::npos,
+              "and says how much was elided, so the caller can still diagnose it");
+}
+
 // ---------------------------------------------------------------------------
 // Event field mapping
 // ---------------------------------------------------------------------------
@@ -321,7 +478,12 @@ static void test_every_event_carries_the_common_fields() {
   TEST_ASSERT(BridgeHarness::field(*ev, "status") == "accepted", "status stringified");
   TEST_ASSERT(BridgeHarness::field(*ev, "origin") == "entity", "origin stringified");
   TEST_ASSERT(BridgeHarness::field(*ev, "seq") == "42", "seq echoed");
-  TEST_ASSERT(BridgeHarness::has(*ev, "node"), "node is present on every event (issue #113)");
+  // By value, not merely present: an empty node defeats the purpose (issue
+  // #113 -- attributing an event to a controller in a multi-node install).
+  TEST_ASSERT(BridgeHarness::field(*ev, "node") == std::string(esphome::App.get_name()),
+              "node carries this controller's name, not an empty string");
+  TEST_ASSERT(std::string(esphome::App.get_name()) != std::string(),
+              "...and that name is non-empty to begin with");
 }
 
 // `enabled` means the pump's RUN STATE on the control commands and the
@@ -415,22 +577,154 @@ static void test_clock_offset_is_omitted_when_nothing_was_measured() {
               "an unmeasured offset emits no key rather than the string 'nan'");
 }
 
+// state_name(pump_auto, schedule_on) is ASYMMETRIC -- (true,false) is
+// "engaged" and (false,true) is "off" -- so a fixture with both flags set to
+// the same value cannot see its arguments swapped. An earlier version of this
+// test used enabled=1, sched_enabled=1, and swapping the two arguments at the
+// call site (a running unscheduled pump reporting "off") left the suite green.
+// Both asymmetric combinations are covered here, plus the unknown case.
 static void test_pump_state_reports_both_flags_and_the_derived_name() {
   std::cout << "\n=== set_pump_state reports enabled, schedule_enabled and state ===" << std::endl;
   esphome::alpha_hwr::AlphaHwrApiBridge bridge;
-  WriteResult r;
-  r.command = WriteCommand::SET_PUMP_STATE;
-  r.status = WriteStatus::ACCEPTED;
-  r.enabled = 1;
-  r.sched_enabled = 1;
 
+  WriteResult engaged;
+  engaged.command = WriteCommand::SET_PUMP_STATE;
+  engaged.status = WriteStatus::ACCEPTED;
+  engaged.enabled = 1;
+  engaged.sched_enabled = 0;
+  const auto *a = fire(bridge, engaged);
+  TEST_ASSERT(a && BridgeHarness::field(*a, "enabled") == "true", "run-state flag reported");
+  TEST_ASSERT(a && BridgeHarness::field(*a, "schedule_enabled") == "false",
+              "schedule flag reported");
+  TEST_ASSERT(a && BridgeHarness::field(*a, "state") == "engaged",
+              "AUTO with the schedule off is 'engaged'");
+
+  // The mirror image. If the two arguments were swapped at the call site this
+  // one reports "engaged" and the one above reports "off".
+  WriteResult off;
+  off.command = WriteCommand::SET_PUMP_STATE;
+  off.status = WriteStatus::ACCEPTED;
+  off.enabled = 0;
+  off.sched_enabled = 1;
+  const auto *b = fire(bridge, off);
+  TEST_ASSERT(b && BridgeHarness::field(*b, "state") == "off",
+              "STOP with the schedule on is 'off', not 'scheduled'");
+
+  WriteResult both;
+  both.command = WriteCommand::SET_PUMP_STATE;
+  both.status = WriteStatus::ACCEPTED;
+  both.enabled = 1;
+  both.sched_enabled = 1;
+  const auto *c = fire(bridge, both);
+  TEST_ASSERT(c && BridgeHarness::field(*c, "state") == "scheduled", "AUTO + schedule is 'scheduled'");
+
+  // -1 is "not known". The guard must drop `state` entirely rather than let
+  // -1 != 0 read as true and fabricate one.
+  WriteResult unknown;
+  unknown.command = WriteCommand::SET_PUMP_STATE;
+  unknown.status = WriteStatus::REJECTED;
+  unknown.enabled = -1;
+  unknown.sched_enabled = -1;
+  const auto *d = fire(bridge, unknown);
+  TEST_ASSERT(d && !BridgeHarness::has(*d, "state"),
+              "unknown flags emit no state rather than a fabricated one");
+
+  // One known, one not: still not enough to name a state.
+  WriteResult half;
+  half.command = WriteCommand::SET_PUMP_STATE;
+  half.status = WriteStatus::REJECTED;
+  half.enabled = 1;
+  half.sched_enabled = -1;
+  const auto *e = fire(bridge, half);
+  TEST_ASSERT(e && BridgeHarness::field(*e, "enabled") == "true", "the known half is reported");
+  TEST_ASSERT(e && !BridgeHarness::has(*e, "state"), "but a half-known state is no state");
+}
+
+// An infinity is not a number a client can parse, and the suite already pins
+// the contract for NaN: a key carries a real value or is absent. Neither
+// submit_set_setpoint nor submit_set_temperature_range validates its floats, so
+// `inf` reaches the event straight from a service call.
+static void test_infinities_are_omitted_like_nan() {
+  std::cout << "\n=== an infinite value emits no key rather than the word 'inf' ===" << std::endl;
+  esphome::alpha_hwr::AlphaHwrApiBridge bridge;
+
+  WriteResult r;
+  r.command = WriteCommand::SET_SETPOINT;
+  r.status = WriteStatus::ACCEPTED;
+  r.value = INFINITY;
+  r.requested_value = -INFINITY;
   const auto *ev = fire(bridge, r);
   TEST_ASSERT(ev != nullptr, "one event fired");
   if (ev == nullptr) return;
-  TEST_ASSERT(BridgeHarness::field(*ev, "enabled") == "true", "run-state flag reported");
-  TEST_ASSERT(BridgeHarness::field(*ev, "schedule_enabled") == "true", "schedule flag reported");
-  TEST_ASSERT(BridgeHarness::field(*ev, "state") == "scheduled",
-              "and the derived three-state name, so the event is self-contained");
+  TEST_ASSERT(!BridgeHarness::has(*ev, "value"), "an infinite settled value emits no key");
+  TEST_ASSERT(!BridgeHarness::has(*ev, "requested_value"),
+              "nor does an infinite requested value");
+}
+
+// The two temperature echoes shared one guard, so a valid min with a NaN max
+// emitted requested_temp_max: "nan".
+static void test_paired_echo_keys_are_guarded_independently() {
+  std::cout << "\n=== each requested_* key is guarded on its own value ===" << std::endl;
+  esphome::alpha_hwr::AlphaHwrApiBridge bridge;
+
+  WriteResult r;
+  r.command = WriteCommand::SET_TEMPERATURE_RANGE;
+  r.status = WriteStatus::INVALID;
+  r.requested_temp_min = 35.0f;
+  r.requested_temp_max = NAN;
+  const auto *ev = fire(bridge, r);
+  TEST_ASSERT(ev != nullptr, "one event fired");
+  if (ev == nullptr) return;
+  TEST_ASSERT(BridgeHarness::field(*ev, "requested_temp_min") == "35.0",
+              "the valid half is reported");
+  TEST_ASSERT(!BridgeHarness::has(*ev, "requested_temp_max"),
+              "the NaN half emits no key rather than the string 'nan'");
+}
+
+// upload_schedule's three keys are omitted when unset, like every other key in
+// that branch. An empty schedule_hash on a payload rejected before any wire
+// work reads as "the upload ran and the grid hashes to nothing".
+static void test_upload_keys_are_omitted_when_nothing_ran() {
+  std::cout << "\n=== a rejected upload emits no empty layer/hash keys ===" << std::endl;
+  esphome::alpha_hwr::AlphaHwrApiBridge bridge;
+
+  WriteResult r;
+  r.command = WriteCommand::UPLOAD_SCHEDULE;
+  r.status = WriteStatus::INVALID;
+  const auto *ev = fire(bridge, r);
+  TEST_ASSERT(ev != nullptr, "one event fired");
+  if (ev == nullptr) return;
+  TEST_ASSERT(!BridgeHarness::has(*ev, "schedule_hash"), "no empty schedule_hash");
+  TEST_ASSERT(!BridgeHarness::has(*ev, "layers_written"), "no empty layers_written");
+  TEST_ASSERT(!BridgeHarness::has(*ev, "layers_skipped"), "no empty layers_skipped");
+}
+
+// The one that matters most. A set_pump_state call that never reached the pump
+// used to report a CONCRETE state -- enabled: false, schedule_enabled: false,
+// state: "off" -- for a pump nothing had been written to and whose caches the
+// disconnect had invalidated. An automation reading `state` concluded the pump
+// was off. The tri-state encoding and the `>= 0` guard both already existed;
+// the callback just could not produce -1, so the guard was dead.
+static void test_a_rejected_pump_state_does_not_assert_a_state() {
+  std::cout << "\n=== set_pump_state on an unsynchronized pump reports no state at all ==="
+            << std::endl;
+  BridgeHarness h;
+
+  TEST_ASSERT(mock_call_service("set_pump_state", {std::string("scheduled"), std::string("ps2")}),
+              "the service accepts the call");
+  const std::map<std::string, std::string> *ev = nullptr;
+  for (const auto &e : mock_fired_events()) {
+    if (e.name != SETTLED) continue;
+    auto it = e.data.find("op_id");
+    if (it != e.data.end() && it->second == "ps2") ev = &e.data;
+  }
+  TEST_ASSERT(ev != nullptr, "the caller's op_id gets its terminal event");
+  if (ev == nullptr) return;
+  TEST_ASSERT(BridgeHarness::field(*ev, "status") == "rejected", "it settles rejected");
+  TEST_ASSERT(!BridgeHarness::has(*ev, "state"),
+              "and asserts NO state -- nothing was written and nothing was read");
+  TEST_ASSERT(!BridgeHarness::has(*ev, "enabled"), "no run-state flag either");
+  TEST_ASSERT(!BridgeHarness::has(*ev, "schedule_enabled"), "nor a schedule flag");
 }
 
 int main() {
@@ -440,13 +734,20 @@ int main() {
 
   test_the_registered_service_surface();
   test_each_service_settles_as_the_command_it_is_named_for();
-  test_set_pump_state_aggregates_to_one_event();
+  test_set_pump_state_fires_one_event_when_it_never_reaches_the_pump();
   test_unparsable_arguments_settle_invalid_at_the_bridge();
   test_every_event_carries_the_common_fields();
   test_enabled_carries_two_different_meanings();
   test_upload_carries_its_three_specific_fields();
   test_clock_offset_is_omitted_when_nothing_was_measured();
   test_pump_state_reports_both_flags_and_the_derived_name();
+  test_partially_numeric_arguments_are_rejected();
+  test_well_formed_arguments_still_reach_the_operation_layer();
+  test_an_oversized_argument_is_not_echoed_whole();
+  test_infinities_are_omitted_like_nan();
+  test_paired_echo_keys_are_guarded_independently();
+  test_upload_keys_are_omitted_when_nothing_ran();
+  test_a_rejected_pump_state_does_not_assert_a_state();
 
   std::cout << "\n===========================================================" << std::endl;
   std::cout << "  Test Results" << std::endl;
