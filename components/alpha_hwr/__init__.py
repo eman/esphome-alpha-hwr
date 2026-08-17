@@ -20,6 +20,7 @@ from esphome.const import (
     DEVICE_CLASS_VOLTAGE,
     ENTITY_CATEGORY_DIAGNOSTIC,
     STATE_CLASS_MEASUREMENT,
+    STATE_CLASS_TOTAL_INCREASING,
     UNIT_CELSIUS,
     UNIT_WATT,
 )
@@ -110,6 +111,16 @@ CONF_LAST_CLOCK_SYNC = "last_clock_sync"
 CONF_PUMP_LINK_STATUS = "pump_link_status"
 CONF_LINK_RECYCLES = "link_recycles"
 CONF_LINK_MAX_GAP = "link_max_gap"
+# The tail histogram (issue #176 part 1). These names mirror
+# LINK_GAP_THRESHOLDS_MS in link_watchdog.h, and the coupling is enforced rather
+# than trusted: each generated key resolves to set_link_gaps_over_<T>s_sensor()
+# in alpha_hwr.h, which static_asserts that its index really does hold that
+# threshold. Change one side without the other and the build fails, instead of
+# an entity quietly reporting a rung it is not counting.
+LINK_GAP_THRESHOLDS_S = [15, 20, 30, 45, 60, 90]
+CONF_LINK_GAPS_OVER = [f"link_gaps_over_{t}s" for t in LINK_GAP_THRESHOLDS_S]
+CONF_LINK_GAPS_TRUNCATED = "link_gaps_truncated"
+CONF_LINK_WATCH_TIME = "link_watch_time"
 CONF_PUMP_LAST_LINK_FAILURE = "pump_last_link_failure"
 CONF_TIME_ID = "time_id"
 
@@ -348,6 +359,39 @@ CONFIG_SCHEMA = cv.Schema(
             entity_category=ENTITY_CATEGORY_DIAGNOSTIC,
             state_class=STATE_CLASS_MEASUREMENT,
         ),
+        # The tail histogram, its trust check, and its denominator (issue #176
+        # part 1). link_max_gap above is one point of this distribution; these
+        # give its shape, which is what "how often would a budget of T have
+        # fired" actually needs.
+        #
+        # total_increasing rather than measurement, and that is the reason these
+        # are numeric counters at all: they are RAM values that restart at every
+        # boot, and Home Assistant's long-term statistics recognise the reset and
+        # keep accumulating. A run measured in weeks survives the OTAs and
+        # crashes it will certainly meet; a running maximum does not.
+        **{
+            cv.Optional(key): sensor.sensor_schema(
+                icon="mdi:timer-alert-outline",
+                accuracy_decimals=0,
+                entity_category=ENTITY_CATEGORY_DIAGNOSTIC,
+                state_class=STATE_CLASS_TOTAL_INCREASING,
+            )
+            for key in CONF_LINK_GAPS_OVER
+        },
+        cv.Optional(CONF_LINK_GAPS_TRUNCATED): sensor.sensor_schema(
+            icon="mdi:content-cut",
+            accuracy_decimals=0,
+            entity_category=ENTITY_CATEGORY_DIAGNOSTIC,
+            state_class=STATE_CLASS_TOTAL_INCREASING,
+        ),
+        cv.Optional(CONF_LINK_WATCH_TIME): sensor.sensor_schema(
+            unit_of_measurement="s",
+            icon="mdi:timer-outline",
+            accuracy_decimals=0,
+            device_class="duration",
+            entity_category=ENTITY_CATEGORY_DIAGNOSTIC,
+            state_class=STATE_CLASS_TOTAL_INCREASING,
+        ),
         cv.Optional(CONF_PUMP_LINK_STATUS): text_sensor.text_sensor_schema(
             icon="mdi:bluetooth-connect",
         ),
@@ -537,6 +581,23 @@ async def to_code(config):
     if CONF_LINK_MAX_GAP in config:
         sens = await sensor.new_sensor(config[CONF_LINK_MAX_GAP])
         cg.add(var.set_link_max_gap_sensor(sens))
+
+    # One setter per rung, named after the threshold. Deliberately not an
+    # index-based setter: the name is the only thing that tells an operator what
+    # a counter means, and a name/index/threshold mismatch is invisible in a
+    # reading. Resolving the setter by name makes drift a build failure.
+    for threshold_s, key in zip(LINK_GAP_THRESHOLDS_S, CONF_LINK_GAPS_OVER):
+        if key in config:
+            sens = await sensor.new_sensor(config[key])
+            cg.add(getattr(var, f"set_link_gaps_over_{threshold_s}s_sensor")(sens))
+
+    if CONF_LINK_GAPS_TRUNCATED in config:
+        sens = await sensor.new_sensor(config[CONF_LINK_GAPS_TRUNCATED])
+        cg.add(var.set_link_gaps_truncated_sensor(sens))
+
+    if CONF_LINK_WATCH_TIME in config:
+        sens = await sensor.new_sensor(config[CONF_LINK_WATCH_TIME])
+        cg.add(var.set_link_watch_time_sensor(sens))
 
     if CONF_PUMP_LINK_STATUS in config:
         sens = await text_sensor.new_text_sensor(config[CONF_PUMP_LINK_STATUS])

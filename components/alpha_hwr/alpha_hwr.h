@@ -248,6 +248,43 @@ public:
   void set_link_max_gap_sensor(sensor::Sensor *sensor) {
     link_max_gap_sensor_ = sensor;
   }
+  // The tail histogram (issue #176 part 1). One setter per rung rather than one
+  // taking an index, and each one static_asserts that the index it writes holds
+  // the threshold its own name claims. The name is the only thing telling an
+  // operator what a counter means, and nothing in a reading would reveal a
+  // mislabelled one -- so reordering LINK_GAP_THRESHOLDS_MS becomes a compile
+  // error here, and a config key in __init__.py that drifts out of step calls a
+  // method that does not exist rather than quietly wiring the wrong rung.
+  void set_link_gaps_over_15s_sensor(sensor::Sensor *sensor) {
+    static_assert(LINK_GAP_THRESHOLDS_MS[0] == 15000u, "rung 0 is not 15s");
+    link_gap_over_sensors_[0] = sensor;
+  }
+  void set_link_gaps_over_20s_sensor(sensor::Sensor *sensor) {
+    static_assert(LINK_GAP_THRESHOLDS_MS[1] == 20000u, "rung 1 is not 20s");
+    link_gap_over_sensors_[1] = sensor;
+  }
+  void set_link_gaps_over_30s_sensor(sensor::Sensor *sensor) {
+    static_assert(LINK_GAP_THRESHOLDS_MS[2] == 30000u, "rung 2 is not 30s");
+    link_gap_over_sensors_[2] = sensor;
+  }
+  void set_link_gaps_over_45s_sensor(sensor::Sensor *sensor) {
+    static_assert(LINK_GAP_THRESHOLDS_MS[3] == 45000u, "rung 3 is not 45s");
+    link_gap_over_sensors_[3] = sensor;
+  }
+  void set_link_gaps_over_60s_sensor(sensor::Sensor *sensor) {
+    static_assert(LINK_GAP_THRESHOLDS_MS[4] == 60000u, "rung 4 is not 60s");
+    link_gap_over_sensors_[4] = sensor;
+  }
+  void set_link_gaps_over_90s_sensor(sensor::Sensor *sensor) {
+    static_assert(LINK_GAP_THRESHOLDS_MS[5] == 90000u, "rung 5 is not 90s");
+    link_gap_over_sensors_[5] = sensor;
+  }
+  void set_link_gaps_truncated_sensor(sensor::Sensor *sensor) {
+    link_gaps_truncated_sensor_ = sensor;
+  }
+  void set_link_watch_time_sensor(sensor::Sensor *sensor) {
+    link_watch_time_sensor_ = sensor;
+  }
   void set_operating_hours_sensor(sensor::Sensor *sensor) {
     operating_hours_sensor_ = sensor;
   }
@@ -482,7 +519,37 @@ private:
   // genuinely 0 still has to reach Home Assistant once to be thresholdable.
   uint32_t link_recycles_published_{0xFFFFFFFFu};
   uint32_t link_max_gap_published_{0xFFFFFFFFu};
-  void publish_link_diagnostics_();
+  // The tail histogram, its trust check, and the time they were drawn from
+  // (issue #176 part 1). The counters move at most once per quiet interval past
+  // 15 s -- effectively never on a healthy link -- so the change gate above is
+  // the whole story for them.
+  sensor::Sensor *link_gap_over_sensors_[LINK_GAP_BUCKETS]{};
+  sensor::Sensor *link_gaps_truncated_sensor_{nullptr};
+  uint32_t link_gap_over_published_[LINK_GAP_BUCKETS]{
+      0xFFFFFFFFu, 0xFFFFFFFFu, 0xFFFFFFFFu,
+      0xFFFFFFFFu, 0xFFFFFFFFu, 0xFFFFFFFFu};
+  uint32_t link_gaps_truncated_published_{0xFFFFFFFFu};
+  // Watched time is the exception: it advances on every notification, so a
+  // change gate alone would publish it every 10 s forever. Throttled to
+  // LINK_GAP_WATCH_PUBLISH_MS as well, with the first publish exempt so the
+  // zero baseline reaches Home Assistant at boot -- its total_increasing reset
+  // accounting needs to see that baseline or it charges the new run's counts to
+  // the old one.
+  sensor::Sensor *link_watch_time_sensor_{nullptr};
+  uint32_t link_watch_time_published_{0xFFFFFFFFu};
+  uint32_t link_watch_time_publish_ms_{0};
+  void publish_link_diagnostics_(uint32_t now_ms);
+  /// True when any histogram entity is declared. The censoring warning in
+  /// setup() is gated on it so a config that never asked for the instrument is
+  /// not nagged about a budget that is fine for it.
+  bool link_gap_histogram_configured_() const {
+    for (size_t i = 0; i < LINK_GAP_BUCKETS; i++) {
+      if (this->link_gap_over_sensors_[i] != nullptr)
+        return true;
+    }
+    return this->link_gaps_truncated_sensor_ != nullptr ||
+           this->link_watch_time_sensor_ != nullptr;
+  }
 
   sensor::Sensor *start_count_sensor_{nullptr};
   sensor::Sensor *operating_hours_sensor_{nullptr};

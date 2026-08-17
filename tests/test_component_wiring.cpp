@@ -67,6 +67,12 @@ struct Rig {
   BLEClient client;
   esphome::binary_sensor::BinarySensor ready;
   esphome::text_sensor::TextSensor link_status;
+  // The gap histogram (issue #176 part 1). Attached by default so every test
+  // here exercises the publish path, and because the frame-budget assertions
+  // below are only meaningful against a rig that has them on.
+  esphome::sensor::Sensor gaps_over[6];
+  esphome::sensor::Sensor gaps_truncated;
+  esphome::sensor::Sensor watch_time;
   AlphaHwrComponent component{&client};
 
   BLEService service;
@@ -78,6 +84,14 @@ struct Rig {
     esp_gap_mock().reset();
     component.set_ready_binary_sensor(&ready);
     component.set_pump_link_status_text_sensor(&link_status);
+    component.set_link_gaps_over_15s_sensor(&gaps_over[0]);
+    component.set_link_gaps_over_20s_sensor(&gaps_over[1]);
+    component.set_link_gaps_over_30s_sensor(&gaps_over[2]);
+    component.set_link_gaps_over_45s_sensor(&gaps_over[3]);
+    component.set_link_gaps_over_60s_sensor(&gaps_over[4]);
+    component.set_link_gaps_over_90s_sensor(&gaps_over[5]);
+    component.set_link_gaps_truncated_sensor(&gaps_truncated);
+    component.set_link_watch_time_sensor(&watch_time);
   }
 
   void setup() { component.setup(); }
@@ -169,6 +183,12 @@ struct Rig {
   /// Pump Ready waits on unpopulated.
   bool answer_overview{true};
 
+  /// Go completely deaf: answer nothing at all, without consuming the backlog,
+  /// so that setting it back to true delivers everything the pump owed. This is
+  /// how a quiet interval is produced against the real notification path rather
+  /// than by poking the sampler directly.
+  bool answer_writes{true};
+
   /// Answer anything the component has written that we know a reply for.
   /// Deliberately answers only the frames a test has taught it about: an
   /// unrecognised request goes unanswered, which is what a real pump that does
@@ -214,6 +234,7 @@ static std::vector<uint8_t> data_object_frame(uint8_t type_hi, uint8_t type_lo,
 }
 
 void Rig::answer_outstanding_writes() {
+  if (!answer_writes) return;
   auto &writes = esp_gattc_mock().writes;
   while (answered_writes < writes.size()) {
     const std::vector<uint8_t> &req = writes[answered_writes++];
@@ -550,6 +571,142 @@ void test_ready_clears_on_disconnect() {
   TEST_ASSERT(!r.ready_is_on(), "...and not ready after the link drops");
 }
 
+// ---------------------------------------------------------------------------
+// The gap histogram's wiring (issue #176 part 1). The pure statistics are
+// covered in test_link_watchdog.cpp; what can only be checked here is that the
+// component feeds the sampler from the real notification path, and — the part
+// that has OOMed this node before — what it costs in API frames.
+// ---------------------------------------------------------------------------
+
+void test_link_gap_baseline_is_published_once_at_zero() {
+  std::cout << "\n=== Every gap counter reaches Home Assistant at zero ==="
+            << std::endl;
+
+  // Not cosmetic. These are total_increasing, and Home Assistant reconstructs
+  // a total across reboots by recognising the reset — which it can only do if
+  // it sees the zero baseline. An entity that stays `unknown` until something
+  // interesting happens has its first run's counts charged to the previous one.
+  Rig r;
+  r.setup();
+  r.advance(2000, 2);
+
+  bool all_zero = true;
+  for (auto &s : r.gaps_over) {
+    if (!s.has_state() || s.state != 0.0f) all_zero = false;
+  }
+  TEST_ASSERT(all_zero, "All six rungs publish 0 without waiting for a gap");
+  TEST_ASSERT(r.gaps_truncated.has_state() && r.gaps_truncated.state == 0.0f,
+              "So does the truncated counter");
+  TEST_ASSERT(r.watch_time.has_state() && r.watch_time.state == 0.0f,
+              "...and watched time, whose throttle does not delay the baseline");
+}
+
+void test_gap_counters_do_not_publish_on_every_tick() {
+  std::cout << "\n=== Gap counters cost one frame per change, never a repeat ==="
+            << std::endl;
+
+  // The issue #127 gate, asserted as a frame budget. publish_state() does not
+  // dedup, so an ungated republish on the ~1 s link tick is a frame per API
+  // subscriber per second whether or not anything moved.
+  //
+  // Asserted as "one frame per increment" rather than "no frames at all",
+  // because this rig's pump is not a healthy pump: answer_outstanding_writes()
+  // deliberately answers only the requests a test taught it about, so some
+  // polls here go unanswered and the lower rungs do move. On hardware they
+  // would not. The invariant that matters is rig-independent either way -- a
+  // counter is published when it changes and at no other time -- and stating it
+  // that way keeps the test honest about what it is actually driving.
+  Rig r;
+  r.setup();
+  r.connect_and_subscribe();
+  r.run_until_ready();
+
+  float before[6];
+  for (size_t i = 0; i < 6; i++) {
+    before[i] = r.gaps_over[i].state;
+    r.gaps_over[i].publish_count = 0;
+  }
+  r.gaps_truncated.publish_count = 0;
+  r.watch_time.publish_count = 0;
+
+  const int ticks = 600;
+  r.advance(600000, ticks);  // ten minutes at one loop tick per second
+
+  bool one_frame_per_change = true;
+  int rung_frames = 0;
+  for (size_t i = 0; i < 6; i++) {
+    rung_frames += r.gaps_over[i].publish_count;
+    if (r.gaps_over[i].publish_count !=
+        static_cast<int>(r.gaps_over[i].state - before[i]))
+      one_frame_per_change = false;
+  }
+  TEST_ASSERT(one_frame_per_change,
+              "Each rung published exactly as many frames as it gained counts");
+  TEST_ASSERT(rung_frames < ticks / 10,
+              "...nowhere near the per-tick republish the gate exists to prevent");
+  TEST_ASSERT(r.gaps_truncated.publish_count == 0,
+              "Nothing was truncated, and an unchanged counter is silent");
+
+  // Watched time is the one that genuinely moves every 10 s, so it is throttled
+  // rather than silent. Ten minutes crosses one or two 300 s boundaries
+  // depending on where the baseline landed; what must not happen is a frame per
+  // tick.
+  TEST_ASSERT(r.watch_time.publish_count >= 1 && r.watch_time.publish_count <= 3,
+              "Watched time publishes on its 300s throttle, not on the 1s tick");
+  TEST_ASSERT(r.watch_time.state > 0.0f,
+              "...and it is current rather than stuck at the baseline");
+}
+
+void test_a_quiet_link_fills_the_rungs_end_to_end() {
+  std::cout << "\n=== A quiet interval reaches the rungs through the real "
+               "notification path ==="
+            << std::endl;
+
+  // The call-site test: it proves the notification callback feeds the whole
+  // distribution and not only the running maximum. Fifty seconds of silence,
+  // which is past the 45 s rung and short of both the 60 s rung and the 60 s
+  // watchdog, so the interval ends on its own.
+  Rig r;
+  r.setup();
+  r.connect_and_subscribe();
+  r.run_until_ready();
+
+  r.answer_writes = false;
+  r.advance(50000, 50);
+  r.answer_writes = true;
+  r.advance(20000, 20);
+
+  TEST_ASSERT(r.gaps_over[3].state >= 1.0f,
+              "The 45s rung counted the quiet interval");
+  TEST_ASSERT(r.gaps_over[4].state == 0.0f && r.gaps_over[5].state == 0.0f,
+              "...and the 60s and 90s rungs did not, since it never got there");
+  TEST_ASSERT(r.gaps_truncated.state == 0.0f,
+              "The interval ended on its own, so nothing was truncated");
+}
+
+void test_a_recycle_marks_the_interval_truncated_end_to_end() {
+  std::cout << "\n=== A watchdog recycle counts, and says it was cut short ==="
+            << std::endl;
+
+  // The other call site. A pump that answers nothing at all still reaches the
+  // point where the watchdog is the only thing that notices, and the interval
+  // it gives up on is exactly the sample that must not be discarded — dropping
+  // it is what censored the statistic at the budget the first time round.
+  Rig r;
+  r.answer_writes = false;
+  r.setup();
+  r.connect_and_subscribe();
+  r.advance(70000, 70);
+
+  TEST_ASSERT(r.gaps_over[4].state >= 1.0f,
+              "The 60s rung counted the interval the watchdog gave up on");
+  TEST_ASSERT(r.gaps_truncated.state >= 1.0f,
+              "...and it is marked truncated, because it did not end on its own");
+  TEST_ASSERT(r.gaps_over[5].state == 0.0f,
+              "The 90s rung stays empty: a 60s budget cannot let an interval "
+              "reach it, which is the censoring the docs warn about");
+}
+
 int main() {
   std::cout << "===========================================================" << std::endl;
   std::cout << "  Component BLE Wiring Test Suite" << std::endl;
@@ -565,6 +722,10 @@ int main() {
   test_the_full_connection_reaches_pump_ready();
   test_one_cache_is_not_enough_for_ready();
   test_ready_clears_on_disconnect();
+  test_link_gap_baseline_is_published_once_at_zero();
+  test_gap_counters_do_not_publish_on_every_tick();
+  test_a_quiet_link_fills_the_rungs_end_to_end();
+  test_a_recycle_marks_the_interval_truncated_end_to_end();
 
   std::cout << "\n==========================================" << std::endl;
   std::cout << "Results: " << tests_passed << " passed, " << tests_failed

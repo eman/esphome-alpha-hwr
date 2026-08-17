@@ -163,6 +163,40 @@ alpha_hwr:
    link_max_gap:
      name: "Pump Link Longest Gap"
 
+   # The gap histogram: how MANY quiet intervals passed each length, where
+   # "Longest Gap" above reports only the worst one. Each counter is the number
+   # of times a `data_timeout` of that length would have fired, which is the
+   # number the default has to be chosen from (issue #176 part 1).
+   #
+   # These are a measurement instrument, not a feature. Two things to know
+   # before reading them:
+   #
+   #   - A counter at or above the configured `data_timeout` cannot fill. The
+   #     watchdog cuts the interval short first, so it reads zero however badly
+   #     the pump behaves. A real measurement run sets `data_timeout: 600s`;
+   #     the component logs a warning at boot if it has not been.
+   #   - "Gaps Truncated" is the trust check. It counts the intervals that were
+   #     cut short by a recycle or a drop rather than ending on their own, so a
+   #     run with many of them has a tail that was cut off rather than observed.
+   #
+   # Delete this block once the default is settled — nothing else depends on it.
+   link_gaps_over_15s:
+     name: "Pump Link Gaps Over 15s"
+   link_gaps_over_20s:
+     name: "Pump Link Gaps Over 20s"
+   link_gaps_over_30s:
+     name: "Pump Link Gaps Over 30s"
+   link_gaps_over_45s:
+     name: "Pump Link Gaps Over 45s"
+   link_gaps_over_60s:
+     name: "Pump Link Gaps Over 60s"
+   link_gaps_over_90s:
+     name: "Pump Link Gaps Over 90s"
+   link_gaps_truncated:
+     name: "Pump Link Gaps Truncated"
+   link_watch_time:
+     name: "Pump Link Watched Time"
+
    # Run state, and the alarm for the illegal "schedule on but pump stopped"
    # state that silently loses every window (issue #124). "Engage Pump" reads
    # off for both AUTO and STOP once the schedule is on, so these are the only

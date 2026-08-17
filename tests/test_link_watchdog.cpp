@@ -23,6 +23,7 @@
 
 using esphome::alpha_hwr::link_data_timeout_expired;
 using esphome::alpha_hwr::link_data_timeout_next;
+using esphome::alpha_hwr::link_gap_thresholds_censored;
 using esphome::alpha_hwr::LinkGapSampler;
 using esphome::alpha_hwr::LINK_DATA_TIMEOUT_BACKOFF_CAP_MS;
 
@@ -565,6 +566,282 @@ void test_backoff_cannot_wrap_into_a_tiny_window() {
               "wrapping to a tiny window");
 }
 
+// ---------------------------------------------------------------------------
+// The tail histogram (issue #176 part 1). The counters exist so the
+// data_timeout default can be chosen from what installations actually do; a
+// running maximum gives one point of the distribution and these give its shape.
+// Everything below guards a way the counters could look plausible and mean
+// something other than what the analysis will assume they mean.
+// ---------------------------------------------------------------------------
+
+void test_gap_buckets_count_each_interval_once() {
+  std::cout << "\n=== One interval counts once, in every rung below it ==="
+            << std::endl;
+
+  LinkGapSampler gap;
+  gap.on_open(0);
+  gap.on_inbound(47000);  // one 47s quiet interval, ended by data
+
+  TEST_ASSERT(gap.over_count(0) == 1 && gap.over_count(1) == 1 &&
+                  gap.over_count(2) == 1 && gap.over_count(3) == 1,
+              "A 47s interval counts once in 15s, 20s, 30s and 45s");
+  TEST_ASSERT(gap.over_count(4) == 0 && gap.over_count(5) == 0,
+              "...and not in 60s or 90s, which it never reached");
+  TEST_ASSERT(gap.watched_ms() == 47000,
+              "The watched total is the interval itself, counted once");
+
+  // Three more intervals, none of them long enough to reach any rung. A
+  // counter that incremented per sample rather than per exceedance would climb
+  // here, which is the shape of a histogram that says the pump is worse than
+  // it is.
+  gap.on_inbound(57000);
+  gap.on_inbound(67000);
+  gap.on_inbound(77000);
+  TEST_ASSERT(gap.over_count(0) == 1,
+              "Ordinary 10s poll intervals do not touch the 15s counter");
+  TEST_ASSERT(gap.watched_ms() == 77000,
+              "...but they do count toward the watched total");
+}
+
+void test_gap_bucket_boundary_is_strictly_greater() {
+  std::cout << "\n=== A rung counts what a budget of T would have fired on ==="
+            << std::endl;
+
+  // The equivalence the whole statistic rests on: over_count(i) must be the
+  // number of times a data_timeout of THRESHOLDS[i] would have expired. So the
+  // comparison has to be the same strict `>` link_data_timeout_expired() uses,
+  // and this asserts the two agree at the boundary from both sides rather than
+  // asserting each separately -- a later edit to either is then caught against
+  // the other.
+  for (size_t i = 0; i < LinkGapSampler::bucket_count(); i++) {
+    const uint32_t t = LinkGapSampler::threshold_ms(i);
+
+    LinkGapSampler exact;
+    exact.on_open(1000);
+    exact.on_inbound(1000 + t);
+    const bool watchdog_fires_at_t =
+        link_data_timeout_expired(true, 1000 + t, 1000, t);
+    TEST_ASSERT(exact.over_count(i) == 0 && !watchdog_fires_at_t,
+                "A gap of exactly the threshold neither counts nor fires");
+
+    LinkGapSampler over;
+    over.on_open(1000);
+    over.on_inbound(1000 + t + 1);
+    const bool watchdog_fires_past_t =
+        link_data_timeout_expired(true, 1000 + t + 1, 1000, t);
+    TEST_ASSERT(over.over_count(i) == 1 && watchdog_fires_past_t,
+                "One millisecond past it, both count and fire");
+  }
+}
+
+void test_gap_buckets_are_nested() {
+  std::cout << "\n=== The rungs stay nested, and bounded by the samples ==="
+            << std::endl;
+
+  // Cumulative counts have structure a miswired counter cannot fake:
+  // over_count(i) >= over_count(i+1) for every i. Driven with a deterministic
+  // spread of gaps rather than one crafted value so the invariant is tested
+  // against a mixture, which is what a real run looks like.
+  LinkGapSampler gap;
+  uint32_t now = 0;
+  uint32_t step = 7000;
+  gap.on_open(now);
+  for (int n = 0; n < 40; n++) {
+    step = (step * 31u + 3001u) % 100000u;  // 0..99999 ms, no <random> needed
+    now += step;
+    gap.on_inbound(now);
+  }
+
+  bool nested = true;
+  for (size_t i = 0; i + 1 < LinkGapSampler::bucket_count(); i++) {
+    if (gap.over_count(i) < gap.over_count(i + 1))
+      nested = false;
+  }
+  TEST_ASSERT(nested, "Every rung counts at least as much as the one above it");
+  TEST_ASSERT(gap.over_count(0) <= 40,
+              "No rung counts more intervals than were sampled");
+  TEST_ASSERT(gap.watched_ms() == now,
+              "The watched total is the whole span, since nothing interrupted "
+              "it");
+}
+
+void test_gap_watched_time_excludes_the_downtime() {
+  std::cout << "\n=== Watched time is armed time, not wall time ===" << std::endl;
+
+  // The denominator has to be the time the counts were drawn from. Counting
+  // wall time instead would divide real excursions by hours the link was not
+  // even up, and every rate in the report would read low.
+  LinkGapSampler gap;
+  gap.on_open(0);
+  gap.on_inbound(10000);
+  gap.on_disconnect(20000);   // 20s of armed link so far
+  gap.on_open(600000);        // ...then ten minutes down
+  gap.on_inbound(610000);
+
+  TEST_ASSERT(gap.watched_ms() == 30000,
+              "Two sessions of armed link total 30s, with the downtime between "
+              "them excluded");
+}
+
+void test_gap_truncated_counts_only_intervals_not_closed_by_data() {
+  std::cout << "\n=== Truncated counts the intervals that did not end on their "
+               "own ==="
+            << std::endl;
+
+  // This is the trust check on every other counter. An interval cut short by a
+  // recycle or a drop is a lower bound, so a run full of them has a tail that
+  // was cut off rather than observed -- and the reading looks identical to a
+  // clean one without this number. That is not hypothetical: the pre-fix
+  // maximum read 2.6s against a budget it had breached five times.
+  LinkGapSampler gap;
+  gap.on_open(0);
+  gap.on_inbound(10000);
+  TEST_ASSERT(gap.truncated() == 0, "An interval ended by data is not truncated");
+
+  gap.on_recycle(80000);
+  TEST_ASSERT(gap.truncated() == 1, "One ended by a recycle is");
+
+  gap.on_disconnect(90000);
+  TEST_ASSERT(gap.truncated() == 2, "So is one ended by a drop");
+
+  gap.on_disconnect(120000);
+  TEST_ASSERT(gap.truncated() == 2,
+              "A disconnect with no open before it samples nothing, so it "
+              "cannot inflate the count either");
+}
+
+void test_gap_buckets_are_censored_at_the_window_in_force() {
+  std::cout << "\n=== The rungs are censored at the window, and the backoff "
+               "moves it ==="
+            << std::endl;
+
+  // Documented rather than asserted away. With budget B in force the watchdog
+  // closes the interval on the first tick past B, so no sample can exceed it
+  // and every rung at or above B reads a structural zero -- which is
+  // indistinguishable from "the pump never went quiet that long". Worse, the
+  // backoff widens B after each recycle, so the cutoff is not even constant
+  // across a run. This is why a measurement run has to raise data_timeout past
+  // the top rung, and why the component warns when it has not been.
+  LinkSim sim;
+  sim.open(0);
+  while (sim.fired < 1)
+    sim.tick();
+
+  TEST_ASSERT(sim.gap.over_count(4) == 1,
+              "The first recycle records an interval past the 60s budget");
+  TEST_ASSERT(sim.gap.over_count(5) == 0,
+              "...and the 90s rung reads zero, because a 60s budget cannot let "
+              "an interval get there");
+
+  // Reconnect and stay deaf. The window is now 120s, so the next interval the
+  // watchdog gives up on is long enough to reach 90s -- the same pump, a
+  // different answer, purely because the cutoff moved.
+  sim.open(sim.now + 6000);
+  while (sim.fired < 2)
+    sim.tick();
+  TEST_ASSERT(sim.gap.over_count(5) == 1,
+              "Once the backoff widens the window to 120s the 90s rung starts "
+              "counting");
+  TEST_ASSERT(sim.gap.truncated() == 2,
+              "Both were cut short by the watchdog, and both say so");
+}
+
+void test_gap_counters_survive_a_reconnect() {
+  std::cout << "\n=== A reconnect does not clear the totals ===" << std::endl;
+
+  // They are since-boot totals. Clearing them per session would make a
+  // flapping link -- the exact condition worth measuring -- report near-zero
+  // counts over a denominator of nothing.
+  LinkGapSampler gap;
+  gap.on_open(0);
+  gap.on_inbound(50000);
+  const uint32_t over15 = gap.over_count(0);
+  const uint64_t watched = gap.watched_ms();
+
+  gap.on_disconnect(60000);
+  gap.on_open(70000);
+  gap.on_inbound(80000);
+
+  TEST_ASSERT(gap.over_count(0) >= over15,
+              "The 15s count carries across the reconnect");
+  TEST_ASSERT(gap.watched_ms() > watched,
+              "...and the watched total keeps accumulating rather than "
+              "restarting");
+}
+
+void test_gap_inbound_with_no_open_before_it_does_not_sample() {
+  std::cout << "\n=== A notification with no link behind it arms, it does not "
+               "measure ==="
+            << std::endl;
+
+  // The mirror of the disconnect guard. Measuring from a disconnect stamp to a
+  // stray later notification records the downtime as a quiet interval on a live
+  // link, which permanently increments the top rungs and reads afterwards as a
+  // genuine multi-minute excursion -- an inflated reading, which argues for a
+  // longer timeout, which is the self-serving direction.
+  LinkGapSampler gap;
+  gap.on_open(0);
+  gap.on_inbound(10000);
+  gap.on_disconnect(20000);
+
+  gap.on_inbound(320000);  // five minutes later, with nothing open
+  TEST_ASSERT(gap.max_ms() == 10000 && gap.over_count(0) == 0,
+              "The five minutes of downtime are not sampled");
+
+  // ...and it armed from that frame rather than discarding everything after
+  // it, so the next interval is measured from the right place.
+  gap.on_inbound(330000);
+  TEST_ASSERT(gap.max_ms() == 10000 && gap.watched_ms() == 30000,
+              "The interval after it is measured from the stray frame, not "
+              "from before the disconnect");
+}
+
+void test_gap_thresholds_are_the_documented_set() {
+  std::cout << "\n=== The rungs are the documented ladder ===" << std::endl;
+
+  // components/alpha_hwr/__init__.py names its entities after these values and
+  // alpha_hwr.h static_asserts each setter against its index. This pins the
+  // third side of that triangle: the values themselves, in this order.
+  TEST_ASSERT(LinkGapSampler::bucket_count() == 6, "Six rungs");
+  TEST_ASSERT(LinkGapSampler::threshold_ms(0) == 15000 &&
+                  LinkGapSampler::threshold_ms(1) == 20000 &&
+                  LinkGapSampler::threshold_ms(2) == 30000 &&
+                  LinkGapSampler::threshold_ms(3) == 45000 &&
+                  LinkGapSampler::threshold_ms(4) == 60000 &&
+                  LinkGapSampler::threshold_ms(5) == 90000,
+              "15/20/30/45/60/90s, in the order the entity names assume");
+
+  bool ascending = true;
+  for (size_t i = 0; i + 1 < LinkGapSampler::bucket_count(); i++) {
+    if (LinkGapSampler::threshold_ms(i) >= LinkGapSampler::threshold_ms(i + 1))
+      ascending = false;
+  }
+  TEST_ASSERT(ascending, "Strictly ascending, which the nesting invariant needs");
+
+  LinkGapSampler gap;
+  TEST_ASSERT(LinkGapSampler::threshold_ms(6) == 0 && gap.over_count(6) == 0,
+              "Out of range reads zero rather than off the end of the array");
+}
+
+void test_gap_thresholds_censored_predicate() {
+  std::cout << "\n=== The censoring warning fires on the budgets that earn it "
+               "==="
+            << std::endl;
+
+  TEST_ASSERT(link_gap_thresholds_censored(60000),
+              "The shipped 60s default cannot observe the top rungs");
+  TEST_ASSERT(link_gap_thresholds_censored(90000),
+              "A budget equal to the top rung cannot observe it either -- the "
+              "watchdog fires strictly past the window, so nothing lands above "
+              "it");
+  TEST_ASSERT(!link_gap_thresholds_censored(91000),
+              "One second past the top rung is enough to observe all of them");
+  TEST_ASSERT(!link_gap_thresholds_censored(600000),
+              "The documented measurement-run budget is clear");
+  TEST_ASSERT(!link_gap_thresholds_censored(0),
+              "A disabled watchdog censors nothing, because nothing recycles");
+}
+
 int main() {
   std::cout << "==========================================" << std::endl;
   std::cout << "Link Watchdog Tests (audit finding 8)" << std::endl;
@@ -589,6 +866,16 @@ int main() {
   test_backoff_leaves_a_disabled_watchdog_disabled();
   test_backoff_never_shrinks_a_configured_window();
   test_backoff_cannot_wrap_into_a_tiny_window();
+  test_gap_buckets_count_each_interval_once();
+  test_gap_bucket_boundary_is_strictly_greater();
+  test_gap_buckets_are_nested();
+  test_gap_watched_time_excludes_the_downtime();
+  test_gap_truncated_counts_only_intervals_not_closed_by_data();
+  test_gap_buckets_are_censored_at_the_window_in_force();
+  test_gap_counters_survive_a_reconnect();
+  test_gap_inbound_with_no_open_before_it_does_not_sample();
+  test_gap_thresholds_are_the_documented_set();
+  test_gap_thresholds_censored_predicate();
 
   std::cout << "\n==========================================" << std::endl;
   std::cout << "Results: " << tests_passed << " passed, " << tests_failed << " failed" << std::endl;
