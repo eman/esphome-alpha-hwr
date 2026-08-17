@@ -128,6 +128,19 @@ MUTATIONS=(
 # the regression worth pinning: the user stops being told which of the two
 # things is broken.
 "single-event-envelope-after-overview|components/alpha_hwr/write_operation_service.cpp|  if (op->slot >= static_cast<int16_t>(services::SINGLE_EVENT_SLOT_LIMIT)) {|  if (false && op->slot >= static_cast<int16_t>(services::SINGLE_EVENT_SLOT_LIMIT)) {"
+# CLEAR_SCHEDULE_ENTRY, whose four branches had no test at all until the §9
+# step 6 gap was closed. SET and CLEAR share run_schedule_entry_() and
+# confirm_schedule_entry_(), so the parts only CLEAR reaches are exactly the
+# parts that were unexercised: the blank entry it composes instead of the
+# requested one, and the enabled-flag-only comparison its confirm makes.
+"clear-entry-writes-an-enabled-day|components/alpha_hwr/write_operation_service.cpp|          entry.set_enabled(false);|          entry.set_enabled(true);"
+"clear-entry-confirm-wants-the-day-on|components/alpha_hwr/write_operation_service.cpp|      bool want_enabled = op->command == WriteCommand::SET_SCHEDULE_ENTRY;|      bool want_enabled = true;"
+# Both rejection paths must report what the PUMP holds, not what was asked
+# for. Reporting the request back is the failure that reads as success: the
+# event says the entry is gone (or the schedule enabled) while the pump still
+# holds the opposite, so a client has no way to see the write did not take.
+"clear-entry-reject-reports-the-request|components/alpha_hwr/write_operation_service.cpp|      op->enabled = actual.is_enabled();|      // mutated: keep the requested flag instead of the pump's"
+"schedule-enabled-reject-reports-the-request|components/alpha_hwr/write_operation_service.cpp|      op->enabled = actual;|      // mutated: keep the requested flag instead of the pump's"
 # The clock confirm, in its load-bearing pieces.
 #
 # The first restores the defect the operation was written to fix: report the

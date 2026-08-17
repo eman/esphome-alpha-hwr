@@ -1667,6 +1667,85 @@ static void test_schedule_entry_no_overview() {
   TEST_ASSERT(h.sim.overview_writes == 0, "no overview/commit write was sent");
 }
 
+// CLEAR_SCHEDULE_ENTRY was the one WriteCommand with no case in this file at
+// all — service, submit_*, facade passthrough, watchdog budget, resource key
+// and event fields all wired, and nothing exercising any of it. AGENTS §9
+// step 6 asks for accepted, one failure status and the one-terminal-event
+// invariant per command; these three are that, for the command that had none.
+//
+// The clear path is not simply "set with the enabled bit off": it composes a
+// blank ScheduleEntry rather than the requested one, and its confirm
+// comparator matches on the enabled flag alone (the times are meaningless
+// once the day is off). Those two branches in run_schedule_entry_ and
+// confirm_schedule_entry_ were reached by nothing before this.
+static void test_clear_schedule_entry_accepted() {
+  std::cout << "\n=== clear_schedule_entry: verified accepted ===" << std::endl;
+  Harness h;
+  h.prime_cache();
+  // Seed layer 1 with two enabled days, so "cleared" is distinguishable from
+  // "was never set", and so the whole-layer write has a neighbour to preserve.
+  uint8_t *thursday = h.sim.layers[1] + 3 * 6;
+  thursday[0] = 0x01; thursday[1] = 0x02;
+  thursday[2] = 6; thursday[3] = 0; thursday[4] = 8; thursday[5] = 0;
+  uint8_t *friday = h.sim.layers[1] + 4 * 6;
+  friday[0] = 0x01; friday[1] = 0x02;
+  friday[2] = 17; friday[3] = 30; friday[4] = 19; friday[5] = 45;
+
+  h.write_op.submit_clear_schedule_entry(1, 3, "ce1");
+  h.advance(20000);
+
+  TEST_ASSERT(h.events_for("ce1") == 1, "exactly one terminal event");
+  const WriteResult *r = h.result_for("ce1");
+  TEST_ASSERT(r && r->status == WriteStatus::ACCEPTED, "status is accepted");
+  TEST_ASSERT(r && r->layer == 1 && r->day == 3, "layer/day echoed");
+  TEST_ASSERT(r && r->sched_enabled == 0, "settled entry reports disabled");
+  TEST_ASSERT(h.sim.layers[1][3 * 6] == 0x00, "pump day cell is disabled");
+  // The clear is a read-modify-write of the whole 42-byte layer, so the day
+  // next to the target is the thing a bad patch destroys.
+  TEST_ASSERT(friday[0] == 0x01 && friday[2] == 17 && friday[3] == 30 &&
+              friday[4] == 19 && friday[5] == 45,
+              "the untargeted day in the same layer survives");
+  TEST_ASSERT(h.sim.overview_writes >= 1, "configuration commit was written");
+}
+
+static void test_clear_schedule_entry_pump_keeps_the_entry() {
+  std::cout << "\n=== clear_schedule_entry: pump ignores write -> rejected ===" << std::endl;
+  Harness h;
+  h.prime_cache();
+  uint8_t *saturday = h.sim.layers[2] + 5 * 6;
+  saturday[0] = 0x01; saturday[1] = 0x02;
+  saturday[2] = 7; saturday[3] = 15; saturday[4] = 9; saturday[5] = 45;
+  h.sim.honor_layer_writes = false;
+
+  h.write_op.submit_clear_schedule_entry(2, 5, "ce2");
+  h.advance(25000);
+
+  TEST_ASSERT(h.events_for("ce2") == 1, "exactly one terminal event");
+  const WriteResult *r = h.result_for("ce2");
+  TEST_ASSERT(r && r->status == WriteStatus::REJECTED, "status is rejected");
+  TEST_ASSERT(r && r->detail.find("does not match") != std::string::npos,
+              "detail reports the verify mismatch");
+  // The settled fields must describe the entry the pump still holds, not the
+  // blank one that was sent — that is what tells a client the clear failed.
+  TEST_ASSERT(r && r->sched_enabled == 1, "settled state reports the surviving entry");
+  TEST_ASSERT(r && r->begin_hhmm == "07:15" && r->end_hhmm == "09:45",
+              "and the times it still holds");
+}
+
+static void test_clear_schedule_entry_out_of_range_is_invalid() {
+  std::cout << "\n=== clear_schedule_entry: layer 5 -> invalid, no wire write ===" << std::endl;
+  Harness h;
+  h.prime_cache();
+
+  h.write_op.submit_clear_schedule_entry(5, 0, "ce3");
+  h.advance(5000);
+
+  TEST_ASSERT(h.events_for("ce3") == 1, "exactly one terminal event");
+  const WriteResult *r = h.result_for("ce3");
+  TEST_ASSERT(r && r->status == WriteStatus::INVALID, "status is invalid");
+  TEST_ASSERT(h.sim.overview_writes == 0, "no overview/commit write was sent");
+}
+
 static void test_schedule_enabled_verified_rmw() {
   std::cout << "\n=== set_schedule_enabled: verified, preserves overview bytes ===" << std::endl;
   Harness h;
@@ -1686,6 +1765,29 @@ static void test_schedule_enabled_verified_rmw() {
   const uint8_t expect[10] = {0x8C, 0x23, 0x05, 0x05, 0x01, 0x01, 0x00, 0x00, 0x00, 0x00};
   TEST_ASSERT(memcmp(h.sim.last_overview_write, expect, 10) == 0,
               "overview write preserved the pump's structure bytes");
+}
+
+// SET_SCHEDULE_ENABLED had the accepted case above and nothing else, so its
+// confirm comparator was only ever asked a question it answered yes to. The
+// failure status §9 step 6 requires is this one: the pump takes the frame and
+// keeps its old flag.
+static void test_schedule_enabled_pump_keeps_its_flag() {
+  std::cout << "\n=== set_schedule_enabled: pump ignores the flag -> rejected ===" << std::endl;
+  Harness h;
+  h.prime_cache();
+  h.sim.honor_overview_writes = false;
+
+  h.write_op.submit_set_schedule_enabled(true, "en2");
+  h.advance(30000);
+
+  TEST_ASSERT(h.events_for("en2") == 1, "exactly one terminal event");
+  const WriteResult *r = h.result_for("en2");
+  TEST_ASSERT(r && r->status == WriteStatus::REJECTED, "status is rejected");
+  TEST_ASSERT(r && r->detail.find("still reports schedule disabled") != std::string::npos,
+              "detail names the state the pump kept");
+  TEST_ASSERT(r && r->sched_enabled == 0,
+              "settled flag is the pump's actual state, not the requested one");
+  TEST_ASSERT(!h.sim.sched_enabled, "pump schedule stayed disabled");
 }
 
 static void test_single_event_auto_slot() {
@@ -2935,7 +3037,11 @@ int main() {
   test_schedule_entry_accepted();
   test_schedule_entry_verify_mismatch();
   test_schedule_entry_no_overview();
+  test_clear_schedule_entry_accepted();
+  test_clear_schedule_entry_pump_keeps_the_entry();
+  test_clear_schedule_entry_out_of_range_is_invalid();
   test_schedule_enabled_verified_rmw();
+  test_schedule_enabled_pump_keeps_its_flag();
   test_single_event_auto_slot();
   test_single_event_reuses_expired_slot();
   test_set_vacation_writes_stop_event();

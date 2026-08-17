@@ -934,6 +934,27 @@ doc recipes with it.
   `write_temp_range_config` echoing an unvalidated cache, the midnight-crossing upload codec gap,
   the §9 step 6/7 documentation gaps.
 
+  **Step 6/7 checked; the two halves did not come out the same way.**
+
+  Step 7 (document the service + event fields) holds for all sixteen commands. Every registered
+  service appears in `docs/programmatic-interface.md` with its arguments, and every key
+  `fire_write_settled()` can emit is described there — including the four the per-command summary
+  paragraph omits (`schedule_enabled`, `state`, `layers_written`/`layers_skipped`,
+  `schedule_hash`), which are documented in the `set_pump_state` and `upload_schedule` sections
+  instead. No gap.
+
+  Step 6 (host test: accepted, one failure status, one terminal event) did **not** hold.
+  `CLEAR_SCHEDULE_ENTRY` was the only command with no case in `tests/test_write_operations.cpp`
+  at all — its sole appearance was the string table in `test_command_strings()`. It is otherwise
+  fully wired: service, `submit_*`, facade passthrough, resource key, watchdog budget, event
+  fields. `SET_SCHEDULE_ENABLED` had the accepted case only, so its confirm comparator was never
+  asked a question it answered no to.
+
+  Nothing was broken underneath. The four previously unreached branches — the blank entry the
+  clear composes, the enabled-flag-only confirm, and the two rejection paths that must report the
+  pump's state rather than the request — all behave correctly, and four `mutation_check.sh`
+  entries now hold them there.
+
 ## Leads refuted
 
 - `register_response_handler` has **zero callers** repo-wide — the `pending_handlers_`
