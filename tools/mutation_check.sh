@@ -497,6 +497,19 @@ MUTATIONS=(
 "dhw-release-hold-not-reported|components/dhw_demand/dhw_demand.cpp|    method = \"demand_release_hold\";\n    confidence = 0.5f;|    confidence = 0.5f;"
 "dhw-flow-onset-unqualified|components/dhw_demand/dhw_demand.cpp|  bool prev_flow_present_pump_off = prev_tick_confirms_flow_onset(\n      prev_flow_, flow_threshold_, prev_pump_confirmed_off_);|  bool prev_flow_present_pump_off = prev_tick_confirms_flow_onset(\n      prev_flow_, flow_threshold_, true);"
 "control-enabled-from-opmode|components/alpha_hwr/control_service.cpp|  // AUTO (0) or USER_DEFINED (4) = enabled, STOP (1) = disabled\n  pump_enabled_ = (operation_mode != static_cast<uint8_t>(OperationMode::STOP));|  // AUTO (0) or USER_DEFINED (4) = enabled, STOP (1) = disabled\n  pump_enabled_ = true;"
+# The single-event confirm compared the window and the enabled flag but not the
+# ACTION -- and the two actions are opposites: 0x01 Stop holds the pump off
+# across the window (a vacation), 0x02 Run turns it on. A pump that stored the
+# wrong kind settled ACCEPTED, so a vacation could be confirmed as set while
+# the pump was in fact scheduled to run for the whole week.
+"single-event-confirm-ignores-the-action|components/alpha_hwr/write_operation_service.cpp|                                  actual.action == op->single_event_action;|                                  true;"
+# ...and the skip for a CLEAR must stay a skip: a cleared slot's window is
+# meaningless, so comparing it would reject every successful clear.
+"single-event-confirm-checks-a-cleared-window|components/alpha_hwr/write_operation_service.cpp|      const bool content_is_a_verdict = want_enabled ? window_matches : true;|      const bool content_is_a_verdict = window_matches;"
+# event_type is the only thing distinguishing a vacation from a one-time run in
+# the settle event -- they share a command string. Without it the two API
+# handlers are interchangeable and nothing notices.
+"bridge-single-event-omits-the-event-type|components/alpha_hwr/api_bridge.cpp|      if (result.single_event_action == 0x01) data[\"event_type\"] = \"stop\";|      // mutated: no event_type"
 # The Home Assistant surface. api_bridge.cpp had NO mutation target before
 # tests/test_api_bridge.cpp, and could not have had one: the mock defines.h
 # omitted the USE_API family, so the file compiled out to an object with zero

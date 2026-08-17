@@ -191,12 +191,31 @@ working); `op_id` is a new optional argument.
 | `clear_single_event` | `slot` | Clear one single-event slot |
 | `refresh_single_events` | *(no data)* | Re-read all single-event slots |
 | `upload_schedule` | v1 payload (below) | **Bulk full-state upload** of the entire 7×5 grid in one call |
-| `set_vacation` | `begin_ts,end_ts` (epoch seconds) | A multi-day Stop event overriding the weekly schedule. Settles as `set_single_event` — a vacation *is* a single-event slot, not a command of its own |
+| `set_vacation` | `begin_ts,end_ts` (epoch seconds) | A multi-day Stop event overriding the weekly schedule. Settles as `set_single_event` with `event_type: "stop"` — a vacation *is* a single-event slot, not a command of its own |
 | `clear_vacation` | *(no data)* | End the active vacation. Settles as `clear_single_event` |
 
 Schedule writes are **verified**: after the write and commit, the component
 reads the schedule back from the pump and compares before reporting. (They
 previously reported success unconditionally.)
+
+#### Telling a vacation from a one-time run
+
+`set_vacation` and `set_single_event` both settle as `set_single_event`,
+because a vacation is a single-event slot rather than a command of its own.
+They are nevertheless **opposite instructions** — a vacation writes a *Stop*
+event, holding the pump off across the window, while `set_single_event` writes
+a *Run*. The settle event distinguishes them:
+
+| `event_type` | Meaning |
+| --- | --- |
+| `"run"` | a one-time run — the pump operates across the window |
+| `"stop"` | a vacation — the pump is held off across the window |
+
+Present on `set_single_event` settles only. A `clear_single_event` disables the
+slot whatever it held, so there is no action to report and the key is absent.
+
+The comparison is part of the verification: a pump that acknowledges the write
+and stores the *other* kind settles `rejected`, not `accepted`.
 
 ### Bulk upload (`upload_schedule`)
 
@@ -340,6 +359,7 @@ commands; `temp_min`/`temp_max`/`autoadapt`; `on_minutes`/`off_minutes`/`flow`
 including fields the request kept — a keep-everything-but-one write doubles
 as a read of the others); `layer`/`day`/`day_name`/`begin`/`end`/`enabled`
 for schedule entries; `slot`/`begin_ts`/`end_ts`/`enabled` for single events;
+`event_type` for `set_single_event` (see below);
 `event_count` for the refreshes; `enabled`/`schedule_enabled`/`state` for
 `set_pump_state`; `layers_written`/`layers_skipped`/`schedule_hash` for
 `upload_schedule`; `remote_enabled` for `set_remote_mode`;

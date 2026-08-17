@@ -372,6 +372,17 @@ void WriteOperationService::finish_(uint32_t seq, WriteStatus status, const std:
       result.begin_ts = op.begin_ts;
       result.end_ts = op.end_ts;
       result.sched_enabled = op.enabled ? 1 : 0;
+      // Which KIND of single event this was. Without it a client watching
+      // write_settled cannot tell "run the pump once at 6am" from "hold the
+      // pump off for a week" -- both settle as `set_single_event`, because a
+      // vacation is a Stop event rather than a command of its own.
+      //
+      // SET only. A clear disables the slot whatever it held, so the action
+      // field of a cleared event describes nothing that was written -- and
+      // op.single_event_action would just be reporting its own 0x02 default.
+      if (op.command == WriteCommand::SET_SINGLE_EVENT) {
+        result.single_event_action = op.single_event_action;
+      }
       break;
     case WriteCommand::REFRESH_SCHEDULE:
     case WriteCommand::REFRESH_SINGLE_EVENTS:
@@ -1767,9 +1778,20 @@ void WriteOperationService::confirm_single_event_(uint32_t seq) {
       }
 
       bool want_enabled = op->command == WriteCommand::SET_SINGLE_EVENT;
-      bool match = actual.enabled == want_enabled &&
-                   (!want_enabled || (actual.begin_timestamp == op->begin_ts &&
-                                      actual.end_timestamp == op->end_ts));
+      // The action is half the meaning of a single event and was not compared.
+      // 0x01 is Stop -- the pump held OFF across the window, which is what a
+      // vacation is -- and 0x02 is a one-time Run. They are opposites, and a
+      // pump that stored the wrong one settled ACCEPTED because the window and
+      // the enabled flag matched: a vacation confirmed as set while the pump
+      // was actually scheduled to run for a week, or the reverse.
+      //
+      // Hoisted into its own name so mutation_check.sh has a pipe-free line to
+      // anchor to.
+      const bool window_matches = actual.begin_timestamp == op->begin_ts &&
+                                  actual.end_timestamp == op->end_ts &&
+                                  actual.action == op->single_event_action;
+      const bool content_is_a_verdict = want_enabled ? window_matches : true;
+      bool match = actual.enabled == want_enabled && content_is_a_verdict;
       if (match) {
         finish_(seq, WriteStatus::ACCEPTED, "");
         return;
@@ -1782,6 +1804,7 @@ void WriteOperationService::confirm_single_event_(uint32_t seq) {
       op->enabled = actual.enabled;
       op->begin_ts = actual.begin_timestamp;
       op->end_ts = actual.end_timestamp;
+      op->single_event_action = actual.action;
       finish_(seq, WriteStatus::REJECTED, "slot readback does not match written event");
     });
 }

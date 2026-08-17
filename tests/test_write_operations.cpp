@@ -141,6 +141,16 @@ struct PumpSim {
   // and confirm_schedule_entry_ deliberately does not look at the times of a
   // day it asked to be off.
   bool keep_times_when_disabling{false};
+  // >0: the pump stores this action byte whatever the write asked for, keeping
+  // the window and enabled flag intact. Models the one divergence the confirm
+  // used to ignore -- a Stop written and a Run stored, or the reverse.
+  uint8_t force_single_event_action{0};
+  // A pump that disables a single-event slot by clearing its ENABLED byte and
+  // leaving the action and timestamps behind, so a cleared slot reads back with
+  // stale content rather than zeros. Nothing in the protocol requires zeroing,
+  // and the confirm deliberately does not look at the content of a slot it
+  // asked to be off.
+  bool keep_single_event_content_when_clearing{false};
   // Swallow this many layer writes, applying each one only when the NEXT layer
   // read arrives. Lets a test put a confirm readback in front of the pump's
   // own commit, which is the only thing the mismatch retry ladder is for.
@@ -464,7 +474,18 @@ struct Harness {
         inject_layer_frame(static_cast<uint8_t>(sub - 1000));
       } else if (opspec == 0x93 && sub >= 900 && sub < 935 && apdu_len >= 21) {
         // Single-event write (10 bytes at apdu+11)
-        if (sim.honor_layer_writes) memcpy(sim.single_events[sub - 900], apdu + 11, 10);
+        if (sim.honor_layer_writes) {
+          uint8_t was[10];
+          memcpy(was, sim.single_events[sub - 900], 10);
+          uint8_t *slot = sim.single_events[sub - 900];
+          memcpy(slot, apdu + 11, 10);
+          if (sim.force_single_event_action != 0) {
+            slot[1] = sim.force_single_event_action;
+          }
+          if (sim.keep_single_event_content_when_clearing && was[0] != 0 && slot[0] == 0) {
+            memcpy(slot + 1, was + 1, 9);
+          }
+        }
         inject_single_event_frame(static_cast<uint8_t>(sub - 900));
       } else if (opspec == 0x93 && sub == 1 && apdu_len >= 21) {
         // ClockProgramOverview write (set_state / configuration commit)
@@ -2151,6 +2172,98 @@ static void test_set_vacation_writes_stop_event() {
               "action byte is Stop (0x01), not Auto");
 }
 
+// The confirm compared the enabled flag and the window but NOT the action, so
+// a pump that stored the opposite kind of event settled ACCEPTED. The two are
+// opposites: 0x01 Stop holds the pump off across the window (a vacation),
+// 0x02 Run turns it on. A vacation confirmed as set while the pump was in fact
+// scheduled to RUN for the whole week is the failure this pins -- and it
+// reported success, so nothing downstream could notice either.
+static void test_a_vacation_stored_as_a_run_event_is_rejected() {
+  std::cout << "\n=== set_vacation: pump stores a Run where a Stop was written -> rejected ==="
+            << std::endl;
+  Harness h;
+  h.prime_cache();
+  h.sim.force_single_event_action = 0x02;  // pump keeps everything else, flips the kind
+
+  h.write_op.submit_set_vacation(1000000, 2000000, "vac_bad");
+  h.advance(60000);
+
+  TEST_ASSERT(h.events_for("vac_bad") == 1, "exactly one terminal event");
+  const WriteResult *r = h.result_for("vac_bad");
+  TEST_ASSERT(r && r->status == WriteStatus::REJECTED,
+              "an inverted event kind is a rejection, not an accepted vacation");
+  // The window matched exactly, so only the action comparison can have caught
+  // it -- and the settled fields must report what the pump actually holds.
+  TEST_ASSERT(r && r->single_event_action == 0x02,
+              "the settled action reports the Run the pump kept");
+}
+
+// The mirror: a one-time run stored as a Stop would hold the pump off over a
+// window the user asked it to run in.
+static void test_a_run_event_stored_as_a_stop_is_rejected() {
+  std::cout << "\n=== set_single_event: pump stores a Stop where a Run was written -> rejected ==="
+            << std::endl;
+  Harness h;
+  h.prime_cache();
+  h.sim.force_single_event_action = 0x01;
+
+  h.write_op.submit_set_single_event(1000000, 2000000, "run_bad");
+  h.advance(60000);
+
+  TEST_ASSERT(h.events_for("run_bad") == 1, "exactly one terminal event");
+  const WriteResult *r = h.result_for("run_bad");
+  TEST_ASSERT(r && r->status == WriteStatus::REJECTED, "an inverted event kind is a rejection");
+  TEST_ASSERT(r && r->single_event_action == 0x01,
+              "the settled action reports the Stop the pump kept");
+}
+
+// The counterpart, so the two above cannot pass by rejecting everything: an
+// honest pump still settles ACCEPTED, and the action reaches the result.
+static void test_a_matching_action_still_settles_accepted() {
+  std::cout << "\n=== set_vacation: a pump that stores the Stop settles accepted ===" << std::endl;
+  Harness h;
+  h.prime_cache();
+
+  h.write_op.submit_set_vacation(1000000, 2000000, "vac_ok");
+  h.advance(60000);
+
+  const WriteResult *r = h.result_for("vac_ok");
+  TEST_ASSERT(h.events_for("vac_ok") == 1, "exactly one terminal event");
+  TEST_ASSERT(r && r->status == WriteStatus::ACCEPTED, "status is accepted");
+  TEST_ASSERT(r && r->single_event_action == 0x01,
+              "and the result carries Stop, so a client can tell a vacation from a run");
+}
+
+// The confirm skips the content comparison for a CLEAR -- a slot we asked to
+// be off has no meaningful window or action. Nothing pinned that: after a
+// normal clear the slot reads back all zeros and the operation's own
+// begin/end are zero too, so comparing them changes nothing and the skip could
+// be deleted unnoticed. It matters for a pump that clears the enabled byte and
+// leaves the rest, which would then have every clear settle REJECTED.
+static void test_clear_single_event_ignores_stale_content_in_a_disabled_slot() {
+  std::cout << "\n=== clear_single_event: leftover content in a disabled slot is not a mismatch ==="
+            << std::endl;
+  Harness h;
+  h.prime_cache();
+  // Slot 1 holds an enabled Stop event with a real window.
+  h.sim.single_events[1][0] = 1;
+  h.sim.single_events[1][1] = 0x01;
+  h.sim.single_events[1][5] = 0x10;
+  h.sim.single_events[1][9] = 0x20;
+  h.sim.keep_single_event_content_when_clearing = true;
+
+  h.write_op.submit_clear_single_event(1, "cse_stale");
+  h.advance(60000);
+
+  TEST_ASSERT(h.events_for("cse_stale") == 1, "exactly one terminal event");
+  const WriteResult *r = h.result_for("cse_stale");
+  TEST_ASSERT(r && r->status == WriteStatus::ACCEPTED,
+              "the slot is off, so the clear is accepted");
+  TEST_ASSERT(h.sim.single_events[1][0] == 0, "pump slot is disabled");
+  TEST_ASSERT(h.sim.single_events[1][1] == 0x01,
+              "and the pump really did keep the old action -- the fixture bites");
+}
+
 static void test_clear_vacation_targets_stop_slot() {
   std::cout << "\n=== clear_vacation: clears the Stop slot, leaves run events ===" << std::endl;
   Harness h;
@@ -3162,6 +3275,10 @@ int main() {
   test_single_event_auto_slot();
   test_single_event_reuses_expired_slot();
   test_set_vacation_writes_stop_event();
+  test_a_vacation_stored_as_a_run_event_is_rejected();
+  test_a_run_event_stored_as_a_stop_is_rejected();
+  test_a_matching_action_still_settles_accepted();
+  test_clear_single_event_ignores_stale_content_in_a_disabled_slot();
   test_clear_vacation_targets_stop_slot();
   test_clear_vacation_none_active();
   test_clear_single_event();

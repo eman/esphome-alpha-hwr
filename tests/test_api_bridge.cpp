@@ -22,19 +22,16 @@
 // handler paired with the wrong enumerator answers to the wrong name, and the
 // event says so.
 //
-// KNOWN BLIND SPOT, found by an adversarial pass that applied all 98
-// same-arity handler mispairings by hand. 96 die here. The two that survive
-// are `set_single_event` <-> `set_vacation`, because both settle under the
-// same command string (`set_single_event`) and `command` is the only
-// discriminator these tests have. That pair is not a technicality: a vacation
-// is submitted as a STOP single event, so a `set_single_event` call bound to
-// `on_set_vacation` turns the pump OFF over the caller's window instead of
-// running it. Status and detail are identical on both paths too.
+// An adversarial pass applied all 98 same-arity handler mispairings by hand.
+// 96 died; the two survivors were `set_single_event` <-> `set_vacation`, which
+// settle under the SAME command string, so `command` could not tell them
+// apart. That pair was never a technicality: a vacation is submitted as a STOP
+// single event, so a `set_single_event` call bound to `on_set_vacation` turns
+// the pump OFF across the caller's window instead of running it.
 //
-// Telling them apart needs something the settle event does not currently
-// carry -- the single event's type -- or a connected component that can be
-// asked what reached the pump. Neither belongs in this file, so the gap is
-// recorded rather than papered over.
+// Closed by giving the event an `event_type` ("run" / "stop"), which a client
+// needed anyway -- until then nothing watching write_settled could tell "run
+// the pump once at 6am" from "hold the pump off for a week". All 98 now die.
 //
 // The component is left unconnected on purpose. Every submitted operation then
 // settles REJECTED at the ready check, which is a terminal event like any
@@ -206,30 +203,36 @@ static void test_each_service_settles_as_the_command_it_is_named_for() {
   struct Case {
     const char *service;
     const char *settles_as;
+    // "" when the command carries no event_type. For the two single-event
+    // services this is what tells them apart: they settle under the SAME
+    // command string, so `command` alone cannot see one bound to the other's
+    // handler -- and the difference is not cosmetic, a vacation is a Stop
+    // event that holds the pump OFF across the window.
+    const char *event_type;
     std::vector<ServiceArg> args;
   };
   // Valid arguments throughout: the point is to reach the operation layer, not
   // to test parsing. Unconnected, each lands on the ready check.
   const std::vector<Case> cases = {
-      {"set_pump_enabled", "set_pump_enabled", {true, std::string("t1")}},
-      {"set_mode", "set_mode", {std::string("constant_speed"), std::string("t2")}},
-      {"set_setpoint", "set_setpoint", {std::string("constant_speed"), 1500.0f, std::string("t3")}},
-      {"set_temperature_range", "set_temperature_range", {35.0f, 45.0f, false, std::string("t4")}},
-      {"set_cycle_times", "set_cycle_times", {5.0f, 15.0f, 1.0f, std::string("t5")}},
-      {"upload_schedule", "upload_schedule", {std::string("v1,1;0,0,6,0,7,0"), std::string("t6")}},
-      {"set_schedule_entry", "set_schedule_entry", {std::string("0,0,6,0,8,0"), std::string("t7")}},
-      {"clear_schedule_entry", "clear_schedule_entry", {std::string("0,0"), std::string("t8")}},
-      {"set_schedule_enabled", "set_schedule_enabled", {std::string("1"), std::string("t9")}},
-      {"refresh_schedule", "refresh_schedule", {std::string("t10")}},
-      {"set_single_event", "set_single_event", {std::string("2000000000,2000003600"), std::string("t11")}},
-      {"clear_single_event", "clear_single_event", {std::string("0"), std::string("t12")}},
-      {"refresh_single_events", "refresh_single_events", {std::string("t13")}},
+      {"set_pump_enabled", "set_pump_enabled", "", {true, std::string("t1")}},
+      {"set_mode", "set_mode", "", {std::string("constant_speed"), std::string("t2")}},
+      {"set_setpoint", "set_setpoint", "", {std::string("constant_speed"), 1500.0f, std::string("t3")}},
+      {"set_temperature_range", "set_temperature_range", "", {35.0f, 45.0f, false, std::string("t4")}},
+      {"set_cycle_times", "set_cycle_times", "", {5.0f, 15.0f, 1.0f, std::string("t5")}},
+      {"upload_schedule", "upload_schedule", "", {std::string("v1,1;0,0,6,0,7,0"), std::string("t6")}},
+      {"set_schedule_entry", "set_schedule_entry", "", {std::string("0,0,6,0,8,0"), std::string("t7")}},
+      {"clear_schedule_entry", "clear_schedule_entry", "", {std::string("0,0"), std::string("t8")}},
+      {"set_schedule_enabled", "set_schedule_enabled", "", {std::string("1"), std::string("t9")}},
+      {"refresh_schedule", "refresh_schedule", "", {std::string("t10")}},
+      {"set_single_event", "set_single_event", "run", {std::string("2000000000,2000003600"), std::string("t11")}},
+      {"clear_single_event", "clear_single_event", "", {std::string("0"), std::string("t12")}},
+      {"refresh_single_events", "refresh_single_events", "", {std::string("t13")}},
       // The two documented exceptions: a vacation is a composition over the
       // single-event slots, not a command of its own, so it settles under the
       // single-event names. docs/programmatic-interface.md states this; here it
       // is pinned rather than trusted.
-      {"set_vacation", "set_single_event", {std::string("2000000000,2000086400"), std::string("t14")}},
-      {"clear_vacation", "clear_single_event", {std::string("t15")}},
+      {"set_vacation", "set_single_event", "stop", {std::string("2000000000,2000086400"), std::string("t14")}},
+      {"clear_vacation", "clear_single_event", "", {std::string("t15")}},
   };
 
   for (const auto &c : cases) {
@@ -256,6 +259,15 @@ static void test_each_service_settles_as_the_command_it_is_named_for() {
                 std::string("'") + c.service + "' reached the write layer's ready check");
     TEST_ASSERT(BridgeHarness::field(*ev, "detail") == "pump not connected/synchronized",
                 std::string("'") + c.service + "' reports why, and `detail` is not empty");
+    // The discriminator that closes the set_single_event <-> set_vacation
+    // blind spot: both settle under one command, and only this says which.
+    if (std::string(c.event_type).empty()) {
+      TEST_ASSERT(!BridgeHarness::has(*ev, "event_type"),
+                  std::string("'") + c.service + "' carries no event_type");
+    } else {
+      TEST_ASSERT(BridgeHarness::field(*ev, "event_type") == c.event_type,
+                  std::string("'") + c.service + "' reports event_type '" + c.event_type + "'");
+    }
   }
 }
 
