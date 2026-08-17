@@ -934,6 +934,86 @@ doc recipes with it.
   `write_temp_range_config` echoing an unvalidated cache, the midnight-crossing upload codec gap,
   the §9 step 6/7 documentation gaps.
 
+  **Step 6/7 checked; both had gaps, and I got step 7 wrong on the first pass.**
+
+  My first reading said step 7 held: every service registered in `api_bridge.cpp` is in
+  `docs/programmatic-interface.md` with its arguments — true, all sixteen registrations, argument
+  lists included (fourteen command-named plus `set_vacation`/`clear_vacation`; `SET_CLOCK` and
+  `SET_PUMP_STATE` register no service at all) — and every event key is "described somewhere". A
+  skeptic pass refuted the second half. Checking that keys are *mentioned* is not checking that
+  they are *documented*, and one key is not mentioned at all:
+
+  - **`schedule_hash` is emitted on every `upload_schedule` settle and appears nowhere in the doc
+    as an event field.** Its only two mentions are the text *sensor* of the same name. That is the
+    step-7 failure proper, and it defeats the field's purpose: it exists so a client can learn what
+    the pump holds straight off the event instead of polling the sensor and racing the republish.
+  - **The doc asserted a false invariant.** It said `enabled` "on every other command is the pump's
+    run state". On all six schedule commands `enabled` is the *schedule* flag —
+    `fire_write_settled()`'s `default:` branch fills it from `sched_enabled`. The same wrong claim
+    sat in the code comment at `api_bridge.cpp` that justified naming remote mode's key
+    `remote_enabled`.
+  - **`partial` was missing from the canonical status list**, appearing only inside the
+    `upload_schedule` section — so a client switching on `status` off the documented enumeration
+    drops a reachable terminal status.
+  - **`layers_written`/`layers_skipped` were scoped to `partial`** in the doc; they are emitted on
+    every upload settle, and their format (comma-separated layer indices) was never stated.
+  - **`clock_offset_s` on `timeout` documented an unreachable case.** A readback that decodes
+    settles the operation immediately, so only undecodable attempts retry and a `timeout` always
+    carries NAN. Both the doc and two code comments claimed the opposite.
+  - **`seq` is `"0"` on the two event kinds the API bridge builds itself** (bridge-level `invalid`,
+    and the aggregate `set_pump_state`), because neither passes through the queue that numbers
+    them. The doc's `node` + `seq` uniqueness claim was false for exactly those.
+
+  All six are fixed in the doc; the two stale code comments are corrected with them.
+
+  Step 6 (host test: accepted, one failure status, one terminal event) did **not** hold either.
+  `CLEAR_SCHEDULE_ENTRY` had no case in `tests/test_write_operations.cpp` — its sole appearance
+  was the string table in `test_command_strings()`. It is otherwise fully wired: service,
+  `submit_*`, facade passthrough, resource key, watchdog budget, event fields.
+  `SET_SCHEDULE_ENABLED` had the accepted case only, so its confirm comparator was never asked a
+  question it answered no to.
+
+  A skeptic instrumented the dispatch switch on the pre-change tree and ran the whole suite: **14
+  of the 16 commands dispatch, and two never do.** The second is `SET_PUMP_STATE`, so
+  "`CLEAR_SCHEDULE_ENTRY` was the *only* command with no case" — which an earlier draft of this
+  note said, and the PR body with it — is false. `SET_PUMP_STATE` cannot have a run/confirm case
+  (it is never enqueued; the bridge composes it from two flag writes), and
+  `tests/test_pump_schedule_ux.cpp:78` covers its state parsing and all three compositions. What
+  is genuinely untested is its **aggregate settle event**, built in `api_bridge.cpp` — which no
+  host test compiles at all. That is a real residual step-6 gap, and closing it means host-testing
+  the bridge, not adding a case to this file.
+
+  Nothing was broken underneath. **Three** branches were previously unreached — the blank entry
+  the clear composes, the enabled-flag-only confirm, and `confirm_schedule_enabled_`'s rejection
+  report — all correct, now held by `mutation_check.sh` entries. The fourth entry
+  (`confirm_schedule_entry_`'s `op->enabled = actual.is_enabled()`) is on a line **shared with
+  SET**, and the pre-existing `test_schedule_entry_verify_mismatch` already killed that mutation;
+  the new CLEAR test adds a second, CLEAR-side kill rather than a first one. Same correction as
+  the sentence above: two rejection paths were claimed unreached, one was.
+
+  **A third skeptic then found two branches the new tests reach but do not pin**, both of which
+  the commit message claimed were covered:
+
+  - **The `!want_enabled ||` short-circuit** — the reason a clear's confirm ignores the entry's
+    times. Deleting it left the suite at 447/0, because after a normal clear the pump's cell is
+    all zeros and the operation's own begin/end are zero too, so the extra comparison is trivially
+    true. It only matters for a pump that clears the *enabled* byte and leaves the hour/minute
+    bytes behind — nothing in the protocol forbids that, and such a pump would settle **every**
+    clear `rejected`, quoting the stale times back as the entry it "still holds". The simulator
+    now models one, and the predicate is hoisted into `times_are_a_verdict` so the mutation entry
+    has a pipe-free line to anchor to.
+  - **The mismatch retry ladder** — no assertion named it. A pump that acks the layer write and
+    commits it a beat later answers the first confirm read with the pre-write image; without the
+    ladder that is a `rejected` for a write that took. The simulator can now defer a layer write
+    to the read after next.
+
+  The same pass also showed one assertion was **unkillable**: `overview_writes == 0` on the
+  out-of-range test. Removing the bounds guard does not produce a stray write — it produces a 20 s
+  stall, because `read_entries_async` refuses an out-of-range layer by returning false *without
+  invoking its callback*, and `run_schedule_entry_` ignored that return. That return is now
+  handled (the guard keeps it unreachable; this keeps it unreachable if the guard ever moves), and
+  the assertion is replaced by one that can fail: the operation settles **before any time passes**.
+
 ## Leads refuted
 
 - `register_response_handler` has **zero callers** repo-wide — the `pending_handlers_`

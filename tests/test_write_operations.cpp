@@ -135,6 +135,18 @@ struct PumpSim {
   bool respond_single_event_reads{true};
   bool honor_layer_writes{true};
   bool honor_overview_writes{true};
+  // A pump that disables a day by clearing its ENABLED byte and leaving the
+  // hour/minute bytes alone, so a cleared cell reads back with stale times
+  // rather than zeros. Nothing in the protocol requires a pump to zero them,
+  // and confirm_schedule_entry_ deliberately does not look at the times of a
+  // day it asked to be off.
+  bool keep_times_when_disabling{false};
+  // Swallow this many layer writes, applying each one only when the NEXT layer
+  // read arrives. Lets a test put a confirm readback in front of the pump's
+  // own commit, which is the only thing the mismatch retry ladder is for.
+  int defer_layer_writes{0};
+  int8_t deferred_layer{-1};
+  uint8_t deferred_layer_data[42] = {};
   // Control source as the pump reports it in Object 86 Sub 7: 2 =
   // Remote/Digital, 1 = Local/Panel, 0 = the unrecognized byte that must not
   // move the cached state.
@@ -408,8 +420,16 @@ struct Harness {
           if (sim.respond_overview_reads) inject_overview_frame();
         } else if (sub >= 1000 && sub <= 1004) {
           uint8_t layer = static_cast<uint8_t>(sub - 1000);
+          // A deferred write lands here: the read that follows it answers with
+          // the OLD image, and the write takes effect only afterwards, so the
+          // read after that one sees it.
+          bool answer_stale = sim.deferred_layer == static_cast<int8_t>(layer);
           if (sim.respond_layer_reads && !sim.drop_layer_reads.count(layer))
             inject_layer_frame(layer);
+          if (answer_stale) {
+            memcpy(sim.layers[layer], sim.deferred_layer_data, 42);
+            sim.deferred_layer = -1;
+          }
         } else if (sub >= 900 && sub < 935) {
           if (sim.respond_single_event_reads)
             inject_single_event_frame(static_cast<uint8_t>(sub - 900));
@@ -417,7 +437,30 @@ struct Harness {
       } else if (opspec == 0xB3 && sub >= 1000 && sub <= 1004 && apdu_len >= 53) {
         // Whole-layer write (42 bytes at apdu+11)
         frames_layer_write++;
-        if (sim.honor_layer_writes) memcpy(sim.layers[sub - 1000], apdu + 11, 42);
+        if (sim.defer_layer_writes > 0) {
+          // Model a pump that takes the frame and applies it a readback later,
+          // so the first confirm sees the OLD image. Only the confirm retry
+          // ladder gets the operation past that.
+          sim.defer_layer_writes--;
+          sim.deferred_layer = static_cast<int8_t>(sub - 1000);
+          memcpy(sim.deferred_layer_data, apdu + 11, 42);
+        } else if (sim.honor_layer_writes) {
+          uint8_t was[42];
+          memcpy(was, sim.layers[sub - 1000], 42);
+          uint8_t *img = sim.layers[sub - 1000];
+          memcpy(img, apdu + 11, 42);
+          if (sim.keep_times_when_disabling) {
+            // Model a pump that clears a day's ENABLED byte but leaves the
+            // hour/minute bytes as they were -- a disabled cell whose payload
+            // is stale rather than zeroed. The confirm must not read those
+            // leftover times as a failed clear.
+            for (int d = 0; d < 7; d++) {
+              if (was[d * 6] != 0 && img[d * 6] == 0) {
+                memcpy(img + d * 6 + 2, was + d * 6 + 2, 4);
+              }
+            }
+          }
+        }
         inject_layer_frame(static_cast<uint8_t>(sub - 1000));
       } else if (opspec == 0x93 && sub >= 900 && sub < 935 && apdu_len >= 21) {
         // Single-event write (10 bytes at apdu+11)
@@ -1667,6 +1710,157 @@ static void test_schedule_entry_no_overview() {
   TEST_ASSERT(h.sim.overview_writes == 0, "no overview/commit write was sent");
 }
 
+// CLEAR_SCHEDULE_ENTRY had no case in this file — service, submit_*, facade
+// passthrough, watchdog budget, resource key and event fields all wired, and
+// nothing exercising any of it. AGENTS §9 step 6 asks for accepted, one
+// failure status and the one-terminal-event invariant per command; these
+// three are that, for a command that had none.
+//
+// (SET_PUMP_STATE is equally caseless here, so this was not "the only one".
+// It is never enqueued as an Operation -- the bridge composes it from two
+// flag writes -- so it has no run/confirm path to test; test_pump_schedule_ux
+// covers its state parsing. Its aggregate settle event, built in
+// api_bridge.cpp, is genuinely untested, but no host test compiles that file.)
+//
+// The clear path is not simply "set with the enabled bit off": it composes a
+// blank ScheduleEntry rather than the requested one, and its confirm
+// comparator matches on the enabled flag alone (the times are meaningless
+// once the day is off). Those two branches in run_schedule_entry_ and
+// confirm_schedule_entry_ were reached by nothing before this — verified by
+// instrumenting both and running the whole pre-change suite: zero hits.
+static void test_clear_schedule_entry_accepted() {
+  std::cout << "\n=== clear_schedule_entry: verified accepted ===" << std::endl;
+  Harness h;
+  h.prime_cache();
+  // Seed layer 1 with two enabled days, so "cleared" is distinguishable from
+  // "was never set", and so the whole-layer write has a neighbour to preserve.
+  uint8_t *thursday = h.sim.layers[1] + 3 * 6;
+  thursday[0] = 0x01; thursday[1] = 0x02;
+  thursday[2] = 6; thursday[3] = 0; thursday[4] = 8; thursday[5] = 0;
+  uint8_t *friday = h.sim.layers[1] + 4 * 6;
+  friday[0] = 0x01; friday[1] = 0x02;
+  friday[2] = 17; friday[3] = 30; friday[4] = 19; friday[5] = 45;
+
+  h.write_op.submit_clear_schedule_entry(1, 3, "ce1");
+  h.advance(20000);
+
+  TEST_ASSERT(h.events_for("ce1") == 1, "exactly one terminal event");
+  const WriteResult *r = h.result_for("ce1");
+  TEST_ASSERT(r && r->status == WriteStatus::ACCEPTED, "status is accepted");
+  TEST_ASSERT(r && r->layer == 1 && r->day == 3, "layer/day echoed");
+  // Deliberately weak wording: on the ACCEPTED path confirm_schedule_entry_
+  // does not write op->enabled back from the readback, so this pins the
+  // request echo, not the pump. The pump-side claim is the next assertion.
+  TEST_ASSERT(r && r->sched_enabled == 0, "the event reports the entry as off");
+  TEST_ASSERT(h.sim.layers[1][3 * 6] == 0x00, "pump day cell is disabled");
+  // The clear is a read-modify-write of the whole 42-byte layer, so the day
+  // next to the target is the thing a bad patch destroys.
+  TEST_ASSERT(friday[0] == 0x01 && friday[2] == 17 && friday[3] == 30 &&
+              friday[4] == 19 && friday[5] == 45,
+              "the untargeted day in the same layer survives");
+  TEST_ASSERT(h.sim.overview_writes >= 1, "configuration commit was written");
+}
+
+static void test_clear_schedule_entry_pump_keeps_the_entry() {
+  std::cout << "\n=== clear_schedule_entry: pump ignores write -> rejected ===" << std::endl;
+  Harness h;
+  h.prime_cache();
+  uint8_t *saturday = h.sim.layers[2] + 5 * 6;
+  saturday[0] = 0x01; saturday[1] = 0x02;
+  saturday[2] = 7; saturday[3] = 15; saturday[4] = 9; saturday[5] = 45;
+  h.sim.honor_layer_writes = false;
+
+  h.write_op.submit_clear_schedule_entry(2, 5, "ce2");
+  h.advance(25000);
+
+  TEST_ASSERT(h.events_for("ce2") == 1, "exactly one terminal event");
+  const WriteResult *r = h.result_for("ce2");
+  TEST_ASSERT(r && r->status == WriteStatus::REJECTED, "status is rejected");
+  TEST_ASSERT(r && r->detail.find("does not match") != std::string::npos,
+              "detail reports the verify mismatch");
+  // The settled fields must describe the entry the pump still holds, not the
+  // blank one that was sent — that is what tells a client the clear failed.
+  TEST_ASSERT(r && r->sched_enabled == 1, "settled state reports the surviving entry");
+  TEST_ASSERT(r && r->begin_hhmm == "07:15" && r->end_hhmm == "09:45",
+              "and the times it still holds");
+}
+
+static void test_clear_schedule_entry_out_of_range_is_invalid() {
+  std::cout << "\n=== clear_schedule_entry: layer 5 -> invalid, no wire write ===" << std::endl;
+  Harness h;
+  h.prime_cache();
+
+  h.write_op.submit_clear_schedule_entry(5, 0, "ce3");
+  // Asserted BEFORE any time passes, and that ordering is the test. "No write
+  // frames were sent" cannot fail here, as a skeptic pass showed: removing the
+  // bounds guard does not produce a write, it produces a 20 s stall, because
+  // read_entries_async refuses layer 5 by returning false without invoking its
+  // callback. What the guard buys is a verdict before any of that.
+  TEST_ASSERT(h.events_for("ce3") == 1, "settled synchronously, before any wire traffic");
+
+  h.advance(5000);
+  TEST_ASSERT(h.events_for("ce3") == 1, "exactly one terminal event");
+  const WriteResult *r = h.result_for("ce3");
+  TEST_ASSERT(r && r->status == WriteStatus::INVALID, "status is invalid");
+}
+
+// The confirm compares the enabled flag ALONE for a clear -- the
+// `!want_enabled ||` short-circuit. Nothing pinned that: after a normal clear
+// the pump's day cell is all zeros and the operation's own begin/end are zero
+// too, so comparing the times as well is trivially true and deleting the
+// short-circuit changes nothing.
+//
+// It stops mattering only if every pump zeroes the payload when it disables a
+// day. Nothing requires that, and a pump that leaves the old times behind in a
+// disabled cell would have every clear settle REJECTED, with the times it
+// "still holds" quoted back as evidence -- a clear that worked, reported as a
+// failure, forever.
+static void test_clear_schedule_entry_ignores_stale_times_in_a_disabled_cell() {
+  std::cout << "\n=== clear_schedule_entry: a disabled cell's leftover times are not a mismatch ==="
+            << std::endl;
+  Harness h;
+  h.prime_cache();
+  uint8_t *tuesday = h.sim.layers[3] + 1 * 6;
+  tuesday[0] = 0x01; tuesday[1] = 0x02;
+  tuesday[2] = 7; tuesday[3] = 15; tuesday[4] = 9; tuesday[5] = 45;
+  h.sim.keep_times_when_disabling = true;
+
+  h.write_op.submit_clear_schedule_entry(3, 1, "ce4");
+  h.advance(25000);
+
+  TEST_ASSERT(h.events_for("ce4") == 1, "exactly one terminal event");
+  const WriteResult *r = h.result_for("ce4");
+  TEST_ASSERT(r && r->status == WriteStatus::ACCEPTED,
+              "the day is off, so the clear is accepted");
+  TEST_ASSERT(h.sim.layers[3][1 * 6] == 0x00, "pump day cell is disabled");
+  TEST_ASSERT(h.sim.layers[3][1 * 6 + 2] == 7 && h.sim.layers[3][1 * 6 + 3] == 15,
+              "and the pump really did keep the old times -- the fixture bites");
+}
+
+// The mismatch retry ladder in confirm_schedule_entry_, which no assertion
+// named. A pump that acks the layer write but commits it a beat later answers
+// the first confirm read with the pre-write image. Without the ladder that is
+// a REJECTED for a write that took.
+static void test_clear_schedule_entry_retries_a_late_commit() {
+  std::cout << "\n=== clear_schedule_entry: pump commits late -> retry, not rejection ==="
+            << std::endl;
+  Harness h;
+  h.prime_cache();
+  uint8_t *wednesday = h.sim.layers[4] + 2 * 6;
+  wednesday[0] = 0x01; wednesday[1] = 0x02;
+  wednesday[2] = 6; wednesday[3] = 0; wednesday[4] = 8; wednesday[5] = 0;
+  h.sim.defer_layer_writes = 1;
+
+  h.write_op.submit_clear_schedule_entry(4, 2, "ce5");
+  h.advance(30000);
+
+  TEST_ASSERT(h.events_for("ce5") == 1, "exactly one terminal event");
+  const WriteResult *r = h.result_for("ce5");
+  TEST_ASSERT(r && r->status == WriteStatus::ACCEPTED,
+              "the retry sees the committed clear and accepts");
+  TEST_ASSERT(h.sim.layers[4][2 * 6] == 0x00, "pump day cell ended up disabled");
+}
+
 static void test_schedule_enabled_verified_rmw() {
   std::cout << "\n=== set_schedule_enabled: verified, preserves overview bytes ===" << std::endl;
   Harness h;
@@ -1686,6 +1880,29 @@ static void test_schedule_enabled_verified_rmw() {
   const uint8_t expect[10] = {0x8C, 0x23, 0x05, 0x05, 0x01, 0x01, 0x00, 0x00, 0x00, 0x00};
   TEST_ASSERT(memcmp(h.sim.last_overview_write, expect, 10) == 0,
               "overview write preserved the pump's structure bytes");
+}
+
+// SET_SCHEDULE_ENABLED had the accepted case above and nothing else, so its
+// confirm comparator was only ever asked a question it answered yes to. The
+// failure status §9 step 6 requires is this one: the pump takes the frame and
+// keeps its old flag.
+static void test_schedule_enabled_pump_keeps_its_flag() {
+  std::cout << "\n=== set_schedule_enabled: pump ignores the flag -> rejected ===" << std::endl;
+  Harness h;
+  h.prime_cache();
+  h.sim.honor_overview_writes = false;
+
+  h.write_op.submit_set_schedule_enabled(true, "en2");
+  h.advance(30000);
+
+  TEST_ASSERT(h.events_for("en2") == 1, "exactly one terminal event");
+  const WriteResult *r = h.result_for("en2");
+  TEST_ASSERT(r && r->status == WriteStatus::REJECTED, "status is rejected");
+  TEST_ASSERT(r && r->detail.find("still reports schedule disabled") != std::string::npos,
+              "detail names the state the pump kept");
+  TEST_ASSERT(r && r->sched_enabled == 0,
+              "settled flag is the pump's actual state, not the requested one");
+  TEST_ASSERT(!h.sim.sched_enabled, "pump schedule stayed disabled");
 }
 
 static void test_single_event_auto_slot() {
@@ -2935,7 +3152,13 @@ int main() {
   test_schedule_entry_accepted();
   test_schedule_entry_verify_mismatch();
   test_schedule_entry_no_overview();
+  test_clear_schedule_entry_accepted();
+  test_clear_schedule_entry_pump_keeps_the_entry();
+  test_clear_schedule_entry_out_of_range_is_invalid();
+  test_clear_schedule_entry_ignores_stale_times_in_a_disabled_cell();
+  test_clear_schedule_entry_retries_a_late_commit();
   test_schedule_enabled_verified_rmw();
+  test_schedule_enabled_pump_keeps_its_flag();
   test_single_event_auto_slot();
   test_single_event_reuses_expired_slot();
   test_set_vacation_writes_stop_event();

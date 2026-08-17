@@ -128,6 +128,39 @@ MUTATIONS=(
 # the regression worth pinning: the user stops being told which of the two
 # things is broken.
 "single-event-envelope-after-overview|components/alpha_hwr/write_operation_service.cpp|  if (op->slot >= static_cast<int16_t>(services::SINGLE_EVENT_SLOT_LIMIT)) {|  if (false && op->slot >= static_cast<int16_t>(services::SINGLE_EVENT_SLOT_LIMIT)) {"
+# CLEAR_SCHEDULE_ENTRY, whose four branches had no test at all until the §9
+# step 6 gap was closed. SET and CLEAR share run_schedule_entry_() and
+# confirm_schedule_entry_(), so the parts only CLEAR reaches are exactly the
+# parts that were unexercised: the blank entry it composes instead of the
+# requested one, and the enabled-flag-only comparison its confirm makes.
+"clear-entry-writes-an-enabled-day|components/alpha_hwr/write_operation_service.cpp|          entry.set_enabled(false);|          entry.set_enabled(true);"
+"clear-entry-confirm-wants-the-day-on|components/alpha_hwr/write_operation_service.cpp|      bool want_enabled = op->command == WriteCommand::SET_SCHEDULE_ENTRY;|      bool want_enabled = true;"
+# A separate branch from the one above, and it needed a test of its own. The
+# entry-times comparison is SKIPPED for a clear; with a pump that zeroes the
+# payload when it disables a day -- which the simulator did, and which nothing
+# in the protocol requires -- op->begin/end and the readback are both 0, the
+# extra comparison is trivially true, and deleting the skip changes nothing.
+# The fixture now models a pump that keeps the old times in a disabled cell,
+# which is the case the skip exists for.
+"clear-entry-confirm-compares-a-cleared-days-times|components/alpha_hwr/write_operation_service.cpp|      const bool times_are_a_verdict = want_enabled ? times_match : true;|      const bool times_are_a_verdict = times_match;"
+# The mismatch retry ladder. A pump that acks the layer write and commits it a
+# beat later answers the first confirm read with the pre-write image; without
+# the ladder that is a REJECTED for a write that took. Distinguished from the
+# !ok ladder above it by indentation (6 spaces vs 8).
+"clear-entry-no-mismatch-retry|components/alpha_hwr/write_operation_service.cpp|      if (op->attempts < SCHED_MAX_ATTEMPTS) {\n        op->attempts++;\n        schedule_([this, seq]() { confirm_schedule_entry_(seq); }, SCHED_RETRY_DELAY_MS);\n        return;\n      }\n      // Report what the pump actually holds.|      // mutated: no retry on a mismatch"
+# Both rejection paths must report what the PUMP holds, not what was asked
+# for. Reporting the request back is the failure that reads as success: the
+# event says the entry is gone (or the schedule enabled) while the pump still
+# holds the opposite, so a client has no way to see the write did not take.
+#
+# Only the second of these two was previously unguarded. The entry line is
+# shared with SET, and test_schedule_entry_verify_mismatch already killed a
+# mutation of it (submit_set_schedule_entry sets op.enabled = true, and that
+# test asserts the settled sched_enabled is 0). Kept anyway: it is now killed
+# from the CLEAR side as well, and the entry names the invariant rather than
+# leaving it implicit in a test about SET.
+"clear-entry-reject-reports-the-request|components/alpha_hwr/write_operation_service.cpp|      op->enabled = actual.is_enabled();|      // mutated: keep the requested flag instead of the pump's"
+"schedule-enabled-reject-reports-the-request|components/alpha_hwr/write_operation_service.cpp|      op->enabled = actual;|      // mutated: keep the requested flag instead of the pump's"
 # The clock confirm, in its load-bearing pieces.
 #
 # The first restores the defect the operation was written to fix: report the

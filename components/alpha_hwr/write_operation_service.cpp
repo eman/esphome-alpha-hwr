@@ -359,10 +359,11 @@ void WriteOperationService::finish_(uint32_t seq, WriteStatus status, const std:
       // The measured offset, not the time we asked for: on every terminal
       // status except ACCEPTED the requested value is the one thing already
       // known, and what the reader needs is how far out the pump still is.
-      // NAN when no readback ever decoded a time. That is the usual TIMEOUT,
-      // but not the same thing as one: a ladder whose first readback decoded
-      // out of tolerance and whose retries then failed to decode settles
-      // TIMEOUT carrying the real measurement it did get.
+      // NAN when no readback ever decoded a time, which is exactly the
+      // TIMEOUT case: confirm_set_clock_ finishes ACCEPTED or REJECTED the
+      // moment a readback decodes, so the retry ladder only ever runs on
+      // attempts that measured nothing. A TIMEOUT therefore always carries
+      // NAN here. (This comment used to claim the opposite.)
       result.clock_offset_s = op.clock_offset_s;
       break;
     case WriteCommand::SET_SINGLE_EVENT:
@@ -1457,7 +1458,13 @@ void WriteOperationService::run_schedule_entry_(uint32_t seq) {
   ensure_overview_(seq, [this, seq]() {
     Operation *op = find_(seq);
     if (op == nullptr || op->phase == Phase::DONE) return;
-    schedule_service_.read_entries_async(op->layer,
+    // read_entries_async refuses an out-of-range layer by returning false
+    // WITHOUT invoking the callback, so ignoring the return value does not
+    // mean "the callback reports it" -- it means the operation never finishes
+    // and the queue stalls behind it for the full watchdog budget. The bounds
+    // guard above makes that unreachable today; this keeps it unreachable if
+    // the guard ever moves.
+    if (!schedule_service_.read_entries_async(op->layer,
       [this, seq](bool ok, const std::vector<ScheduleEntry> &) {
         Operation *op = find_(seq);
         if (op == nullptr || op->phase == Phase::DONE) return;
@@ -1489,7 +1496,9 @@ void WriteOperationService::run_schedule_entry_(uint32_t seq) {
             op->phase = Phase::CONFIRMING;
             schedule_([this, seq]() { confirm_schedule_entry_(seq); }, SCHED_SETTLE_DELAY_MS);
           });
-      });
+      })) {
+      finish_(seq, WriteStatus::INVALID, "layer must be 0-4 and day 0-6");
+    }
   });
 }
 
@@ -1518,12 +1527,21 @@ void WriteOperationService::confirm_schedule_entry_(uint32_t seq) {
         return;
       }
       bool want_enabled = op->command == WriteCommand::SET_SCHEDULE_ENTRY;
-      bool match = actual.is_enabled() == want_enabled &&
-                   (!want_enabled ||
-                    (actual.get_begin_hour() == op->begin_hour &&
-                     actual.get_begin_minute() == op->begin_minute &&
-                     actual.get_end_hour() == op->end_hour &&
-                     actual.get_end_minute() == op->end_minute));
+      const bool times_match = actual.get_begin_hour() == op->begin_hour &&
+                               actual.get_begin_minute() == op->begin_minute &&
+                               actual.get_end_hour() == op->end_hour &&
+                               actual.get_end_minute() == op->end_minute;
+      // A day we asked to be OFF has no meaningful times. Nothing obliges a
+      // pump to zero the hour/minute bytes when it disables a cell, and one
+      // that leaves them behind would fail this comparison forever -- every
+      // clear settling REJECTED while quoting the stale times back as the
+      // entry it "still holds". The flag is the whole verdict for a clear.
+      //
+      // Hoisted into its own name so mutation_check.sh has a pipe-free line to
+      // anchor to: entries are split on '|', so a search string containing the
+      // original `!want_enabled ||` was truncated and scored as untouched.
+      const bool times_are_a_verdict = want_enabled ? times_match : true;
+      bool match = actual.is_enabled() == want_enabled && times_are_a_verdict;
       if (match) {
         finish_(seq, WriteStatus::ACCEPTED, "");
         return;
