@@ -44,13 +44,21 @@ constexpr uint8_t CLASS_11_MEASURED_16BIT = 0x0B;
  * arriving mid-command and being taken for the answer -- is a property of what
  * the pump volunteers. Class 10 is what it volunteers: telemetry notifications
  * arrive continuously and unbidden, which is exactly why Class 10 is not in
- * this set and is matched on its identifiers instead. Classes 2, 5 and 11 were
- * observed at zero frames across 373 frames of normal operation on one pump
- * (issue #174) -- they appear only as answers to these four reads.
+ * this set and is matched on its identifiers instead.
  *
- * That is one specimen, so the guarantee is the queued-class term rather than
- * the census. The census is why the term is sufficient here and not merely
- * necessary.
+ * Classes 2, 5 and 11 appeared at zero frames across 373 frames of *this
+ * component's* normal operation on one pump (issue #174). Read that narrowly.
+ * It is not a claim that the pump does not speak Class 2 -- it plainly does,
+ * and in bulk: the reference captures behind transport.cpp's statistics were
+ * taken from the phone app, which reads telemetry as Class 2, and roughly
+ * 2,500 of those ~24,000 inbound frames are non-Class-10 as a result. What the
+ * census says is only that *this* component never asks for Class 2, 5 or 11
+ * outside the opening sequence, because it reads telemetry as Class 10 -- so
+ * nothing of those classes is in flight to be confused with anything.
+ *
+ * The guarantee is therefore the queued-class term, not the census; one
+ * specimen could not carry a guarantee anyway. The census only explains why
+ * that term is sufficient here rather than merely necessary.
  *
  * Note also what adding a class to this set cannot do: both predicates require
  * the *queued* command to be of a set class, and nothing outside the opening

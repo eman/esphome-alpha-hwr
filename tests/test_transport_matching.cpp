@@ -113,7 +113,10 @@ void test_wildcard_matched_set_is_exactly_these_five() {
                 << is_wildcard_matched_class(class_byte) << std::endl;
       set_is_exact = false;
     }
-    if (expected) members++;
+    // Count from the production function, not from `expected`. Counting the
+    // test's own literal made this a tautology that no production change could
+    // fail.
+    if (is_wildcard_matched_class(class_byte)) members++;
   }
 
   TEST_ASSERT(set_is_exact,

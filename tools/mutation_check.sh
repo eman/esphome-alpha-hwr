@@ -393,7 +393,18 @@ MUTATIONS=(
 "motor-speed-on-threshold|components/dhw_demand/dhw_demand_logic.h|    return motor_speed >= 10.0f;|    return motor_speed > 10.0f;"
 "motor-channel-precedence-swapped|components/dhw_demand/dhw_demand_logic.h|  if (!std::isnan(motor_speed))\n    return motor_speed >= 10.0f;\n  if (!std::isnan(motor_current))\n    return motor_current >= pump_off_current_threshold;|  if (!std::isnan(motor_current))\n    return motor_current >= pump_off_current_threshold;\n  if (!std::isnan(motor_speed))\n    return motor_speed >= 10.0f;"
 "auth-stage2-repeat-count|components/alpha_hwr/auth.cpp|  if (repeat_count < 5) {|  if (repeat_count < 4) {"
-"auth-extension-packet-order|components/alpha_hwr/auth.cpp|  send_packet(AUTH_EXT_1, sizeof(AUTH_EXT_1));\n  send_packet(AUTH_EXT_2, sizeof(AUTH_EXT_2));|  send_packet(AUTH_EXT_2, sizeof(AUTH_EXT_2));\n  send_packet(AUTH_EXT_1, sizeof(AUTH_EXT_1));"
+# Stage 3 stopped being two blind sends when issue #174 made it two matched
+# reads, so this entry's old search string (two consecutive send_packet calls)
+# matched nothing. mutation_check.sh reports that loudly as "could not apply"
+# and exits 1 rather than scoring it Survived -- so a stale entry is a red
+# build, not a silent hole. Retargeted at the same property: EXT_1 first.
+# Stage 2 must stay a blind send. Matching its Class 10 reply consumes the
+# frame, and that frame is the operation-status notification TelemetryService
+# publishes control mode, operation mode and setpoint from on every connect --
+# so this mutation silently stops that publish. It survived the whole suite
+# until tests/test_auth.cpp began counting frames reaching the packet callback.
+"auth-stage2-must-stay-blind|components/alpha_hwr/auth.cpp|    send_packet(AUTH_CLASS10, sizeof(AUTH_CLASS10));|    send_read(AUTH_CLASS10, sizeof(AUTH_CLASS10), [](bool, const uint8_t *, size_t) {});"
+"auth-extension-packet-order|components/alpha_hwr/auth.cpp|  send_read(AUTH_EXT_1, sizeof(AUTH_EXT_1), [this](bool, const uint8_t *, size_t) {|  send_read(AUTH_EXT_2, sizeof(AUTH_EXT_2), [this](bool, const uint8_t *, size_t) {"
 "sensor-pub-media-temp-range-removed|components/alpha_hwr/sensor_publisher.cpp|    if (temp.media_temperature_c >= -20 && temp.media_temperature_c <= 100) {|    if (true) {"
 "sensor-pub-alarm-dedup-removed|components/alpha_hwr/sensor_publisher.cpp|  if (alarms_sensor_->has_state() && alarms_sensor_->state == codes_str) {|  if (false) {"
 "sensor-pub-head-rate-gap-reset-removed|components/alpha_hwr/sensor_publisher.cpp|      if (dt_s > 30.0f) {|      if (false) {"

@@ -93,6 +93,35 @@ class Authentication {
   /// before anything else got to run. At 1000 ms the same worst case is 5 s.
   static constexpr uint32_t REPLY_TIMEOUT_MS = 1000;
 
+  /// Last resort: finish the sequence even if no callback ever comes back.
+  ///
+  /// Stages 1 and 3 are continued *only* by the transport's command callback,
+  /// which is a single point of failure the old all-timers version did not
+  /// have. Transport::reset() clears its command queue without invoking the
+  /// pending callback, and on_notification() calls reset() on a live link when
+  /// the reassembly buffer overruns -- reachable from one corrupt inbound
+  /// fragment, since any frame header declaring >= 253 bytes overruns before
+  /// the frame can complete or be CRC-checked. The continuation is then simply
+  /// gone: no packet is ever sent again, complete() is never called, running_
+  /// stays true so even a fresh start() is refused, and the session never
+  /// leaves AUTHENTICATING.
+  ///
+  /// The link watchdog does not rescue that, because it is fed by *any*
+  /// inbound notification regardless of session state, and this pump volunteers
+  /// operation-status notifications throughout. A pump that keeps talking would
+  /// hold the node connected, never ready, indefinitely.
+  ///
+  /// So one timer is armed for the whole sequence. 15 s is comfortably above
+  /// the 5.45 s a fully silent pump needs (450 ms of stage 2 plus five
+  /// REPLY_TIMEOUT_MS) and comfortably below the watchdog's 60 s, so it fires
+  /// only when the chain is genuinely broken rather than merely slow.
+  ///
+  /// Fixing Transport::reset() to fire each queued callback with failure would
+  /// be the better repair -- the dropped callback is not specific to this
+  /// sequence -- but it changes the disconnect path for every service that
+  /// queues a command, which is not this change's blast radius.
+  static constexpr uint32_t SEQUENCE_BACKSTOP_MS = 15000;
+
   /**
    * @brief Construct an Authentication handler
    */
@@ -156,6 +185,18 @@ class Authentication {
    * @return true if handshake is running
    */
   bool is_running() const { return running_; }
+
+  /// Matched reads issued so far this connection, and how many were answered.
+  ///
+  /// Exposed because the sequence's defining property -- a read is not issued
+  /// until the previous one has been resolved -- cannot be observed from
+  /// outside without them. Counting BLE writes does not do it: the transport
+  /// only writes one command per response cycle, so a version that queued all
+  /// three of stage 1's reads at once would still be *written* one at a time
+  /// and look identical. A test that counts packets is measuring the
+  /// transport's queue, not this class. reads_sent() tells them apart.
+  uint8_t reads_sent() const { return reads_sent_; }
+  uint8_t replies_matched() const { return replies_matched_; }
 
 
  private:

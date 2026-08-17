@@ -29,6 +29,23 @@ void Authentication::start() {
   reads_sent_ = 0;
   ESP_LOGI(TAG, "Starting 3-stage authentication handshake");
 
+  // Arm the backstop before sending anything, so it covers the whole sequence
+  // including the very first read. See SEQUENCE_BACKSTOP_MS for what it is
+  // catching -- a dropped transport callback, which now has no other recovery.
+  if (scheduler_callback_) {
+    uint32_t seq = auth_sequence_;
+    scheduler_callback_(SEQUENCE_BACKSTOP_MS, [this, seq]() {
+      if (seq != this->auth_sequence_) return;  // A newer sequence owns us now.
+      if (!this->running_) return;              // Finished normally; nothing to do.
+      ESP_LOGE(TAG,
+               "Handshake stalled: no reply and no timeout arrived for %u ms. "
+               "The transport's command callback was lost -- completing so the "
+               "session cannot sit in AUTHENTICATING forever.",
+               static_cast<unsigned>(SEQUENCE_BACKSTOP_MS));
+      this->complete();
+    });
+  }
+
   // Start Stage 1 immediately
   stage1_legacy_burst(0);
 }
@@ -188,6 +205,15 @@ void Authentication::complete() {
   //
   // Counted over the five matched reads only; stage 2's five are still sent
   // blind, so nothing here knows whether they were answered.
+  //
+  // And read the count as "how many reads got an answer", not "every read got
+  // its own answer". Stage 1's three reads are byte-identical, so a reply that
+  // arrives after REPLY_TIMEOUT_MS is matched to whichever of them is
+  // outstanding when it lands -- the transport matches by class, and identical
+  // requests have indistinguishable replies. A slow pump can therefore report
+  // 5/5 while one particular read went unanswered and a later one was credited
+  // twice. That is tolerable because nothing acts on the count: it is a log
+  // line, and the sequence proceeds identically either way.
   if (replies_matched_ == reads_sent_) {
     ESP_LOGI(TAG, "Authentication handshake complete (%u/%u reads answered)",
              replies_matched_, reads_sent_);

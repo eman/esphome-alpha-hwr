@@ -561,7 +561,7 @@ bool Transport::try_dispatch_response(const uint8_t* data, size_t len) {
   // Log incoming packets at verbose level when waiting for a command response
   if (this->state_ == State::AWAITING_RESPONSE && !this->command_queue_.empty()) {
     auto &cmd = this->command_queue_.front();
-    ESP_LOGV(TAG, "[AWAITING] Packet received: len=%d, Class=%02X, OpSpec=%02X, Sub=%d, Obj=%d (waiting for Obj %d Sub %d)",
+    ESP_LOGV(TAG, "[AWAITING] Packet received: len=%zu, Class=%02X, OpSpec=%02X, Sub=%d, Obj=%d (waiting for Obj %d Sub %d)",
              len, data[4], opspec, packet_type_high, packet_type_low_ver, cmd.expect_type_low_ver, cmd.expect_type_high);
   }
 
@@ -754,7 +754,7 @@ bool Transport::try_dispatch_response(const uint8_t* data, size_t len) {
 
   // Validate packet structure
   if (len < 12) {
-    ESP_LOGV(TAG, "Packet too short for response matching (%d bytes)", len);
+    ESP_LOGV(TAG, "Packet too short for response matching (%zu bytes)", len);
     return false;
   }
 
