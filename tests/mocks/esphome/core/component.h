@@ -1,4 +1,8 @@
 #pragma once
+
+// The real esphome/core/component.h pulls hal.h in transitively, and component
+// sources rely on that for millis(). Mirror it so they compile unchanged.
+#include "hal.h"
 #include <string>
 #include <functional>
 #include <cstdint>
