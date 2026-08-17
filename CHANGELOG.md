@@ -491,6 +491,34 @@
 
 ### Fixed
 
+- **The Lovelace card mangled — and could destroy — a schedule window that
+  crosses midnight** (issue #174). A cell whose end is earlier than its start
+  (22:00–02:00 is stored as `[1320, 120]`) reaches the card today from the
+  Grundfos GO app or the `set_schedule_entry` service, so this is a display and
+  editing bug for data the card did not create.
+
+  Three failures, worst first:
+
+  - **Dragging such a block silently rewrote it.** The drag clamps force
+    `start < end`, so grabbing an edge un-crossed the window and queued that as
+    a pending write — a four-hour overnight window became a short evening one,
+    with nothing to indicate the schedule had changed. Crossing blocks now
+    render without drag handles, and the drag handler refuses them outright.
+  - **It painted as a 4 px sliver.** The width came out negative
+    (`(120-1320)/1440`) and was clamped to a 0.7% minimum, so a four-hour window
+    showed as a stub at the 22:00 mark while its tooltip read "22:00 – 02:00".
+    Such a block is now split into the two segments that can actually be drawn,
+    and the tooltip says it crosses midnight.
+  - **The editor refused to create one, silently.** `end <= start` returned
+    without committing and without closing the dialog or explaining. Only a
+    zero-length window is refused now, which matches what the device and both
+    write paths accept.
+
+  Both pieces are drawn on the cell's own row rather than bleeding the tail onto
+  the next day: the row shows what the cell contains, and which calendar day the
+  pump runs the tail on is unverified.
+
+
 - **A temperature-range write could overwrite the pump's own on/off-time limits
   with fabricated values** (issue #174 audit). The config write echoes those
   five bytes back verbatim so setting a temperature does not zero them (issue

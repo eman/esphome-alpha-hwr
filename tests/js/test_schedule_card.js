@@ -1007,6 +1007,75 @@ async function main() {
     assertEqual(timerCount(), 0, 'no timer survives the card');
   });
 
+  // ── Windows that cross midnight ──────────────────────────────────────────
+  // A cell whose end is earlier than its start (22:00-02:00 = [1320, 120]) is
+  // reachable today from the Grundfos GO app and from set_schedule_entry, so
+  // the card has to cope with data it did not create.
+
+  await test('a midnight-crossing block paints as two segments, not a negative sliver', async () => {
+    const h = makeCard();
+    const segs = h.card._blockSegments({ start: 1320, end: 120, layer: 0 });
+
+    assertEqual(segs.length, 2, 'the window is split in two');
+    assertEqual(segs[0].start, 1320, 'first segment starts at 22:00');
+    assertEqual(segs[0].end, 1440, '...and runs to midnight');
+    assertEqual(segs[1].start, 0, 'second segment starts at midnight');
+    assertEqual(segs[1].end, 120, '...and runs to 02:00');
+
+    const widths = segs.map(sg => sg.end - sg.start);
+    assert(widths.every(w => w > 0), 'neither segment has a negative width');
+    assertEqual(widths[0] + widths[1], 240,
+                'and together they cover the full four hours, not a 0.7% stub');
+  });
+
+  await test('an ordinary block is left as a single segment', async () => {
+    const h = makeCard();
+    const segs = h.card._blockSegments({ start: 360, end: 480, layer: 0 });
+    assertEqual(segs.length, 1, 'not split');
+    assertEqual(segs[0].start, 360, 'start preserved');
+    assertEqual(segs[0].end, 480, 'end preserved');
+  });
+
+  await test('a midnight-crossing block renders as two pieces with no drag handles', async () => {
+    const h = makeCard();
+    h.hass.states['sensor.hwr_pump_schedule_layer_0'] =
+      { state: JSON.stringify([[1320, 120], 0, 0, 0, 0, 0, 0]) };
+    h.card.hass = h.hass;
+    h.card._render();
+    const html = h.html;
+
+    assertIncludes(html, 'data-wrapped="1"', 'the block is marked as wrapped');
+    assertExcludes(html, 'data-edge="start" data-wrapped',
+                   'no start handle is attached to a wrapped block');
+    // Dragging one silently un-crossed it and queued that as a write, which
+    // rewrote the user's overnight window with no indication.
+    // Count rendered handles, not the CSS rules that define the class.
+    const handleCount = (html.match(/data-edge="/g) || []).length;
+    assertEqual(handleCount, 0, 'a wrapped block carries no drag handles at all');
+  });
+
+  await test('the editor accepts a midnight-crossing window and refuses only a zero-length one', async () => {
+    const h = makeCard();
+    const fields = { startH: 22, startM: 0, endH: 2, endM: 0 };
+    h.card.shadowRoot.querySelector = (sel) => {
+      const m = /\[data-field="(\w+)"\]/.exec(sel);
+      return m ? { value: String(fields[m[1]]) } : null;
+    };
+
+    h.card._selectedBlock = { day: 0, layer: 0 };
+    h.card._editingTime = true;
+    h.card._saveInlineTime();
+    assertEqual(JSON.stringify(h.card._pendingChanges.get('0,0')), '[1320,120]',
+                'a crossing window is committed rather than silently dropped');
+
+    h.card._pendingChanges.clear();
+    fields.startH = 7; fields.startM = 0; fields.endH = 7; fields.endM = 0;
+    h.card._selectedBlock = { day: 0, layer: 0 };
+    h.card._editingTime = true;
+    h.card._saveInlineTime();
+    assertEqual(h.card._pendingChanges.size, 0, 'a zero-length window is still refused');
+  });
+
   console.log('');
   console.log('==========================================');
   console.log(`  ${assertions} assertions, ${failures} failure(s)`);

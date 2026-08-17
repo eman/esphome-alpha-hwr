@@ -658,6 +658,34 @@ class AlphaHwrScheduleCard extends HTMLElement {
       </div>`;
   }
 
+  /** Split a block into the segments that can actually be painted on one row.
+   *
+   * A schedule cell whose end is earlier than its start crosses midnight --
+   * 22:00-02:00 is stored as [1320, 120]. Painting that directly gives a
+   * NEGATIVE width, which the old code hid by clamping to a 0.7% minimum: a
+   * four-hour overnight window rendered as a 4px sliver at the 22:00 mark,
+   * with a tooltip that said "22:00 - 02:00" and contradicted the geometry.
+   *
+   * Such a cell is reachable today without this card: the Grundfos GO app and
+   * the set_schedule_entry service both create them. So this is a display bug
+   * for existing data, not a new capability.
+   *
+   * Both pieces are drawn on the cell's OWN row rather than bleeding the tail
+   * onto the next day, because the row shows what the cell contains. Which
+   * calendar day the pump actually runs the tail on is unverified (issue #174),
+   * and this deliberately does not assert an answer.
+   *
+   * _foldToGrid() solves the same painting problem for the dated scheduler
+   * overlay; this is its equivalent for the pump's own weekly cells.
+   */
+  _blockSegments(b) {
+    if (b.end > b.start) return [{ start: b.start, end: b.end }];
+    return [
+      { start: b.start, end: MINUTES_IN_DAY },
+      { start: 0, end: b.end },
+    ];
+  }
+
   /** Fold dated intervals onto the card's (weekday, minute-of-day) grid.
    *
    * The grid is weekly-recurring while the series carry concrete dates, so
@@ -745,21 +773,23 @@ class AlphaHwrScheduleCard extends HTMLElement {
              title="scheduler wants this; device is not holding it"></div>`;
       }).join('');
 
-    const blocksHtml = blocks.map(b => {
-      const leftPct = (b.start / MINUTES_IN_DAY) * 100;
-      const widthPct = ((b.end - b.start) / MINUTES_IN_DAY) * 100;
+    const blocksHtml = blocks.flatMap(b => this._blockSegments(b).map((seg, segIdx, segs) => {
+      const leftPct = (seg.start / MINUTES_IN_DAY) * 100;
+      const widthPct = ((seg.end - seg.start) / MINUTES_IN_DAY) * 100;
+      const wrapped = segs.length > 1;
       const sel = this._selectedBlock && this._selectedBlock.day === dayIdx && this._selectedBlock.layer === b.layer;
       const hov = this._hoverBlock && this._hoverBlock.day === dayIdx && this._hoverBlock.layer === b.layer;
 
       return `
-        <div class="time-block ${sel ? 'selected' : ''} ${b.pending ? 'pending' : ''}"
+        <div class="time-block ${sel ? 'selected' : ''} ${b.pending ? 'pending' : ''} ${wrapped ? 'wrapped' : ''}"
              style="left:${leftPct}%;width:${Math.max(widthPct, 0.7)}%"
-             data-day="${dayIdx}" data-layer="${b.layer}">
-          <div class="drag-handle start" data-day="${dayIdx}" data-layer="${b.layer}" data-edge="start"></div>
-          <div class="drag-handle end" data-day="${dayIdx}" data-layer="${b.layer}" data-edge="end"></div>
-          ${(hov || sel) ? `<div class="block-tooltip">${this._minutesToTime(b.start)} – ${this._minutesToTime(b.end)}</div>` : ''}
+             data-day="${dayIdx}" data-layer="${b.layer}"
+             ${wrapped ? 'data-wrapped="1"' : ''}>
+          ${wrapped ? '' : `<div class="drag-handle start" data-day="${dayIdx}" data-layer="${b.layer}" data-edge="start"></div>`}
+          ${wrapped ? '' : `<div class="drag-handle end" data-day="${dayIdx}" data-layer="${b.layer}" data-edge="end"></div>`}
+          ${(hov || sel) ? `<div class="block-tooltip">${this._minutesToTime(b.start)} – ${this._minutesToTime(b.end)}${wrapped && segIdx === 0 ? ' (crosses midnight)' : ''}</div>` : ''}
         </div>`;
-    }).join('');
+    })).join('');
 
     // Single event overlays (green bars on today)
     let singleEventHtml = '';
@@ -1752,6 +1782,14 @@ class AlphaHwrScheduleCard extends HTMLElement {
         const data = this._getDayBlocks(day);
         const entry = data.find(b => b.layer === layer);
         if (!entry) return;
+        // A window that crosses midnight is rendered without drag handles (see
+        // _blockSegments), so this should be unreachable -- guarded anyway
+        // because the failure is destructive rather than cosmetic. The clamps
+        // below force start < end, so dragging a crossing block silently
+        // UN-crossed it and queued that as a pending write: a 22:00-02:00
+        // window became 22:00-23:xx, rewriting the user's overnight schedule
+        // with no indication that anything had changed.
+        if (entry.end <= entry.start) return;
         let curStart = entry.start, curEnd = entry.end;
 
         // Create floating drag tooltip
@@ -1915,7 +1953,12 @@ class AlphaHwrScheduleCard extends HTMLElement {
     const eM = parseInt(root.querySelector('[data-field="endM"]').value);
     const start = sH * 60 + sM;
     const end = eH * 60 + eM;
-    if (end <= start) return; // invalid range
+    // Only a zero-length window is invalid. `end < start` crosses midnight and
+    // is accepted by set_schedule_entry and by upload_schedule alike, so
+    // refusing it here meant the editor could not express a window the device
+    // stores -- and did so as a silent no-op that left the dialog open with no
+    // explanation.
+    if (end === start) return;
     const { day, layer } = this._selectedBlock;
     this._pendingChanges.set(`${day},${layer}`, [start, end]);
     this._editingTime = false;
