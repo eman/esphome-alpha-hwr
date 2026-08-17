@@ -72,7 +72,7 @@ JOBS="${JOBS:-4}"
 MUTATIONS=(
 "crc-initial-value|components/alpha_hwr/codec.cpp|uint16_t crc = init;|uint16_t crc = init ^ 0x0001;"
 "crc-byte-order|components/alpha_hwr/frame_builder.cpp|packet_out[9] = (crc >> 8) & 0xFF;|packet_out[9] = crc & 0xFF;"
-"class-match-equality|components/alpha_hwr/response_match.h|incoming_class == queued_class &&|true &&"
+"class-match-equality|components/alpha_hwr/response_match.h|if (incoming_class != queued_class) return false;|if (false) return false;"
 "frame-length-guard|components/alpha_hwr/frame_parser.cpp|if (len < expected_total) {|if (false) {"
 "schedule-day-bound|components/alpha_hwr/schedule_codec.cpp|if (v[1] > 6) return fail|if (v[1] > 99) return fail"
 # Restores the DST readback defect: resolving the offset from the local value
@@ -89,7 +89,17 @@ MUTATIONS=(
 # all, which makes it the place to close them.
 "dst-offset-ignores-sub-hour-zones|components/alpha_hwr/schedule_service.h|(lt.tm_min - gt.tm_min) * 60|0 * (lt.tm_min - gt.tm_min) * 60"
 "dst-offset-year-rollover-branch|components/alpha_hwr/schedule_service.h|    day_delta = (lt.tm_year > gt.tm_year) ? 1 : -1;|    day_delta = 0;"
-"ignore-unrelated-gate|components/alpha_hwr/response_match.h|return is_class3_or_7(queued_class) && !is_class3_or_7(incoming_class);|return false;"
+"ignore-unrelated-gate|components/alpha_hwr/response_match.h|  if (!is_wildcard_matched_class(queued_class)) return false;\n  return !is_wildcard_matched_class(incoming_class);|  return false;"
+# The wildcard-matched class set (issue #174). Membership is the whole safety
+# argument for admitting classes 2, 5 and 11, so both directions are pinned:
+# dropping a member silently stops matching that class's replies and sends the
+# sequence back to advancing on nothing, and admitting Class 10 lets an
+# unsolicited telemetry notification answer any queued Class 10 command. Written
+# without `||` on purpose -- this script splits its entries on `|`, so a search
+# or replacement string containing one is truncated and the mutation never runs.
+"class-set-drop-class2|components/alpha_hwr/response_match.h|  if (class_byte == CLASS_2_MEASURED_DATA) return true;|  if (false) return true;"
+"class-set-drop-class5|components/alpha_hwr/response_match.h|  if (class_byte == CLASS_5_REFERENCE_VALUES) return true;|  if (false) return true;"
+"class-set-admit-class10|components/alpha_hwr/response_match.h|  return class_byte == CLASS_11_MEASURED_16BIT;|  return class_byte == CLASS_11_MEASURED_16BIT ? true : (class_byte == 0x0A);"
 "remote-mode-confirm-fresh|components/alpha_hwr/write_operation_service.cpp|bool confirmed = success && fresh && control_.remote_state_valid_ &&|bool confirmed = success && control_.remote_state_valid_ &&"
 # Restores the exact naming defect issue #159 reported: the service was called
 # `pump_set_state`, its settle event answered `set_pump_state`. Since api_bridge

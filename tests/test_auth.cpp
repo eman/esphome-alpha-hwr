@@ -266,6 +266,12 @@ void test_an_unanswered_sequence_still_completes() {
     r.run_scheduled();
   }
 
+  // Pin the constant as a literal. Every other assertion here derives its
+  // timings from REPLY_TIMEOUT_MS, so the suite would certify any value it was
+  // given -- the same way the clock-sync grace period certified both 1 ms and
+  // 24 hours before it was pinned this way.
+  TEST_ASSERT(Authentication::REPLY_TIMEOUT_MS == 1000u,
+              "The per-read timeout is 1000 ms, not whatever the tests are told");
   TEST_ASSERT(r.sent.size() == 10,
               "All ten packets are still sent when none of them is answered");
   TEST_ASSERT(r.completions == 1,
