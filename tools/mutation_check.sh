@@ -363,17 +363,34 @@ MUTATIONS=(
 # recycle sample is the one that shipped: it censors the sample at exactly the
 # threshold the number exists to validate, since an interval that ends in a
 # recycle is never closed by a notification.
-"gap-censored-at-the-budget|components/alpha_hwr/link_watchdog.h|  void on_recycle(uint32_t now_ms) { this->sample_(now_ms); }|  void on_recycle(uint32_t now_ms) { (void) now_ms; }"
+"gap-censored-at-the-budget|components/alpha_hwr/link_watchdog.h|  void on_recycle(uint32_t now_ms) { this->sample_(now_ms, false); }|  void on_recycle(uint32_t now_ms) { (void) now_ms; }"
 "gap-samples-the-time-spent-disconnected|components/alpha_hwr/link_watchdog.h|    this->last_ms_ = now_ms;\n    this->armed_ = true;|    this->armed_ = true;"
-"gap-never-closes-an-interval|components/alpha_hwr/link_watchdog.h|    if (gap > this->max_ms_)\n      this->max_ms_ = gap;\n    this->last_ms_ = now_ms;|    if (gap > this->max_ms_)\n      this->max_ms_ = gap;"
+"gap-never-closes-an-interval|components/alpha_hwr/link_watchdog.h|    }\n    this->last_ms_ = now_ms;\n  }|    }\n  }"
 # The disconnect sample and its arming guard. Dropping the sample loses every
 # interval ended by a drop the watchdog did not cause -- the same censoring, at
 # a threshold nobody configured. Dropping the guard is the opposite error: a
 # connection attempt that fails without opening reports a disconnect, and
 # sampling it records the downtime since the previous session as though the link
 # had been up and silent for all of it.
-"gap-drops-the-disconnect-sample|components/alpha_hwr/link_watchdog.h|  void on_disconnect(uint32_t now_ms) {\n    if (!this->armed_)\n      return;\n    this->sample_(now_ms);\n    this->armed_ = false;\n  }|  void on_disconnect(uint32_t now_ms) { (void) now_ms; }"
-"gap-samples-an-unarmed-disconnect|components/alpha_hwr/link_watchdog.h|    if (!this->armed_)\n      return;\n    this->sample_(now_ms);|    this->sample_(now_ms);"
+"gap-drops-the-disconnect-sample|components/alpha_hwr/link_watchdog.h|  void on_disconnect(uint32_t now_ms) {\n    if (!this->armed_)\n      return;\n    this->sample_(now_ms, false);\n    this->armed_ = false;\n  }|  void on_disconnect(uint32_t now_ms) { (void) now_ms; }"
+"gap-samples-an-unarmed-disconnect|components/alpha_hwr/link_watchdog.h|    if (!this->armed_)\n      return;\n    this->sample_(now_ms, false);|    this->sample_(now_ms, false);"
+# The tail histogram (issue #176 part 1). The counters are only a decision input
+# because "intervals longer than T" is exactly "times a budget of T would have
+# fired"; each mutation below answers a slightly different question while
+# looking identical in Home Assistant, which is the whole hazard. Three of them
+# bias the reading toward "the budget was never close", the direction that
+# argues for keeping a default nobody has validated.
+"gap-bucket-counts-every-interval|components/alpha_hwr/link_watchdog.h|      if (gap > LINK_GAP_THRESHOLDS_MS[i])\n        this->over_counts_[i]++;|        this->over_counts_[i]++;"
+"gap-bucket-boundary-off-by-one|components/alpha_hwr/link_watchdog.h|      if (gap > LINK_GAP_THRESHOLDS_MS[i])|      if (gap >= LINK_GAP_THRESHOLDS_MS[i])"
+"gap-truncated-counts-a-notification|components/alpha_hwr/link_watchdog.h|    if (!closed_by_data)\n      this->truncated_++;|    this->truncated_++;"
+"gap-watch-time-never-accumulates|components/alpha_hwr/link_watchdog.h|    this->watched_ms_ += gap;|"
+"gap-counters-reset-on-reconnect|components/alpha_hwr/link_watchdog.h|  void on_open(uint32_t now_ms) {\n    this->last_ms_ = now_ms;|  void on_open(uint32_t now_ms) {\n    this->over_counts_[0] = 0;\n    this->last_ms_ = now_ms;"
+"gap-inbound-samples-across-the-downtime|components/alpha_hwr/link_watchdog.h|    if (!this->armed_) {\n      this->last_ms_ = now_ms;\n      this->armed_ = true;\n      return;\n    }\n    this->sample_(now_ms, true);|    this->sample_(now_ms, true);"
+# The publish throttle on watched time. Removing it is the issue #127 load
+# shape: a frame per API subscriber every 10 s, forever, for a number nothing
+# downstream can resolve faster than hourly. Mutated through the constant
+# because the guard itself contains a `||`, which is the field separator here.
+"gap-watch-time-published-unthrottled|components/alpha_hwr/link_watchdog.h|static const uint32_t LINK_GAP_WATCH_PUBLISH_MS = 300000u;|static const uint32_t LINK_GAP_WATCH_PUBLISH_MS = 0u;"
 
 # Initial-read re-arm (bench regression: a stalled one-shot read chain left the
 # node with device info and the operating statistics unread for as long as the
