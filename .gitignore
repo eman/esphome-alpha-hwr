@@ -82,6 +82,11 @@ ehthumbs.db
 Thumbs.db
 reference
 hwr-pump.yaml
+
+# Snapshot log written by tools/link_gap_report.py. Measurement data from a
+# specific pair of pumps -- useful to whoever is running the measurement, not
+# something the repo should carry.
+link_gap_log.jsonl
 resources
 components/alpha_hwr/secrets.yaml
 

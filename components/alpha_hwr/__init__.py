@@ -1,3 +1,4 @@
+import logging
 import os
 import subprocess
 
@@ -20,9 +21,12 @@ from esphome.const import (
     DEVICE_CLASS_VOLTAGE,
     ENTITY_CATEGORY_DIAGNOSTIC,
     STATE_CLASS_MEASUREMENT,
+    STATE_CLASS_TOTAL_INCREASING,
     UNIT_CELSIUS,
     UNIT_WATT,
 )
+
+_LOGGER = logging.getLogger(__name__)
 
 CODEOWNERS = ["@eman"]
 DEPENDENCIES = ["ble_client"]
@@ -110,6 +114,16 @@ CONF_LAST_CLOCK_SYNC = "last_clock_sync"
 CONF_PUMP_LINK_STATUS = "pump_link_status"
 CONF_LINK_RECYCLES = "link_recycles"
 CONF_LINK_MAX_GAP = "link_max_gap"
+# The tail histogram (issue #176 part 1). These names mirror
+# LINK_GAP_THRESHOLDS_MS in link_watchdog.h, and the coupling is enforced rather
+# than trusted: each generated key resolves to set_link_gaps_over_<T>s_sensor()
+# in alpha_hwr.h, which static_asserts that its index really does hold that
+# threshold. Change one side without the other and the build fails, instead of
+# an entity quietly reporting a rung it is not counting.
+LINK_GAP_THRESHOLDS_S = [15, 20, 30, 45, 60, 90]
+CONF_LINK_GAPS_OVER = [f"link_gaps_over_{t}s" for t in LINK_GAP_THRESHOLDS_S]
+CONF_LINK_GAPS_TRUNCATED = "link_gaps_truncated"
+CONF_LINK_WATCH_TIME = "link_watch_time"
 CONF_PUMP_LAST_LINK_FAILURE = "pump_last_link_failure"
 CONF_TIME_ID = "time_id"
 
@@ -348,6 +362,39 @@ CONFIG_SCHEMA = cv.Schema(
             entity_category=ENTITY_CATEGORY_DIAGNOSTIC,
             state_class=STATE_CLASS_MEASUREMENT,
         ),
+        # The tail histogram, its trust check, and its denominator (issue #176
+        # part 1). link_max_gap above is one point of this distribution; these
+        # give its shape, which is what "how often would a budget of T have
+        # fired" actually needs.
+        #
+        # total_increasing rather than measurement, and that is the reason these
+        # are numeric counters at all: they are RAM values that restart at every
+        # boot, and Home Assistant's long-term statistics recognise the reset and
+        # keep accumulating. A run measured in weeks survives the OTAs and
+        # crashes it will certainly meet; a running maximum does not.
+        **{
+            cv.Optional(key): sensor.sensor_schema(
+                icon="mdi:timer-alert-outline",
+                accuracy_decimals=0,
+                entity_category=ENTITY_CATEGORY_DIAGNOSTIC,
+                state_class=STATE_CLASS_TOTAL_INCREASING,
+            )
+            for key in CONF_LINK_GAPS_OVER
+        },
+        cv.Optional(CONF_LINK_GAPS_TRUNCATED): sensor.sensor_schema(
+            icon="mdi:content-cut",
+            accuracy_decimals=0,
+            entity_category=ENTITY_CATEGORY_DIAGNOSTIC,
+            state_class=STATE_CLASS_TOTAL_INCREASING,
+        ),
+        cv.Optional(CONF_LINK_WATCH_TIME): sensor.sensor_schema(
+            unit_of_measurement="s",
+            icon="mdi:timer-outline",
+            accuracy_decimals=0,
+            device_class="duration",
+            entity_category=ENTITY_CATEGORY_DIAGNOSTIC,
+            state_class=STATE_CLASS_TOTAL_INCREASING,
+        ),
         cv.Optional(CONF_PUMP_LINK_STATUS): text_sensor.text_sensor_schema(
             icon="mdi:bluetooth-connect",
         ),
@@ -356,6 +403,62 @@ CONFIG_SCHEMA = cv.Schema(
         ),
     }
 ).extend(cv.COMPONENT_SCHEMA).extend(esp32_ble_tracker.ESP_BLE_DEVICE_SCHEMA)
+
+
+def _warn_if_histogram_cannot_fill(config):
+    """Say at config time when the gap histogram is censored by data_timeout.
+
+    The watchdog closes a quiet interval as soon as the budget expires, so every
+    rung at or above `data_timeout` reads a structural zero however badly the
+    pump behaves -- and a rung exactly at it silently becomes a recycle count
+    rather than a gap count. A measurement run started that way produces
+    reassuring numbers and settles nothing.
+
+    The component also warns at boot, but that fires at setup_priority::DATA,
+    before the API server is up -- so it reaches the serial console only, and
+    nobody flashing over the air ever sees it (verified on the bench: the
+    warning is absent from an `esphome logs` stream of a boot that emitted it).
+    Here it lands in `esphome config` and `esphome compile` output, where the
+    person choosing the value is actually looking.
+    """
+    declared = [key for key in CONF_LINK_GAPS_OVER if key in config]
+    if not declared:
+        return config
+    budget_ms = config[CONF_DATA_TIMEOUT].total_milliseconds
+    if budget_ms == 0:
+        return config  # nothing recycles, so nothing truncates an interval
+    # Above the budget and equal to it fail differently, and lumping them
+    # together is wrong about the second. A rung above the budget is a
+    # structural zero. A rung AT the budget does increment -- but only on the
+    # intervals the watchdog itself cut off, so it stops counting quiet periods
+    # and starts counting recycles. That one is the more insidious of the two,
+    # because the number looks alive.
+    declared = [
+        (threshold, key)
+        for threshold, key in zip(LINK_GAP_THRESHOLDS_S, CONF_LINK_GAPS_OVER, strict=True)
+        if key in config
+    ]
+    above = [t for t, _ in declared if t * 1000 > budget_ms]
+    at_budget = [t for t, _ in declared if t * 1000 == budget_ms]
+    if above:
+        _LOGGER.warning(
+            "alpha_hwr: data_timeout is %ss, so the %s gap counter(s) cannot fill -- "
+            "the watchdog truncates the interval first. Raise data_timeout (600s) "
+            "for a measurement run; see docs/configuration.md",
+            budget_ms // 1000,
+            ", ".join(f"{t}s" for t in above),
+        )
+    if at_budget:
+        _LOGGER.warning(
+            "alpha_hwr: the %s gap counter(s) equal data_timeout, so the only intervals "
+            "that can reach them are ones the watchdog cut off -- they count recycles, "
+            "not quiet periods. Raise data_timeout (600s) for a measurement run",
+            ", ".join(f"{t}s" for t in at_budget),
+        )
+    return config
+
+
+FINAL_VALIDATE_SCHEMA = _warn_if_histogram_cannot_fill
 
 
 async def to_code(config):
@@ -537,6 +640,25 @@ async def to_code(config):
     if CONF_LINK_MAX_GAP in config:
         sens = await sensor.new_sensor(config[CONF_LINK_MAX_GAP])
         cg.add(var.set_link_max_gap_sensor(sens))
+
+    # One setter per rung, named after the threshold. Deliberately not an
+    # index-based setter: the name is the only thing that tells an operator what
+    # a counter means, and a name/index/threshold mismatch is invisible in a
+    # reading. Resolving the setter by name makes drift a build failure.
+    for threshold_s, key in zip(
+        LINK_GAP_THRESHOLDS_S, CONF_LINK_GAPS_OVER, strict=True
+    ):
+        if key in config:
+            sens = await sensor.new_sensor(config[key])
+            cg.add(getattr(var, f"set_link_gaps_over_{threshold_s}s_sensor")(sens))
+
+    if CONF_LINK_GAPS_TRUNCATED in config:
+        sens = await sensor.new_sensor(config[CONF_LINK_GAPS_TRUNCATED])
+        cg.add(var.set_link_gaps_truncated_sensor(sens))
+
+    if CONF_LINK_WATCH_TIME in config:
+        sens = await sensor.new_sensor(config[CONF_LINK_WATCH_TIME])
+        cg.add(var.set_link_watch_time_sensor(sens))
 
     if CONF_PUMP_LINK_STATUS in config:
         sens = await text_sensor.new_text_sensor(config[CONF_PUMP_LINK_STATUS])

@@ -336,8 +336,11 @@ jobs:
       # The component __init__.py files import esphome's codegen modules, which
       # are not installed here; check the standalone tooling strictly and the
       # schemas leniently.
+      # Named explicitly rather than sweeping tools/: mutation_targets.py has
+      # never been under mypy, and pulling it in here would fail this job on
+      # something unrelated to whatever change added a script.
       - name: mypy
-        run: mypy --ignore-missing-imports tools/write_bench.py
+        run: mypy --ignore-missing-imports tools/write_bench.py tools/link_gap_report.py
 
   # ---------------------------------------------------------------------------
   # The Lovelace card. 1700+ lines that had no automated check of any kind --

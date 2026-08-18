@@ -39,6 +39,35 @@ void AlphaHwrComponent::setup() {
     // reader actually sees.
   }
 
+  // A gap histogram configured under a budget that cannot let its top rungs
+  // fill (issue #176 part 1). The watchdog closes an interval on the first tick
+  // past the window in force, so every threshold at or above `data_timeout`
+  // reads a structural zero -- which is indistinguishable from "the pump never
+  // went quiet that long", and is exactly the wrong conclusion. Worth a warning
+  // rather than silence: the failure mode is a measurement run that looks
+  // clean, produces reassuring numbers, and settles the default on nothing.
+  const uint32_t top_rung_ms = this->link_gap_top_configured_rung_ms_();
+  if (link_gap_thresholds_censored(this->link_data_timeout_ms_, top_rung_ms)) {
+    ESP_LOGW(TAG,
+             "Link gap histogram counts up to %" PRIu32
+             "s, but data_timeout is %" PRIu32 "s",
+             top_rung_ms / 1000, this->link_data_timeout_ms_ / 1000);
+    // Above the budget and equal to it fail differently, and saying "cannot
+    // fill" for both is wrong about the second: a rung at the budget does
+    // increment, on the samples the watchdog itself cut off. It stops being a
+    // gap count and becomes a recycle count, which is the more insidious of the
+    // two because the number looks alive.
+    if (top_rung_ms == this->link_data_timeout_ms_) {
+      ESP_LOGW(TAG, "  That counter can only be reached by intervals the "
+                    "watchdog cut off - it counts recycles, not quiet periods");
+    } else {
+      ESP_LOGW(TAG, "  Counters above that budget cannot fill - the watchdog "
+                    "truncates the interval first");
+    }
+    ESP_LOGW(TAG, "  Raise data_timeout (600s) for a measurement run; see "
+                  "docs/configuration.md");
+  }
+
   if (this->ready_sensor_) {
     this->ready_sensor_->publish_state(false);
   }
@@ -208,13 +237,17 @@ void AlphaHwrComponent::setup() {
         // correctness check on the payload.
         const uint32_t inbound_now = millis();
 
-        // Longest quiet interval seen since boot, as a running maximum (issue
-        // #176). The data_timeout default has to clear every gap that happens
-        // routinely while staying short enough to be useful, and those two
-        // requirements pull opposite ways -- only observation settles it.
-        // Recorded here rather than derived from the poll interval because a
-        // bench reading once turned out to be 90 s old against a channel the
-        // constants said was 10 s.
+        // Close the quiet interval this frame ended (issue #176). The
+        // data_timeout default has to clear every gap that happens routinely
+        // while staying short enough to be useful, and those two requirements
+        // pull opposite ways -- only observation settles it. Recorded here
+        // rather than derived from the poll interval because a bench reading
+        // once turned out to be 90 s old against a channel the constants said
+        // was 10 s.
+        //
+        // This feeds the whole distribution, not just the running maximum: the
+        // per-threshold counters, how many intervals were cut short rather than
+        // ending on their own, and the time they cover. See LinkGapSampler.
         this->link_gap_.on_inbound(inbound_now);
 
         // Data arrived, so whatever the link was doing, it is doing it again --
@@ -480,7 +513,10 @@ void AlphaHwrComponent::loop() {
     this->link_last_eval_ms_ = millis();
     this->check_link_liveness_();
     this->evaluate_link_status();
-    this->publish_link_diagnostics_();
+    // The tick's own stamp, not a fresh millis(): the watched-time throttle
+    // measures against it, and re-reading the clock after two calls that can
+    // each take a while would make the interval it enforces drift.
+    this->publish_link_diagnostics_(this->link_last_eval_ms_);
   }
 }
 
@@ -564,7 +600,7 @@ void AlphaHwrComponent::check_link_liveness_() {
 // republishing on every ~1 s tick would cost a frame per API subscriber per
 // second for values that change at most once per recycle -- the exact shape of
 // the load that OOMs this node (issue #127).
-void AlphaHwrComponent::publish_link_diagnostics_() {
+void AlphaHwrComponent::publish_link_diagnostics_(uint32_t now_ms) {
   if (this->link_recycles_sensor_ != nullptr &&
       this->link_recycles_published_ != this->link_recycles_without_data_) {
     this->link_recycles_published_ = this->link_recycles_without_data_;
@@ -578,6 +614,50 @@ void AlphaHwrComponent::publish_link_diagnostics_() {
     this->link_max_gap_published_ = max_gap_ms;
     this->link_max_gap_sensor_->publish_state(static_cast<float>(max_gap_ms) /
                                               1000.0f);
+  }
+
+  // The tail histogram (issue #176 part 1). Each rung is the number of times a
+  // data_timeout of that length would have fired, so these are the counts the
+  // default has to be chosen from; link_max_gap above gives one point of the
+  // same distribution and cannot give its shape.
+  for (size_t i = 0; i < LINK_GAP_BUCKETS; i++) {
+    const uint32_t count = this->link_gap_.over_count(i);
+    if (this->link_gap_over_sensors_[i] != nullptr &&
+        this->link_gap_over_published_[i] != count) {
+      this->link_gap_over_published_[i] = count;
+      this->link_gap_over_sensors_[i]->publish_state(static_cast<float>(count));
+    }
+  }
+
+  const uint32_t truncated = this->link_gap_.truncated();
+  if (this->link_gaps_truncated_sensor_ != nullptr &&
+      this->link_gaps_truncated_published_ != truncated) {
+    this->link_gaps_truncated_published_ = truncated;
+    this->link_gaps_truncated_sensor_->publish_state(
+        static_cast<float>(truncated));
+  }
+
+  // Watched time: change-gated AND throttled. It advances on every notification,
+  // so the gate alone would emit a frame per API subscriber every 10 s forever
+  // -- the load shape that OOMs this node (issue #127). The throttle costs no
+  // information: 300 s is Home Assistant's short-term statistics bucket and its
+  // long-term statistics are hourly, so nothing downstream can resolve finer.
+  //
+  // The first publish is exempt from the throttle, not from the gate: the zero
+  // baseline has to reach Home Assistant promptly at boot for its
+  // total_increasing accounting to attribute the counts to the right run.
+  const uint32_t watch_time_s =
+      static_cast<uint32_t>(this->link_gap_.watched_ms() / 1000u);
+  const bool watch_time_first =
+      this->link_watch_time_published_ == 0xFFFFFFFFu;
+  if (this->link_watch_time_sensor_ != nullptr &&
+      this->link_watch_time_published_ != watch_time_s &&
+      (watch_time_first || now_ms - this->link_watch_time_publish_ms_ >=
+                               LINK_GAP_WATCH_PUBLISH_MS)) {
+    this->link_watch_time_published_ = watch_time_s;
+    this->link_watch_time_publish_ms_ = now_ms;
+    this->link_watch_time_sensor_->publish_state(
+        static_cast<float>(watch_time_s));
   }
 }
 

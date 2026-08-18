@@ -1,5 +1,6 @@
 #pragma once
 
+#include <cstddef>
 #include <cstdint>
 
 // Inbound-data watchdog for the GENI link.
@@ -207,7 +208,98 @@ inline uint32_t link_data_timeout_next(uint32_t current_ms, uint32_t cap_ms) {
   return doubled > cap_ms ? cap_ms : doubled;
 }
 
-/// Running maximum of the quiet intervals the watchdog above measures.
+/// Thresholds the tail histogram in LinkGapSampler counts against, in ms.
+///
+/// A running maximum is one extreme value. It cannot answer the question the
+/// `data_timeout` default actually turns on -- "how many times a day would a
+/// budget of T have fired?" -- and one freak interval pins it for the rest of
+/// the boot. These counters answer it directly, one point on the survival curve
+/// each, because "intervals longer than T" IS the number of times a budget of T
+/// would have expired (see the strict `>` in record_(), which mirrors
+/// link_data_timeout_expired()).
+///
+/// The ladder is chosen against the sizing note at the top of this file rather
+/// than by round numbers:
+///
+///   15 s, 20 s   One missed poll cycle. Steady state is bounded by our own
+///                fixed 10 s poll -- update_interval is deliberately not in the
+///                component's schema -- so anything past ~20 s means a poll
+///                response did not arrive, not that the pump reports slowly.
+///                15 s is also the instrument's own liveness check: after a day
+///                an all-zero histogram is indistinguishable from one that was
+///                never wired up, and a nonzero 15 s counter is the cheapest
+///                proof the whole path works.
+///   30 s, 45 s   Straddle the handshake worst cases: 21.5 s to first inbound
+///                data, 31.5 s with the sequence backstop firing. A default
+///                below these would recycle links that were merely connecting.
+///   60 s         The value under test. Its counter is what says whether the
+///                shipped default was ever close to firing.
+///   90 s         Above the default deliberately. Without a rung up here the
+///                data can say "60 s would have fired N times" but cannot say
+///                whether those excursions were 61-89 s -- in which case a
+///                longer default covers them -- or minutes long, in which case
+///                they are genuine link deaths that SHOULD recycle and the
+///                default is not the problem. Those two readings argue in
+///                opposite directions, so the rung is load-bearing rather than
+///                decorative. It needs `data_timeout` raised past it to be
+///                observable at all; see the censoring note on LinkGapSampler.
+///
+/// Keep in step with __init__.py, which names the entities after these values.
+/// The setters in alpha_hwr.h static_assert each index against the value its
+/// name claims, so reordering this array is a compile error and a Python key
+/// with no matching setter fails the build -- neither can end up silently
+/// labelling a counter with the wrong threshold, which is a mistake nothing in
+/// a reading would reveal.
+static constexpr uint32_t LINK_GAP_THRESHOLDS_MS[] = {15000u, 20000u, 30000u,
+                                                      45000u, 60000u, 90000u};
+static constexpr size_t LINK_GAP_BUCKETS =
+    sizeof(LINK_GAP_THRESHOLDS_MS) / sizeof(LINK_GAP_THRESHOLDS_MS[0]);
+
+/// True when `data_timeout` is small enough that the top thresholds above
+/// cannot be observed at all.
+///
+/// An interval is closed by the watchdog at whatever window is in force, on the
+/// first 1 s tick strictly past it, so with budget B no sample can exceed
+/// B + ~1 s unless a drop ended it instead. Two different failures follow, and
+/// the comparison is `<=` because both of them matter:
+///
+///   - A threshold ABOVE B reads a structural zero however badly the pump
+///     behaves, which reads exactly like "the budget was never close" — the
+///     conclusion this histogram exists to stop anyone reaching by accident.
+///   - A threshold AT B is not zero, it is worse: the only samples that can
+///     reach it are the ones the watchdog itself cut off, so the counter
+///     silently changes meaning from "quiet intervals this long" to "recycles".
+///     Those are different numbers and only one of them answers the question.
+///
+/// @param top_rung_ms The largest threshold actually configured. Every rung is
+///                    independently optional, so this is NOT always the top of
+///                    the ladder: a config declaring only `link_gaps_over_15s`
+///                    is perfectly well served by a 60 s budget and must not be
+///                    warned about the 90 s rung it never asked for. 0 means no
+///                    rung is configured, which nothing can censor.
+///
+/// A disabled watchdog (0) is not censored either: with nothing recycling,
+/// nothing truncates an interval.
+inline bool link_gap_thresholds_censored(uint32_t data_timeout_ms,
+                                         uint32_t top_rung_ms) {
+  if (data_timeout_ms == 0 || top_rung_ms == 0)
+    return false;
+  return data_timeout_ms <= top_rung_ms;
+}
+
+/// How often the watched-time total may be published, in ms.
+///
+/// Unlike the counters, watched time advances on every notification — so a
+/// plain change gate would emit a frame per API subscriber every 10 s forever,
+/// which is the load shape that OOMs this node (issue #127). 300 s is Home
+/// Assistant's short-term statistics bucket and its long-term statistics are
+/// hourly, so nothing that consumes this value can resolve a finer cadence
+/// anyway: the throttle costs no information at all.
+static const uint32_t LINK_GAP_WATCH_PUBLISH_MS = 300000u;
+
+/// The distribution of the quiet intervals the watchdog above measures: a
+/// running maximum, cumulative counts of the intervals that exceeded each
+/// LINK_GAP_THRESHOLDS_MS rung, and the time those intervals cover.
 ///
 /// The statistic exists to choose the `data_timeout` default from what real
 /// installations do rather than from a constants calculation (issue #176), and
@@ -257,6 +349,37 @@ inline uint32_t link_data_timeout_next(uint32_t current_ms, uint32_t cap_ms) {
 ///     on its own under a widened 120 s window reads the same as one that hit a
 ///     60 s ceiling. `link_recycles` and the fault sensor are what distinguish
 ///     them; this number alone cannot.
+///
+/// The counters and the watched-time total are fed from the same sample_(), so
+/// they see exactly the intervals the maximum sees. That is why they live in
+/// this class rather than beside it: what the two statistics share is not
+/// arithmetic but the sampling *policy* argued above — which intervals count —
+/// and a second class holding a second copy of that policy would diverge from
+/// this one silently, in a direction no reading reveals. One sampling site
+/// makes the divergence impossible rather than merely tested for.
+///
+/// Two things the counters add that a maximum cannot express:
+///
+///   - **`over_count(i)` is the number of times a `data_timeout` of
+///     LINK_GAP_THRESHOLDS_MS[i] would have fired**, exactly, because the
+///     comparison is the same strict `>` that link_data_timeout_expired() uses.
+///     That equivalence is the whole point; it is what makes the counter a
+///     decision input rather than a curiosity, and it is what the boundary test
+///     pins from both sides.
+///   - **`truncated()` is how far the reading can be trusted.** An interval
+///     closed by a recycle or a drop did not end on its own, so it is a lower
+///     bound, and a run with many of them has a tail that was cut off rather
+///     than observed. Counting them turns that from an assumption into a
+///     measurement — which matters because the failure this whole statistic
+///     already suffered once was a censored reading that looked clean (the
+///     2.6 s maximum against five breaches, above).
+///
+/// The counters are censored the same way, and worse, because the cutoff moves:
+/// with budget B in force no sample can exceed B by more than one 1 s tick, and
+/// the backoff widens B after each recycle. So every rung at or above the
+/// configured budget reads a structural zero. A measurement run has to raise
+/// `data_timeout` past the top rung — see link_gap_thresholds_censored(), which
+/// is what the component warns from at setup.
 class LinkGapSampler {
  public:
   /// Connection open. The watchdog's clock starts here, so this one does too;
@@ -268,11 +391,58 @@ class LinkGapSampler {
   }
 
   /// Inbound notification: closes an interval and opens the next.
-  void on_inbound(uint32_t now_ms) { this->sample_(now_ms); }
+  ///
+  /// Arms rather than samples if no open preceded it. A notification with no
+  /// live link behind it is not the end of a quiet interval — there was no link
+  /// to be quiet — and measuring across the downtime would inflate the reading,
+  /// which is the same error on_disconnect()'s armed_ guard exists to prevent.
+  /// It matters more here than it did for the maximum alone: an inflated
+  /// maximum is one number a reader already knows is a floor, while an inflated
+  /// sample permanently increments the top counters and reads afterwards as a
+  /// genuine multi-minute excursion.
+  ///
+  /// Self-arming rather than a bare early return, deliberately. No path today
+  /// delivers a notification without a connection callback first; if one ever
+  /// did, a bare guard would silently discard *every* sample of that session,
+  /// which is worse than the inflation it fixes. Arming loses at most the
+  /// session's first interval.
+  ///
+  /// on_recycle() below needs no such guard: the watchdog only fires while the
+  /// session is connected, so it cannot run unarmed.
+  void on_inbound(uint32_t now_ms) {
+    if (!this->armed_) {
+      this->last_ms_ = now_ms;
+      this->armed_ = true;
+      return;
+    }
+    this->sample_(now_ms, true);
+  }
 
-  /// The watchdog fired: record the interval it gave up on, and re-arm with the
-  /// same stamp check_link_liveness_() re-arms the window with.
-  void on_recycle(uint32_t now_ms) { this->sample_(now_ms); }
+  /// The watchdog fired: record the interval it gave up on, then stop sampling
+  /// this session.
+  ///
+  /// Disarming is what keeps one recycle from counting as two truncated
+  /// intervals. check_link_liveness_() samples here and then calls
+  /// force_disconnect(), which is asynchronous -- the DISCONNECT event lands a
+  /// tick or two later and the disconnection callback calls on_disconnect().
+  /// Left armed, that second call samples the ~1 s between the re-arm and the
+  /// event and counts it as another truncated interval, so `link_gaps_truncated`
+  /// reads about twice the number of recycles. Measured: open, one notification,
+  /// one recycle, one disconnect gave truncated = 2.
+  ///
+  /// The interval that would be lost is the tail end of a link already being
+  /// torn down, which is an artifact of the asynchronous close rather than a
+  /// quiet period on a live link. Once the watchdog has given up, this session
+  /// is over as far as the statistic is concerned.
+  ///
+  /// Not guarded on armed_ itself: the watchdog only fires while the session is
+  /// connected, and if force_disconnect() produces no DISCONNECT event (the
+  /// documented case where another client holds the ACL) it re-fires once per
+  /// window, and those intervals are real and should be recorded.
+  void on_recycle(uint32_t now_ms) {
+    this->sample_(now_ms, false);
+    this->armed_ = false;
+  }
 
   /// The link dropped for a reason other than the watchdog — supervision
   /// timeout, pump power loss, the encryption-failure teardown. The watchdog
@@ -296,25 +466,75 @@ class LinkGapSampler {
   void on_disconnect(uint32_t now_ms) {
     if (!this->armed_)
       return;
-    this->sample_(now_ms);
+    this->sample_(now_ms, false);
     this->armed_ = false;
   }
 
   uint32_t max_ms() const { return this->max_ms_; }
 
+  /// Intervals longer than LINK_GAP_THRESHOLDS_MS[index], since boot.
+  ///
+  /// Out of range reads 0 rather than asserting: the only caller iterates to
+  /// bucket_count(), and there is nowhere useful for an ESP32 to send an
+  /// assertion. Pinned by a test so it does not read as dead code.
+  uint32_t over_count(size_t index) const {
+    return index < LINK_GAP_BUCKETS ? this->over_counts_[index] : 0;
+  }
+
+  /// Intervals closed by a recycle or a drop rather than by data, since boot.
+  /// The trust check on everything above — see the class comment.
+  uint32_t truncated() const { return this->truncated_; }
+
+  /// Total length of every interval sampled, since boot.
+  ///
+  /// The sum of the intervals IS the time the watchdog was armed, so this is
+  /// the denominator that turns a count into a rate, obtained without a second
+  /// clock or a call site of its own. 64-bit because 32 bits of milliseconds
+  /// wraps at 49.7 days and a measurement run is weeks: a wrap would read to
+  /// Home Assistant as a counter reset and quietly discard the run.
+  uint64_t watched_ms() const { return this->watched_ms_; }
+
+  static constexpr size_t bucket_count() { return LINK_GAP_BUCKETS; }
+
+  static constexpr uint32_t threshold_ms(size_t index) {
+    return index < LINK_GAP_BUCKETS ? LINK_GAP_THRESHOLDS_MS[index] : 0;
+  }
+
  private:
-  void sample_(uint32_t now_ms) {
+  /// @param closed_by_data True when a notification ended the interval; false
+  ///                       when a recycle or a drop cut it short.
+  void sample_(uint32_t now_ms, bool closed_by_data) {
     // Unsigned subtraction, correct across the ~49-day millis() rollover for
     // the same reason link_data_timeout_expired() is.
     const uint32_t gap = static_cast<uint32_t>(now_ms - this->last_ms_);
     if (gap > this->max_ms_)
       this->max_ms_ = gap;
+    this->watched_ms_ += gap;
+    if (!closed_by_data)
+      this->truncated_++;
+    // Strict `>`, matching link_data_timeout_expired(). A gap of exactly T did
+    // not expire a budget of T, so it must not count as one — see the class
+    // comment on why that equivalence is the point.
+    //
+    // The whole array every time, with no break on the first threshold the gap
+    // does not reach. Six comparisons per ~10 s is free, while the break
+    // version is silently wrong the day someone writes the thresholds out of
+    // order — a bug traded for an optimisation nothing needs.
+    for (size_t i = 0; i < LINK_GAP_BUCKETS; i++) {
+      if (gap > LINK_GAP_THRESHOLDS_MS[i])
+        this->over_counts_[i]++;
+    }
     this->last_ms_ = now_ms;
   }
 
   uint32_t last_ms_{0};
   uint32_t max_ms_{0};
   bool armed_{false};
+  // Since-boot totals: a reconnect must not clear them, or a flapping link
+  // reports near-zero counts over a denominator of nothing.
+  uint32_t over_counts_[LINK_GAP_BUCKETS]{};
+  uint32_t truncated_{0};
+  uint64_t watched_ms_{0};
 };
 
 }  // namespace alpha_hwr

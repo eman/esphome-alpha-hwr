@@ -163,6 +163,43 @@ alpha_hwr:
    link_max_gap:
      name: "Pump Link Longest Gap"
 
+   # The gap histogram: how MANY quiet intervals passed each length, where
+   # "Longest Gap" above reports only the worst one. Each counter is the number
+   # of times a `data_timeout` of that length would have fired, which is the
+   # number the default has to be chosen from (issue #176 part 1).
+   #
+   # OFF by default, deliberately. This is a measurement instrument for one
+   # decision, not a feature: switching it on costs eight diagnostic entities
+   # and a boot warning on every install, to answer a question only the people
+   # actually running the measurement are asking.
+   #
+   # To take part in a measurement run, uncomment the block below AND set
+   # `data_timeout: 600s` in your own config. The second half is not optional:
+   # a counter at or above the budget in force cannot fill, because the watchdog
+   # cuts the interval short first, so at the shipped 60s default the top rungs
+   # read zero however badly the pump behaves. `esphome config` says so if you
+   # forget. "Gaps Truncated" is the trust check afterwards — it counts the
+   # intervals that were cut short rather than ending on their own.
+   #
+   # See docs/configuration.md, and tools/link_gap_report.py for reading them.
+   #
+   # link_gaps_over_15s:
+   #   name: "Pump Link Gaps Over 15s"
+   # link_gaps_over_20s:
+   #   name: "Pump Link Gaps Over 20s"
+   # link_gaps_over_30s:
+   #   name: "Pump Link Gaps Over 30s"
+   # link_gaps_over_45s:
+   #   name: "Pump Link Gaps Over 45s"
+   # link_gaps_over_60s:
+   #   name: "Pump Link Gaps Over 60s"
+   # link_gaps_over_90s:
+   #   name: "Pump Link Gaps Over 90s"
+   # link_gaps_truncated:
+   #   name: "Pump Link Gaps Truncated"
+   # link_watch_time:
+   #   name: "Pump Link Watched Time"
+
    # Run state, and the alarm for the illegal "schedule on but pump stopped"
    # state that silently loses every window (issue #124). "Engage Pump" reads
    # off for both AUTO and STOP once the schedule is on, so these are the only

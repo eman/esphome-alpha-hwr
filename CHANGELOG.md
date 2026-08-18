@@ -4,6 +4,74 @@
 
 ### Added
 
+- **A gap histogram, so the `data_timeout` default can be chosen from
+  observation** (issue #176 part 1). Eight optional diagnostic sensors:
+  `link_gaps_over_15s` through `link_gaps_over_90s`, `link_gaps_truncated`, and
+  `link_watch_time`.
+
+  `link_max_gap` reports the worst quiet interval since boot. That is one
+  extreme value, and the question the default actually turns on is a rate — a
+  budget of `T` fires once for every quiet interval longer than `T`, so what it
+  costs is how many of those happen per day. Each `link_gaps_over_Ns` counter is
+  exactly that number, because the comparison is the same strict one the
+  watchdog makes.
+
+  The rungs are sized against the timings already recorded in
+  `link_watchdog.h`: 15s and 20s are one missed poll cycle, 30s and 45s straddle
+  the 21.5s and 31.5s worst cases for reaching first data after a connect, 60s
+  is the shipped default, and 90s sits above it deliberately — without a rung
+  there the data cannot separate a 70s excursion, which a longer default would
+  cover, from one lasting minutes, which is a genuine link death that should
+  recycle. Those two readings argue in opposite directions.
+
+  All of it is fed from the sampler's existing `sample_()`, so the counters see
+  exactly the intervals the maximum sees and inherit every censoring decision
+  already argued and pinned there. `total_increasing` rather than
+  `measurement`, which is the point of numeric counters over a text summary:
+  they are RAM values that restart at every boot, and Home Assistant's long-term
+  statistics recognise the reset and keep accumulating, so a run measured in
+  weeks survives the OTAs it will certainly meet.
+
+  Two additions the review insisted on, both because the failure they prevent
+  looks like success:
+
+  - **`link_gaps_truncated`.** An interval cut short by a recycle or a drop is a
+    lower bound, so a run full of them has a tail that was cut off rather than
+    observed — and without a count of them that reading is indistinguishable
+    from a clean one. This statistic already made exactly that mistake once: a
+    maximum reading 2.6s against a budget it had breached five times.
+  - **A warning when `data_timeout` is too small for the rungs declared.**
+    Under the `60s` default nothing can ever be recorded above 60s, so a run
+    left at the default produces reassuring zeros whatever the pump does. A
+    measurement run wants `data_timeout: 600s`. Emitted at *config* time, from
+    `esphome config` and `esphome compile`, because the equivalent boot-time
+    warning runs before the API server is up and so reaches the serial console
+    only — confirmed on the bench, where it is absent from the log stream of a
+    boot that emitted it. The boot warning is kept for serial users.
+
+  The entities are **off by default**: they are an instrument for one decision,
+  and switching them on costs eight diagnostic entities plus a boot warning on
+  every install to answer a question only the people running the measurement are
+  asking. `packages/alpha_hwr_pairing.yaml` carries the block commented out with
+  instructions; `tests/ci-compile.yaml` declares it so the schema and codegen
+  stay covered in CI.
+
+  `link_watch_time` is the denominator — the time the counts were drawn from,
+  obtained as the sum of the sampled intervals rather than from a second clock.
+  It is the one value here that moves on every notification, so it is throttled
+  to one publish per 300s on top of the change gate; that is Home Assistant's
+  short-term statistics bucket, so the throttle costs no resolution anything
+  downstream can use, and without it this would be a frame per API subscriber
+  every 10 seconds forever (issue #127).
+
+- **`tools/link_gap_report.py`** — reads those counters off one or more nodes,
+  pools them across boots the way `total_increasing` does, and prints what each
+  candidate default would have cost in recycles per day, with the decision rule
+  printed alongside the answer. It refuses to recommend anything when the
+  evidence does not support it: under two weeks of watched link, fewer than two
+  installations, a material fraction of intervals truncated, or a run whose
+  budget could not let the rungs fill.
+
 - **The component's BLE lifecycle is host-tested** — `tests/test_component_wiring.cpp`,
   16 assertions, plus the ESP-IDF and ESPHome mocks that make it possible
   (issue #174 audit tail). `alpha_hwr.cpp` and `ble_connection_manager.cpp` are
@@ -101,6 +169,16 @@
   a link step, so every run fell back to rebuilding everything. It was loud in
   the output and annotated CI, but it silently cost the entire speedup until it
   was noticed.
+
+- **The gap sampler no longer measures across downtime when a notification
+  arrives with no connection behind it.** It arms from that frame instead. No
+  path delivers one today, but the consequence changed with the histogram: an
+  inflated maximum is one number a reader already knows is a floor, while an
+  inflated sample permanently increments the top counters and reads afterwards
+  as a genuine multi-minute excursion — an error in the direction that argues
+  for keeping a default nobody has validated. It arms rather than discarding,
+  so if such a path ever does appear it loses at most that session's first
+  interval rather than all of them.
 
 - **The transport's send-failure branches are tested.** Every write callback in
   the suite returned `true` unconditionally, so the two paths production takes
