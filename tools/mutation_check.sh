@@ -521,7 +521,13 @@ MUTATIONS=(
 # A refusal must be reported as ANSWERED to the config-write callers, or their
 # no-readback short-circuit turns a misattributed refusal into a REJECTED
 # verdict for a write that landed.
-"config-write-treats-a-refusal-as-silence|components/alpha_hwr/control_service.cpp|        if (on_ack) on_ack(success || data != nullptr);\n      },\n      3000, false, true); // 3000ms timeout, no register read, expect short ACK|        if (on_ack) on_ack(success);\n      },\n      3000, false, true); // 3000ms timeout, no register read, expect short ACK"
+# NOTE the shape of this search string. The obvious one contains `success ||
+# data != nullptr`, and this file's format splits fields on `|` -- so a `||` in
+# a search silently truncates the field and the entry cannot apply. It reports
+# "not applied" and exits 1 rather than scoring Survived, which is how this was
+# caught, but the fix is to keep `|` out of the string: hence the named
+# `answered` local in control_service.cpp, which is clearer code regardless.
+"config-write-treats-a-refusal-as-silence|components/alpha_hwr/control_service.cpp|        if (on_ack) on_ack(answered);\n      },\n      3000, false, true); // 3000ms timeout, no register read, expect short ACK|        if (on_ack) on_ack(success);\n      },\n      3000, false, true); // 3000ms timeout, no register read, expect short ACK"
 "sensor-pub-media-temp-range-removed|components/alpha_hwr/sensor_publisher.cpp|    if (temp.media_temperature_c >= -20 && temp.media_temperature_c <= 100) {|    if (true) {"
 "sensor-pub-alarm-dedup-removed|components/alpha_hwr/sensor_publisher.cpp|  if (alarms_sensor_->has_state() && alarms_sensor_->state == codes_str) {|  if (false) {"
 "sensor-pub-head-rate-gap-reset-removed|components/alpha_hwr/sensor_publisher.cpp|      if (dt_s > 30.0f) {|      if (false) {"

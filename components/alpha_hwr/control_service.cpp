@@ -855,7 +855,8 @@ void ControlService::write_temp_range_config(float min_temp, float max_temp, boo
         // So an answered-but-refused write reports true and is settled by the
         // readback, which is unambiguous. transport.cpp logs the refusal at
         // warning either way, so it is reported rather than swallowed.
-        if (on_ack) on_ack(success || data != nullptr);
+        const bool answered = success or (data != nullptr);
+        if (on_ack) on_ack(answered);
       },
       3000, false, true); // 3000ms timeout, no register read, expect short ACK
 }
@@ -901,7 +902,8 @@ bool ControlService::write_dhw_config(uint8_t on_minutes, uint8_t off_minutes,
       [on_ack](bool success, const uint8_t *data, size_t /*len*/) {
         // "Answered", not "accepted" -- see write_temp_range_config() above for
         // why a refusal must not be reported as silence (issue #208).
-        if (on_ack) on_ack(success || data != nullptr);
+        const bool answered = success or (data != nullptr);
+        if (on_ack) on_ack(answered);
       },
       3000, false, true);
   return true;
