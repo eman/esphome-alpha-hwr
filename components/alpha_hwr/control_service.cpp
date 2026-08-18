@@ -291,7 +291,9 @@ void ControlService::read_dhw_config(std::function<void(bool)> callback) {
 }
 
 bool ControlService::get_mode_async(std::function<void(bool, ControlMode)> on_complete) {
-  // Verify session is authenticated
+  // Verify the session is READY. Note what that does and does not mean: it is
+  // reached on a timer, with no frame having been exchanged, so this rejects a
+  // session that has not got that far and promises nothing about the pump.
   if (session_.get_state() != core::SessionState::READY) {
     ESP_LOGW(TAG, "Cannot get mode: session not ready (state=%d)", static_cast<int>(session_.get_state()));
     if (on_complete) {

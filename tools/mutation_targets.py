@@ -4,7 +4,7 @@
 The mutation check used to rebuild all 22 test binaries from scratch for every
 one of its 54 mutations, which is where its wall-clock went -- the mutation
 itself is a one-line edit. A mutation to `dhw_demand_logic.h` cannot change the
-verdict of `test_auth`, so building and running it is pure waste.
+verdict of `test_session`, so building and running it is pure waste.
 
 The Makefile cannot answer this on its own: it lists *every* component header as
 a prerequisite of *every* target, deliberately ("Coarse on purpose: a header

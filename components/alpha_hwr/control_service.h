@@ -200,7 +200,8 @@ class ControlService {
     * 
     * Called by TelemetryService when it receives a passive notification
     * (OpSpec 0x0E, Object 0x2F01, Sub 1) containing control mode data.
-    * The pump sends these notifications automatically during/after authentication.
+    * The pump volunteers these notifications of its own accord, and the
+    * control-state poll (issue #54) also asks for the same object.
     * 
     * Updates is_remote_mode_enabled_ when control_source == 2 (Remote/Digital)
     * or control_source == 1 (Local/Panel). Unknown values (e.g. 0) are ignored
@@ -222,7 +223,7 @@ class ControlService {
     * from two code paths, both of which carry the same payload format
     * ([control_source][operation_mode][control_mode][setpoint]):
     *   1. Passive Control Mode Status notifications (Obj 0x2F01 / Sub 0x0001,
-    *      OpSpec 0x0E) — received automatically after authentication.
+    *      OpSpec 0x0E) — volunteered by the pump.
     *   2. Explicit Object 86 / Sub 6 read callback — triggered by the periodic
     *      control-state poll (issue #54).
     * When control_source == 2 (Remote/Digital) the flag is set true; when

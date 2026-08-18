@@ -35,7 +35,7 @@ void test_schedule_write_payload() {
   });
 
   // Set session to ready state to allow writes
-  session.on_authenticated();
+  session.on_ready();
 
   // Write a simple schedule (layer 1) through the path production uses.
   //
@@ -300,7 +300,7 @@ void test_state_change_callback_fires_only_on_change() {
   esphome::alpha_hwr::services::ScheduleService service(transport, session);
 
   transport.set_write_callback([](const uint8_t *, size_t) -> bool { return true; });
-  session.on_authenticated();
+  session.on_ready();
 
   int callbacks = 0;
   bool last_reported = false;

@@ -533,6 +533,79 @@ static void test_length_collision_does_not_veto_a_type_match() {
               "a reply of the wrong type still does not match");
 }
 
+// ── A caller-supplied timeout is what actually reaches the command ──────────
+// Only one production caller passes one (TimeService's 5 s clock read), and it
+// is exercised only coarsely. This walked the boundary directly in
+// tests/test_auth.cpp until the opening sequence was removed (issue #174), and
+// it moved here rather than going with it: the property is the transport's, not
+// the caller's, and nothing else in the suite pins it.
+void test_a_command_honours_its_own_timeout_not_the_default() {
+  std::cout << "\n=== A command honours its own timeout, not the default ===" << std::endl;
+  esphome::alpha_hwr::core::Transport transport;
+  transport.set_write_callback([](const uint8_t *, size_t) -> bool { return true; });
+
+  const uint32_t started_at = mock_millis;
+  int cb_calls = 0;
+  bool cb_success = true;
+  transport.send_command(std::vector<uint8_t>(10, 0xAA), 0, 0,
+                         [&](bool ok, const uint8_t *, size_t) { cb_calls++; cb_success = ok; },
+                         /*timeout_ms=*/1000);
+
+  mock_millis += 50;
+  transport.loop();   // sends, enters AWAITING_RESPONSE
+
+  mock_millis += 900;
+  transport.loop();
+  TEST_ASSERT(cb_calls == 0, "900 ms in, the 1000 ms window has not expired");
+
+  mock_millis += 200;
+  transport.loop();
+  TEST_ASSERT(cb_calls == 1, "past 1000 ms the command gives up exactly once");
+  TEST_ASSERT(!cb_success, "...and reports failure");
+
+  // The point of the case: 1100 ms is well short of the 3000 ms default, so a
+  // build that ignored the argument would still be waiting here.
+  TEST_ASSERT(mock_millis - started_at < 3000,
+              "and it did so well short of the 3000 ms default, which is what "
+              "shows the caller's value was the one in force");
+}
+
+// ── reset() drops queued callbacks without invoking them ────────────────────
+// Not a desirable property -- a hazard, pinned so it stays visible. reset() is
+// reachable on a live link from one corrupt inbound fragment, and any service
+// with a read in flight when it happens waits forever: DeviceInfoService,
+// ScheduleService and TelemetryService all queue commands with callbacks.
+//
+// The opening sequence carried a whole-sequence backstop for exactly this, and
+// tests/test_auth.cpp was the only place the hazard was demonstrated. Both are
+// gone (issue #174), so this case exists to keep the hazard in the tree.
+//
+// The better repair is to fire each queued callback with failure from reset()
+// itself, which would let this assertion be inverted. Nobody has done it.
+void test_reset_abandons_a_pending_command_without_telling_it() {
+  std::cout << "\n=== reset() abandons a pending command silently ===" << std::endl;
+  esphome::alpha_hwr::core::Transport transport;
+  transport.set_write_callback([](const uint8_t *, size_t) -> bool { return true; });
+
+  int cb_calls = 0;
+  transport.send_command(std::vector<uint8_t>(10, 0xAA), 0, 0,
+                         [&](bool, const uint8_t *, size_t) { cb_calls++; },
+                         /*timeout_ms=*/1000);
+
+  mock_millis += 50;
+  transport.loop();   // in flight, awaiting a response
+
+  transport.reset();
+
+  mock_millis += 10000;   // ten times the command's own window
+  transport.loop();
+
+  TEST_ASSERT(cb_calls == 0,
+              "The callback never fires -- reset() dropped the command, and the "
+              "timeout that would have failed it went with the queue entry. A "
+              "caller waiting on this reply waits forever.");
+}
+
 int main() {
   test_reassembly_continuation_0x24();
   test_reassembly_continuation_0x27();
@@ -553,6 +626,8 @@ int main() {
   test_partial_write_holds_off_so_the_peer_can_resync();
   test_first_chunk_failure_does_not_hold_off();
   test_missing_write_callback_drops_the_command();
+  test_a_command_honours_its_own_timeout_not_the_default();
+  test_reset_abandons_a_pending_command_without_telling_it();
   
   std::cout << "\n===========================================================" << std::endl;
   std::cout << "  Test Results" << std::endl;

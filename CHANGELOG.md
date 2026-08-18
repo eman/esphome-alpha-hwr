@@ -17,9 +17,11 @@
   watchdog makes.
 
   The rungs are sized against the timings already recorded in
-  `link_watchdog.h`: 15s and 20s are one missed poll cycle, 30s and 45s straddle
-  the 21.5s and 31.5s worst cases for reaching first data after a connect, 60s
-  is the shipped default, and 90s sits above it deliberately — without a rung
+  `link_watchdog.h`: 15s and 20s are one missed poll cycle, 30s and 45s sit
+  clear above the worst case for reaching first data after a connect (they
+  straddled it at 21.5s and 31.5s when they were chosen; removing the opening
+  sequence took that to 16.0s, and the rungs stay put so the counts already
+  gathered against them remain comparable), 60s is the shipped default, and 90s sits above it deliberately — without a rung
   there the data cannot separate a 70s excursion, which a longer default would
   cover, from one lasting minutes, which is a genuine link death that should
   recycle. Those two readings argue in opposite directions.
@@ -138,39 +140,6 @@
   only configuration where renaming the rpm sensor fails.
 
 ### Changed
-
-- **Stage 1 of the opening sequence sends its identity read once and retries
-  only if it goes unanswered** (issue #210). It used to send three
-  unconditionally.
-
-  The bursts were a hedge against delivery uncertainty, from `connection.md`:
-  *"The client should send these packets in bursts to ensure the device receives
-  them despite any radio interference or sleep states."* Sound, while a dropped
-  packet was invisible. Issue #204 made it visible, and the hedge stopped
-  fitting the moment it did.
-
-  It had also inverted. Three unconditional sends advance on every callback
-  regardless of what the callback says, so they repeat the read when the *first*
-  one succeeded and give up when all three failed — the opposite of what a retry
-  is for. One send plus one retransmission on timeout is the shape that was
-  wanted, and it is what GENIpro itself does on a Data Reply that misses the
-  Reply Timeout.
-
-  A retransmission that also goes unanswered still advances, which is the
-  standing fail-open policy; whether a *refused* read should be treated
-  differently is issue #225.
-
-  Costs on the bench specimen: the answered case drops two round trips (~350 ms
-  at its ~175 ms average) and the unanswered case one `REPLY_TIMEOUT_MS`. The
-  sizing note in `link_watchdog.h` is corrected accordingly — worst case to
-  first inbound data moves from 21.5 s to 20.45 s against the 60 s default, so
-  the change is toward more slack, but that arithmetic is what the whole
-  watchdog default rests on and is quoted elsewhere.
-
-  One thing that got narrower for free: `complete()`'s count could previously be
-  ambiguous on every handshake, because stage 1's three byte-identical reads
-  meant a late reply could be credited to a later one. That now applies only on
-  the retry path, so a pump answering normally has no ambiguity at all.
 
 - **The host test suite compiles once per translation unit instead of once per
   target.** A full build compiled 142 translation units out of ~40 distinct
@@ -394,10 +363,9 @@
   The same gap turned out to cover four more files, so they were closed too:
   `auth.cpp`, `sensor_publisher.cpp`, `telemetry_service.cpp` and
   `device_info_service.cpp` each compiled against the mocks unmodified and were
-  firmware-build-only for no reason but a missing target. Each now has a test
-  suite: the authentication handshake's packet sequence and its 1200 ms
-  timer-only completion (the figure the deaf-node fix rests on, previously
-  added up by eye); the publisher's presence gating, temperature bounds, head-
+  firmware-build-only for no reason but a missing target. Each got a test suite.
+  (`auth.cpp` and its suite have since been deleted outright — see the opening
+  sequence entry below.) The publisher's presence gating, temperature bounds, head-
   rate derivative and issue #127 text guards; the telemetry poll set and the
   OpSpec routing that tells alarms from warnings by an echoed register; and the
   device-info string reads with the two hand-ported repairs for a pump that
@@ -746,49 +714,73 @@
   two-bit field, and reading `0xB3` as an opcode rather than as SET-plus-51 is
   exactly how the length came to be copied.
 
-- **The four packets a connection opens with were sent blind, and three of them
-  could not have been matched even if they had asked to be** (issue #174). The
-  transport's Class 10 path requires `data[4] == 0x0A` and a frame of at least
-  11 bytes, so a Class 2 reply failed the first test and the 9-byte Class 5 and
-  Class 11 replies failed the second. So all four went out with no callback and
-  the sequence advanced on four delay values transcribed from the reference
-  client's `asyncio.sleep()` calls. Nothing noticed whether the pump answered:
-  a pump that replied to all ten packets and a pump that replied to none were
-  indistinguishable from inside the sequence.
+- **The connection no longer opens with an "authentication handshake", because
+  there was never one** (issue #174). Every connect used to send ten packets
+  before anything else happened. They are gone, and nothing replaces them: the
+  session is declared ready two seconds after notifications are enabled, which
+  is the same delay that was always there, and the initial read chain follows.
 
-  Classes 2, 5 and 11 now join Classes 3 and 7 in the transport's
-  wildcard-matched set, and stages 1 and 3 send their packets as ordinary
-  matched reads that advance when the reply lands or the wait expires — so the
-  pacing is the pump's, and 750 ms of transcribed delay goes with it. Nothing
-  is required to answer; an unanswered read advances the sequence exactly as an
-  answered one does, and completion now reports which happened. Both matching
-  predicates already required the *queued* command to be of the same class and
-  nothing else in the component queues those classes, so no existing traffic
-  changes path.
+  The whole arc, because the intermediate steps explain why removal is the
+  right end point rather than a leap:
 
-  Stage 2 keeps its timers deliberately: its Class 10 reply is the
-  operation-status frame the telemetry path decodes and publishes on every
-  connect, and matching a command *consumes* the frame. Recorded at the site
-  with what sharing it would take.
+  **They were documented as unlock writes and are reads.** The second APDU byte
+  is `0booLLLLLL` — operation in the top two bits, payload length in the low six
+  — so the `0x03` read as "SET" is a GET with a 3-byte payload, and "register
+  0x9495, unlock code 0x96" was a misparse of a length field. Decoded, the four
+  are: a Class 2 GET of `unit_family`/`unit_type`/`unit_version` (answered
+  `52 / 7 / 2`, an ALPHA HWR identifying itself), a Class 10 GET of the
+  operation-status object (Obj 86 Sub 6, documented with object and sub
+  reversed), and two INFO queries asking for scaling metadata on Class 5 item
+  `0x4B` and Class 11 item `0x0F`, both answered "unscaled". Two GETs and two
+  INFOs. Reads cannot change device state, so an unlock was never a thing these
+  bytes could do. The same misreading had spread to `frame_builder.cpp` and
+  `time_service.cpp` and is corrected there too; the address pair described as
+  one 16-bit "Service ID" is a destination and a source, which the pump's
+  replies show by swapping them.
 
-  Bench-verified: 5/5 reads answered, control-mode publishing intact, 1330 ms
-  end to end. That is slightly longer than the 1200 ms the fixed delays always
-  took — this pump averages ~175 ms per reply where the specimen in the issue
-  reports 54-108 ms, which is the variation a transcribed constant cannot
-  accommodate and the reason for the change.
+  **Then they were made reply-driven, and that made the redundancy legible.**
+  Classes 2, 5 and 11 joined the transport's wildcard-matched set, stages 1 and
+  3 became ordinary matched reads, and completion reported how many were
+  answered. What that surfaced is that every reply was discarded: the callbacks
+  took `(bool, const uint8_t *, size_t)` and named none of the payload
+  parameters. The component was running an interrogation sequence and throwing
+  the answers away — reasonable for a general client that must ask what it is
+  talking to, pointless for one that only ever talks to an ALPHA HWR.
 
-- **The opening packets were documented as an unlock handshake and are four
-  reads** (issue #174). The second APDU byte is `0booLLLLLL` — operation in the
-  top two bits, payload length in the low six — so the `0x03` that was read as
-  "SET" is a GET with a 3-byte payload, and "register 0x9495, unlock code 0x96"
-  was a misparse of a length field. The packets read `unit_family`, `unit_type`
-  and `unit_version`; the operation-status object (Obj 86 Sub 6, which was
-  documented with object and sub reversed); and two INFO queries. Corrected in
-  `auth.h`, along with the two address bytes described as one 16-bit "Service
-  ID" — the pump's replies swap them, which a constant does not do — and the
-  same `0b00`-is-INFO mislabel where it had spread to `frame_builder.cpp` and
-  `time_service.cpp`. Bytes unchanged throughout; the encoding is corroborated
-  by two independent bench-derived frames already in the tree.
+  **And the field evidence closed the last gap.** The remaining hypothesis was
+  that the packets mattered on a *first pairing*, with the pump holding state
+  keyed to the bond — which would make every no-handshake observation merely a
+  description of an already-paired pump. Ten connection cycles on a build with
+  the sequence removed settle it: two bond-cleared re-pairings, five pump power
+  cycles and three BLE reconnects, all reading five Class 7 device-info strings
+  and reaching Pump Ready, nine of them accepting a Class 3 START and STOP with
+  the motor confirmed spinning, across 1,019 frames containing zero Class 2,
+  zero Class 5 and zero Class 11. Reported by jfriend00, who did the decode and
+  ran the experiment.
+
+  What goes with the packets: the reply-timeout gating, the whole-sequence
+  backstop, the stall warnings, the fail-open ceiling and the answered-read
+  counter — 758 lines of `auth.h`/`auth.cpp`, all of it machinery for keeping a
+  sequence from hanging a connection it could only hang by existing. The
+  session's pre-ready state is renamed `AUTHENTICATING` → `STABILIZING`, since
+  nothing is on the wire during it.
+
+  The watchdog sizing note in `link_watchdog.h` is re-derived: worst case from
+  connection-open to first inbound data drops from 20.45 s to 16.0 s against the
+  60 s default, and the 31.5 s backstop case disappears entirely. The
+  `link_gap_report.py` floor of 41 s is deliberately *not* lowered to match —
+  that is a recommendation, and changing it wants the measurement rather than a
+  recomputed constant.
+
+  Two claims are corrected rather than defended. `device_info.md`'s "Class 7
+  reading requires the device to be Authenticated" is contradicted by fifty
+  string reads across ten unauthenticated connections, and by the code: nothing
+  in the read path checks session state. `connection.md`'s "the pump may ignore
+  control commands" is contradicted by the START/STOP writes above. Both were
+  hedged in the original wording and neither is sourced to a capture.
+
+  If a pump variant ever does need them, the failure is loud — it never reaches
+  Pump Ready — and this is one revert.
 
 - **A pump whose clock is never synced now says so, instead of silently letting
   schedule windows drift.** The pump keeps its own RTC and runs schedule windows

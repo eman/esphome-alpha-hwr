@@ -16,7 +16,7 @@ Our mission is to provide a robust, reliable, and feature-rich ESPHome component
 
 * **Incrementalism**: We build complexity layer-by-layer.
   * *Phase 1:* Passive Telemetry (READ only).
-  * *Phase 2:* Authenticated Telemetry (UNLOCK + READ).
+  * *Phase 2:* Bonded Telemetry (BLE pairing + READ).
   * *Phase 3:* Basic Control (WRITE commands).
   * *Phase 4:* Complex Management (Schedules, Time Sync).
 * **Simple Configuration**: The `hwr-pump-example.yaml` configuration should demonstrate best practices and be the reference for users. We prioritize good architecture over backward compatibility since this is a new library.
@@ -42,7 +42,7 @@ Agents should consult these resources before making architectural decisions:
   * `ESP_LOGW`: Retries, unexpected (but handled) data, timeout warnings.
   * `ESP_LOGE`: Critical failures, unrecoverable errors.
 * **Endianness**: The GENI protocol is **Big-Endian**. Always use helper functions (e.g., `read_float_be`, `put_unaligned_be32`) or standard `htonl`/`ntohl` to ensure portability. **Do not assume host endianness.**
-* **State Machines**: Explicitly model complex interactions (e.g., Authentication Handshake) as state machines `enum class State { IDLE, AUTH_CHALLENGE, AUTH_RESPONSE, CONNECTED }`. Avoid deep nested `if/else` in the loop.
+* **State Machines**: Explicitly model complex interactions (e.g., the connection lifecycle) as state machines `enum class State { IDLE, SERVICE_DISCOVERY, SUBSCRIBING, STABILIZING, READY }`. Avoid deep nested `if/else` in the loop.
 
 ### Python (Support Scripts/Tools)
 
@@ -135,7 +135,7 @@ The ESPHome component follows a layered, service-based architecture. This archit
 2. **Client as Facade**: The `AlphaHwrComponent` is a thin orchestration layer that delegates all work to services.
 3. **Services Own Business Logic**: Each service encapsulates all operations for its domain (e.g., `TelemetryService` handles all telemetry operations).
 4. **Protocol Layer is Stateless**: Frame builders and parsers are pure functions with no side effects.
-5. **Core Layer Manages State**: Transport handles BLE I/O, Session tracks connection state, Authentication handles handshake.
+5. **Core Layer Manages State**: Transport handles BLE I/O, Session tracks connection state, BLEConnectionManager handles the connection lifecycle.
 6. **One Write Path**: Every pump write — entity-originated or service-originated — goes through the write-operation layer (`services::WriteOperationService`, issue #92), which serializes write sequences, confirms each write against a pump readback, and reports exactly one terminal settle result per operation.
 
 ### ESPHome Component Implementation (COMPLETED)
@@ -151,7 +151,6 @@ components/alpha_hwr/
 ├── core::                           # Foundation layer (namespace)
 │   ├── transport.h/cpp              # BLE I/O, command queue, FSM transaction manager
 │   ├── session.h/cpp                # Connection state machine
-│   ├── auth.h/cpp                   # Authentication handshake
 │   └── ble_connection_manager.h/cpp # BLE connection lifecycle management
 ├── protocol::                       # Protocol layer (namespace, stateless)
 │   ├── codec.h/cpp                  # Endianness-safe encoding/decoding, CRC
@@ -198,10 +197,14 @@ components/alpha_hwr/
 
 ### Completed Features
 
-#### Phase 1-2: Telemetry & Authentication (COMPLETE)
+#### Phase 1-2: Telemetry & Connection (COMPLETE)
 
 * [x] BLE discovery and connection
-* [x] Authentication handshake (challenge/response)
+* [x] BLE pairing and bonding
+* [x] ~~GENI "authentication handshake"~~ — there was never one. The four packets
+  the connection opened with were GENIbus reads whose replies nothing consumed,
+  and they were removed in issue #174. Nothing in the protocol this component
+  speaks is a challenge/response.
 * [x] Live telemetry streaming (flow rate, pressure, power, temperature)
 * [x] All sensors exposed to Home Assistant
 * [x] Connection stability and reconnection logic
@@ -288,7 +291,7 @@ The layered architecture is now in place. When adding new features:
 1. **Check Protocol Doc**: Consult the [GENI protocol documentation](https://eman.github.io/alpha-hwr/reimplementation/) for the packet formats involved.
 2. **Identify Layer**: Determine which namespace/layer owns this feature:
    * `protocol::` for packet encoding/decoding (stateless)
-   * `core::` for BLE transport, session state, authentication
+   * `core::` for BLE transport, session state, connection lifecycle
    * `services::` for business logic (telemetry, control, schedules, etc.)
 3. **Plan**: Define the packet structure and state flow.
 4. **Implement Protocol**: Add packet builder/parser functions in the `protocol` namespace (codec, frame_builder, frame_parser, telemetry_decoder).

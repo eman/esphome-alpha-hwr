@@ -365,7 +365,7 @@ first-time flow:
 
 1. Put the pump into Bluetooth pairing mode.
 2. Flash the ESPHome node with the paired package.
-3. Watch logs for the authentication/pairing sequence to complete.
+3. Watch logs for the BLE pairing to complete.
 
 After that, reconnects reuse the stored bond.
 

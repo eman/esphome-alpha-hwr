@@ -113,12 +113,13 @@ hand-written blocks the log is the only signal.
 
 ### `data_timeout`
 
-The GENI handshake does not verify that the pump is answering: authentication
-sends its packets on timers and never inspects a reply, so the session reaches
-its ready state whether or not anything came back. A link whose writes succeed
-but whose notifications never arrive therefore reports itself healthy
-indefinitely — every sensor frozen, nothing to trigger a reconnect, because the
-BLE connection itself is fine.
+Nothing on the connect path verifies that the pump is answering. The session is
+declared ready a fixed two seconds after notifications are enabled, and not a
+single frame has been exchanged by then, so it reaches its ready state whether
+or not anything is listening. A link whose writes succeed but whose
+notifications never arrive therefore reports itself healthy indefinitely — every
+sensor frozen, nothing to trigger a reconnect, because the BLE connection itself
+is fine.
 
 `data_timeout` closes that hole with a liveness check: if nothing is received
 for this long while connected, the link is dropped and the usual reconnect
@@ -145,13 +146,14 @@ A link that stays deaf is not recycled on the configured cadence forever. Each
 recycle that produces no data doubles the window for the next one, up to a
 ceiling of one hour, and a notification received once the session is **ready**
 resets it to the configured value. (Ready-gated because a deaf pump still
-answers the handshake: resetting on those frames would clear the window once per
-session and the backoff would never engage.) A link that can recover still
+volunteers operation-status notifications of its own accord: resetting on those
+frames would clear the window once per session and the backoff would never
+engage.) A link that can recover still
 recovers on the first or second try; a permanently deaf one drops from roughly
 1,300 recycles a day to about 28.
 
 A widened window is not reset by the reconnect either, so it governs the next
-connection's handshake as well — which matters for reading `link_max_gap` below.
+connection's opening as well — which matters for reading `link_max_gap` below.
 
 That matters because a recycle is not free: each one re-enters the
 encryption-on-open path on a bonded pump, taking one more run at the window
@@ -233,8 +235,11 @@ recycle rate a `45s` default would have cost this installation, measured rather
 than predicted.
 
 The rungs are chosen against the timings in the section above: 15s and 20s are
-one missed poll cycle, 30s and 45s straddle the 21.5s and 31.5s worst cases for
-reaching first data after a connect, 60s is the shipped default, and 90s is
+one missed poll cycle, 30s and 45s sit clear above the worst case for reaching
+first data after a connect (they straddled it at 21.5s and 31.5s when they were
+chosen; removing the opening sequence took it to 16.0s, and the rungs are left
+where they are so the counts already gathered against them stay comparable), 60s
+is the shipped default, and 90s is
 above it deliberately — without a rung there the data cannot distinguish an
 excursion of 70s (which a longer default would cover) from one lasting minutes
 (a genuine link death, which *should* recycle).
@@ -385,10 +390,12 @@ RECOMMENDATION
 **RECOMMENDATION applies a rule the report then prints in full**, so it can be
 argued with rather than taken on trust:
 
-- **Floor: T ≥ 41s.** 31.5s is the calculated worst case from connection-open to
-  first inbound data with the sequence backstop firing (see the sizing note in
-  `components/alpha_hwr/link_watchdog.h`), plus 30% margin on a number derived
-  from constants rather than measured.
+- **Floor: T ≥ 41s.** The calculated worst case from connection-open to first
+  inbound data is 16.0s (see the sizing note in
+  `components/alpha_hwr/link_watchdog.h`), which with 30% margin would give 21s.
+  The floor is deliberately above that: it also has to clear the
+  missed-poll-cycle rungs, and lowering a recommendation is a policy change this
+  measurement has not made yet.
 - **Tolerance: under one spurious recycle per installation per 30 days.** Each
   recycle takes another run at the encryption-on-open window that can erase the
   bond (issue #14), which is what makes recycles worth being stingy about.

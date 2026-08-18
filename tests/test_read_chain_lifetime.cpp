@@ -89,7 +89,7 @@ struct Rig {
       if (n > 0 && d[0] == 0x27) commands_sent++;
       return true;
     });
-    session.on_authenticated();
+    session.on_ready();
   }
 };
 

@@ -26,8 +26,8 @@ const char* Session::get_state_name() const {
       return "SERVICE_DISCOVERY";
     case SessionState::SUBSCRIBING:
       return "SUBSCRIBING";
-    case SessionState::AUTHENTICATING:
-      return "AUTHENTICATING";
+    case SessionState::STABILIZING:
+      return "STABILIZING";
     case SessionState::READY:
       return "READY";
     default:
@@ -67,26 +67,14 @@ void Session::on_subscribed() {
   if (state_ != SessionState::SUBSCRIBING) {
     ESP_LOGW(TAG, "on_subscribed() called from unexpected state: %s", get_state_name());
   }
-  transition_to(SessionState::AUTHENTICATING, "Notifications enabled");
+  transition_to(SessionState::STABILIZING, "Notifications enabled");
 }
 
-void Session::on_authenticating() {
-  // Can be called from SUBSCRIBING (first auth) or READY (re-auth)
-  if (state_ != SessionState::SUBSCRIBING && state_ != SessionState::READY && 
-      state_ != SessionState::AUTHENTICATING) {
-    ESP_LOGW(TAG, "on_authenticating() called from unexpected state: %s", get_state_name());
+void Session::on_ready() {
+  if (state_ != SessionState::STABILIZING) {
+    ESP_LOGW(TAG, "on_ready() called from unexpected state: %s", get_state_name());
   }
-  
-  if (state_ != SessionState::AUTHENTICATING) {
-    transition_to(SessionState::AUTHENTICATING, "Starting authentication");
-  }
-}
-
-void Session::on_authenticated() {
-  if (state_ != SessionState::AUTHENTICATING) {
-    ESP_LOGW(TAG, "on_authenticated() called from unexpected state: %s", get_state_name());
-  }
-  transition_to(SessionState::READY, "Authentication complete");
+  transition_to(SessionState::READY, "Stabilize window elapsed");
 }
 
 void Session::on_disconnected() {

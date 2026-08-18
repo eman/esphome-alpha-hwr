@@ -63,10 +63,19 @@ from typing import Any
 # simply goes unreported rather than being assumed zero.
 THRESHOLDS_S = [15, 20, 30, 45, 60, 90]
 
-# The smallest budget that is defensible on the firmware's own timings: 31.5 s
-# is the calculated worst case from connection-open to first inbound data with
-# the sequence backstop firing (link_watchdog.h), and 30% margin on a worst case
-# derived from constants rather than measured is not generous.
+# The smallest budget that is defensible on the firmware's own timings.
+#
+# The arithmetic behind this moved and the number deliberately did not. It was
+# 31.5 s -- the calculated worst case from connection-open to first inbound data
+# with the opening sequence's backstop firing -- plus 30% margin, giving 41.
+# Removing that sequence (issue #174) took the worst case to 16.0 s, which the
+# same margin would put at 21.
+#
+# The floor stays at 41 because it is not only a restatement of that worst case:
+# it also has to sit clear of the missed-poll-cycle rungs and satisfy the
+# tolerance rule below, and lowering a recommendation floor is a policy change
+# with no evidence behind it. Revisit it with the measurement this tool exists
+# to serve, not with a recomputed constant.
 FLOOR_S = 41
 
 # What a spurious recycle is worth. Each one takes another run at the
@@ -426,10 +435,12 @@ def print_recommendation(passing: list[int], reported: list[int], problems: list
             print(f"  Conservative alternative: {alternative}s")
 
     print("\n  Decision rule")
-    print(f"    Floor      T >= {FLOOR_S}s. 31.5s is the calculated worst case from")
-    print("               connection-open to first inbound data with the sequence")
-    print("               backstop firing (link_watchdog.h), plus 30% margin on a")
-    print("               number derived from constants rather than measured.")
+    print(f"    Floor      T >= {FLOOR_S}s. The calculated worst case from")
+    print("               connection-open to first inbound data is 16.0s")
+    print("               (link_watchdog.h), which with 30% margin would give 21s.")
+    print("               The floor is deliberately above that: it also has to")
+    print("               clear the missed-poll-cycle rungs, and lowering it is a")
+    print("               policy change this measurement has not made yet.")
     print(f"    Tolerance  Under {TOLERANCE_PER_DAY:.4f} spurious recycles per node-day (one per")
     print("               30 days). Each recycle takes another run at the")
     print("               encryption-on-open window that can erase the bond (#14).")

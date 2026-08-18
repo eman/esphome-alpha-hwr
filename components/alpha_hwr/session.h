@@ -10,15 +10,16 @@
  * IDLE             : Initial state, BLE connection not yet established
  * SERVICE_DISCOVERY: Searching for Grundfos GENI service
  * SUBSCRIBING      : Enabling notifications on GENI characteristic
- * AUTHENTICATING   : Authentication handshake in progress
- * READY            : Fully operational (authenticated + subscribed)
+ * STABILIZING      : Notifications enabled; settling before the session is
+ *                    declared ready. Nothing is sent during this window.
+ * READY            : Fully operational (subscribed + stabilize window elapsed)
  * 
  * State Transitions:
  * ------------------
  * IDLE -> SERVICE_DISCOVERY    : BLE connection opened
  * SERVICE_DISCOVERY -> SUBSCRIBING : GENI service found
- * SUBSCRIBING -> AUTHENTICATING : Notifications enabled
- * AUTHENTICATING -> READY       : Authentication complete
+ * SUBSCRIBING -> STABILIZING    : Notifications enabled
+ * STABILIZING -> READY          : Stabilize window elapsed
  * * -> IDLE                     : Disconnect
  *
  * There is no ERROR state, and this is deliberate rather than an omission.
@@ -26,6 +27,12 @@
  * critically" -- but nothing ever entered it: `on_error()` and `reset()` had no
  * caller anywhere in the component, so the transition the diagram promised
  * could not occur (issue #174 audit).
+ *
+ * `on_authenticating()` went the same way, and for the same reason. It existed
+ * to re-enter this state from READY for a re-authentication that no caller ever
+ * performed, and its first-entry case duplicated what `on_subscribed()` already
+ * does. It was removed with the opening sequence itself (issue #174): there is
+ * no handshake left to begin, so nothing can be in the middle of one.
  *
  * It is redundant with what the component actually does. A failure that matters
  * ends the BLE link, which lands here as `on_disconnected()` -> IDLE, and the
@@ -81,14 +88,24 @@ enum class SessionState : uint8_t {
   SUBSCRIBING = 2,
   
   /**
-   * Authentication handshake in progress.
-   * Notifications enabled, now sending auth packets.
+   * Notifications enabled, settling before the session is declared ready.
+   * Nothing is on the wire during this state: it is a fixed delay separating
+   * the CCCD write and the encryption negotiation behind it from the first
+   * GENI traffic.
+   *
+   * It was called AUTHENTICATING while this component opened a connection with
+   * four GENIbus reads it called a handshake. Those are gone (issue #174); the
+   * numbering is kept because get_state() is logged as an integer.
    */
-  AUTHENTICATING = 3,
+  STABILIZING = 3,
   
   /**
-   * Fully operational. Auth complete, notifications enabled.
+   * Fully operational: notifications enabled and the stabilize window elapsed.
    * All operations (read, write, control) are permitted.
+   *
+   * Reaching it proves only that a timer fired. Not one frame has been
+   * exchanged with the pump, so a deaf pump arrives here exactly as a live one
+   * does -- which is what the inbound-data watchdog exists to notice.
    */
   READY = 4
 };
@@ -119,9 +136,9 @@ enum class SessionState : uint8_t {
  *           │ on_subscribed()         │
  *           ▼                         │
  *    ┌────────────────┐               │
- *    │AUTHENTICATING  │               │
+ *    │  STABILIZING   │               │
  *    └──────┬─────────┘               │
- *           │ on_authenticated()      │
+ *           │ on_ready()              │
  *           ▼                         │
  *    ┌──────────┐                     │
  *    │  READY   │─────────────────────┘
@@ -144,11 +161,8 @@ enum class SessionState : uint8_t {
  * // Notifications enabled
  * session.on_subscribed();
  * 
- * // Start authentication
- * session.on_authenticating();
- * 
- * // Auth complete
- * session.on_authenticated();
+ * // Stabilize window elapsed
+ * session.on_ready();
  * 
  * // Check state before operations
  * if (session.is_ready()) {
@@ -178,26 +192,20 @@ class Session {
   void on_service_found();
   
   /**
-   * Transition to AUTHENTICATING state.
+   * Transition to STABILIZING state.
    * 
    * Called when notifications are successfully enabled.
    */
   void on_subscribed();
   
   /**
-   * Remain in AUTHENTICATING state (or transition from READY).
-   * 
-   * Called when authentication handshake begins.
-   * Can be called from SUBSCRIBING (first auth) or READY (re-auth).
-   */
-  void on_authenticating();
-  
-  /**
    * Transition to READY state.
    * 
-   * Called when authentication handshake completes successfully.
+   * Called when the stabilize window has elapsed. Nothing has been exchanged
+   * with the pump by this point -- see the arming site in AlphaHwrComponent for
+   * what that window is and is not for.
    */
-  void on_authenticated();
+  void on_ready();
   
   /**
    * Transition to IDLE state.
@@ -236,11 +244,11 @@ class Session {
   bool is_subscribing() const { return state_ == SessionState::SUBSCRIBING; }
   
   /**
-   * Check if authentication is in progress.
+   * Check if the session is in its post-subscribe stabilize window.
    * 
-   * @return true if in AUTHENTICATING state
+   * @return true if in STABILIZING state
    */
-  bool is_authenticating() const { return state_ == SessionState::AUTHENTICATING; }
+  bool is_stabilizing() const { return state_ == SessionState::STABILIZING; }
   
   /**
    * Check if session is ready for operations.
@@ -254,7 +262,7 @@ class Session {
    * 
    * Connected means: anything but IDLE.
    * 
-   * @return true if state is SERVICE_DISCOVERY, SUBSCRIBING, AUTHENTICATING, or READY
+   * @return true if state is SERVICE_DISCOVERY, SUBSCRIBING, STABILIZING, or READY
    */
   bool is_connected() const;
   

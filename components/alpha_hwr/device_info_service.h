@@ -8,8 +8,11 @@
  * - Hardware version
  * - BLE version
  * 
- * The service uses Class 7 string parameters to read device information
- * via authenticated BLE connection.
+ * The service uses Class 7 string parameters to read device information.
+ * Nothing gates these reads: this class holds no Session reference, and the
+ * pump answered all five on ten connections that sent no opening sequence at
+ * all (issue #174). The claim that Class 7 requires an authenticated session
+ * came from inferred documentation and is not supported by any capture.
  * 
  * Architecture:
  * - Transport Layer: Handles BLE communication and raw packets

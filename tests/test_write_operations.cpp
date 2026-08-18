@@ -240,7 +240,7 @@ struct Harness {
     node_clock_base_ms = mock_millis;
     time_service.set_time_id(&node_clock);
     tick_node_clock();
-    session.on_authenticated();
+    session.on_ready();
     control.set_schedule_callback([this](std::function<void()> fn, uint32_t delay) {
       tasks.push_back({mock_millis + delay, std::move(fn)});
     });

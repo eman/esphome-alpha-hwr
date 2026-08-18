@@ -11,7 +11,6 @@ components/alpha_hwr/
 ├── core::                       # Foundation layer
 │   ├── transport.h/cpp          # BLE I/O, command queue, FSM transaction manager
 │   ├── session.h/cpp            # Connection state machine
-│   ├── auth.h/cpp               # Authentication handshake
 │   └── ble_connection_manager   # BLE connection lifecycle
 ├── protocol::                   # Protocol layer (stateless)
 │   ├── codec.h/cpp              # Endianness-safe encoding/decoding, CRC
@@ -36,7 +35,7 @@ components/alpha_hwr/
 - **`api_bridge`** — Home Assistant surface of the programmatic write interface: registers the pump and schedule write services — each named after the
   `WriteCommand` it settles as, so the service you call and the event's
   `command` field are one string (issue #159) — and fires the terminal `esphome.alpha_hwr_write_settled` event. Compiled only when the `api:` component enables `custom_services` + `homeassistant_services`.
-- **`core::`** — Manages BLE I/O, connection state, and authentication. The transport uses a command queue and 3-state FSM (`IDLE` → `SENDING_CHUNKS` → `AWAITING_RESPONSE`) to stay non-blocking inside ESPHome's event loop.
+- **`core::`** — Manages BLE I/O and connection state. The transport uses a command queue and 3-state FSM (`IDLE` → `SENDING_CHUNKS` → `AWAITING_RESPONSE`) to stay non-blocking inside ESPHome's event loop.
 - **`protocol::`** — Stateless frame builders and parsers. Pure functions with no side effects. Fully unit-testable on host without hardware.
 - **`services::`** — One service per domain. Each owns all operations for its area (telemetry, control, schedules, etc.).
 
@@ -59,7 +58,7 @@ composes; it no longer owns any multi-step write sequencing.
 
 - **Non-blocking transport**: 50ms pacing between commands; only one command in flight at a time.
 - **Response matching**: Flexible Object/Sub-ID matching handles pump firmware quirks (SubID 0 wildcard responses).
-- **Time sync**: Automatic daily RTC synchronization via SNTP; initial sync fires 2 seconds after authentication.
+- **Time sync**: Automatic daily RTC synchronization via SNTP; initial sync fires 2 seconds after the session becomes ready.
 - **Namespace organization**: ESPHome requires a flat file structure, so layering is achieved via C++ namespaces (`esphome::alpha_hwr::core`, `::protocol`, `::services`) rather than subdirectories.
 - **Units & scaling**: live telemetry arrives as raw IEEE-754 floats already in physical units; only setpoints, trends, and statistics apply conversion factors. Every entity's unit and factor is catalogued, cross-referenced to the GENI unit tables, and regression-tested — see [Units audit](units-audit.md). Confirm any new entity's factor there before adding it.
 

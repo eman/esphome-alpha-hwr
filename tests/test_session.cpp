@@ -8,6 +8,13 @@
 // safe only if the transitions that *do* exist are pinned, which is what this
 // file is for.
 //
+// `on_authenticating()` and its test_reauthentication_from_ready() case went
+// the same way when the opening sequence was removed (issue #174). It existed
+// to re-enter the pre-ready state from READY for a re-authentication no caller
+// ever performed, and there is no handshake left to re-enter. AUTHENTICATING is
+// now STABILIZING -- same enumerator value, and a name that does not claim
+// something is happening during it.
+//
 // The FSM is small enough that the whole thing can be asserted rather than
 // sampled, so it is: every documented transition, and the behaviour on the
 // out-of-order calls the code explicitly warns about.
@@ -55,12 +62,12 @@ void test_the_documented_connection_sequence() {
               "on_service_found() -> SUBSCRIBING");
 
   s.on_subscribed();
-  TEST_ASSERT(s.get_state() == SessionState::AUTHENTICATING,
-              "on_subscribed() -> AUTHENTICATING");
+  TEST_ASSERT(s.get_state() == SessionState::STABILIZING,
+              "on_subscribed() -> STABILIZING");
 
-  s.on_authenticated();
+  s.on_ready();
   TEST_ASSERT(s.get_state() == SessionState::READY,
-              "on_authenticated() -> READY");
+              "on_ready() -> READY");
   TEST_ASSERT(s.is_ready(), "...and is_ready() agrees");
   TEST_ASSERT(s.is_connected(), "...and so does is_connected()");
 }
@@ -90,14 +97,14 @@ void test_disconnect_returns_to_idle_from_every_state() {
     s.on_service_found();
     s.on_subscribed();
     s.on_disconnected();
-    TEST_ASSERT(s.get_state() == SessionState::IDLE, "AUTHENTICATING -> IDLE");
+    TEST_ASSERT(s.get_state() == SessionState::IDLE, "STABILIZING -> IDLE");
   }
   {
     Session s;
     s.on_connected();
     s.on_service_found();
     s.on_subscribed();
-    s.on_authenticated();
+    s.on_ready();
     s.on_disconnected();
     TEST_ASSERT(s.get_state() == SessionState::IDLE, "READY -> IDLE");
     TEST_ASSERT(!s.is_connected(), "...and is_connected() goes false");
@@ -124,35 +131,9 @@ void test_is_connected_is_exactly_not_idle() {
   s.on_service_found();
   TEST_ASSERT(s.is_connected(), "SUBSCRIBING is connected");
   s.on_subscribed();
-  TEST_ASSERT(s.is_connected(), "AUTHENTICATING is connected");
-  s.on_authenticated();
+  TEST_ASSERT(s.is_connected(), "STABILIZING is connected");
+  s.on_ready();
   TEST_ASSERT(s.is_connected(), "READY is connected");
-}
-
-// ── Re-authentication ───────────────────────────────────────────────────────
-// on_authenticating() is documented as reachable from SUBSCRIBING (first auth)
-// and from READY (re-auth), and as idempotent while already AUTHENTICATING.
-void test_reauthentication_from_ready() {
-  std::cout << "\n=== Re-authentication ===" << std::endl;
-
-  Session s;
-  s.on_connected();
-  s.on_service_found();
-  s.on_subscribed();
-  s.on_authenticated();
-  TEST_ASSERT(s.get_state() == SessionState::READY, "Starts READY");
-
-  s.on_authenticating();
-  TEST_ASSERT(s.get_state() == SessionState::AUTHENTICATING,
-              "on_authenticating() from READY re-enters AUTHENTICATING");
-  TEST_ASSERT(!s.is_ready(), "...and READY is given up while it runs");
-
-  s.on_authenticating();
-  TEST_ASSERT(s.get_state() == SessionState::AUTHENTICATING,
-              "...and calling it again is idempotent");
-
-  s.on_authenticated();
-  TEST_ASSERT(s.get_state() == SessionState::READY, "Re-auth completes back to READY");
 }
 
 // ── Out-of-order calls warn but still transition ────────────────────────────
@@ -160,26 +141,28 @@ void test_reauthentication_from_ready() {
 // permissive: every on_*() guard logs a warning and then transitions anyway. A
 // reader of session.cpp could easily assume the guards reject. They do not.
 //
-// It matters for stale callbacks: anything that can call on_authenticated()
-// after a disconnect drives the session to READY from IDLE without the link
-// having been re-established. Nothing does today -- Authentication's sequence
-// number and running_ flag stop it (issue #174) -- but that safety lives in the
-// caller, not here, and this test is what says so.
+// It matters for stale callbacks: anything that can call on_ready() after a
+// disconnect drives the session to READY from IDLE without the link having been
+// re-established. Exactly one thing can -- the stabilize timer -- and what stops
+// it is cancel_timeout(SESSION_READY_TIMER) on the disconnect path, pinned by
+// test_a_disconnect_inside_the_stabilize_window_cancels_it() in
+// test_component_wiring.cpp. That safety lives in the caller, not here, and this
+// test is what says so.
 void test_out_of_order_calls_transition_anyway() {
   std::cout << "\n=== Out-of-order calls warn, but still transition ===" << std::endl;
 
   {
     Session s;
-    s.on_authenticated();  // straight from IDLE
+    s.on_ready();  // straight from IDLE
     TEST_ASSERT(s.get_state() == SessionState::READY,
-                "on_authenticated() from IDLE reaches READY -- the guard warns, "
+                "on_ready() from IDLE reaches READY -- the guard warns, "
                 "it does not refuse");
   }
   {
     Session s;
     s.on_subscribed();  // from IDLE, skipping discovery
-    TEST_ASSERT(s.get_state() == SessionState::AUTHENTICATING,
-                "on_subscribed() from IDLE reaches AUTHENTICATING for the same reason");
+    TEST_ASSERT(s.get_state() == SessionState::STABILIZING,
+                "on_subscribed() from IDLE reaches STABILIZING for the same reason");
   }
   {
     Session s;
@@ -202,8 +185,8 @@ void test_every_state_has_a_name() {
   s.on_service_found();
   TEST_ASSERT(std::string(s.get_state_name()) == "SUBSCRIBING", "SUBSCRIBING");
   s.on_subscribed();
-  TEST_ASSERT(std::string(s.get_state_name()) == "AUTHENTICATING", "AUTHENTICATING");
-  s.on_authenticated();
+  TEST_ASSERT(std::string(s.get_state_name()) == "STABILIZING", "STABILIZING");
+  s.on_ready();
   TEST_ASSERT(std::string(s.get_state_name()) == "READY", "READY");
 }
 
@@ -215,7 +198,6 @@ int main() {
   test_the_documented_connection_sequence();
   test_disconnect_returns_to_idle_from_every_state();
   test_is_connected_is_exactly_not_idle();
-  test_reauthentication_from_ready();
   test_out_of_order_calls_transition_anyway();
   test_every_state_has_a_name();
 
