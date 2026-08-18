@@ -7,6 +7,12 @@ line-length = 120
 # The floor ESPHome supports (2026.7 declares >=3.12,<3.15), not the version CI
 # happens to run. components/ is executed inside the user's ESPHome install, so
 # a UP rule that rewrites to 3.14-only syntax would break anyone on 3.12.
+#
+# tools/check_ruff_target.py asserts this still matches the installed ESPHome's
+# Requires-Python floor, and CI runs it -- so when ESPHome raises its minimum,
+# the build says so instead of leaving the pin quietly stale. Raising it is a
+# deliberate decision (it lets ruff rewrite the schemas to syntax the previous
+# floor cannot run), which is why the check reports rather than auto-fixes.
 target-version = "py312"
 
 [lint]
