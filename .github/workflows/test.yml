@@ -189,6 +189,14 @@ jobs:
       - name: Install esphome
         run: pip install esphome
 
+      # ruff's target-version has to track the oldest Python ESPHome supports,
+      # not the one this job runs: components/ is executed inside the user's
+      # ESPHome install. That floor is ESPHome's to move, and when it moves the
+      # pin goes stale silently. Checked here rather than in the python job
+      # because this one already has esphome installed and that job does not.
+      - name: ruff target-version tracks ESPHome's floor
+        run: python3 tools/check_ruff_target.py
+
       # Validates the working tree via external_components: type: local.
       - name: Validate CI config (working tree)
         run: esphome config tests/ci-compile.yaml
