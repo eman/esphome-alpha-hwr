@@ -477,6 +477,14 @@ bool Transport::try_dispatch_response(const uint8_t* data, size_t len) {
         (cmd.packet[5] == 0x97 || cmd.packet[5] == 0x96 || cmd.packet[5] == 0xB3 ||
          cmd.packet[5] == 0x95 || cmd.packet[5] == 0x91 || cmd.packet[5] == 0x90 ||
          cmd.packet[5] == 0x8F) &&  // queued OpSpec (0x8F: DHW config write, #106)
+        // Of the four address shapes below, only the first two are reachable:
+        // 0x97 temperature-range and 0x8F DHW config, both of which queue a
+        // callback. The Sub 5600 / Obj 0601 shape is emitted only by
+        // send_control_request(), which sends without one and so never enters
+        // AWAITING_RESPONSE; send_set_mode_request() carries Obj high 0x0A and
+        // matches no alternative at all. Left in place rather than pruned --
+        // the cost is two comparisons and the next writer to add a callback to
+        // either would need them back.
         ((cmd.packet[6] == 91 && cmd.packet[7] == 0x01 && cmd.packet[8] == 0xAE) || // old format
          (cmd.packet[6] == 91 && cmd.packet[7] == 0x01 && cmd.packet[8] == 0xA5) || // Obj 91 Sub 421 DHW config (#106)
          (cmd.packet[6] == 0x01 && cmd.packet[7] == 0xAE && cmd.packet[8] == 0x00 && cmd.packet[9] == 91) || // new format SubID 430 Obj 91

@@ -684,6 +684,34 @@ void test_a_refused_class10_write_reports_failure() {
   }
 }
 
+// The DHW config write reaches the same branch through a different address
+// alternative (OpSpec 0x8F, Obj 91 Sub 421). Covered because a guard with four
+// address shapes is exactly where one gets broken without anyone noticing --
+// and one of the four is already dead: the only emitter of the Sub 5600 /
+// Obj 0601 shape sends without a callback, so it never reaches this branch.
+void test_the_dhw_config_write_shape_also_reports_a_refusal() {
+  std::cout << "\n=== The DHW config shape reaches the same branch ===" << std::endl;
+
+  esphome::alpha_hwr::core::Transport transport;
+  transport.set_write_callback([](const uint8_t *, size_t) -> bool { return true; });
+
+  int cb_calls = 0;
+  bool cb_success = true;
+  std::vector<uint8_t> req = {0x27, 0x0B, 0xE7, 0xF8, 0x0A, 0x8F, 91, 0x01, 0xA5, 0x00, 0x00, 0x00};
+  transport.send_command(req, 0, 0, [&](bool ok, const uint8_t *, size_t) {
+    cb_calls++;
+    cb_success = ok;
+  });
+  mock_millis += 50;
+  transport.loop();
+
+  std::vector<uint8_t> reply = with_crc({0x24, 0x05, 0xF8, 0xE7, 0x0A, 0xC1, 0x2F, 0x00, 0x00});
+  transport.on_notification(reply.data(), reply.size());
+
+  TEST_ASSERT(cb_calls == 1, "The 0x8F shape is matched by the short-ACK branch too");
+  TEST_ASSERT(!cb_success, "...and its refusal is reported as one");
+}
+
 // The refusal must also free the transport, or one refused write wedges every
 // command behind it -- which would be a far worse bug than the misreport.
 void test_a_refused_write_still_frees_the_transport() {
@@ -734,6 +762,7 @@ int main() {
   test_a_command_honours_its_own_timeout_not_the_default();
   test_reset_abandons_a_pending_command_without_telling_it();
   test_a_refused_class10_write_reports_failure();
+  test_the_dhw_config_write_shape_also_reports_a_refusal();
   test_a_refused_write_still_frees_the_transport();
   
   std::cout << "\n===========================================================" << std::endl;
