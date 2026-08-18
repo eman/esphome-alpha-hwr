@@ -4,6 +4,11 @@
 
 line-length = 120
 
+# The floor ESPHome supports (2026.7 declares >=3.12,<3.15), not the version CI
+# happens to run. components/ is executed inside the user's ESPHome install, so
+# a UP rule that rewrites to 3.14-only syntax would break anyone on 3.12.
+target-version = "py312"
+
 [lint]
 # pycodestyle errors/warnings, pyflakes, import sorting, and the bugbear subset
 # that catches real mistakes rather than style opinions.

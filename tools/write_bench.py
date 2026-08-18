@@ -228,7 +228,7 @@ async def cmd_states(host: str, key: str) -> int:
     await maybe_await(client.subscribe_states(on_state))
     try:
         await asyncio.wait_for(done.wait(), 5)
-    except asyncio.TimeoutError:
+    except TimeoutError:
         pass
     interesting = ("Select", "Number", "Switch", "TextSensor", "BinarySensor")
     for entity_key, state in sorted(seen.items(), key=lambda kv: names.get(kv[0], ("", ""))[1]):
@@ -243,9 +243,16 @@ async def cmd_states(host: str, key: str) -> int:
     return 0
 
 
-async def run_call(client: APIClient, collector: EventCollector,
-                   service: Any, service_name: str, kvs: list[str],
-                   timeout: float, linger: float, seq: int = 0) -> int:
+async def run_call(
+    client: APIClient,
+    collector: EventCollector,
+    service: Any,
+    service_name: str,
+    kvs: list[str],
+    timeout: float,
+    linger: float,
+    seq: int = 0,
+) -> int:
     """One service call on an ALREADY-CONNECTED client. Returns 0 on success.
 
     Split out of cmd_call so `chain` can run several calls over a single
@@ -284,7 +291,7 @@ async def run_call(client: APIClient, collector: EventCollector,
     try:
         await asyncio.wait_for(matched.wait(), timeout)
         print(f"settled in {time.monotonic() - t0:.1f}s")
-    except asyncio.TimeoutError:
+    except TimeoutError:
         print(f"NO TERMINAL EVENT for op_id={op_id} within {timeout}s <-- CONTRACT VIOLATION")
         return 1
 
@@ -293,22 +300,19 @@ async def run_call(client: APIClient, collector: EventCollector,
     return 1 if bad else 0
 
 
-async def cmd_call(host: str, key: str, service_name: str, kvs: list[str],
-                   timeout: float, linger: float) -> int:
+async def cmd_call(host: str, key: str, service_name: str, kvs: list[str], timeout: float, linger: float) -> int:
     client = await connect(host, key)
     try:
         collector = EventCollector()
         await maybe_await(client.subscribe_service_calls(collector.on_service_call))
         await asyncio.sleep(0.3)
         service = await find_service(client, service_name)
-        return await run_call(client, collector, service, service_name,
-                              kvs, timeout, linger)
+        return await run_call(client, collector, service, service_name, kvs, timeout, linger)
     finally:
         await maybe_await(client.disconnect())
 
 
-async def cmd_chain(host: str, key: str, calls: list[list[str]],
-                    timeout: float, linger: float) -> int:
+async def cmd_chain(host: str, key: str, calls: list[list[str]], timeout: float, linger: float) -> int:
     """Several service calls over ONE connection.
 
     Use this instead of invoking `call` N times: N invocations means N
@@ -330,16 +334,14 @@ async def cmd_chain(host: str, key: str, calls: list[list[str]],
         by_name = {s.name: s for s in services}
         missing = sorted({c[0] for c in calls} - set(by_name))
         if missing:
-            die(f"no service(s) named {', '.join(missing)}; "
-                f"available: {', '.join(sorted(by_name))}")
+            die(f"no service(s) named {', '.join(missing)}; available: {', '.join(sorted(by_name))}")
         resolved = {name: by_name[name] for name in {c[0] for c in calls}}
 
         op_ids: list[str] = []
         for i, call in enumerate(calls, 1):
             print(f"\n[{i}/{len(calls)}] {call[0]}")
             before = set(collector.waiters)
-            rc = await run_call(client, collector, resolved[call[0]], call[0],
-                                call[1:], timeout, linger, seq=i)
+            rc = await run_call(client, collector, resolved[call[0]], call[0], call[1:], timeout, linger, seq=i)
             op_ids.extend(sorted(set(collector.waiters) - before))
             worst = max(worst, rc)
 
@@ -355,8 +357,9 @@ async def cmd_chain(host: str, key: str, calls: list[list[str]],
     return worst
 
 
-async def cmd_burst(host: str, key: str, service_name: str, common: list[str],
-                    groups: list[str], timeout: float, linger: float) -> int:
+async def cmd_burst(
+    host: str, key: str, service_name: str, common: list[str], groups: list[str], timeout: float, linger: float
+) -> int:
     client = await connect(host, key)
     service = await find_service(client, service_name)
 
@@ -388,10 +391,10 @@ async def cmd_burst(host: str, key: str, service_name: str, common: list[str],
     return 1 if bad else 0
 
 
-
 # ---------------------------------------------------------------------------
 # upload subcommand (bulk schedule upload)
 # ---------------------------------------------------------------------------
+
 
 def _canonical_hash(entries: list[tuple[int, ...]], enabled: bool) -> str:
     """Python mirror of schedule_codec's canonical hash."""
@@ -492,8 +495,7 @@ def main() -> int:
         payload, expected = build_upload(rest[0], rest[1:])
         print(f"payload:       {payload}")
         print(f"expected hash: {expected}")
-        return asyncio.run(cmd_call(host, key, "upload_schedule",
-                                    [f"data={payload}"], max(timeout, 160.0), linger))
+        return asyncio.run(cmd_call(host, key, "upload_schedule", [f"data={payload}"], max(timeout, 160.0), linger))
     if cmd == "chain":
         # chain <service> [k=v ...] -- <service> [k=v ...] -- ...
         calls: list[list[str]] = []

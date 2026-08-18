@@ -56,7 +56,10 @@ def _compile_commands(targets: list[str]) -> dict[str, list[str]]:
     """
     out = subprocess.run(
         ["make", "-B", "-n", *targets],
-        cwd=TESTS_DIR, capture_output=True, text=True, check=False,
+        cwd=TESTS_DIR,
+        capture_output=True,
+        text=True,
+        check=False,
     ).stdout
 
     # The build is two-phase: one `-c <src> -o <obj>` per translation unit, then
@@ -94,7 +97,10 @@ def _includes(srcs: list[str]) -> set[str]:
     """Every file the given translation units pull in, via the compiler."""
     res = subprocess.run(
         ["g++", "-std=c++17", "-I.", "-I./mocks", "-I../", "-MM", *srcs],
-        cwd=TESTS_DIR, capture_output=True, text=True, check=False,
+        cwd=TESTS_DIR,
+        capture_output=True,
+        text=True,
+        check=False,
     )
     # -MM output is `target.o: a.cpp b.h \` continuation lines.
     body = res.stdout.replace("\\\n", " ")
@@ -116,9 +122,7 @@ def build_map(cache_path: str) -> None:
         # Do not guess. A target whose recipe could not be read would silently
         # be excluded from every selection, which is the one way this could
         # under-select without anyone noticing.
-        raise SystemExit(
-            "mutation_targets: no compile command found for: " + " ".join(missing)
-        )
+        raise SystemExit("mutation_targets: no compile command found for: " + " ".join(missing))
 
     file_to_targets: dict[str, list[str]] = {}
     for target, srcs in cmds.items():

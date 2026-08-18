@@ -184,7 +184,7 @@ jobs:
 
       - uses: actions/setup-python@v5
         with:
-          python-version: "3.12"
+          python-version: "3.14"
 
       - name: Install esphome
         run: pip install esphome
@@ -260,7 +260,7 @@ jobs:
 
       - uses: actions/setup-python@v5
         with:
-          python-version: "3.12"
+          python-version: "3.14"
 
       - name: Cache PlatformIO and ESPHome
         uses: actions/cache@v4
@@ -321,7 +321,7 @@ jobs:
 
       - uses: actions/setup-python@v5
         with:
-          python-version: "3.12"
+          python-version: "3.14"
 
       - name: Install tooling
         run: pip install ruff mypy types-PyYAML
@@ -331,7 +331,6 @@ jobs:
 
       - name: ruff format check
         run: ruff format --check components/ tools/
-        continue-on-error: true  # advisory until the tree is formatted
 
       # The component __init__.py files import esphome's codegen modules, which
       # are not installed here; check the standalone tooling strictly and the
