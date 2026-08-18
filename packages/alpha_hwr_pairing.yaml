@@ -40,6 +40,19 @@ substitutions:
   # tools/bump_version.sh, which rewrites it alongside the @vX.Y.Z package pin.
   component_version: "0.15.0"
 
+  # Where the component's C++ and codegen are loaded from. Overridable so a
+  # config can point it at a working tree without also having to declare a
+  # second `external_components` entry: two sources for the same component name
+  # both resolve, both get fetched, and which one *wins* comes down to
+  # `install_meta_finder` inserting each at the front of `sys.meta_path` -- last
+  # processed wins, which is neither stated in the config nor stable if the
+  # merge order ever changes. The tests/ci-compile*.yaml configs set this to
+  # `../components`; ESPHome's shorthand source validator tries a filesystem
+  # directory before the github:// pattern, so one substitution covers both.
+  #
+  # Rewritten by tools/bump_version.sh, which matches the @vX.Y.Z.
+  component_source: github://eman/esphome-alpha-hwr@v0.15.0
+
 esphome:
   # Publish the (constant) component version once at boot (issue #95).
   on_boot:
@@ -50,7 +63,7 @@ esphome:
           state: "${component_version}"
 
 external_components:
-  - source: github://eman/esphome-alpha-hwr@v0.15.0
+  - source: ${component_source}
     components: [alpha_hwr, dhw_demand]
 
 esp32_ble_tracker:

@@ -298,17 +298,28 @@ the detector without the control UI, see `dhw-demand-example.yaml`.
 ## Local development override
 
 When you are working from a local clone and want ESPHome to build the local
-component sources instead of the cached GitHub copy, add:
+component sources instead of the cached GitHub copy, point the packages'
+`component_source` substitution at the checkout:
 
 ```yaml
-external_components:
-  - source:
-      type: local
-      path: components
-    components: [alpha_hwr, dhw_demand]
+substitutions:
+  component_source: components   # relative to the config file
 ```
 
-That is the pattern used in `dhw-demand-example.yaml`.
+Override it rather than adding a second `external_components` block. The
+packages declare their own, so a second one does not replace it — both sources
+are resolved and the pinned repo is still cloned; which one supplies the
+component then depends on ESPHome inserting each at the front of
+`sys.meta_path` as it goes, so the last one processed wins. That happens to be
+the local one today, but nothing in your config says so. The substitution
+leaves exactly one source.
+
+Beware the mismatch this exists to avoid: a release-pinned *package* against a
+working-tree *component* disagree the moment a config key changes between
+releases, and validation fails on a key the pinned side does not know. Point
+both at the same place — either both local, or both at the same tag. This is
+why `dhw-demand-example.yaml` says not to add a local block on top of its
+tagged packages.
 
 ## Programmatic control (services + `write_settled` event)
 
