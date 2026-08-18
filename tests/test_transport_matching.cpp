@@ -258,8 +258,8 @@ void test_the_acknowledge_is_the_top_two_bits() {
 
   TEST_ASSERT(apdu_ack(0x01) == ApduAck::OK,
               "0x01 is ack 00 -- ok, one payload byte");
-  TEST_ASSERT(apdu_ack(0x41) == ApduAck::UNKNOWN_CLASS,
-              "0x41 is ack 01 -- Unknown Class");
+  TEST_ASSERT(apdu_ack(0x40) == ApduAck::UNKNOWN_CLASS,
+              "0x40 is ack 01 -- Unknown Class, and it declares NO payload");
   TEST_ASSERT(apdu_ack(0x81) == ApduAck::UNKNOWN_DATA_ITEM,
               "0x81 is ack 10 -- Unknown Data Item, NOT a successful short ACK");
   TEST_ASSERT(apdu_ack(0xC1) == ApduAck::ILLEGAL_OPERATION,
@@ -278,7 +278,9 @@ void test_the_length_is_the_low_six_bits_and_is_independent_of_the_ack() {
   TEST_ASSERT(apdu_payload_len(0x01) == 1, "0x01 declares one payload byte");
   TEST_ASSERT(apdu_payload_len(0x81) == 1, "0x81 declares one payload byte as well");
   TEST_ASSERT(apdu_payload_len(0xC1) == 1, "...and so does 0xC1");
-  TEST_ASSERT(apdu_payload_len(0x41) == 1, "...and 0x41");
+  TEST_ASSERT(apdu_payload_len(0x40) == 0,
+              "but Unknown Class declares none -- its head is 0x40, not 0x41, and a "
+              "matcher keyed on 'exactly one payload byte' misses it entirely");
 
   // This is what lets the short-ACK branch match a refusal at all. It keys on
   // the length, so all four acknowledge kinds reach the callback; before #208
@@ -298,7 +300,7 @@ void test_only_ack_ok_counts_as_success() {
   TEST_ASSERT(!apdu_ack_is_ok(0x81),
               "The captured 0x81 is a refusal, whatever byte follows it");
   TEST_ASSERT(!apdu_ack_is_ok(0xC1), "So is the probed 0xC1");
-  TEST_ASSERT(!apdu_ack_is_ok(0x41), "So is 0x41");
+  TEST_ASSERT(!apdu_ack_is_ok(0x40), "So is 0x40, the Unknown Class in the captured frame");
 
   // The precise shape of the old bug: `success = (b == 0x01) || (b == 0x81 &&
   // next == 0x00)`. The frame captured in #208 is `... 0A 81 00 ...`, whose

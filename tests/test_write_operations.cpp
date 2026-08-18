@@ -118,6 +118,7 @@ struct PumpSim {
   bool respond_mode_reads{true};
   bool respond_obj91{true};
   bool ack_temp_write{true};
+  uint8_t temp_ack_head{0x01};        // 0x81/0xC1/0x40 = the pump refuses the write
   bool honor_mode_change{true};       // apply 0x0A01 mode changes
   bool honor_setpoint_writes{true};   // apply setpoint values from 0601/register writes
   bool obj91_includes_limits{true};   // firmware echoes the 5 limit tail bytes
@@ -375,7 +376,7 @@ struct Harness {
       sim.temp_min = mn;
       sim.temp_max = mx;
       last_temp_write_tail.assign(apdu + 20, apdu + 25);
-      if (sim.ack_temp_write) inject_short_ack();
+      if (sim.ack_temp_write) inject_short_ack(sim.temp_ack_head);
     } else if (opspec == 0x8F && apdu_len >= 17 && apdu[2] == 0x5B && apdu[3] == 0x01 && apdu[4] == 0xA5) {
       // DHW config write (Obj 91 Sub 421, type 985, GO-app frame shape)
       frames_dhw_write++;
@@ -596,8 +597,8 @@ struct Harness {
     inject(std::move(f));
   }
 
-  void inject_short_ack() {
-    inject({0x24, 0x05, 0xF8, 0xE7, 0x0A, 0x01, 0x00, 0xAA, 0xBB});
+  void inject_short_ack(uint8_t head = 0x01) {
+    inject({0x24, 0x05, 0xF8, 0xE7, 0x0A, head, 0x00, 0xAA, 0xBB});
   }
 
   // Object 84 and Object 94 replies share one DataObject shape: OpSpec 0x13
@@ -1348,6 +1349,42 @@ static void test_temperature_range_accepted() {
   TEST_ASSERT(h.frames_0601 == 0, "temperature range no longer touches the fused 0x0601 object");
   TEST_ASSERT(h.frames_0a01 == 1, "mode switched via the unfused 0x0A01 object");
   TEST_ASSERT(h.commit_count > commits_before, "configuration commit was sent");
+}
+
+// An ANSWERED refusal is settled by the readback, not short-circuited to
+// REJECTED (issue #208).
+//
+// The distinction this pins is between silence and a "no". The caller drops
+// straight to REJECTED without a readback when the write goes unanswered, which
+// is right -- nothing came back, so there is nothing to attribute. A refusal is
+// different, and cannot be attributed with confidence: transport.cpp's
+// short-ACK branch matches "some queued write of this shape", with no sequence
+// number and no object echo, so the fire-and-forget mode write a few hundred ms
+// earlier can be answered inside this write's window.
+//
+// Making refusals visible (#208) is what created the hazard: without this, a
+// misattributed refusal would report REJECTED for a write that landed, and no
+// readback would run to catch it. The capture behind #208 is that exact shape --
+// an 0x81 mid-write, and the value landed.
+static void test_temperature_range_refusal_is_settled_by_the_readback() {
+  std::cout << "\n=== set_temperature_range: an answered refusal defers to the readback ===" << std::endl;
+  Harness h;
+  h.sim.mode_byte = 0x02;
+  h.prime_cache();
+  h.prime_temp_limits();
+  h.sim.temp_ack_head = 0x81;  // Unknown Data Item -- the captured frame's head
+
+  h.write_op.submit_set_temperature_range(30.0f, 50.0f, true, "tr_refused");
+  h.advance(15000);
+
+  TEST_ASSERT(h.events_for("tr_refused") == 1, "exactly one terminal event");
+  const WriteResult *r = h.result_for("tr_refused");
+  TEST_ASSERT(r && r->status == WriteStatus::ACCEPTED,
+              "accepted -- the pump holds the requested values, so the refusal was "
+              "not this write's; a short-circuit here would report failure for a "
+              "write that landed");
+  TEST_ASSERT(r && std::fabs(r->temp_min - 30.0f) < 0.2f && std::fabs(r->temp_max - 50.0f) < 0.2f,
+              "and the settled values come from the pump, not from the request");
 }
 
 static void test_temperature_range_no_ack() {
@@ -3246,6 +3283,7 @@ int main() {
   test_temperature_range_refused_when_limits_unknown();
   test_temperature_range_accepted();
   test_temperature_range_no_ack();
+  test_temperature_range_refusal_is_settled_by_the_readback();
   test_temperature_range_invalid();
   test_cycle_times_accepted();
   test_cycle_times_pump_clamps();

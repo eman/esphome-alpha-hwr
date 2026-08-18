@@ -643,18 +643,26 @@ void test_a_refused_class10_write_reports_failure() {
 
   struct Case {
     uint8_t head;
-    uint8_t next;
+    uint8_t next;      // ignored when the head declares no payload
+    bool has_payload;  // false -> the 8-byte, zero-payload frame shape
     bool expect_success;
     const char *what;
   };
   const Case cases[] = {
-      {0x01, 0x00, true, "0x01 (ack ok) is still accepted"},
-      {0x81, 0x00, false,
+      {0x01, 0x00, true, true, "0x01 (ack ok) is still accepted"},
+      {0x81, 0x00, true, false,
        "0x81 with a following 0x00 -- the exact frame captured on hardware -- is a "
        "refusal, where the old reading called it accepted"},
-      {0x81, 0x2F, false, "0x81 with any other item ID is a refusal too"},
-      {0xC1, 0x2F, false, "0xC1 (Illegal Operation) is a refusal, not a timeout"},
-      {0x41, 0x00, false, "0x41 (Unknown Class) likewise"},
+      {0x81, 0x2F, true, false, "0x81 with any other item ID is a refusal too"},
+      {0xC1, 0x2F, true, false, "0xC1 (Illegal Operation) is a refusal, not a timeout"},
+      // Unknown Class declares length 0, so this frame is 8 bytes and there is
+      // no item ID byte. The first cut of this test asserted 0x41 instead --
+      // a length-1 Unknown Class, which App C.17's format table says does not
+      // occur -- so it pinned a frame that cannot exist while the one that can
+      // went unmatched and died by 3 s timeout. Caught by an adversarial review
+      // pass, not by the suite.
+      {0x40, 0x00, false, false,
+       "0x40 (Unknown Class) is a refusal, and it arrives with no payload at all"},
   };
 
   for (const Case &c : cases) {
@@ -665,7 +673,10 @@ void test_a_refused_class10_write_reports_failure() {
     bool cb_success = true;
     queue_a_class10_temperature_write(transport, &cb_calls, &cb_success);
 
-    std::vector<uint8_t> reply = with_crc({0x24, 0x05, 0xF8, 0xE7, 0x0A, c.head, c.next, 0x00, 0x00});
+    std::vector<uint8_t> reply =
+        c.has_payload
+            ? with_crc({0x24, 0x05, 0xF8, 0xE7, 0x0A, c.head, c.next, 0x00, 0x00})
+            : with_crc({0x24, 0x04, 0xF8, 0xE7, 0x0A, c.head, 0x00, 0x00});
     transport.on_notification(reply.data(), reply.size());
 
     TEST_ASSERT(cb_calls == 1, c.what);

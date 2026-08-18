@@ -471,7 +471,7 @@ bool Transport::try_dispatch_response(const uint8_t* data, size_t len) {
     // Object 0601/Sub 5600 mode writes using OpSpec 0x90) are ACKed with a short
     // Class 10 OpSpec 0x01 frame that does not carry Obj/Sub fields.
     // Handle that before the generic len>=12 DataObject parser below.
-    if (queued_class == 0x0A && len >= 6 && data[4] == 0x0A && protocol::apdu_payload_len(data[5]) == 1 &&
+    if (queued_class == 0x0A && len >= 6 && data[4] == 0x0A && protocol::apdu_payload_len(data[5]) <= 1 &&
         cmd.expect_type_low_ver == 0x0000 && cmd.expect_type_high == 0x0000 &&
         cmd.packet.size() > 9 &&
         (cmd.packet[5] == 0x97 || cmd.packet[5] == 0x96 || cmd.packet[5] == 0xB3 ||
@@ -497,10 +497,21 @@ bool Transport::try_dispatch_response(const uint8_t* data, size_t len) {
         // which nothing else in this path would surface: before #208 a refusal
         // did not match here at all and the command failed by 3 s timeout, so
         // the log said "no response" about a pump that had answered promptly.
-        const unsigned item_id = (len >= 7) ? data[6] : 0xFFu;
-        ESP_LOGW(TAG,
-                 "Class 10 SET refused: head 0x%02X (%s), offending item ID 0x%02X",
-                 data[5], protocol::apdu_ack_name(ack), item_id);
+        //
+        // Only Unknown Data Item and Illegal Operation carry the offending
+        // item's ID. Unknown Class declares a zero-length payload, so there is
+        // no byte to report and `len` is 8 rather than 9 -- which is why the
+        // match above is `<= 1` and not `== 1`. Getting that wrong is how the
+        // first cut of this shipped: it admitted 0x41, a length-1 Unknown
+        // Class that the documented format says cannot occur, while rejecting
+        // the 0x40 that does.
+        if (protocol::apdu_payload_len(data[5]) == 1 && len >= 7) {
+          ESP_LOGW(TAG, "Class 10 SET refused: head 0x%02X (%s), offending item ID 0x%02X",
+                   data[5], protocol::apdu_ack_name(ack), data[6]);
+        } else {
+          ESP_LOGW(TAG, "Class 10 SET refused: head 0x%02X (%s)", data[5],
+                   protocol::apdu_ack_name(ack));
+        }
       }
       if (cmd.callback) {
         cmd.callback(success, data, len);

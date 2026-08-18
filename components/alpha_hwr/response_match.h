@@ -109,6 +109,14 @@ inline bool is_wildcard_matched_class(uint8_t class_byte) {
  * the item the pump did not recognise. So the write failed, and it was reported
  * as succeeding precisely when the unknown item's ID was 0x00.
  *
+ * Note the asymmetry in those payloads, because it is easy to lose: only the
+ * two item-related errors carry a byte. Unknown Class declares length 0, so its
+ * reply head is `0x40` and its frame is one byte shorter. A matcher keyed on
+ * "declares exactly one payload byte" therefore admits `0x41` -- a length-1
+ * Unknown Class, which this table says does not occur -- while rejecting the
+ * `0x40` that does. The second APDU of the frame captured in #208 is exactly
+ * that: `40 40`, an Unknown Class error with no payload.
+ *
  * Evidence that this pump populates the field at all, since #174 declined to
  * build on the documentation alone: a CRC-verified `0x81` reply captured during
  * a setpoint write, and a deliberate probe returning `0xC1` (Illegal Operation)
