@@ -34,9 +34,16 @@ Repeat --host to read several pumps in one run; --key/--secrets before a --host
 applies to it and to every later one until overridden. One connection per node,
 opened and closed: connection count is what costs heap on these nodes.
 
-Run with a Python that has aioesphomeapi available; the esphome venv works:
+`snapshot` needs aioesphomeapi; the esphome venv provides it. `report` needs
+nothing but the log file, so it runs on a plain python3.
+
   venv/bin/python tools/link_gap_report.py snapshot --host hwr-pump.local \\
       --secrets secrets.yaml
+  python3 tools/link_gap_report.py report --budget 600
+
+The procedure around these -- raising data_timeout before declaring the
+entities, the snapshot cadence and why it matters, and how to read each section
+of the output -- is in docs/configuration.md under "Running a measurement run".
 """
 
 from __future__ import annotations
