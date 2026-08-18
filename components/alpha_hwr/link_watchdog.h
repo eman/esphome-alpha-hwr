@@ -271,11 +271,20 @@ static constexpr size_t LINK_GAP_BUCKETS =
 ///     silently changes meaning from "quiet intervals this long" to "recycles".
 ///     Those are different numbers and only one of them answers the question.
 ///
-/// 0 is not censored: with the watchdog disabled nothing truncates an interval.
-inline bool link_gap_thresholds_censored(uint32_t data_timeout_ms) {
-  if (data_timeout_ms == 0)
+/// @param top_rung_ms The largest threshold actually configured. Every rung is
+///                    independently optional, so this is NOT always the top of
+///                    the ladder: a config declaring only `link_gaps_over_15s`
+///                    is perfectly well served by a 60 s budget and must not be
+///                    warned about the 90 s rung it never asked for. 0 means no
+///                    rung is configured, which nothing can censor.
+///
+/// A disabled watchdog (0) is not censored either: with nothing recycling,
+/// nothing truncates an interval.
+inline bool link_gap_thresholds_censored(uint32_t data_timeout_ms,
+                                         uint32_t top_rung_ms) {
+  if (data_timeout_ms == 0 || top_rung_ms == 0)
     return false;
-  return data_timeout_ms <= LINK_GAP_THRESHOLDS_MS[LINK_GAP_BUCKETS - 1];
+  return data_timeout_ms <= top_rung_ms;
 }
 
 /// How often the watched-time total may be published, in ms.

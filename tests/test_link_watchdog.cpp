@@ -866,18 +866,31 @@ void test_gap_thresholds_censored_predicate() {
                "==="
             << std::endl;
 
-  TEST_ASSERT(link_gap_thresholds_censored(60000),
+  const uint32_t top = LinkGapSampler::threshold_ms(LinkGapSampler::bucket_count() - 1);
+
+  TEST_ASSERT(link_gap_thresholds_censored(60000, top),
               "The shipped 60s default cannot observe the top rungs");
-  TEST_ASSERT(link_gap_thresholds_censored(90000),
+  TEST_ASSERT(link_gap_thresholds_censored(90000, top),
               "A budget equal to the top rung censors it too -- the only "
               "samples that can reach it are ones the watchdog cut off, so the "
               "counter quietly becomes a recycle count");
-  TEST_ASSERT(!link_gap_thresholds_censored(91000),
+  TEST_ASSERT(!link_gap_thresholds_censored(91000, top),
               "One second past the top rung is enough to observe all of them");
-  TEST_ASSERT(!link_gap_thresholds_censored(600000),
+  TEST_ASSERT(!link_gap_thresholds_censored(600000, top),
               "The documented measurement-run budget is clear");
-  TEST_ASSERT(!link_gap_thresholds_censored(0),
+  TEST_ASSERT(!link_gap_thresholds_censored(0, top),
               "A disabled watchdog censors nothing, because nothing recycles");
+
+  // Every rung is independently optional, so the ladder's top is not the top of
+  // a given config. Warning a 15s-only setup about the 90s rung it never asked
+  // for is noise, and a setup with no rung at all has nothing to censor.
+  TEST_ASSERT(!link_gap_thresholds_censored(60000, 15000),
+              "A config declaring only the 15s rung is well served by a 60s "
+              "budget and must not be warned");
+  TEST_ASSERT(link_gap_thresholds_censored(20000, 30000),
+              "...while the same budget against a 30s rung is censored");
+  TEST_ASSERT(!link_gap_thresholds_censored(60000, 0),
+              "No rung configured is nothing to censor, whatever the budget");
 }
 
 int main() {

@@ -46,15 +46,24 @@ void AlphaHwrComponent::setup() {
   // went quiet that long", and is exactly the wrong conclusion. Worth a warning
   // rather than silence: the failure mode is a measurement run that looks
   // clean, produces reassuring numbers, and settles the default on nothing.
-  if (this->link_gap_histogram_configured_() &&
-      link_gap_thresholds_censored(this->link_data_timeout_ms_)) {
+  const uint32_t top_rung_ms = this->link_gap_top_configured_rung_ms_();
+  if (link_gap_thresholds_censored(this->link_data_timeout_ms_, top_rung_ms)) {
     ESP_LOGW(TAG,
              "Link gap histogram counts up to %" PRIu32
              "s, but data_timeout is %" PRIu32 "s",
-             LINK_GAP_THRESHOLDS_MS[LINK_GAP_BUCKETS - 1] / 1000,
-             this->link_data_timeout_ms_ / 1000);
-    ESP_LOGW(TAG, "  Counters at or above that budget cannot fill - the "
-                  "watchdog truncates the interval first");
+             top_rung_ms / 1000, this->link_data_timeout_ms_ / 1000);
+    // Above the budget and equal to it fail differently, and saying "cannot
+    // fill" for both is wrong about the second: a rung at the budget does
+    // increment, on the samples the watchdog itself cut off. It stops being a
+    // gap count and becomes a recycle count, which is the more insidious of the
+    // two because the number looks alive.
+    if (top_rung_ms == this->link_data_timeout_ms_) {
+      ESP_LOGW(TAG, "  That counter can only be reached by intervals the "
+                    "watchdog cut off - it counts recycles, not quiet periods");
+    } else {
+      ESP_LOGW(TAG, "  Counters above that budget cannot fill - the watchdog "
+                    "truncates the interval first");
+    }
     ESP_LOGW(TAG, "  Raise data_timeout (600s) for a measurement run; see "
                   "docs/configuration.md");
   }

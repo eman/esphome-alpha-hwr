@@ -427,18 +427,33 @@ def _warn_if_histogram_cannot_fill(config):
     budget_ms = config[CONF_DATA_TIMEOUT].total_milliseconds
     if budget_ms == 0:
         return config  # nothing recycles, so nothing truncates an interval
-    blind = [
-        threshold
+    # Above the budget and equal to it fail differently, and lumping them
+    # together is wrong about the second. A rung above the budget is a
+    # structural zero. A rung AT the budget does increment -- but only on the
+    # intervals the watchdog itself cut off, so it stops counting quiet periods
+    # and starts counting recycles. That one is the more insidious of the two,
+    # because the number looks alive.
+    declared = [
+        (threshold, key)
         for threshold, key in zip(LINK_GAP_THRESHOLDS_S, CONF_LINK_GAPS_OVER, strict=True)
-        if key in config and threshold * 1000 >= budget_ms
+        if key in config
     ]
-    if blind:
+    above = [t for t, _ in declared if t * 1000 > budget_ms]
+    at_budget = [t for t, _ in declared if t * 1000 == budget_ms]
+    if above:
         _LOGGER.warning(
             "alpha_hwr: data_timeout is %ss, so the %s gap counter(s) cannot fill -- "
             "the watchdog truncates the interval first. Raise data_timeout (600s) "
             "for a measurement run; see docs/configuration.md",
             budget_ms // 1000,
-            ", ".join(f"{t}s" for t in blind),
+            ", ".join(f"{t}s" for t in above),
+        )
+    if at_budget:
+        _LOGGER.warning(
+            "alpha_hwr: the %s gap counter(s) equal data_timeout, so the only intervals "
+            "that can reach them are ones the watchdog cut off -- they count recycles, "
+            "not quiet periods. Raise data_timeout (600s) for a measurement run",
+            ", ".join(f"{t}s" for t in at_budget),
         )
     return config
 

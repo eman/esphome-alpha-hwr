@@ -547,16 +547,25 @@ private:
   uint32_t link_watch_time_published_{0xFFFFFFFFu};
   uint32_t link_watch_time_publish_ms_{0};
   void publish_link_diagnostics_(uint32_t now_ms);
-  /// True when any histogram entity is declared. The censoring warning in
-  /// setup() is gated on it so a config that never asked for the instrument is
-  /// not nagged about a budget that is fine for it.
-  bool link_gap_histogram_configured_() const {
+  /// The largest threshold that actually has a sensor attached, in ms; 0 when
+  /// no rung is configured.
+  ///
+  /// What the censoring warning is gated on, rather than "any histogram entity
+  /// exists". Every rung is independently optional, so the top of the ladder is
+  /// not the top of a given config: declaring only `link_gaps_over_15s` under
+  /// the 60 s default is a perfectly sound setup, and warning it about the 90 s
+  /// rung it never asked for would be noise. Declaring only `link_watch_time`
+  /// has no rung to censor at all.
+  ///
+  /// Relies on LINK_GAP_THRESHOLDS_MS being ascending, which
+  /// test_gap_thresholds_are_the_documented_set() pins.
+  uint32_t link_gap_top_configured_rung_ms_() const {
+    uint32_t top = 0;
     for (size_t i = 0; i < LINK_GAP_BUCKETS; i++) {
       if (this->link_gap_over_sensors_[i] != nullptr)
-        return true;
+        top = LINK_GAP_THRESHOLDS_MS[i];
     }
-    return this->link_gaps_truncated_sensor_ != nullptr ||
-           this->link_watch_time_sensor_ != nullptr;
+    return top;
   }
 
   sensor::Sensor *start_count_sensor_{nullptr};

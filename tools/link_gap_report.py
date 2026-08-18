@@ -70,12 +70,15 @@ TOLERANCE_PER_DAY = 1.0 / 30.0
 # Evidence required before recommending anything at all.
 MIN_DAYS = 14.0
 MIN_NODES = 2
-MAX_TRUNCATED_FRACTION = 0.01
-
-# The component's fixed poll interval, used only to estimate how many intervals
-# a span of watched time contains. update_interval is not in the component's
-# schema, so this is a constant rather than a guess.
-POLL_INTERVAL_S = 10.0
+# Truncated intervals are observations whose true length is unknown, so a run
+# full of them has a tail that was clipped rather than measured. Expressed per
+# watched day rather than as a fraction of intervals: the number of intervals is
+# NOT watched_s / poll_interval, because one 10 s poll cycle queues five
+# telemetry reads plus the schedule read and every reply closes an interval of
+# its own -- an estimate built on the poll interval undercounts them severalfold
+# and overstates the truncated share by the same factor. The firmware does not
+# publish an interval count, so this uses a denominator that is exactly known.
+MAX_TRUNCATED_PER_DAY = 2.0
 
 GAP_RE = re.compile(r"gaps?\s+over\s+(\d+)\s*s", re.IGNORECASE)
 TRUNCATED_RE = re.compile(r"gaps?\s+truncated", re.IGNORECASE)
@@ -135,13 +138,20 @@ async def read_node(host: str, key: str) -> dict[str, Any]:
         elif WATCH_RE.search(name):
             watched = value
 
-    return {
+    record: dict[str, Any] = {
         "host": host,
         "at": time.time(),
         "over": over,
         "truncated": truncated,
         "watched_s": watched,
     }
+    if watched is None:
+        # Only when discovery found nothing, and only to make that diagnosable:
+        # the caller prints these so a renamed entity is distinguishable from a
+        # missing one. Not kept otherwise -- the log is meant to stay small and
+        # to carry measurements, not an inventory.
+        record["seen_names"] = sorted(n for n in names.values() if n and "link" in n.lower())
+    return record
 
 
 async def cmd_snapshot(targets: list[tuple[str, str]], log_path: str) -> int:
@@ -161,7 +171,19 @@ async def cmd_snapshot(targets: list[tuple[str, str]], log_path: str) -> int:
     for record in records:
         if record["watched_s"] is None:
             print(f"{record['host']}: no gap histogram entities found")
-            print("  Declare them in the alpha_hwr block -- see docs/configuration.md")
+            # Discovery matches the documented display names, because nothing the
+            # API exposes ties an entity back to the config key that made it --
+            # object_id is derived from the name too. So a node whose entities
+            # were renamed looks identical to one that never declared them. Show
+            # what was actually there rather than leaving that undiagnosable.
+            seen_names = record.get("seen_names") or []
+            if seen_names:
+                print(f"  Sensors seen: {', '.join(seen_names[:12])}")
+                print("  Discovery matches the documented names ('Pump Link Gaps Over 15s',")
+                print("  'Pump Link Gaps Truncated', 'Pump Link Watched Time'). Rename to match,")
+                print("  or declare the keys -- see docs/configuration.md")
+            else:
+                print("  Declare them in the alpha_hwr block -- see docs/configuration.md")
             continue
         days = record["watched_s"] / 86400.0
         rungs = " ".join(f">{t}s={int(record['over'][t])}" for t in sorted(record["over"], key=int))
@@ -193,8 +215,10 @@ class NodeTotals:
         self.truncated = 0.0
         self.watched_s = 0.0
         self.resets = 0
+        self.ambiguous = 0
         self.snapshots = 0
         self._prev: dict[str, float] = {}
+        self._prev_at: float | None = None
 
     def add(self, record: dict[str, Any]) -> None:
         if record.get("watched_s") is None:
@@ -215,8 +239,25 @@ class NodeTotals:
         # that always moves on a live link, so a counter that merely happens not
         # to have changed cannot be mistaken for a reboot.
         reset = bool(self._prev) and current["watched_s"] < self._prev.get("watched_s", 0.0)
+        at = float(record.get("at", 0.0))
         if reset:
             self.resets += 1
+        elif self._prev and self._prev_at is not None:
+            # A reboot is only visible here when the new reading is LOWER. One
+            # that happened early enough to climb back past the previous total
+            # before this snapshot is invisible, and differencing then drops the
+            # whole pre-reboot session.
+            #
+            # That is exactly detectable, though not correctable: hiding needs
+            # the post-reboot watched time to exceed the previous total, and it
+            # cannot exceed the wall time since the last snapshot. So when
+            # `elapsed <= previous watched`, a hidden reboot is impossible and
+            # this difference is sound; otherwise it might not be, and the run
+            # is only as trustworthy as the snapshot cadence. Nothing in the API
+            # carries a boot identity (DeviceInfo has no uptime), so the honest
+            # move is to count these and say so rather than assume.
+            if at - self._prev_at > self._prev.get("watched_s", 0.0):
+                self.ambiguous += 1
 
         for field, value in current.items():
             previous = 0.0 if reset else self._prev.get(field, 0.0)
@@ -230,15 +271,18 @@ class NodeTotals:
             else:
                 self.over[int(field[4:])] += delta
 
-        self._prev = current
+        # Merge rather than replace. read_node() writes a snapshot after a
+        # timeout even when only some states arrived, and replacing wholesale
+        # would forget the baselines of the fields that snapshot omitted -- so
+        # the next one to carry them would add their entire since-boot value a
+        # second time. After a reset, 0 IS the right baseline for a field that
+        # did not appear, which is what a plain replace gives.
+        self._prev = dict(current) if reset else {**self._prev, **current}
+        self._prev_at = at
 
     @property
     def days(self) -> float:
         return self.watched_s / 86400.0
-
-    @property
-    def estimated_intervals(self) -> float:
-        return self.watched_s / POLL_INTERVAL_S
 
 
 def pool(records: list[dict[str, Any]]) -> tuple[dict[str, NodeTotals], list[str]]:
@@ -274,9 +318,12 @@ def rate_per_day(count: float, days: float) -> float:
 
 def print_coverage(nodes: dict[str, NodeTotals]) -> None:
     print("COVERAGE")
-    print(f"  {'node':<24} {'watched':>10} {'snapshots':>10} {'reboots':>8} {'truncated':>10}")
+    print(f"  {'node':<24} {'watched':>10} {'snapshots':>10} {'reboots':>8} {'unsure':>7} {'truncated':>10}")
     for node in nodes.values():
-        print(f"  {node.host:<24} {node.days:>9.2f}d {node.snapshots:>10} {node.resets:>8} {int(node.truncated):>10}")
+        print(
+            f"  {node.host:<24} {node.days:>9.2f}d {node.snapshots:>10} "
+            f"{node.resets:>8} {node.ambiguous:>7} {int(node.truncated):>10}"
+        )
     total_days = sum(n.days for n in nodes.values())
     print(f"  {'pooled':<24} {total_days:>9.2f}d")
 
@@ -331,12 +378,11 @@ def refusals(nodes: dict[str, NodeTotals], reported: list[int], budget_s: float 
         problems.append(f"{len(nodes)} installation(s) reporting, need {MIN_NODES} independent ones")
 
     truncated = sum(n.truncated for n in nodes.values())
-    intervals = sum(n.estimated_intervals for n in nodes.values())
-    fraction = truncated / intervals if intervals > 0 else 1.0
-    if fraction > MAX_TRUNCATED_FRACTION:
+    truncated_rate = rate_per_day(truncated, total_days) if total_days > 0 else 0.0
+    if truncated_rate > MAX_TRUNCATED_PER_DAY:
         problems.append(
-            f"{fraction * 100:.2f}% of intervals were cut short rather than ending on their own "
-            f"-- the tail was truncated, not observed"
+            f"{truncated:.0f} intervals were cut short rather than ending on their own "
+            f"({truncated_rate:.2f} per watched day) -- the tail was clipped, not observed"
         )
 
     if budget_s is None:
@@ -396,6 +442,11 @@ def print_caveats() -> None:
     print("  - Counts between a node's last snapshot and a reboot are lost. Frequent")
     print("    snapshots keep that tail small; the reboot count above says how often it")
     print("    happened.")
+    print("  - The 'unsure' column counts snapshot intervals long enough that a reboot")
+    print("    could have happened and climbed back past the previous total unseen, which")
+    print("    would silently drop that session. Snapshot more often than the node's")
+    print("    watched time grows and the column goes to zero; a nonzero count means the")
+    print("    totals are a lower bound.")
 
 
 def cmd_report(log_path: str, budget_s: float | None) -> int:
