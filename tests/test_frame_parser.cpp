@@ -37,6 +37,11 @@ static int tests_failed = 0;
 
 /// Build a frame with a correct CRC over [Length .. end of APDU].
 /// Layout: [0x24][len_field][SvcH][SvcL][Class][OpSpec][body...][CRC-H][CRC-L]
+// NOTE on `opspec`: it is the APDU head byte, whose low six bits declare the
+// body length. Keep it consistent with `body.size()` unless the test is
+// deliberately about an inconsistent header -- since issue #226 the parser
+// bounds the payload by what the head declares, so a fixture that under-declares
+// gets a truncated payload and one that over-declares is clamped to the frame.
 static std::vector<uint8_t> build_frame(uint8_t class_byte, uint8_t opspec,
                                         const std::vector<uint8_t> &body) {
   std::vector<uint8_t> f;
@@ -82,6 +87,70 @@ static void test_truncated_against_length_field() {
   ParsedFrame r = parse_frame(f.data(), f.size());
   TEST_ASSERT(!r.valid,
               "Frame whose length_field overruns the buffer is rejected");
+}
+
+// ── Multi-APDU telegrams (issue #226) ───────────────────────────────────────
+// A telegram may carry several APDUs; App C.17 says errors are reported
+// per-APDU, so an error reply substitutes for one answer inside a telegram
+// carrying others. The parser used to return everything between the header and
+// the CRC, so the second APDU arrived as part of the first one's payload with
+// nothing to indicate it.
+//
+// Worth recording what this is NOT: the frame issue #226 cites as its example,
+// `24 07 F8 E7 0A 81 00 40 40 5E BF`, does not actually reach the line it
+// blames. Its class byte is 0x0A, so it routes to the Class 10 branch, whose
+// default arm needs len >= 12; at 11 bytes it sets no payload at all. The
+// exposure is real but lives in the other arms, which is what these pin.
+static void test_a_second_apdu_is_not_reported_as_payload() {
+  std::cout << "\n=== Multi-APDU: the payload stops at the first APDU ===" << std::endl;
+
+  // Class 2 reply: APDU 1 = [02][01][34] (ok, one payload byte), then a
+  // zero-length Unknown Class error for a second APDU: [40][40].
+  auto f = build_frame(0x02, 0x01, {0x34, 0x40, 0x40});
+  ParsedFrame r = parse_frame(f.data(), f.size());
+  TEST_ASSERT(r.valid && r.crc_valid, "the telegram is well formed");
+  TEST_ASSERT(r.payload_len == 1,
+              "payload is the one byte APDU 1 declares, not the three between "
+              "the header and the CRC");
+  TEST_ASSERT(r.payload && r.payload[0] == 0x34, "and it is APDU 1's byte");
+  TEST_ASSERT(r.multi_apdu, "the frame reports that more followed");
+
+  // Class 10 default arm: head 0x08 = 8 body bytes (4 ID + 4 payload), then a
+  // second APDU.
+  auto g = build_frame(0x0A, 0x08, {0x00, 0x01, 0x2F, 0x01, 0xDE, 0xAD, 0xBE, 0xEF, 0x40, 0x40});
+  ParsedFrame rg = parse_frame(g.data(), g.size());
+  TEST_ASSERT(rg.payload_len == 4,
+              "Class 10 payload stops at APDU 1 too -- it used to run one byte "
+              "into the next APDU");
+  TEST_ASSERT(rg.payload && rg.payload[3] == 0xEF, "...ending on APDU 1's last byte");
+  TEST_ASSERT(rg.multi_apdu, "and multi_apdu is set here as well");
+}
+
+// The flag must stay off for the single-APDU frames that are everything the
+// component actually sees, or it is useless as a refusal signal.
+static void test_single_apdu_frames_are_not_flagged() {
+  std::cout << "\n=== Multi-APDU: ordinary frames are not flagged ===" << std::endl;
+
+  auto f = build_frame(0x02, 0x03, {0x34, 0x07, 0x02});
+  ParsedFrame r = parse_frame(f.data(), f.size());
+  TEST_ASSERT(r.payload_len == 3 && !r.multi_apdu,
+              "a single-APDU Class 2 reply is unchanged and unflagged");
+
+  auto g = build_frame(0x0A, 0x0E, {0x00, 0x01, 0x2F, 0x01, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10});
+  ParsedFrame rg = parse_frame(g.data(), g.size());
+  TEST_ASSERT(rg.payload_len == 10 && !rg.multi_apdu,
+              "and so is a passive notification, whose head declares exactly its body");
+}
+
+// A head declaring more than the frame holds is trusted no further than the
+// frame itself, and is not mistaken for a multi-APDU telegram.
+static void test_an_overlong_declaration_is_clamped_not_flagged() {
+  std::cout << "\n=== Multi-APDU: an over-declaring head is clamped ===" << std::endl;
+
+  auto f = build_frame(0x02, 0x3F, {0x34, 0x07, 0x02});  // declares 63, carries 3
+  ParsedFrame r = parse_frame(f.data(), f.size());
+  TEST_ASSERT(r.payload_len == 3, "payload is bounded by the frame, not the claim");
+  TEST_ASSERT(!r.multi_apdu, "and nothing follows it, so the flag stays off");
 }
 
 static void test_class3_payload_len_underflow() {
@@ -153,7 +222,9 @@ static void test_class10_id_extraction() {
   std::cout << "\n=== Class 10 ID extraction (big-endian) ===" << std::endl;
 
   // Default Class 10 layout: [SubH][SubL][ObjH][ObjL][payload...]
-  auto f = build_frame(0x0A, 0x03, {0x01, 0x22, 0x00, 0x5D, 7, 7, 7, 7});
+  // Head 0x08 because the body is 8 bytes. It used to be 0x03, which declared
+  // three -- a shape no pump emits, and one the parser now believes (#226).
+  auto f = build_frame(0x0A, 0x08, {0x01, 0x22, 0x00, 0x5D, 7, 7, 7, 7});
   ParsedFrame r = parse_frame(f.data(), f.size());
   TEST_ASSERT(r.sub_id == 0x0122, "Sub-ID decoded big-endian");
   TEST_ASSERT(r.obj_id == 0x005D, "Object ID decoded big-endian");
@@ -168,6 +239,9 @@ int main() {
 
   test_rejects_runts();
   test_truncated_against_length_field();
+  test_a_second_apdu_is_not_reported_as_payload();
+  test_single_apdu_frames_are_not_flagged();
+  test_an_overlong_declaration_is_clamped_not_flagged();
   test_class3_payload_len_underflow();
   test_short_length_field_does_not_read_past_window();
   test_trailing_bytes_are_clamped_for_crc();
