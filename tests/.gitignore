@@ -13,6 +13,11 @@ test_write_operations
 *.o
 *.obj
 
+# The per-flags object cache the Makefile builds into. Listed in its own right
+# rather than left to `*.obj` above: that pattern happens to match the bare name
+# `.obj`, which is a coincidence of glob semantics and not something to rely on.
+.obj/
+
 # Dependency files
 *.d
 

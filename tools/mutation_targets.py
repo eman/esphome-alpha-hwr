@@ -12,7 +12,7 @@ change rebuilds the suite, which takes seconds and is always correct"). That is
 the right trade for a normal build and the wrong one when it is paid 54 times.
 So the real include graph is taken from the compiler instead.
 
-    make -B -n <targets>     -> the exact compile command per target
+    make -B -n <targets>     -> the compile and link commands per target
     g++ -MM <its .cpp files> -> every header those translation units include
 
 which yields target -> {sources, headers}, inverted here into file -> targets.
@@ -59,16 +59,34 @@ def _compile_commands(targets: list[str]) -> dict[str, list[str]]:
         cwd=TESTS_DIR, capture_output=True, text=True, check=False,
     ).stdout
 
-    cmds: dict[str, list[str]] = {}
+    # The build is two-phase: one `-c <src> -o <obj>` per translation unit, then
+    # a link line naming the objects. So the sources of a target are reached
+    # through its objects rather than read off a single command.
+    #
+    # This function used to scan for `.cpp` tokens on the line that produced the
+    # target, which was right when each target was one big compiler invocation.
+    # After tests/Makefile moved to per-unit objects, that found no sources, the
+    # `missing` check below fired, and the whole run silently fell back to
+    # rebuilding everything -- correct, and about four times slower.
+    obj_src: dict[str, str] = {}
+    link: dict[str, list[str]] = {}
     for line in out.splitlines():
-        if " -o " not in line:
+        compiled = re.search(r"-c\s+(\S+)\s+-o\s+(\S+)", line)
+        if compiled:
+            obj_src[compiled.group(2)] = compiled.group(1)
             continue
         m = re.search(r"-o\s+(\S+)", line)
         if not m or m.group(1) not in targets:
             continue
-        srcs = [tok for tok in line.split() if tok.endswith(".cpp")]
+        objs = [tok for tok in line.split() if tok.endswith(".o")]
+        if objs:
+            link[m.group(1)] = objs
+
+    cmds: dict[str, list[str]] = {}
+    for target, objs in link.items():
+        srcs = [obj_src[o] for o in objs if o in obj_src]
         if srcs:
-            cmds[m.group(1)] = srcs
+            cmds[target] = srcs
     return cmds
 
 

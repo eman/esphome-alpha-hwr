@@ -70,6 +70,38 @@
 
 ### Changed
 
+- **The host test suite compiles once per translation unit instead of once per
+  target.** A full build compiled 142 translation units out of ~40 distinct
+  files — `codec.cpp` fourteen times, `transport.cpp` ten — because every target
+  was a single compiler invocation over its whole source list, with one coarse
+  wildcard standing in for header dependencies.
+
+  That was survivable until `test_component_wiring` and `test_api_bridge`
+  arrived. Each compiles 21 translation units and both include `alpha_hwr.h`, so
+  most mutation entries select at least one of them, and a full
+  mutation sweep grew to the better part of an hour — long enough to stop being
+  something anyone runs before pushing.
+
+  Objects are now cached under `.obj/<flags-hash>/<group>/`, `-MMD` records the
+  real include graph, and `tools/mutation_check.sh` builds at `-O0` and deletes
+  exactly the objects whose recorded dependencies name the file it mutated.
+  **A full sweep went from about 36 minutes to 7, with every mutation still
+  caught.**
+
+  The flags hash is load-bearing rather than tidiness: make cannot see that
+  flags changed, so without it `make OPT=-O0` would link `-O2` objects and
+  `test-asan` would reuse un-instrumented ones and report a clean run against
+  code the sanitizer never saw. Objects for `-DUSE_TIME` and `-DUSE_TEXT_SENSOR`
+  are kept in separate groups for the reason AGENTS.md §4 gives — those defines
+  compile a different program, and sharing an object across them would report
+  guards as covered that were never built.
+
+  One bug this shook out on the way: `tools/mutation_targets.py` read a target's
+  sources off the line that produced it, which found nothing once the build had
+  a link step, so every run fell back to rebuilding everything. It was loud in
+  the output and annotated CI, but it silently cost the entire speedup until it
+  was noticed.
+
 - **The transport's send-failure branches are tested.** Every write callback in
   the suite returned `true` unconditionally, so the two paths production takes
   when a chunk cannot reach the BLE stack had never executed under test: a GATT
