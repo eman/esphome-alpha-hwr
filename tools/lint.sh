@@ -53,6 +53,8 @@ echo ""
 # - Suppress missingInclude: ESP-IDF/ESPHome headers aren't available on host
 # - Suppress unusedFunction: Functions called from ESPHome YAML lambdas
 # - Suppress syntaxError: Some ESP32-specific syntax not parseable on host
+# shellcheck disable=SC2054  # the commas belong to cppcheck's --enable= value,
+#                             not to the array; there is one element per line.
 CPPCHECK_ARGS=(
   --enable=warning,performance,portability
   --suppress=missingInclude
@@ -105,6 +107,36 @@ echo -e "  Warnings:    ${WARNINGS}"
 echo -e "  Performance: ${PERF}"
 echo -e "  Style:       ${STYLE}"
 echo ""
+
+# The status was captured so `set -e` could not kill the script when
+# --error-exitcode fires; it was then never read, which shellcheck was right to
+# flag. It is read here, and it is fatal.
+#
+# It cannot decide the exit on its own, because in strict mode cppcheck exits
+# nonzero for any finding at all -- including the performance ones this project
+# does not gate on -- so failing on the status alone would start failing builds
+# that pass today. Paired with "and it counted nothing", though, it separates
+# the two things a nonzero status means, and the second one is serious: cppcheck
+# did not analyse anything. A bad argument, a glob that matched no files, a
+# binary that died on startup.
+#
+# Untreated, that prints "✓ Analysis passed" over a check that never ran, and
+# the cppcheck CI job is a single call to this script -- so the gate reports
+# success precisely when it has stopped being a gate. That is the same defect as
+# issue #237 in the sibling tool: silence meaning "no answer" has to be
+# distinguishable from silence meaning "nothing wrong".
+#
+# It cannot fire in normal operation. Any counted finding of any severity makes
+# the condition false, and a cppcheck that cannot open a file says "error:" and
+# is counted by the branch below.
+if [[ $CPPCHECK_STATUS -ne 0 && $ERRORS -eq 0 && $WARNINGS -eq 0 \
+      && $PERF -eq 0 && $STYLE -eq 0 ]]; then
+  echo -e "${RED}✗ cppcheck exited ${CPPCHECK_STATUS} having reported nothing.${NC}"
+  echo "  It did not fail to find problems; it failed to run. Check its output"
+  echo "  above. Reporting this as a pass would mean the analysis silently"
+  echo "  stopped happening."
+  exit 1
+fi
 
 if [[ $ERRORS -gt 0 ]]; then
   echo -e "${RED}✗ Analysis found errors${NC}"

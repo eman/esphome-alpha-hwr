@@ -45,6 +45,89 @@ RED='\033[0;31m'; GREEN='\033[0;32m'; YELLOW='\033[1;33m'; NC='\033[0m'
 # Override with JOBS=1 to serialise if a build ever looks order-dependent.
 JOBS="${JOBS:-4}"
 
+# Wall-clock limit on a single suite run, in seconds, and the exit status used
+# to report one that blew through it (124, the value GNU timeout uses).
+#
+# Why this exists (issue #237). A mutation that makes a test loop forever is
+# neither caught nor survived: the run never returns an answer. Before this the
+# sweep simply stopped advancing -- no output, because progress is printed per
+# entry; the script itself at 0% CPU with a test binary at 99%; and nothing
+# anywhere naming which entry was in force, because the mutated file is restored
+# per entry and the name lives only in this script's memory. It reads exactly
+# like a slow sweep. One such mutation cost 34 minutes of silence before anyone
+# noticed the log had stopped growing.
+#
+# It is a class rather than one bad entry: any "the thing never fires" mutation,
+# against any test that drives to a condition instead of a fixed step count,
+# produces it. Drive-to-condition is the established pattern here -- see
+# run_until_ready() in tests/test_component_wiring.cpp, whose comment explains
+# why the fixed-window alternative was wrong twice -- so the vulnerable shape is
+# the one the tests are supposed to use.
+#
+# The limit is deliberately enormous rather than tight. A full `make test` runs
+# in about 7 s on a developer machine and the slowest single binary in about 2,
+# so 300 s is a factor of forty. That asymmetry is on purpose: a false HUNG
+# would blame a timeout for someone's correct change and send them debugging the
+# wrong thing, while a real hang caught late merely costs five minutes instead
+# of the rest of the day. Override for a slow machine with
+# `TEST_TIMEOUT=600 ./tools/mutation_check.sh`.
+TEST_TIMEOUT="${TEST_TIMEOUT:-300}"
+# The baseline builds every binary from a cleared object cache before running
+# them, so it gets its own much larger budget. Bounded for the same reason:
+# an unbounded loop in an UNMUTATED test hangs here, before a single mutation is
+# applied, with even less to go on than the per-entry case.
+BASELINE_TIMEOUT="${BASELINE_TIMEOUT:-1800}"
+TIMEOUT_EXIT=124
+
+# Run a command with a wall-clock limit, returning its status, or TIMEOUT_EXIT
+# if it had to be killed.
+#
+# Hand-rolled because `timeout` is GNU coreutils and macOS does not ship it --
+# development here is on darwin and CI is ubuntu, and a limit that engaged only
+# in CI would not have caught the case that prompted this.
+#
+# `set -m` around the launch is the part that matters and the part that is easy
+# to leave out. It puts the background job in its own process group, so the kill
+# below can signal the group. Without it, killing the job kills the subshell
+# while the test binary it launched survives as an orphan, still spinning --
+# which is exactly what had to be cleaned up by hand when this was first hit.
+# TERM first so a test can die normally, then KILL for one that cannot.
+#
+# Polls rather than racing a watchdog against `wait`, because distinguishing
+# "killed by the watchdog" from "exited 143 on its own" would need a flag file
+# and this does not. 200 ms granularity keeps the rounding overhead near a tenth
+# of a second per run, against a sweep where each entry costs seconds to build.
+run_bounded() {
+  local limit=$1; shift
+  local monitor_was_on=0
+  case "$-" in *m*) monitor_was_on=1 ;; esac
+  set -m
+  "$@" &
+  local pid=$!
+  [ "$monitor_was_on" = "1" ] || set +m
+
+  local ticks=0
+  local limit_ticks=$((limit * 5))
+  while kill -0 "$pid" 2>/dev/null; do
+    if [ "$ticks" -ge "$limit_ticks" ]; then
+      kill -TERM -"$pid" 2>/dev/null || kill -TERM "$pid" 2>/dev/null
+      sleep 2
+      kill -KILL -"$pid" 2>/dev/null || kill -KILL "$pid" 2>/dev/null
+      wait "$pid" 2>/dev/null
+      return "$TIMEOUT_EXIT"
+    fi
+    sleep 0.2
+    ticks=$((ticks + 1))
+  done
+  wait "$pid"
+  return $?
+}
+
+# The three things run_bounded is pointed at, as functions rather than inline
+# compound commands, because a backgrounded function is what it can launch.
+run_one_test() { cd "$TESTS_DIR" && ./"$1" >/dev/null 2>&1; }
+run_whole_suite() { cd "$TESTS_DIR" && make test >/dev/null 2>&1; }
+
 # Each mutation: name | file | python-repr search | python-repr replace
 # The search string must appear exactly once; the script fails loudly if not,
 # so a refactor that moves the code is reported rather than silently skipped.
@@ -777,10 +860,26 @@ restore_or_die() {
 # load-bearing: with the trap already armed, `exit 2` here would fire it and
 # `git checkout --` would destroy precisely the uncommitted edits the guard
 # exists to protect.
-cd "$PROJECT_DIR"
+# `|| exit` is not decoration here. Every path below is relative to the repo
+# root, and the very next thing is the guard that decides whether it is safe to
+# start mutating tracked sources -- run that from the wrong directory and it
+# asks git about some other tree, which is the one way this guard could pass
+# when it should not.
+cd "$PROJECT_DIR" || { echo "cannot cd to $PROJECT_DIR" >&2; exit 2; }
+
+# The files this run may mutate, as an array. Built with a read loop rather than
+# `mapfile` for the reason the selection loop below gives -- that is bash 4 and
+# macOS ships 3.2 -- and as an array rather than unquoted command substitution
+# so the splitting is something this script states rather than something the
+# shell does to it on the way past.
+MUTATED_FILES=()
+while IFS= read -r mf; do
+  [ -n "$mf" ] && MUTATED_FILES+=("$mf")
+done < <(mutated_files)
+
 # Compare against HEAD so a *staged* edit counts as dirty too -- restore_all
 # resets to HEAD and would discard it.
-if ! git diff HEAD --quiet -- $(mutated_files); then
+if [ ${#MUTATED_FILES[@]} -gt 0 ] && ! git diff HEAD --quiet -- "${MUTATED_FILES[@]}"; then
   echo -e "${RED}✗ A file this script mutates has uncommitted changes.${NC}"
   echo "  This script mutates tracked sources and reverts them with git checkout,"
   echo "  which would discard those changes. Commit or stash first."
@@ -872,10 +971,27 @@ case "$RUN_OBJDIR" in
   .obj/*) ;;
   *) RUN_OBJDIR="" ;;
 esac
-if (cd "$TESTS_DIR" && make clean-bin >/dev/null 2>&1 \
-      && { [ -z "$RUN_OBJDIR" ] || rm -rf "$RUN_OBJDIR"; } \
-      && make -j"$JOBS" test >/tmp/mutation_baseline.log 2>&1); then
+baseline_build_and_run() {
+  cd "$TESTS_DIR" || return 1
+  make clean-bin >/dev/null 2>&1 || return 1
+  { [ -z "$RUN_OBJDIR" ] || rm -rf "$RUN_OBJDIR"; } || return 1
+  make -j"$JOBS" test >/tmp/mutation_baseline.log 2>&1
+}
+run_bounded "$BASELINE_TIMEOUT" baseline_build_and_run
+BASELINE_RC=$?
+if [ "$BASELINE_RC" -eq 0 ]; then
   echo -e "${GREEN}✓ passes${NC}"
+elif [ "$BASELINE_RC" -eq "$TIMEOUT_EXIT" ]; then
+  echo -e "${RED}✗ HUNG${NC}"
+  echo ""
+  echo "  The baseline did not finish within ${BASELINE_TIMEOUT}s, before any"
+  echo "  mutation was applied. Something in the unmutated tree loops forever or"
+  echo "  this machine is far slower than the budget assumes; either way no"
+  echo "  mutation result would mean anything. Raise BASELINE_TIMEOUT if it is"
+  echo "  the latter. Last 20 lines:"
+  echo ""
+  tail -20 /tmp/mutation_baseline.log 2>/dev/null | sed 's/^/    /'
+  exit 2
 else
   echo -e "${RED}✗ FAILS${NC}"
   echo ""
@@ -891,9 +1007,28 @@ echo ""
 SURVIVORS=()
 CAUGHT=0
 
+HUNGS=()
+
+# Run the selected binaries, stopping at the first that fails or hangs.
+# 0 = every one passed (the mutation survived), 1 = one failed (caught),
+# TIMEOUT_EXIT = one never finished, which is neither.
+run_selected() {
+  local t rc
+  for t in "${SEL[@]}"; do
+    run_bounded "$TEST_TIMEOUT" run_one_test "$t"
+    rc=$?
+    if [ "$rc" -eq "$TIMEOUT_EXIT" ]; then HUNG_TEST="$t"; return "$TIMEOUT_EXIT"; fi
+    [ "$rc" -ne 0 ] && return 1
+  done
+  return 0
+}
+
 for entry in "${MUTATIONS[@]}"; do
   SURVIVED=0
   BUILD_BROKEN=0
+  HUNG=0
+  HUNG_TEST=""
+  RUN_RC=0
   IFS='|' read -r name file search replace <<< "$entry"
 
   # A '|' in the SEARCH field silently truncates it there, and the remainder is
@@ -983,10 +1118,16 @@ PY
     purge_objects_for "$file"
     if ! (cd "$TESTS_DIR" && make -j"$JOBS" "${SEL[@]}" >/dev/null 2>&1); then
       BUILD_BROKEN=1
-    elif (cd "$TESTS_DIR" && for t in "${SEL[@]}"; do ./"$t" >/dev/null 2>&1 || exit 1; done); then
-      SURVIVED=1
     else
-      SURVIVED=0
+      run_selected
+      RUN_RC=$?
+      if [ "$RUN_RC" -eq "$TIMEOUT_EXIT" ]; then
+        HUNG=1
+      elif [ "$RUN_RC" -eq 0 ]; then
+        SURVIVED=1
+      else
+        SURVIVED=0
+      fi
     fi
   else
     # Build and RUN must be separate steps here, exactly as in the scoped arm
@@ -998,11 +1139,31 @@ PY
     # living in the script. `make` alone builds; `make test` then only runs.
     if ! (cd "$TESTS_DIR" && make clean >/dev/null 2>&1 && make -j"$JOBS" >/dev/null 2>&1); then
       BUILD_BROKEN=1
-    elif (cd "$TESTS_DIR" && make test >/dev/null 2>&1); then
-      SURVIVED=1
     else
-      SURVIVED=0
+      run_bounded "$TEST_TIMEOUT" run_whole_suite
+      RUN_RC=$?
+      if [ "$RUN_RC" -eq "$TIMEOUT_EXIT" ]; then
+        HUNG=1
+        HUNG_TEST="the suite"
+      elif [ "$RUN_RC" -eq 0 ]; then
+        SURVIVED=1
+      else
+        SURVIVED=0
+      fi
     fi
+  fi
+
+  if [[ "$HUNG" == "1" ]]; then
+    echo -e "${RED}✗ HUNG — ${HUNG_TEST} did not finish within ${TEST_TIMEOUT}s${NC}"
+    echo "    Neither caught nor survived: the suite never returned a verdict, so"
+    echo "    this entry proves nothing either way. Almost always the mutation"
+    echo "    stops something from ever firing and a test waits on it in an"
+    echo "    unbounded loop -- bound the loop and assert the property arrived,"
+    echo "    rather than looping until it does. If the machine is simply slow,"
+    echo "    raise TEST_TIMEOUT."
+    HUNGS+=("$name (${HUNG_TEST} exceeded ${TEST_TIMEOUT}s)")
+    restore_and_purge "$file"
+    continue
   fi
 
   if [[ "$BUILD_BROKEN" == "1" ]]; then
@@ -1037,7 +1198,7 @@ done
 # rather than a full rebuild, and a full clean would also throw away a
 # developer's -O2 objects, which this run never touched.
 cd "$TESTS_DIR" && make clean-bin >/dev/null 2>&1 || true
-for f in $(mutated_files); do purge_objects_for "$f"; done
+for f in "${MUTATED_FILES[@]}"; do purge_objects_for "$f"; done
 
 echo ""
 echo "=========================================="
@@ -1047,6 +1208,14 @@ if [[ -n "$FILTER" ]]; then
   echo -e "  ${YELLOW}PARTIAL RUN — only mutations matching '$FILTER'${NC}"
 fi
 echo "  Caught:   $CAUGHT / ${#MUTATIONS[@]}"
+# Listed separately from the survivors, and before them, because they mean
+# different things. A survivor is an answer -- the suite is not testing that
+# code. A hang is the absence of one, and it is the more urgent of the two to
+# fix, because until it is fixed every later entry in the run is delayed by it.
+if [[ ${#HUNGS[@]} -gt 0 ]]; then
+  echo -e "  ${RED}Hung:     ${#HUNGS[@]}${NC}"
+  for h in "${HUNGS[@]}"; do echo "    - $h"; done
+fi
 if [[ ${#SURVIVORS[@]} -gt 0 ]]; then
   echo -e "  ${RED}Survived: ${#SURVIVORS[@]}${NC}"
   for s in "${SURVIVORS[@]}"; do echo "    - $s"; done
@@ -1054,6 +1223,13 @@ if [[ ${#SURVIVORS[@]} -gt 0 ]]; then
   echo -e "${RED}✗ A surviving mutation means the suite is not testing that code.${NC}"
   echo "  Usually it means a test asserts a replica of the logic rather than"
   echo "  linking the production source. Fix the test, not the mutation."
+  exit 1
+fi
+if [[ ${#HUNGS[@]} -gt 0 ]]; then
+  echo ""
+  echo -e "${RED}✗ A mutation that hangs the suite has no result at all.${NC}"
+  echo "  It is not evidence of coverage and must not be read as any. Bound the"
+  echo "  loop that waits on the mutated behaviour and assert what it waited for."
   exit 1
 fi
 echo ""

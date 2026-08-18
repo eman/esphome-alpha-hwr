@@ -349,6 +349,17 @@ jobs:
       - name: mypy
         run: mypy --ignore-missing-imports tools/write_bench.py tools/link_gap_report.py
 
+      # The shell half of tools/, which had no check of any kind. Two of the
+      # three scripts here decide whether a change is allowed to merge --
+      # lint.sh IS the cppcheck job, and mutation_check.sh is the coverage
+      # gate -- so a shell bug in them does not produce a wrong answer, it
+      # produces a check that quietly stops checking. All three are clean at
+      # -S style today; this is what keeps them that way.
+      #
+      # ubuntu-latest ships shellcheck, so there is nothing to install.
+      - name: shellcheck
+        run: shellcheck --severity=style tools/*.sh
+
   # ---------------------------------------------------------------------------
   # The Lovelace card. 1700+ lines that had no automated check of any kind --
   # and which shipped broken against the current service signatures.

@@ -223,6 +223,45 @@
 
 ### Changed
 
+- **A mutation that hangs a test is reported instead of stalling the sweep**
+  (issue #237). `tools/mutation_check.sh` had three outcomes — caught, survived,
+  and did-not-compile — and a mutation that made a test loop forever produced
+  none of them. The run simply stopped advancing: no output, because progress is
+  printed per entry; the script at 0% CPU with a test binary at 99%; and nothing
+  naming the entry, because the mutated file is restored per entry and the name
+  lives only in the script's memory. It reads exactly like a slow sweep, and one
+  such mutation cost 34 minutes of silence before anyone noticed the log had
+  stopped growing.
+
+  Each suite run is now bounded, and a run that blows through the limit is its
+  own outcome: named, listed separately from the survivors, and fatal. The two
+  are different — a survivor is an answer, a hang is the absence of one — and
+  the hang is the more urgent, because until it is fixed every later entry is
+  delayed behind it. The baseline is bounded too, where an unbounded loop in an
+  *unmutated* test hangs before a single mutation is applied.
+
+  The limit is deliberately huge rather than tight: 300 s against a suite that
+  runs in about 7 s. A false timeout would blame the tool for someone's correct
+  change; a real hang caught late costs five minutes instead of a day.
+  `TEST_TIMEOUT` and `BASELINE_TIMEOUT` override it. Implemented by hand rather
+  than with `timeout`, which is GNU coreutils and absent on macOS — and the kill
+  targets the process group, without which the runner dies and the spinning test
+  binary survives as an orphan.
+
+- **`lint.sh` fails when cppcheck did not run, instead of reporting a pass.**
+  Found by shellcheck while fixing the above: the script captured cppcheck's
+  exit status and never read it, so a cppcheck that failed to start — a bad
+  argument, a glob matching no files — printed `✓ Analysis passed` over an
+  analysis that never happened. The cppcheck CI job is a single call to this
+  script, so the gate reported success exactly when it had stopped being a gate.
+  The status is now fatal when nothing at all was counted; it cannot fire on a
+  real finding of any severity, so nothing that passes today starts failing.
+
+  `shellcheck --severity=style tools/*.sh` now runs in CI. All three scripts are
+  clean; two of them decide whether a change may merge, so a shell bug in them
+  does not give a wrong answer, it gives a check that quietly stops checking.
+
+
 - **The packages' component source is a substitution, so a config can redirect
   it instead of declaring a second one** (`component_source`). Every package
   ships an `external_components` block pinned to its release tag. A config that
