@@ -633,6 +633,29 @@ restore_all() {
   return $rc
 }
 
+# Objects are cached across mutations (tests/Makefile builds per translation
+# unit), which is what makes a rebuild here cost one or two files instead of a
+# whole target. Two reasons to delete the affected ones by hand rather than
+# leaving it to make:
+#
+#   - make decides staleness by mtime at 1 s granularity, and a mutate/build/
+#     revert cycle runs well inside a second. That is the same stale-artifact
+#     hazard the binary `rm -f` below exists for, one level down, and it has
+#     produced false survivors here before.
+#   - The compiler already recorded the exact include graph in the .d files, so
+#     "every object whose dependencies mention this file" is precise where a
+#     guess would be either unsafe or wasteful.
+#
+# $1 is repo-relative (components/alpha_hwr/link_watchdog.h); the .d files spell
+# it ../components/..., so a substring match is what lines the two up.
+purge_objects_for() {
+  local f="$1" d
+  [ -d "$TESTS_DIR/.obj" ] || return 0
+  while IFS= read -r d; do
+    rm -f "$d" "${d%.d}.o"
+  done < <(find "$TESTS_DIR/.obj" -name '*.d' -exec grep -l -- "$f" {} + 2>/dev/null)
+}
+
 # Abort the run the moment a restore fails, rather than mutating further on top
 # of a source we could not put back.
 restore_or_die() {
@@ -706,6 +729,12 @@ if [[ "$SCOPED" == "1" ]]; then
   fi
 fi
 
+# -O0 for every build in this run. The suite is compiled hundreds of times here
+# and never profiled, so the optimiser is pure wall-clock; behaviour under test
+# is identical, and the -O2 build is still what `make test`, the sanitizer job
+# and the warning check use. tests/Makefile keys its object cache on the flags,
+# so this does not evict a developer's -O2 objects or get linked against them.
+export OPT=-O0
 if (cd "$TESTS_DIR" && make clean >/dev/null 2>&1 && make -j"$JOBS" test >/tmp/mutation_baseline.log 2>&1); then
   echo -e "${GREEN}✓ passes${NC}"
 else
@@ -808,6 +837,11 @@ PY
     # survived on the *previous* build. Cheap insurance against the exact
     # stale-binary artifact that has produced false survivors here before.
     ( cd "$TESTS_DIR" && rm -f "${SEL[@]}" )
+    # ...and the objects compiled from this file, for the same reason. Every
+    # other object in the cache is still valid, which is the point: the rebuild
+    # below recompiles the handful of translation units that actually include
+    # the mutation instead of the 21 that make up a whole-component target.
+    purge_objects_for "$file"
     if ! (cd "$TESTS_DIR" && make -j"$JOBS" "${SEL[@]}" >/dev/null 2>&1); then
       BUILD_BROKEN=1
     elif (cd "$TESTS_DIR" && for t in "${SEL[@]}"; do ./"$t" >/dev/null 2>&1 || exit 1; done); then
@@ -853,7 +887,18 @@ PY
   restore_or_die
 done
 
-cd "$TESTS_DIR" && make clean >/dev/null 2>&1 || true
+# The last mutation's binaries are still on disk, built from a source that has
+# since been restored -- and `git checkout` landing inside the same second would
+# not make them stale to make. Remove them, and remove every object compiled
+# from a file this run mutated, so nothing built from a mutation can be picked
+# up by a later `make test`.
+#
+# Deliberately not `make clean`: the rest of the object cache was built from
+# unmutated sources and is what makes the next run's baseline a few seconds
+# rather than a full rebuild, and a full clean would also throw away a
+# developer's -O2 objects, which this run never touched.
+cd "$TESTS_DIR" && make clean-bin >/dev/null 2>&1 || true
+for f in $(mutated_files); do purge_objects_for "$f"; done
 
 echo ""
 echo "=========================================="

@@ -2,174 +2,268 @@
 # Compiles and runs host-based tests without ESP32 dependencies
 
 CXX ?= g++
-CXXFLAGS = -std=c++17 -Wall -Wextra -O2 -I. -I./mocks -I../
+# Separate from CXXFLAGS so a caller can drop the optimiser without restating
+# the whole flag line. tools/mutation_check.sh builds at -O0: it runs the suite
+# hundreds of times and never reads a profile, so -O2 there is pure wall-clock.
+OPT ?= -O2
+CXXFLAGS = -std=c++17 -Wall -Wextra $(OPT) -I. -I./mocks -I../
 LDFLAGS =
 
-# Header prerequisites. Without these, editing a component or mock header left
-# every binary stale ("make: Nothing to be done") and the suite silently tested
-# the previous build. Coarse on purpose: a header change rebuilds the suite,
-# which takes seconds and is always correct.
-COMPONENT_HDRS = $(wildcard ../components/alpha_hwr/*.h) \
-                 $(wildcard ../components/dhw_demand/*.h)
-MOCK_HDRS = $(shell find mocks -name '*.h' 2>/dev/null)
-DEPS = $(COMPONENT_HDRS) $(MOCK_HDRS)
+# ---------------------------------------------------------------------------
+# Object cache
+# ---------------------------------------------------------------------------
+#
+# Every target used to be one compiler invocation over its whole source list,
+# so a full build compiled 142 translation units out of ~40 distinct files --
+# codec.cpp fourteen times, transport.cpp ten. Header prerequisites were a
+# single coarse $(DEPS) wildcard, so touching any header rebuilt all 29 targets
+# from scratch.
+#
+# That was survivable until tests/test_component_wiring.cpp and
+# tests/test_api_bridge.cpp arrived (issues #212 and #218). Each compiles 21
+# translation units and both include alpha_hwr.h, so 130 of the 163 entries in
+# tools/mutation_check.sh now select at least one of them -- and a full mutation
+# sweep went from minutes to the better part of an hour.
+#
+# Compiling once per translation unit and linking from objects fixes both: a
+# mutation recompiles only the units whose include graph actually contains the
+# mutated file, and -MMD records that graph exactly rather than guessing at it
+# with a wildcard.
+DEPFLAGS = -MMD -MP
+
+# Objects live under a directory keyed by the compiler and flags that produced
+# them. make has no idea flags changed, so without this a `make OPT=-O0` would
+# happily link objects built at -O2, and `test-asan` -- which replaces CXXFLAGS
+# wholesale -- would reuse un-instrumented objects and report a clean run
+# against code the sanitizer never saw. Keying by flags also means the two
+# variants coexist in the cache instead of evicting each other.
+VARIANT := $(shell printf '%s' "$(CXX) $(CXXFLAGS)" | cksum | cut -d' ' -f1)
+OBJDIR := .obj/$(VARIANT)
+
+# The defines are NOT interchangeable, which is why objects are grouped by them
+# rather than pooled. AGENTS.md §4 is explicit: -DUSE_TIME and -DUSE_TEXT_SENSOR
+# change which code exists, so a target built without one compiles a different
+# program and reports guards as covered that were never built. Sharing an object
+# across those groups would reintroduce exactly that. -Werror=switch changes no
+# code generation, but it gets its own group anyway rather than being applied
+# everywhere, since turning a warning fatal across files that were never audited
+# for it is a separate decision.
+FLAGS_base :=
+FLAGS_time := -DUSE_TIME
+FLAGS_text := -DUSE_TEXT_SENSOR
+FLAGS_sw   := -Werror=switch
+GROUPS := base time text sw
+
+# $(call objs,<group>,<sources>) -> object paths in that group's cache.
+# ../components/x/y.cpp -> $(OBJDIR)/<group>/components/x/y.o
+# test_z.cpp            -> $(OBJDIR)/<group>/test_z.o
+objs = $(foreach s,$(2),$(OBJDIR)/$(1)/$(patsubst ../%,%,$(s:.cpp=.o)))
+
+define GROUP_RULES
+$(OBJDIR)/$(1)/components/%.o: ../components/%.cpp
+	@mkdir -p $$(@D)
+	$$(CXX) $$(CXXFLAGS) $$(FLAGS_$(1)) $$(DEPFLAGS) -c $$< -o $$@
+
+$(OBJDIR)/$(1)/%.o: %.cpp
+	@mkdir -p $$(@D)
+	$$(CXX) $$(CXXFLAGS) $$(FLAGS_$(1)) $$(DEPFLAGS) -c $$< -o $$@
+endef
+$(foreach g,$(GROUPS),$(eval $(call GROUP_RULES,$(g))))
+
+# CXXFLAGS on the link line too: test-asan puts -fsanitize in LDFLAGS, but a
+# variant that ever carries it only in CXXFLAGS would link without the runtime.
+LINK = $(CXX) $(CXXFLAGS) $^ -o $@ $(LDFLAGS)
+
+# Header dependencies as recorded by the compiler on the last build. Absent on a
+# cold cache, which is correct -- there is no object to be stale then either.
+-include $(shell find $(OBJDIR) -name '*.d' 2>/dev/null)
 
 # Test executables
 TESTS = test_protocol test_frame_parser test_read_chain_lifetime test_control_service test_control_state test_dhw_demand_logic test_dhw_demand_component test_transport_matching test_transport_fsm test_schedule_service test_write_operations test_schedule_codec test_telemetry_units test_pump_schedule_ux test_publish_gate test_dhw_publish_gate test_link_watchdog test_auth test_sensor_publisher test_telemetry_service test_device_info_service test_initial_read_retry test_subscribe_outcome test_failure_hold test_gap_security_policy test_clock_sync_gate test_session test_component_wiring test_api_bridge
 
+# Objects are keyed by flags, but the BINARIES are not -- test_protocol is one
+# path whichever variant produced it. So switching variants leaves executables
+# on disk that were linked from a different object cache, and make cannot tell:
+# their mtime is newer than the objects it would now use, so it reports nothing
+# to be done and the suite runs the previous variant's binaries. Left alone
+# that means `make test-asan` followed by `make test` silently re-runs the
+# sanitized build, and `make OPT=-O0` after an -O2 build runs the -O2 one.
+#
+# Recording the variant and dropping the binaries when it changes costs one
+# stat per invocation and removes the whole class. The objects stay, which is
+# the point: switching back and forth is a relink, not a rebuild.
+LAST_VARIANT := $(shell cat .obj/last-variant 2>/dev/null)
+ifneq ($(LAST_VARIANT),$(VARIANT))
+$(shell rm -f $(TESTS))
+$(shell mkdir -p .obj && printf '%s' '$(VARIANT)' > .obj/last-variant)
+endif
+
 # Default target
 all: $(TESTS)
 
-# Build test executables
+# ---------------------------------------------------------------------------
+# Source sets
+# ---------------------------------------------------------------------------
 PROTOCOL_SRCS = ../components/alpha_hwr/codec.cpp ../components/alpha_hwr/frame_builder.cpp
 
-test_protocol: test_protocol.cpp protocol.h $(PROTOCOL_SRCS) $(DEPS)
-	$(CXX) $(CXXFLAGS) test_protocol.cpp $(PROTOCOL_SRCS) -o test_protocol $(LDFLAGS)
-
-test_frame_parser: test_frame_parser.cpp ../components/alpha_hwr/frame_parser.cpp ../components/alpha_hwr/frame_builder.cpp ../components/alpha_hwr/codec.cpp $(DEPS)
-	$(CXX) $(CXXFLAGS) test_frame_parser.cpp ../components/alpha_hwr/frame_parser.cpp ../components/alpha_hwr/frame_builder.cpp ../components/alpha_hwr/codec.cpp -o test_frame_parser $(LDFLAGS)
+FRAME_PARSER_SRCS = ../components/alpha_hwr/frame_parser.cpp ../components/alpha_hwr/frame_builder.cpp ../components/alpha_hwr/codec.cpp
 
 CONTROL_SRCS = ../components/alpha_hwr/control_service.cpp ../components/alpha_hwr/transport.cpp ../components/alpha_hwr/session.cpp ../components/alpha_hwr/schedule_service.cpp ../components/alpha_hwr/schedule_codec.cpp ../components/alpha_hwr/frame_builder.cpp ../components/alpha_hwr/frame_parser.cpp ../components/alpha_hwr/codec.cpp
 
-test_control_service: test_control_service.cpp $(CONTROL_SRCS) $(DEPS)
-	$(CXX) $(CXXFLAGS) test_control_service.cpp $(CONTROL_SRCS) -o test_control_service $(LDFLAGS)
+TRANSPORT_FSM_SRCS = ../components/alpha_hwr/transport.cpp ../components/alpha_hwr/frame_builder.cpp ../components/alpha_hwr/frame_parser.cpp ../components/alpha_hwr/codec.cpp
 
-test_control_state: test_control_state.cpp $(DEPS)
-	$(CXX) $(CXXFLAGS) test_control_state.cpp -o test_control_state $(LDFLAGS)
+SCHEDULE_SVC_SRCS = ../components/alpha_hwr/schedule_service.cpp ../components/alpha_hwr/schedule_codec.cpp ../components/alpha_hwr/transport.cpp ../components/alpha_hwr/session.cpp ../components/alpha_hwr/frame_builder.cpp ../components/alpha_hwr/frame_parser.cpp ../components/alpha_hwr/codec.cpp
 
-test_pump_schedule_ux: test_pump_schedule_ux.cpp ../components/alpha_hwr/pump_schedule_ux.h $(DEPS)
-	$(CXX) $(CXXFLAGS) test_pump_schedule_ux.cpp -o test_pump_schedule_ux $(LDFLAGS)
+READ_CHAIN_SRCS = ../components/alpha_hwr/history_service.cpp ../components/alpha_hwr/event_log_service.cpp ../components/alpha_hwr/schedule_service.cpp ../components/alpha_hwr/schedule_codec.cpp ../components/alpha_hwr/transport.cpp ../components/alpha_hwr/session.cpp ../components/alpha_hwr/frame_builder.cpp ../components/alpha_hwr/frame_parser.cpp ../components/alpha_hwr/codec.cpp
 
-test_publish_gate: test_publish_gate.cpp ../components/alpha_hwr/publish_gate.h $(DEPS)
-	$(CXX) $(CXXFLAGS) test_publish_gate.cpp -o test_publish_gate $(LDFLAGS)
+WRITE_OP_SRCS = ../components/alpha_hwr/write_operation_service.cpp ../components/alpha_hwr/time_service.cpp ../components/alpha_hwr/schedule_codec.cpp ../components/alpha_hwr/control_service.cpp ../components/alpha_hwr/schedule_service.cpp ../components/alpha_hwr/transport.cpp ../components/alpha_hwr/session.cpp ../components/alpha_hwr/frame_builder.cpp ../components/alpha_hwr/frame_parser.cpp ../components/alpha_hwr/codec.cpp
 
-test_link_watchdog: test_link_watchdog.cpp ../components/alpha_hwr/link_watchdog.h $(DEPS)
-	$(CXX) $(CXXFLAGS) test_link_watchdog.cpp -o test_link_watchdog $(LDFLAGS)
+# The whole component, shared by the two targets that drive it end to end.
+COMPONENT_SRCS = $(WRITE_OP_SRCS) ../components/alpha_hwr/auth.cpp ../components/alpha_hwr/telemetry_service.cpp ../components/alpha_hwr/sensor_publisher.cpp ../components/alpha_hwr/device_info_service.cpp ../components/alpha_hwr/event_log_service.cpp ../components/alpha_hwr/history_service.cpp ../components/alpha_hwr/api_bridge.cpp ../components/alpha_hwr/telemetry_decoder.cpp ../components/alpha_hwr/ble_connection_manager.cpp ../components/alpha_hwr/alpha_hwr.cpp
 
-test_initial_read_retry: test_initial_read_retry.cpp ../components/alpha_hwr/initial_read_retry.h $(DEPS)
-	$(CXX) $(CXXFLAGS) test_initial_read_retry.cpp -o test_initial_read_retry $(LDFLAGS)
+AUTH_SRCS = ../components/alpha_hwr/auth.cpp ../components/alpha_hwr/transport.cpp ../components/alpha_hwr/frame_builder.cpp ../components/alpha_hwr/frame_parser.cpp ../components/alpha_hwr/codec.cpp
 
-# -Werror=switch on this target only. The exhaustiveness assertion inside can
-# catch an enumerator added without a table entry, but NOT one added without a
-# to_string() case -- that is a -Wswitch warning, and the suite does not build
-# with -Werror, so it scrolls past. The two together make the claim true.
-test_subscribe_outcome: test_subscribe_outcome.cpp ../components/alpha_hwr/subscribe_outcome.h $(DEPS)
-	$(CXX) $(CXXFLAGS) -Werror=switch test_subscribe_outcome.cpp -o test_subscribe_outcome $(LDFLAGS)
+SENSOR_PUB_SRCS = ../components/alpha_hwr/sensor_publisher.cpp ../components/alpha_hwr/telemetry_decoder.cpp ../components/alpha_hwr/codec.cpp
 
-# -Werror=switch here for the same reason, and it carries more weight: both
-# release switches in failure_hold.h are switches over FailureHold, so a new
-# hold added without deciding what releases it fails the build rather than
-# becoming a permanent hold that silences every later fault.
-test_failure_hold: test_failure_hold.cpp ../components/alpha_hwr/failure_hold.h $(DEPS)
-	$(CXX) $(CXXFLAGS) -Werror=switch test_failure_hold.cpp -o test_failure_hold $(LDFLAGS)
+TELEMETRY_SVC_SRCS = ../components/alpha_hwr/telemetry_service.cpp ../components/alpha_hwr/sensor_publisher.cpp ../components/alpha_hwr/control_service.cpp ../components/alpha_hwr/telemetry_decoder.cpp ../components/alpha_hwr/schedule_service.cpp ../components/alpha_hwr/schedule_codec.cpp ../components/alpha_hwr/transport.cpp ../components/alpha_hwr/session.cpp ../components/alpha_hwr/frame_builder.cpp ../components/alpha_hwr/frame_parser.cpp ../components/alpha_hwr/codec.cpp
 
-# -Werror=switch again: ble_connection_manager.cpp switches over
-# GapSecurityAction at both reply sites, so a fourth action added without
-# deciding what each handler does with it must break the build rather than
-# silently take a default. The test mirrors that switch so the guard applies
-# here too, where it is actually compiled.
-test_gap_security_policy: test_gap_security_policy.cpp ../components/alpha_hwr/gap_security_policy.h $(DEPS)
-	$(CXX) $(CXXFLAGS) -Werror=switch test_gap_security_policy.cpp -o test_gap_security_policy $(LDFLAGS)
+DEVICE_INFO_SRCS = ../components/alpha_hwr/device_info_service.cpp ../components/alpha_hwr/transport.cpp ../components/alpha_hwr/session.cpp ../components/alpha_hwr/frame_builder.cpp ../components/alpha_hwr/frame_parser.cpp ../components/alpha_hwr/codec.cpp
 
-# -Werror=switch. check_and_sync_time() switches over ClockSyncAction with no
-# default, so a state added without deciding what that caller does with it is a
-# compiler diagnostic there too -- but ESPHome's build does not use -Werror, so
-# this target is where it is actually fatal. An earlier version of this comment
-# claimed the production caller was covered while it used a ternary, which
-# mapped every non-WARN_NO_TIME_ID state onto the wrong user-facing message.
-test_clock_sync_gate: test_clock_sync_gate.cpp ../components/alpha_hwr/clock_sync_gate.h $(DEPS)
-	$(CXX) $(CXXFLAGS) -Werror=switch test_clock_sync_gate.cpp -o test_clock_sync_gate $(LDFLAGS)
+# ---------------------------------------------------------------------------
+# Targets built with no extra defines
+# ---------------------------------------------------------------------------
+test_protocol: $(call objs,base,test_protocol.cpp $(PROTOCOL_SRCS))
+	$(LINK)
 
-test_dhw_publish_gate: test_dhw_publish_gate.cpp ../components/dhw_demand/publish_gate.h $(DEPS)
-	$(CXX) $(CXXFLAGS) test_dhw_publish_gate.cpp -o test_dhw_publish_gate $(LDFLAGS)
+test_frame_parser: $(call objs,base,test_frame_parser.cpp $(FRAME_PARSER_SRCS))
+	$(LINK)
 
-test_dhw_demand_logic: test_dhw_demand_logic.cpp ../components/dhw_demand/dhw_demand_logic.h $(DEPS)
-	$(CXX) $(CXXFLAGS) test_dhw_demand_logic.cpp -o test_dhw_demand_logic $(LDFLAGS)
+test_control_service: $(call objs,base,test_control_service.cpp $(CONTROL_SRCS))
+	$(LINK)
+
+test_control_state: $(call objs,base,test_control_state.cpp)
+	$(LINK)
+
+test_pump_schedule_ux: $(call objs,base,test_pump_schedule_ux.cpp)
+	$(LINK)
+
+test_publish_gate: $(call objs,base,test_publish_gate.cpp)
+	$(LINK)
+
+test_link_watchdog: $(call objs,base,test_link_watchdog.cpp)
+	$(LINK)
+
+test_initial_read_retry: $(call objs,base,test_initial_read_retry.cpp)
+	$(LINK)
+
+test_dhw_publish_gate: $(call objs,base,test_dhw_publish_gate.cpp)
+	$(LINK)
+
+test_dhw_demand_logic: $(call objs,base,test_dhw_demand_logic.cpp)
+	$(LINK)
 
 # The component shell itself. Until this target existed, `esphome compile` was
 # the only thing in the toolchain that compiled dhw_demand.cpp at all -- the
 # unit suite, cppcheck and the mutation check all read past it, which is how a
 # block referencing an out-of-scope variable once got through 905 green tests.
-test_dhw_demand_component: test_dhw_demand_component.cpp ../components/dhw_demand/dhw_demand.cpp $(DEPS)
-	$(CXX) $(CXXFLAGS) test_dhw_demand_component.cpp ../components/dhw_demand/dhw_demand.cpp -o test_dhw_demand_component $(LDFLAGS)
+test_dhw_demand_component: $(call objs,base,test_dhw_demand_component.cpp ../components/dhw_demand/dhw_demand.cpp)
+	$(LINK)
 
-test_session: test_session.cpp ../components/alpha_hwr/session.cpp $(DEPS)
-	$(CXX) $(CXXFLAGS) test_session.cpp ../components/alpha_hwr/session.cpp -o test_session $(LDFLAGS)
+test_session: $(call objs,base,test_session.cpp ../components/alpha_hwr/session.cpp)
+	$(LINK)
 
-test_transport_matching: test_transport_matching.cpp ../components/alpha_hwr/response_match.h $(DEPS)
-	$(CXX) $(CXXFLAGS) test_transport_matching.cpp -o test_transport_matching $(LDFLAGS)
+test_transport_matching: $(call objs,base,test_transport_matching.cpp)
+	$(LINK)
 
-test_transport_fsm: test_transport_fsm.cpp ../components/alpha_hwr/transport.cpp ../components/alpha_hwr/frame_builder.cpp ../components/alpha_hwr/frame_parser.cpp ../components/alpha_hwr/codec.cpp $(DEPS)
-	$(CXX) $(CXXFLAGS) test_transport_fsm.cpp ../components/alpha_hwr/transport.cpp ../components/alpha_hwr/frame_builder.cpp ../components/alpha_hwr/frame_parser.cpp ../components/alpha_hwr/codec.cpp -o test_transport_fsm $(LDFLAGS)
+test_transport_fsm: $(call objs,base,test_transport_fsm.cpp $(TRANSPORT_FSM_SRCS))
+	$(LINK)
 
-test_schedule_service: test_schedule_service.cpp ../components/alpha_hwr/schedule_service.cpp ../components/alpha_hwr/schedule_codec.cpp ../components/alpha_hwr/transport.cpp ../components/alpha_hwr/session.cpp ../components/alpha_hwr/frame_builder.cpp ../components/alpha_hwr/frame_parser.cpp ../components/alpha_hwr/codec.cpp $(DEPS)
-	$(CXX) $(CXXFLAGS) test_schedule_service.cpp ../components/alpha_hwr/schedule_service.cpp ../components/alpha_hwr/schedule_codec.cpp ../components/alpha_hwr/transport.cpp ../components/alpha_hwr/session.cpp ../components/alpha_hwr/frame_builder.cpp ../components/alpha_hwr/frame_parser.cpp ../components/alpha_hwr/codec.cpp -o test_schedule_service $(LDFLAGS)
+test_schedule_service: $(call objs,base,test_schedule_service.cpp $(SCHEDULE_SVC_SRCS))
+	$(LINK)
 
-READ_CHAIN_SRCS = ../components/alpha_hwr/history_service.cpp ../components/alpha_hwr/event_log_service.cpp ../components/alpha_hwr/schedule_service.cpp ../components/alpha_hwr/schedule_codec.cpp ../components/alpha_hwr/transport.cpp ../components/alpha_hwr/session.cpp ../components/alpha_hwr/frame_builder.cpp ../components/alpha_hwr/frame_parser.cpp ../components/alpha_hwr/codec.cpp
+test_read_chain_lifetime: $(call objs,base,test_read_chain_lifetime.cpp $(READ_CHAIN_SRCS))
+	$(LINK)
 
-test_read_chain_lifetime: test_read_chain_lifetime.cpp $(READ_CHAIN_SRCS) $(DEPS)
-	$(CXX) $(CXXFLAGS) test_read_chain_lifetime.cpp $(READ_CHAIN_SRCS) -o test_read_chain_lifetime $(LDFLAGS)
+test_schedule_codec: $(call objs,base,test_schedule_codec.cpp ../components/alpha_hwr/schedule_codec.cpp)
+	$(LINK)
 
-WRITE_OP_SRCS = ../components/alpha_hwr/write_operation_service.cpp ../components/alpha_hwr/time_service.cpp ../components/alpha_hwr/schedule_codec.cpp ../components/alpha_hwr/control_service.cpp ../components/alpha_hwr/schedule_service.cpp ../components/alpha_hwr/transport.cpp ../components/alpha_hwr/session.cpp ../components/alpha_hwr/frame_builder.cpp ../components/alpha_hwr/frame_parser.cpp ../components/alpha_hwr/codec.cpp
+test_telemetry_units: $(call objs,base,test_telemetry_units.cpp ../components/alpha_hwr/telemetry_decoder.cpp ../components/alpha_hwr/codec.cpp)
+	$(LINK)
 
-# Placed AFTER WRITE_OP_SRCS is defined, and that is load-bearing: make expands
-# prerequisites immediately but recipes lazily, so a rule listing $(WRITE_OP_SRCS)
-# above its definition gets an EMPTY prerequisite list while still compiling the
-# files. Editing session.cpp, transport.cpp or any of the other eight then runs a
-# stale binary -- silently, and only in the human workflow, since
-# tools/mutation_check.sh rm -f's its target first.
+test_auth: $(call objs,base,test_auth.cpp $(AUTH_SRCS))
+	$(LINK)
 
-test_component_wiring: test_component_wiring.cpp $(WRITE_OP_SRCS) ../components/alpha_hwr/auth.cpp ../components/alpha_hwr/telemetry_service.cpp ../components/alpha_hwr/sensor_publisher.cpp ../components/alpha_hwr/device_info_service.cpp ../components/alpha_hwr/event_log_service.cpp ../components/alpha_hwr/history_service.cpp ../components/alpha_hwr/api_bridge.cpp ../components/alpha_hwr/telemetry_decoder.cpp ../components/alpha_hwr/ble_connection_manager.cpp ../components/alpha_hwr/alpha_hwr.cpp $(DEPS)
-	$(CXX) $(CXXFLAGS) -DUSE_TIME test_component_wiring.cpp $(WRITE_OP_SRCS) ../components/alpha_hwr/auth.cpp ../components/alpha_hwr/telemetry_service.cpp ../components/alpha_hwr/sensor_publisher.cpp ../components/alpha_hwr/device_info_service.cpp ../components/alpha_hwr/event_log_service.cpp ../components/alpha_hwr/history_service.cpp ../components/alpha_hwr/api_bridge.cpp ../components/alpha_hwr/telemetry_decoder.cpp ../components/alpha_hwr/ble_connection_manager.cpp ../components/alpha_hwr/alpha_hwr.cpp -o test_component_wiring $(LDFLAGS)
+test_device_info_service: $(call objs,base,test_device_info_service.cpp $(DEVICE_INFO_SRCS))
+	$(LINK)
+
+# ---------------------------------------------------------------------------
+# Targets built with -Werror=switch
+# ---------------------------------------------------------------------------
+# The exhaustiveness assertion inside can catch an enumerator added without a
+# table entry, but NOT one added without a to_string() case -- that is a
+# -Wswitch warning, and the suite does not build with -Werror, so it scrolls
+# past. The two together make the claim true.
+test_subscribe_outcome: $(call objs,sw,test_subscribe_outcome.cpp)
+	$(LINK)
+
+# Same reason, and it carries more weight: both release switches in
+# failure_hold.h are switches over FailureHold, so a new hold added without
+# deciding what releases it fails the build rather than becoming a permanent
+# hold that silences every later fault.
+test_failure_hold: $(call objs,sw,test_failure_hold.cpp)
+	$(LINK)
+
+# ble_connection_manager.cpp switches over GapSecurityAction at both reply
+# sites, so a fourth action added without deciding what each handler does with
+# it must break the build rather than silently take a default. The test mirrors
+# that switch so the guard applies here too, where it is actually compiled.
+test_gap_security_policy: $(call objs,sw,test_gap_security_policy.cpp)
+	$(LINK)
+
+# check_and_sync_time() switches over ClockSyncAction with no default, so a
+# state added without deciding what that caller does with it is a compiler
+# diagnostic there too -- but ESPHome's build does not use -Werror, so this
+# target is where it is actually fatal. An earlier version of this comment
+# claimed the production caller was covered while it used a ternary, which
+# mapped every non-WARN_NO_TIME_ID state onto the wrong user-facing message.
+test_clock_sync_gate: $(call objs,sw,test_clock_sync_gate.cpp)
+	$(LINK)
+
+# ---------------------------------------------------------------------------
+# Targets built with -DUSE_TIME
+# ---------------------------------------------------------------------------
+# Not optional here. TimeService::current_time() -- the function that decides
+# whether the pump is written at all, and that carries the SNTP floor -- lives
+# inside that ifdef; without the define these targets compile the three-line
+# #else stub and report the real one as covered when it was never built.
+# SET_CLOCK's confirm calls it on every readback, so the whole comparison would
+# be untested too.
+test_write_operations: $(call objs,time,test_write_operations.cpp $(WRITE_OP_SRCS))
+	$(LINK)
+
+test_component_wiring: $(call objs,time,test_component_wiring.cpp $(COMPONENT_SRCS))
+	$(LINK)
 
 # The Home Assistant surface. Same source set as test_component_wiring because
 # the bridge is reached through the component, and api_bridge.cpp needs the
-# whole write-operation layer behind it to settle anything.
-test_api_bridge: test_api_bridge.cpp $(WRITE_OP_SRCS) ../components/alpha_hwr/auth.cpp ../components/alpha_hwr/telemetry_service.cpp ../components/alpha_hwr/sensor_publisher.cpp ../components/alpha_hwr/device_info_service.cpp ../components/alpha_hwr/event_log_service.cpp ../components/alpha_hwr/history_service.cpp ../components/alpha_hwr/api_bridge.cpp ../components/alpha_hwr/telemetry_decoder.cpp ../components/alpha_hwr/ble_connection_manager.cpp ../components/alpha_hwr/alpha_hwr.cpp $(DEPS)
-	$(CXX) $(CXXFLAGS) -DUSE_TIME test_api_bridge.cpp $(WRITE_OP_SRCS) ../components/alpha_hwr/auth.cpp ../components/alpha_hwr/telemetry_service.cpp ../components/alpha_hwr/sensor_publisher.cpp ../components/alpha_hwr/device_info_service.cpp ../components/alpha_hwr/event_log_service.cpp ../components/alpha_hwr/history_service.cpp ../components/alpha_hwr/api_bridge.cpp ../components/alpha_hwr/telemetry_decoder.cpp ../components/alpha_hwr/ble_connection_manager.cpp ../components/alpha_hwr/alpha_hwr.cpp -o test_api_bridge $(LDFLAGS)
+# whole write-operation layer behind it to settle anything. Sharing that set is
+# now literal: both link the same objects out of the cache.
+test_api_bridge: $(call objs,time,test_api_bridge.cpp $(COMPONENT_SRCS))
+	$(LINK)
 
+# ---------------------------------------------------------------------------
+# Targets built with -DUSE_TEXT_SENSOR
+# ---------------------------------------------------------------------------
+# Not optional here. The issue #127 publish-on-change guards for the alarm and
+# warning text live inside that ifdef, and the component's AUTO_LOAD pulls
+# text_sensor into every real build -- so without the define these targets would
+# compile a different program from the shipped one and report the guards as
+# covered when they had not been compiled at all.
+test_sensor_publisher: $(call objs,text,test_sensor_publisher.cpp $(SENSOR_PUB_SRCS))
+	$(LINK)
 
-
-test_schedule_codec: test_schedule_codec.cpp ../components/alpha_hwr/schedule_codec.cpp $(DEPS)
-	$(CXX) $(CXXFLAGS) test_schedule_codec.cpp ../components/alpha_hwr/schedule_codec.cpp -o test_schedule_codec $(LDFLAGS)
-
-test_telemetry_units: test_telemetry_units.cpp ../components/alpha_hwr/telemetry_decoder.cpp ../components/alpha_hwr/codec.cpp $(DEPS)
-	$(CXX) $(CXXFLAGS) test_telemetry_units.cpp ../components/alpha_hwr/telemetry_decoder.cpp ../components/alpha_hwr/codec.cpp -o test_telemetry_units $(LDFLAGS)
-
-# -DUSE_TIME is not optional here. TimeService::current_time() -- the function
-# that decides whether the pump is written at all, and that carries the SNTP
-# floor -- lives inside that ifdef; without the define this target compiles the
-# three-line #else stub and reports the real one as covered when it was never
-# built. SET_CLOCK's confirm calls it on every readback, so the whole comparison
-# would be untested too.
-test_write_operations: test_write_operations.cpp $(WRITE_OP_SRCS) $(DEPS)
-	$(CXX) $(CXXFLAGS) -DUSE_TIME test_write_operations.cpp $(WRITE_OP_SRCS) -o test_write_operations $(LDFLAGS)
-
-AUTH_SRCS = ../components/alpha_hwr/auth.cpp ../components/alpha_hwr/transport.cpp ../components/alpha_hwr/frame_builder.cpp ../components/alpha_hwr/frame_parser.cpp ../components/alpha_hwr/codec.cpp
-
-test_auth: test_auth.cpp $(AUTH_SRCS) $(DEPS)
-	$(CXX) $(CXXFLAGS) test_auth.cpp $(AUTH_SRCS) -o test_auth $(LDFLAGS)
-
-# -DUSE_TEXT_SENSOR is not optional here. The issue #127 publish-on-change
-# guards for the alarm and warning text live inside that ifdef, and the
-# component's AUTO_LOAD pulls text_sensor into every real build -- so without
-# the define this target would compile a different program from the shipped one
-# and report the guards as covered when they had not been compiled at all.
-SENSOR_PUB_SRCS = ../components/alpha_hwr/sensor_publisher.cpp ../components/alpha_hwr/telemetry_decoder.cpp ../components/alpha_hwr/codec.cpp
-
-test_sensor_publisher: test_sensor_publisher.cpp $(SENSOR_PUB_SRCS) $(DEPS)
-	$(CXX) $(CXXFLAGS) -DUSE_TEXT_SENSOR test_sensor_publisher.cpp $(SENSOR_PUB_SRCS) -o test_sensor_publisher $(LDFLAGS)
-
-TELEMETRY_SVC_SRCS = ../components/alpha_hwr/telemetry_service.cpp ../components/alpha_hwr/sensor_publisher.cpp ../components/alpha_hwr/control_service.cpp ../components/alpha_hwr/telemetry_decoder.cpp ../components/alpha_hwr/schedule_service.cpp ../components/alpha_hwr/schedule_codec.cpp ../components/alpha_hwr/transport.cpp ../components/alpha_hwr/session.cpp ../components/alpha_hwr/frame_builder.cpp ../components/alpha_hwr/frame_parser.cpp ../components/alpha_hwr/codec.cpp
-
-test_telemetry_service: test_telemetry_service.cpp $(TELEMETRY_SVC_SRCS) $(DEPS)
-	$(CXX) $(CXXFLAGS) -DUSE_TEXT_SENSOR test_telemetry_service.cpp $(TELEMETRY_SVC_SRCS) -o test_telemetry_service $(LDFLAGS)
-
-DEVICE_INFO_SRCS = ../components/alpha_hwr/device_info_service.cpp ../components/alpha_hwr/transport.cpp ../components/alpha_hwr/session.cpp ../components/alpha_hwr/frame_builder.cpp ../components/alpha_hwr/frame_parser.cpp ../components/alpha_hwr/codec.cpp
-
-test_device_info_service: test_device_info_service.cpp $(DEVICE_INFO_SRCS) $(DEPS)
-	$(CXX) $(CXXFLAGS) test_device_info_service.cpp $(DEVICE_INFO_SRCS) -o test_device_info_service $(LDFLAGS)
-
+test_telemetry_service: $(call objs,text,test_telemetry_service.cpp $(TELEMETRY_SVC_SRCS))
+	$(LINK)
 
 # Run tests
 test: $(TESTS)
@@ -291,19 +385,22 @@ test: $(TESTS)
 # macOS ARM, so locally the weak_ptr assertions in test_read_chain_lifetime are
 # the net instead. UBSan is set to abort rather than log-and-continue so a
 # violation actually fails the build.
+#
+# Replacing CXXFLAGS wholesale changes VARIANT, so these objects land in their
+# own cache directory and cannot be confused with the ordinary ones.
 ASAN_CXXFLAGS = -std=c++17 -Wall -Wextra -O1 -g -I. -I./mocks -I../ \
                 -fsanitize=address,undefined -fno-sanitize-recover=undefined \
                 -fno-omit-frame-pointer
 test-asan:
-	$(MAKE) clean
 	$(MAKE) test CXXFLAGS="$(ASAN_CXXFLAGS)" LDFLAGS="-fsanitize=address,undefined"
 
-# Alternative targets for specific compilers
+# Alternative targets for specific compilers. CXX is part of VARIANT, so these
+# no longer need a clean: the two compilers keep separate object caches.
 test-gcc: CXX = g++
-test-gcc: clean test
+test-gcc: test
 
 test-clang: CXX = clang++
-test-clang: clean test
+test-clang: test
 
 # The Lovelace card. Plain node against a stubbed DOM -- no npm, no lockfile,
 # nothing to install. Kept out of `test` so the mutation check (which drives
@@ -319,9 +416,18 @@ test-js:
 
 test-all: test test-js
 
-# Clean build artifacts
+# Clean build artifacts, object cache included -- every variant of it, since the
+# point of a clean is to leave nothing behind that a later build might reuse.
 clean:
-	rm -f $(TESTS) *.o
+	rm -f $(TESTS) *.o *.d
+	rm -rf .obj
+
+# Binaries only, object cache kept. tools/mutation_check.sh ends with this plus
+# a targeted purge of the objects it could have mutated: a full clean there
+# would throw away objects built from unmutated sources, which is most of the
+# cache and most of the next run's speed.
+clean-bin:
+	rm -f $(TESTS)
 
 # Help target
 help:
@@ -335,12 +441,16 @@ help:
 	@echo "  test-clang  - Build and run tests with Clang"
 	@echo "  test-js     - Run the Lovelace card tests (node, no deps)"
 	@echo "  test-all    - Run the C++ suite and the card tests"
-	@echo "  clean       - Remove build artifacts"
+	@echo "  clean       - Remove build artifacts and the object cache"
 	@echo "  help        - Show this help message"
 	@echo ""
 	@echo "Environment Variables:"
 	@echo "  CXX         - C++ compiler (default: g++)"
+	@echo "  OPT         - Optimisation level (default: -O2; mutation runs use -O0)"
 	@echo "  CXXFLAGS    - Compiler flags"
 	@echo "  LDFLAGS     - Linker flags"
+	@echo ""
+	@echo "Objects are cached under .obj/<flags-hash>/<group>/, so switching"
+	@echo "OPT, CXX or sanitizers keeps both variants rather than rebuilding."
 
-.PHONY: all test test-asan test-gcc test-clang test-js test-all clean help
+.PHONY: all test test-asan test-gcc test-clang test-js test-all clean clean-bin help
