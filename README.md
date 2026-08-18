@@ -380,6 +380,17 @@ first-time flow:
 
 After that, reconnects reuse the stored bond.
 
+> **Clearing the node's bond needs physical access to the pump to undo.**
+> `ble_client.remove_bond`, an NVS erase, or a re-flash that loses NVS leaves
+> the pump bonded to a node that is no longer bonded to it. The pump then
+> refuses the link on every attempt and never offers to pair again. The only fix
+> is to put it back into pairing mode at the pump itself, with
+> `enable_pairing: true` set first — without that this node configures no
+> bonding and the pump's offer goes nowhere. The node reports
+> this on **Pump Link Fault** as `Pump not accepting pairing` once it has
+> happened three connections running; see
+> [`docs/configuration.md`](docs/configuration.md#enable_pairing).
+
 ## Examples in this repo
 
 Each example reads WiFi, the API encryption key and the OTA password from

@@ -4,6 +4,7 @@
 #include "esphome/components/binary_sensor/binary_sensor.h"
 #include "failure_hold.h"
 #include "gap_security_policy.h"
+#include "pairing_stall.h"
 #include "subscribe_outcome.h"
 #include <esp_gattc_api.h>
 #include <esp_gap_ble_api.h>
@@ -111,6 +112,13 @@ class BLEConnectionManager {
   /// report anything, only mask the next outage's cause.
   void on_session_ready();
 
+ private:
+  /// Drop a latched pairing-stall reason once the detector stops claiming one.
+  /// Called from every site that clears the stall; see pairing_stall.h.
+  void release_pairing_stall_hold_();
+
+ public:
+
   // Debug helpers
   void dump_services();
 
@@ -193,6 +201,13 @@ class BLEConnectionManager {
   // live in failure_hold.h, where they are host-tested; every site in the .cpp
   // that writes last_failure_ goes through failure_hold_admits().
   FailureHold failure_hold_{FailureHold::NONE};
+
+  // Counts connections that opened unbonded and were dropped without the pump
+  // ever offering to pair, which is the one state this component cannot
+  // recover from on its own (issue #230). The rule, the threshold and the
+  // reasons a healthy unbonded link must not trip it live in pairing_stall.h,
+  // where they are host-tested.
+  PairingStallDetector pairing_stall_;
 
   // Advertisement identifiers decoded at scan time (pre-connection)
   PumpAdvertisementInfo adv_info_;

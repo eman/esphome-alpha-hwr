@@ -111,6 +111,57 @@ off the pump was when it was found; the two together are the way to check this
 is working. `alpha_hwr_base.yaml` declares neither, so on that package and on
 hand-written blocks the log is the only signal.
 
+### `enable_pairing`
+
+Pairing is initiated by the pump, not by this node. On an unbonded connection
+the node stays silent and waits for the pump's security request, because a
+pairing request sent from this side to an unbonded pump comes back "Pairing Not
+Supported" and loses the pump's own request in the process.
+
+That works whenever the pump is willing to pair. It has one failure mode, and it
+is not recoverable over the air:
+
+> **Clearing this node's bond without clearing the pump's requires physical
+> access to the pump.** `ble_client.remove_bond`, an NVS erase and a re-flash
+> that loses NVS all leave the pump holding a bond for a peer that no longer
+> has one. The pump then sees an unencrypted stranger at a bonded address,
+> sends no security request, and drops the link — every time, indefinitely.
+> Do not do it remotely.
+
+The recovery is to put the pump into Bluetooth pairing mode by hand, after which
+it offers to pair as usual. **Set `enable_pairing: true` before doing so**, or
+the offer goes nowhere: with it false this component configures no IO
+capability, no bonding requirement and no key distribution, so nothing is set up
+to complete a bond. (ESPHome's own BLE client answers the pump's request
+regardless — this node cannot decline it — but answering is not bonding.)
+
+The node cannot tell that state apart from a pump that has simply never been put
+into pairing mode — in both cases the evidence is an absence, no security request
+— and it does not try to, because the remedy is the same. After three
+consecutive connections that open with no bond, exchange no security and carry
+no data, it says so: a `WARN` naming both possibilities and the remedy, repeated
+about once a minute, and **Pump Link Fault** reading `Pump not accepting
+pairing`. Without that the fault sensor shows `Failed To Establish (0x3e)`,
+which points at radio trouble — and the radio is fine; the connections succeed.
+
+Three cycles rather than one, so an ordinary dropped link is not reported as a
+pairing problem — and three specific cycles. A connection that carried data is
+not counted, so an unbonded node running read-only telemetry (the default, since
+`enable_pairing` is `false`) does not accumulate them on its ordinary
+reconnects. Neither is a link the node dropped itself: a `data_timeout` recycle
+looks identical in every other respect, and blaming pairing for a pump that is
+simply not answering would replace a true diagnosis with a false one. Neither,
+finally, is a link the radio lost — a supervision timeout, a connection that
+failed to establish — because the claim being made is about the pump's
+behaviour, and those are not evidence about it in either direction.
+
+What remains is a judgement, not a certainty. The node sees an absence, and it
+reports the two things that absence usually means. A third cause with the same
+signature is possible — anything that repeatedly drops an opened link before
+data flows, such as another client holding the pump's connection slot — so read
+the message as "the pump is not pairing and here is what usually explains it",
+not as a positive identification.
+
 ### `data_timeout`
 
 Nothing on the connect path verifies that the pump is answering. The session is
