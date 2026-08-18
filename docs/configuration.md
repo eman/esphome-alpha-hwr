@@ -128,12 +128,36 @@ is not recoverable over the air:
 > sends no security request, and drops the link — every time, indefinitely.
 > Do not do it remotely.
 
-The recovery is to put the pump into Bluetooth pairing mode by hand, after which
-it offers to pair as usual. **Set `enable_pairing: true` before doing so**, or
-the offer goes nowhere: with it false this component configures no IO
+The recovery is to put the pump back into Bluetooth pairing mode by hand. That
+is more than one button press, and the steps are not guessable from the pump —
+this is the procedure reported by @jfriend00, who has run it repeatedly on their
+own pump (see [#229](https://github.com/eman/esphome-alpha-hwr/pull/229)):
+
+1. Go to the pump physically.
+2. **Stop this node from connecting first** — power it down, or disable the BLE
+   client. The pump accepts only one BLE connection at a time, so a node
+   reconnecting every few seconds will keep the next step from working. This is
+   exactly what a node in this fault state is doing.
+3. Connect the Grundfos GO app to the pump.
+4. Unlock the pump's front panel from the app. The panel re-locks itself on its
+   own, so do this immediately before the next steps rather than in advance.
+5. Disconnect the GO app, again because the pump holds one connection at a time.
+6. Press the pairing button on the front panel and wait about 15 seconds to see
+   whether a link is established.
+7. If nothing happens, press it again. It commonly takes several attempts.
+
+Then let the node reconnect. **Set `enable_pairing: true` before any of this**,
+or the pump's offer goes nowhere: with it false this component configures no IO
 capability, no bonding requirement and no key distribution, so nothing is set up
 to complete a bond. (ESPHome's own BLE client answers the pump's request
 regardless — this node cannot decline it — but answering is not bonding.)
+
+Two caveats on the procedure. It is one owner's routine on one pump, not
+something this project has verified across models, and the panel-unlock step in
+particular may be specific to how that pump is configured. And it is a re-pair,
+not a reset of the pump's own bond table: clearing a bond *at the pump* is a
+different operation that nobody here has needed, and as far as is known it takes
+a full pump reset.
 
 The node cannot tell that state apart from a pump that has simply never been put
 into pairing mode — in both cases the evidence is an absence, no security request
@@ -158,9 +182,14 @@ behaviour, and those are not evidence about it in either direction.
 What remains is a judgement, not a certainty. The node sees an absence, and it
 reports the two things that absence usually means. A third cause with the same
 signature is possible — anything that repeatedly drops an opened link before
-data flows, such as another client holding the pump's connection slot — so read
-the message as "the pump is not pairing and here is what usually explains it",
-not as a positive identification.
+data flows — so read the message as "the pump is not pairing and here is what
+usually explains it", not as a positive identification.
+
+The likeliest such cause is worth naming, because it follows from the pump
+holding **one BLE connection at a time**: anything else already talking to it —
+the GO app, a phone left connected, a second node — takes the slot this one
+needs. If the fault appears while somebody is standing at the pump with the app
+open, that is the first thing to rule out.
 
 ### `data_timeout`
 

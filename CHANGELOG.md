@@ -4,6 +4,28 @@
 
 ### Added
 
+- **The re-pairing procedure, written down** (follow-up to #230). The recovery
+  #238 points users at was stated as "put the pump into Bluetooth pairing mode",
+  as though it were one button press. It is not, and the missing steps are not
+  guessable while standing at the pump: the front panel auto-locks and is
+  unlocked from the Grundfos GO app, and the button commonly needs several
+  presses before it takes.
+
+  The step that actually traps people is earlier than any of that. **The pump
+  accepts one BLE connection at a time**, so the GO app cannot connect while
+  this node is connected — and a node in this fault state is reconnecting every
+  few seconds, which is precisely when someone is trying to run the procedure.
+  Stopping the node first is now step 2, and the log line and README both say
+  the remedy is more than a button press rather than implying it is not.
+
+  Reported by @jfriend00 on #229, from their own re-pairing routine. Recorded as
+  one owner's procedure on one pump rather than as something this project has
+  verified, and distinguished from clearing a bond *at* the pump, which is a
+  different operation nobody here has needed. The same one-connection fact is
+  now named in `docs/configuration.md` as the likeliest third cause of a pairing
+  stall, where that paragraph previously hedged without saying what it meant.
+
+
 - **A pump that will not pair is reported instead of waited on** (issue #230).
   Clearing only this node's bond — `ble_client.remove_bond`, an NVS erase, a
   re-flash that loses NVS — leaves the pump holding a bond for a peer that no
