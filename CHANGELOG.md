@@ -4,6 +4,66 @@
 
 ### Added
 
+- **A pump that will not pair is reported instead of waited on** (issue #230).
+  Clearing only this node's bond — `ble_client.remove_bond`, an NVS erase, a
+  re-flash that loses NVS — leaves the pump holding a bond for a peer that no
+  longer has one. It then sees an unencrypted stranger at a bonded address,
+  sends no security request, and drops the link. The node reconnected roughly
+  every five seconds and logged "waiting for pump to initiate pairing" each
+  time, indefinitely, while **Pump Link Fault** read `Failed To Establish
+  (0x3e)` — a radio diagnostic for a link whose radio is fine.
+
+  Nothing about the connect path changes, because the silent wait is correct:
+  initiating from this side against an unbonded pump returns 0x52 ("Pairing Not
+  Supported") and loses the pump's own request with it. That was tried on the
+  bench and it is why the wait exists. What changes is that the wait is now
+  bounded by a diagnosis rather than by nothing. After three consecutive
+  connections that open with no bond, exchange no security and carry no data,
+  the node logs a `WARN` naming both states it could be in and the one remedy
+  that fixes either — put the pump into Bluetooth pairing mode, at the pump —
+  and latches `Pump not accepting pairing` on the fault sensor. The state is not
+  recoverable over the air, so saying so is the whole fix.
+
+  It deliberately does not claim to know *which* state it is in. The evidence is
+  an absence, so a pump bonded to a departed client and a pump that has simply
+  never been put into pairing mode look identical from here; the remedy is the
+  same in both, and asserting the first as fact would be an inference the
+  evidence does not carry.
+
+  Most of the design is about not crying wolf, because telling someone their
+  pump refuses to pair when it does not is worse than the silence this replaces.
+  `enable_pairing` defaults to `false` and passive telemetry needs no bond, so a
+  healthy installation runs unbonded forever and its links open unbonded and are
+  eventually dropped — exactly like a stalled one, except for what happened in
+  between. Four things clear the count: a notification, a security request
+  however answered, a completed bond, and a connection that opened bonded. Three
+  kinds of ending are not counted at all — a failed open, a teardown this node
+  initiated, and a link the radio lost, which is read from the disconnect reason
+  rather than assumed. The last two matter most: without them the data
+  watchdog's recycles and any run of supervision timeouts both read as refusals,
+  and both would have replaced a true diagnosis with a false one.
+
+  On the fault surface it takes its own rank, below both the subscribe fault and
+  a real pairing failure, on the rule that **an observed event outranks an
+  inference from an absence**. That is not where it started. The first version
+  latched at the same rank as an SMP failure, and an adversarial review drove
+  the case that breaks: issue #14's `0x61` erases the bond, every connection
+  after it is unbonded and unanswered — so that failure manufactures the stall's
+  own precondition — and the stall then replaced the root cause about fifteen
+  seconds later. `0x61` is the only pointer to the `reconnect_settle_time`
+  mitigation, and it is the one that recurs. The stall also withdraws itself the
+  moment it is refuted, rather than waiting to be overwritten: on a default node
+  nothing else would ever take it off, since `AUTH_CMPL` never fires and a
+  stalled link never reaches ready.
+
+  The log repeat is throttled to about once a minute while the fault string
+  holds continuously — the two have different jobs. The rule is in
+  `pairing_stall.h` with its own host test, so it can be exercised
+  exhaustively; the wiring is tested in `test_component_wiring.cpp`, which was
+  already compiling `ble_connection_manager.cpp` despite three headers still
+  claiming nothing does.
+
+
 - **A gap histogram, so the `data_timeout` default can be chosen from
   observation** (issue #176 part 1). Eight optional diagnostic sensors:
   `link_gaps_over_15s` through `link_gaps_over_90s`, `link_gaps_truncated`, and

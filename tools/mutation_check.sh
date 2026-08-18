@@ -281,6 +281,64 @@ MUTATIONS=(
 # cleared on exactly the links it describes.
 "failure-hold-auth-not-released-at-ready|components/alpha_hwr/failure_hold.h|    case FailureHold::SUBSCRIBE:\n      return false;  // and a blocking subscribe fault never reaches READY\n    case FailureHold::AUTH:\n      return true;|    case FailureHold::SUBSCRIBE:\n      return false;  // and a blocking subscribe fault never reaches READY\n    case FailureHold::AUTH:\n      return false;"
 "failure-hold-watchdog-released-at-ready|components/alpha_hwr/failure_hold.h|      return false;  // READY does not prove the pump is answering|      return true;  // READY does not prove the pump is answering"
+# Pairing-stall detection (pairing_stall.h, issue #230). A pump bonded to a
+# client that is no longer bonded to it sends no SEC_REQ and drops the link, and
+# the node loops on that every ~5 s forever saying "waiting for pump to initiate
+# pairing". Nothing here recovers it -- the pump has to be put into pairing mode
+# by hand -- so the whole value of this module is that it says so.
+#
+# The first two are the false negatives: never firing at all, and firing only on
+# the reported cycles so the latched fault blinks in and out with the log
+# throttle instead of holding.
+"pairing-stall-never-reported|components/alpha_hwr/pairing_stall.h|    if (consecutive_ < PAIRING_STALL_CYCLES) return false;|    if (true) return false;"
+"pairing-stall-fault-blinks-with-the-log-throttle|components/alpha_hwr/pairing_stall.h|  bool stalled() const { return consecutive_ >= PAIRING_STALL_CYCLES; }|  bool stalled() const { return consecutive_ == PAIRING_STALL_CYCLES; }"
+# The rest are the false positives, which are the more damaging half: telling
+# someone their pump refuses to pair, when it does not, is worse than the
+# silence this replaces. `enable_pairing` defaults to false and passive
+# telemetry needs no bond, so a healthy installation runs unbonded forever and
+# its ordinary reconnects must not accumulate -- that is what the data term and
+# the SEC_REQ term are for. The bonded-open term keeps a bonded reconnect out of
+# the count entirely, and the failed-open guard keeps a pump that is powered
+# down or out of range from being reported as one that refuses to pair.
+"pairing-stall-data-does-not-clear-it|components/alpha_hwr/pairing_stall.h|  void note_data() { note_progress_(); }|  void note_data() {}"
+"pairing-stall-a-willing-pump-still-counts|components/alpha_hwr/pairing_stall.h|  void note_security_request() { note_progress_(); }|  void note_security_request() {}"
+"pairing-stall-counts-bonded-connections|components/alpha_hwr/pairing_stall.h|    if (bonded_at_open) note_progress_();|    if (false) note_progress_();"
+"pairing-stall-counts-a-failed-open|components/alpha_hwr/pairing_stall.h|    if (!saw_open_) return false;  // a failed open is not a cycle|    if (false) return false;  // a failed open is not a cycle"
+"pairing-stall-counts-our-own-teardowns|components/alpha_hwr/pairing_stall.h|  void note_local_teardown() { progress_ = true; }|  void note_local_teardown() {}"
+"pairing-stall-fires-on-a-single-drop|components/alpha_hwr/pairing_stall.h|inline constexpr uint8_t PAIRING_STALL_CYCLES = 3;|inline constexpr uint8_t PAIRING_STALL_CYCLES = 1;"
+# The throttle itself, and the counter it is NOT derived from. A stall lasts
+# until someone walks to the pump, which can be days: dropping the throttle puts
+# twelve identical warnings a minute in the log forever, and letting the cycle
+# counter wrap reads a two-day-old stall as one that has just started.
+"pairing-stall-warns-on-every-cycle|components/alpha_hwr/pairing_stall.h|    if (since_report_ >= PAIRING_STALL_REMINDER_CYCLES) {|    if (true) {"
+"pairing-stall-cycle-counter-wraps|components/alpha_hwr/pairing_stall.h|    if (consecutive_ < UINT8_MAX) consecutive_++;|    consecutive_++;"
+# Found by a skeptic pass, all four SURVIVING against the first version of the
+# tests. The first is the sharpest: the branch form of "warn on every cycle" was
+# pinned and the CONSTANT form was not, so the mechanism read as covered while
+# the number could be retuned to 1 -- twelve warnings a minute, forever, for a
+# fault whose remedy needs someone to walk to the pump. The second let one
+# ordinary drop plus an out-of-range pump manufacture a pattern, because the
+# only test of the failed-open guard used a virgin detector where the flag it
+# checks was already false. The third shortens a relapse's first repeat.
+"pairing-stall-reminder-window-retuned-to-one|components/alpha_hwr/pairing_stall.h|inline constexpr uint8_t PAIRING_STALL_REMINDER_CYCLES = 12;|inline constexpr uint8_t PAIRING_STALL_REMINDER_CYCLES = 1;"
+"pairing-stall-one-open-closes-many-cycles|components/alpha_hwr/pairing_stall.h|    saw_open_ = false;\n    if (progress_|    if (progress_"
+"pairing-stall-relapse-skips-its-reminder-window|components/alpha_hwr/pairing_stall.h|      consecutive_ = 0;\n      since_report_ = 0;\n      return false;|      consecutive_ = 0;\n      return false;"
+"pairing-stall-a-completed-bond-does-not-clear-it|components/alpha_hwr/pairing_stall.h|  void note_bond_established() { note_progress_(); }|  void note_bond_established() {}"
+# The wiring, which the first version left entirely unexercised -- ten hand-made
+# mutations of these call sites all survived, including one that switches the
+# feature off outright. The rule living in a pure header is why it can be tested
+# exhaustively; it is not a reason for the component's use of it to be untested,
+# and the claim that ble_connection_manager.cpp "is compiled by no host test"
+# (still repeated by three neighbouring headers) stopped being true when it
+# joined COMPONENT_SRCS.
+"pairing-stall-feature-silently-off|components/alpha_hwr/ble_connection_manager.cpp|  pairing_stall_.on_connection_opened(bonded_at_open_);|  pairing_stall_.on_connection_opened(true);"
+"pairing-stall-no-cycle-ever-closes|components/alpha_hwr/ble_connection_manager.cpp|          pairing_stall_.on_disconnected(static_cast<uint16_t>(param->disconnect.reason));|          false;"
+"pairing-stall-disconnect-reason-ignored|components/alpha_hwr/ble_connection_manager.cpp|          pairing_stall_.on_disconnected(static_cast<uint16_t>(param->disconnect.reason));|          pairing_stall_.on_disconnected(0x0013);"
+"pairing-stall-fault-never-latched|components/alpha_hwr/ble_connection_manager.cpp|      if (pairing_stall_.stalled()) {|      if (false) {"
+"pairing-stall-fault-latched-on-every-drop|components/alpha_hwr/ble_connection_manager.cpp|      if (pairing_stall_.stalled()) {|      if (true) {"
+"pairing-stall-latched-at-auth-rank|components/alpha_hwr/ble_connection_manager.cpp|          failure_hold_ = FailureHold::PAIRING_STALL;|          failure_hold_ = FailureHold::AUTH;"
+"pairing-stall-hold-is-never-withdrawn|components/alpha_hwr/ble_connection_manager.cpp|  if (failure_hold_ == FailureHold::PAIRING_STALL && !pairing_stall_.stalled()) {|  if (false) {"
+"pairing-stall-sec-req-not-noted|components/alpha_hwr/ble_connection_manager.cpp|        pairing_stall_.note_security_request();|        (void) 0;"
 # GAP security policy (gap_security_policy.h). BLE GAP events are broadcast to
 # every client and every node on the device, not routed to the connection that
 # caused them, so a handler without an address check answers -- and acts on --

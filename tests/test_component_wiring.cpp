@@ -67,6 +67,12 @@ struct Rig {
   BLEClient client;
   esphome::binary_sensor::BinarySensor ready;
   esphome::text_sensor::TextSensor link_status;
+  // The Pump Link Fault companion. Attached by default, because the fault
+  // surface is where the fault-hold rank is actually observable: failure_hold.h
+  // decides which cause wins, and until this was wired the whole decision was
+  // exercised only through a pure-header test that could not see whether the
+  // component asks it the right question (issue #230).
+  esphome::text_sensor::TextSensor link_fault;
   // The gap histogram (issue #176 part 1). Attached by default so every test
   // here exercises the publish path, and because the frame-budget assertions
   // below are only meaningful against a rig that has them on.
@@ -84,6 +90,7 @@ struct Rig {
     esp_gap_mock().reset();
     component.set_ready_binary_sensor(&ready);
     component.set_pump_link_status_text_sensor(&link_status);
+    component.set_pump_last_link_failure_text_sensor(&link_fault);
     component.set_link_gaps_over_15s_sensor(&gaps_over[0]);
     component.set_link_gaps_over_20s_sensor(&gaps_over[1]);
     component.set_link_gaps_over_30s_sensor(&gaps_over[2]);
@@ -824,6 +831,127 @@ void test_a_recycle_marks_the_interval_truncated_end_to_end() {
               "reach it, which is the censoring the docs warn about");
 }
 
+
+// ── A pump that will not pair, through the real handlers ────────────────────
+// Issue #230. The detector's rule is host-tested exhaustively in
+// tests/test_pairing_stall.cpp; what these pin is the WIRING -- that the
+// component opens and closes a cycle on the right events, passes the disconnect
+// reason, and puts the answer on the fault surface at a rank that does not
+// trample the causes worth more.
+//
+// These exist because the first version of this change said, in the new
+// header's own comment, that ble_connection_manager.cpp "is compiled by no host
+// test" -- copied from three neighbouring headers that all still say it. It has
+// not been true since it went into COMPONENT_SRCS, and repeating it was on its
+// way to being the excuse for leaving the risky half of the change untested.
+static void drive_stall_cycles(Rig &r, int n, esp_gatt_conn_reason_t reason) {
+  for (int i = 0; i < n; i++) {
+    r.open(ESP_GATT_OK);
+    r.advance(500, 10);
+    r.disconnect(reason);
+    r.advance(500, 10);
+  }
+}
+
+void test_three_refused_connections_name_the_pump_not_the_radio() {
+  std::cout << "\n=== Three refused connections name the pump ===" << std::endl;
+
+  Rig r;
+  r.setup();  // enable_pairing defaults to false, which is the reported setup
+  const uint8_t pump[6] = {0x00, 0x1E, 0x2A, 0x00, 0x3C, 0x4D};
+  r.client.mock_set_remote_bda(pump);
+  esp_gap_mock().bond_device_num = 0;  // nothing bonded: the state after a bond clear
+
+  drive_stall_cycles(r, 2, ESP_GATT_CONN_TERMINATE_PEER_USER);
+  TEST_ASSERT(r.link_fault.state != "Pump not accepting pairing",
+              "Two dropped links are not a diagnosis -- the disconnect reason "
+              "still speaks for itself");
+
+  drive_stall_cycles(r, 1, ESP_GATT_CONN_TERMINATE_PEER_USER);
+  TEST_ASSERT(r.link_fault.state == "Pump not accepting pairing",
+              "The third says what is actually wrong, instead of leaving "
+              "\"Remote Terminated\" to imply a radio problem");
+}
+
+void test_a_radio_drop_is_never_reported_as_a_refusal() {
+  std::cout << "\n=== A radio drop is not reported as a refusal ===" << std::endl;
+
+  Rig r;
+  r.setup();
+  const uint8_t pump[6] = {0x00, 0x1E, 0x2A, 0x00, 0x3C, 0x4D};
+  r.client.mock_set_remote_bda(pump);
+  esp_gap_mock().bond_device_num = 0;
+
+  drive_stall_cycles(r, 8, ESP_GATT_CONN_TIMEOUT);
+  TEST_ASSERT(r.link_fault.state != "Pump not accepting pairing",
+              "A supervision timeout eight times running is a radio problem, "
+              "and telling the user to walk to the pump would be worse than "
+              "the silence this replaced");
+  TEST_ASSERT(r.link_fault.state == "Connection Timeout (0x08)",
+              "...so the true reason keeps the surface");
+}
+
+void test_the_pump_offering_to_pair_takes_the_fault_back_off() {
+  std::cout << "\n=== The pump offering to pair clears the fault ===" << std::endl;
+
+  Rig r;
+  r.setup();
+  const uint8_t pump[6] = {0x00, 0x1E, 0x2A, 0x00, 0x3C, 0x4D};
+  r.client.mock_set_remote_bda(pump);
+  esp_gap_mock().bond_device_num = 0;
+
+  drive_stall_cycles(r, 3, ESP_GATT_CONN_TERMINATE_PEER_USER);
+  TEST_ASSERT(r.link_fault.state == "Pump not accepting pairing", "Stalled first");
+
+  // Someone walks to the pump and puts it into pairing mode. The pump asks to
+  // secure the link -- the one event that refutes the diagnosis outright.
+  r.open(ESP_GATT_OK);
+  esp_ble_gap_cb_param_t sec{};
+  std::memcpy(sec.ble_security.ble_req.bd_addr, pump, 6);
+  r.component.gap_event_handler(ESP_GAP_BLE_SEC_REQ_EVT, &sec);
+  r.advance(200, 10);
+
+  TEST_ASSERT(r.link_fault.state != "Pump not accepting pairing",
+              "The fault comes off at once. Nothing else would take it off: "
+              "with enable_pairing false no AUTH_CMPL ever fires, and a link "
+              "the pump keeps dropping never reaches READY");
+}
+
+void test_a_stall_does_not_bury_a_bond_erasing_pairing_failure() {
+  std::cout << "\n=== A stall does not bury an encryption failure ===" << std::endl;
+
+  Rig r;
+  r.component.set_pairing_enabled(true);
+  r.setup();
+  const uint8_t pump[6] = {0x00, 0x1E, 0x2A, 0x00, 0x3C, 0x4D};
+  r.client.mock_set_remote_bda(pump);
+
+  // Issue #14's shape: a bonded reconnect whose encryption fails, which erases
+  // the bond. Everything after it is unbonded and unanswered -- the failure
+  // manufactures the stall's own precondition.
+  esp_gap_mock().bond_device_num = 1;
+  std::memcpy(esp_gap_mock().bonded_addr, pump, 6);
+  r.open(ESP_GATT_OK);
+  esp_ble_gap_cb_param_t fail{};
+  std::memcpy(fail.ble_security.auth_cmpl.bd_addr, pump, 6);
+  fail.ble_security.auth_cmpl.success = false;
+  fail.ble_security.auth_cmpl.fail_reason = ESP_AUTH_SMP_ENC_FAIL;
+  r.component.gap_event_handler(ESP_GAP_BLE_AUTH_CMPL_EVT, &fail);
+  r.disconnect(ESP_GATT_CONN_TERMINATE_PEER_USER);
+  r.advance(500, 10);
+  const std::string root_cause = r.link_fault.state;
+  TEST_ASSERT(root_cause.find("0x") != std::string::npos,
+              "The encryption failure is latched with its code");
+
+  esp_gap_mock().bond_device_num = 0;  // the bond it erased
+  drive_stall_cycles(r, 6, ESP_GATT_CONN_TERMINATE_PEER_USER);
+
+  TEST_ASSERT(r.link_fault.state == root_cause,
+              "The stall does not replace it. 0x61 is the only pointer to the "
+              "reconnect_settle_time mitigation -- the stall is the treatment, "
+              "that code is the prevention, and it is the one that recurs");
+}
+
 int main() {
   std::cout << "===========================================================" << std::endl;
   std::cout << "  Component BLE Wiring Test Suite" << std::endl;
@@ -846,6 +974,10 @@ int main() {
   test_gap_counters_do_not_publish_on_every_tick();
   test_a_quiet_link_fills_the_rungs_end_to_end();
   test_a_recycle_marks_the_interval_truncated_end_to_end();
+  test_three_refused_connections_name_the_pump_not_the_radio();
+  test_a_radio_drop_is_never_reported_as_a_refusal();
+  test_the_pump_offering_to_pair_takes_the_fault_back_off();
+  test_a_stall_does_not_bury_a_bond_erasing_pairing_failure();
 
   std::cout << "\n==========================================" << std::endl;
   std::cout << "Results: " << tests_passed << " passed, " << tests_failed

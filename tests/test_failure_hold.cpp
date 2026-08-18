@@ -45,6 +45,7 @@ int tests_failed = 0;
 static const FailureHold ALL[] = {
     FailureHold::NONE,
     FailureHold::DATA,
+    FailureHold::PAIRING_STALL,
     FailureHold::SUBSCRIBE,
     FailureHold::AUTH,
 };
@@ -53,6 +54,7 @@ static const char *name(FailureHold h) {
   switch (h) {
     case FailureHold::NONE: return "NONE";
     case FailureHold::DATA: return "DATA";
+    case FailureHold::PAIRING_STALL: return "PAIRING_STALL";
     case FailureHold::SUBSCRIBE: return "SUBSCRIBE";
     case FailureHold::AUTH: return "AUTH";
   }
@@ -91,25 +93,35 @@ void test_a_hold_admits_only_its_equals_and_betters() {
   // failure. Sixteen hand-written outcomes say what the policy IS.
   struct Row { FailureHold held; FailureHold incoming; bool writes; };
   static const Row TABLE[] = {
-      {FailureHold::NONE,      FailureHold::NONE,      true},
-      {FailureHold::NONE,      FailureHold::DATA,      true},
-      {FailureHold::NONE,      FailureHold::SUBSCRIBE, true},
-      {FailureHold::NONE,      FailureHold::AUTH,      true},
+      {FailureHold::NONE,          FailureHold::NONE,          true},
+      {FailureHold::NONE,          FailureHold::DATA,          true},
+      {FailureHold::NONE,          FailureHold::PAIRING_STALL, true},
+      {FailureHold::NONE,          FailureHold::SUBSCRIBE,     true},
+      {FailureHold::NONE,          FailureHold::AUTH,          true},
 
-      {FailureHold::DATA,      FailureHold::NONE,      false},
-      {FailureHold::DATA,      FailureHold::DATA,      true},
-      {FailureHold::DATA,      FailureHold::SUBSCRIBE, true},
-      {FailureHold::DATA,      FailureHold::AUTH,      true},
+      {FailureHold::DATA,          FailureHold::NONE,          false},
+      {FailureHold::DATA,          FailureHold::DATA,          true},
+      {FailureHold::DATA,          FailureHold::PAIRING_STALL, true},
+      {FailureHold::DATA,          FailureHold::SUBSCRIBE,     true},
+      {FailureHold::DATA,          FailureHold::AUTH,          true},
 
-      {FailureHold::SUBSCRIBE, FailureHold::NONE,      false},
-      {FailureHold::SUBSCRIBE, FailureHold::DATA,      false},
-      {FailureHold::SUBSCRIBE, FailureHold::SUBSCRIBE, true},
-      {FailureHold::SUBSCRIBE, FailureHold::AUTH,      true},
+      {FailureHold::PAIRING_STALL, FailureHold::NONE,          false},
+      {FailureHold::PAIRING_STALL, FailureHold::DATA,          false},
+      {FailureHold::PAIRING_STALL, FailureHold::PAIRING_STALL, true},
+      {FailureHold::PAIRING_STALL, FailureHold::SUBSCRIBE,     true},
+      {FailureHold::PAIRING_STALL, FailureHold::AUTH,          true},
 
-      {FailureHold::AUTH,      FailureHold::NONE,      false},
-      {FailureHold::AUTH,      FailureHold::DATA,      false},
-      {FailureHold::AUTH,      FailureHold::SUBSCRIBE, false},
-      {FailureHold::AUTH,      FailureHold::AUTH,      true},
+      {FailureHold::SUBSCRIBE,     FailureHold::NONE,          false},
+      {FailureHold::SUBSCRIBE,     FailureHold::DATA,          false},
+      {FailureHold::SUBSCRIBE,     FailureHold::PAIRING_STALL, false},
+      {FailureHold::SUBSCRIBE,     FailureHold::SUBSCRIBE,     true},
+      {FailureHold::SUBSCRIBE,     FailureHold::AUTH,          true},
+
+      {FailureHold::AUTH,          FailureHold::NONE,          false},
+      {FailureHold::AUTH,          FailureHold::DATA,          false},
+      {FailureHold::AUTH,          FailureHold::PAIRING_STALL, false},
+      {FailureHold::AUTH,          FailureHold::SUBSCRIBE,     false},
+      {FailureHold::AUTH,          FailureHold::AUTH,          true},
   };
 
   const int rows = static_cast<int>(sizeof(TABLE) / sizeof(TABLE[0]));
@@ -167,10 +179,19 @@ void test_the_release_matrix() {
     bool by_ready;
   };
   static const Row TABLE[] = {
-      {FailureHold::NONE,      false, false, false},
-      {FailureHold::DATA,      true,  false, false},
-      {FailureHold::SUBSCRIBE, true,  false, false},
-      {FailureHold::AUTH,      false, true,  true},
+      {FailureHold::NONE,          false, false, false},
+      {FailureHold::DATA,          true,  false, false},
+      // The only hold released by all three, and the only one that is an
+      // inference from an absence rather than an observed event. Each of the
+      // three refutes it outright: data means something is getting through, a
+      // successful auth means the bond it said could not be formed has been,
+      // and READY means the link survived far past where a refusing pump drops
+      // it. That breadth is deliberate -- the caller also drops it the moment
+      // the detector stops claiming a stall, because for a held reason
+      // "something else will overwrite it" can mean never.
+      {FailureHold::PAIRING_STALL, true,  true,  true},
+      {FailureHold::SUBSCRIBE,     true,  false, false},
+      {FailureHold::AUTH,          false, true,  true},
   };
 
   TEST_ASSERT(sizeof(TABLE) / sizeof(TABLE[0]) == sizeof(ALL) / sizeof(ALL[0]),
@@ -342,10 +363,49 @@ void test_the_rank_is_pinned_and_a_new_hold_cannot_skip_a_release() {
   // appended silently demotes everything after it. Pin the order itself.
   TEST_ASSERT(static_cast<uint8_t>(FailureHold::NONE) == 0 &&
                   static_cast<uint8_t>(FailureHold::DATA) == 1 &&
-                  static_cast<uint8_t>(FailureHold::SUBSCRIBE) == 2 &&
-                  static_cast<uint8_t>(FailureHold::AUTH) == 3,
-              "NONE < DATA < SUBSCRIBE < AUTH — the order IS the rank, so a "
-              "reorder is a behaviour change and fails here");
+                  static_cast<uint8_t>(FailureHold::PAIRING_STALL) == 2 &&
+                  static_cast<uint8_t>(FailureHold::SUBSCRIBE) == 3 &&
+                  static_cast<uint8_t>(FailureHold::AUTH) == 4,
+              "NONE < DATA < PAIRING_STALL < SUBSCRIBE < AUTH — the order IS "
+              "the rank, so a reorder is a behaviour change and fails here");
+}
+
+// ── The two orderings a skeptic pass corrected ─────────────────────────────
+// The first version of the pairing-stall change (issue #230) latched at AUTH
+// rank. Both of these episodes were driven against it and both came out wrong,
+// so they are pinned as episodes rather than as two more table rows: a rank is
+// only meaningful as the answer to "which of these does the operator see".
+void test_an_inference_from_absence_loses_to_an_observed_event() {
+  std::cout << "\n=== An inference from an absence loses to an observed event ==="
+            << std::endl;
+
+  // Issue #14: an encryption request on a bonded reconnect fails 0x61 and the
+  // bond is erased. Every connection after it is unbonded and unanswered --
+  // that failure MANUFACTURES the stall's precondition. At equal rank the
+  // stall replaced the root cause about fifteen seconds later, and 0x61 is the
+  // only thing pointing at reconnect_settle_time, which is the mitigation that
+  // stops it recurring. The stall is the treatment; 0x61 is the prevention.
+  TEST_ASSERT(!failure_hold_admits(FailureHold::AUTH, FailureHold::PAIRING_STALL),
+              "A bond-erasing encryption failure is not replaced by the stall "
+              "its own bond erasure created");
+  TEST_ASSERT(failure_hold_admits(FailureHold::PAIRING_STALL, FailureHold::AUTH),
+              "...while a real SMP failure still replaces a stall");
+
+  // A link that reached the subscribe step got far past where a refusing pump
+  // drops it -- about 2 s, before discovery completes. The stall cannot see how
+  // far the link got, so at a higher rank it masked a live subscribe fault with
+  // a diagnosis that had stopped applying.
+  TEST_ASSERT(!failure_hold_admits(FailureHold::SUBSCRIBE, FailureHold::PAIRING_STALL),
+              "A subscribe fault is not masked by a stall: reaching subscribe "
+              "is itself evidence the pump did not refuse the link");
+  TEST_ASSERT(failure_hold_admits(FailureHold::PAIRING_STALL, FailureHold::SUBSCRIBE),
+              "...and the subscribe fault replaces the stall when both happen");
+
+  // Against the watchdog it wins, on the same logic that puts SUBSCRIBE above
+  // DATA: silence is the symptom every cause here shares.
+  TEST_ASSERT(!failure_hold_admits(FailureHold::PAIRING_STALL, FailureHold::DATA),
+              "\"No data from pump\" does not replace the reason there is no "
+              "data");
 }
 
 int main() {
@@ -361,6 +421,7 @@ int main() {
   test_an_auth_hold_cannot_outlive_its_own_usefulness();
   test_the_release_asymmetry_is_the_reason_this_is_an_enum();
   test_the_write_sites_in_sequence();
+  test_an_inference_from_absence_loses_to_an_observed_event();
   test_the_rank_is_pinned_and_a_new_hold_cannot_skip_a_release();
 
   std::cout << "\n==========================================" << std::endl;

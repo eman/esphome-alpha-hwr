@@ -14,6 +14,21 @@ namespace esphome {
 namespace alpha_hwr {
 namespace core {
 
+// pairing_stall.h names the disconnect reasons that mean "the link was lost"
+// as raw numbers, so that header can stay free of ESP-IDF and be compiled on
+// its own. This is where the real enumerators are in scope, so this is where
+// the numbers are pinned: a value change in ESP-IDF fails the build here rather
+// than silently turning the exclusion list into a list of codes that no longer
+// occur -- and an exclusion that stops matching is a false pairing report, not
+// a missing one.
+static_assert(ESP_GATT_CONN_L2C_FAILURE == 0x0001, "reason value drifted");
+static_assert(ESP_GATT_CONN_TIMEOUT == 0x0008, "reason value drifted");
+static_assert(ESP_GATT_CONN_TERMINATE_PEER_USER == 0x0013, "reason value drifted");
+static_assert(ESP_GATT_CONN_TERMINATE_LOCAL_HOST == 0x0016, "reason value drifted");
+static_assert(ESP_GATT_CONN_LMP_TIMEOUT == 0x0022, "reason value drifted");
+static_assert(ESP_GATT_CONN_FAIL_ESTABLISH == 0x003E, "reason value drifted");
+static_assert(ESP_GATT_CONN_CONN_CANCEL == 0x0100, "reason value drifted");
+
 static const char *TAG = "alpha_hwr.ble";
 
 // Expected product identification bytes in the FE5D service data.
@@ -292,8 +307,38 @@ void BLEConnectionManager::force_disconnect(const char *reason) {
     last_failure_ = reason;
     failure_hold_ = FailureHold::DATA;
   }
+  // This teardown is ours, so the cycle it ends is not evidence about the
+  // pump's willingness to pair. Without this, the watchdog recycling an
+  // unbonded link that subscribed and went quiet would read as a pairing
+  // refusal after three recycles -- and would replace the reason latched two
+  // lines up, which is the true one, because the pairing fault outranks it.
+  pairing_stall_.note_local_teardown();
   if (client_ != nullptr) {
     client_->disconnect();
+  }
+}
+
+void BLEConnectionManager::release_pairing_stall_hold_() {
+  // The stall is the one held reason that is an inference from an absence, so
+  // it is the one that can be refuted outright -- and when it is, it has to
+  // come off the surface rather than sit there until something of equal or
+  // higher rank happens to be written. Nothing may: with enable_pairing false,
+  // which is the default, AUTH_CMPL never fires at all, and a link that never
+  // reaches READY produces no release either. Before this, a pump put into
+  // pairing mode and visibly sending SEC_REQ went on being reported as one that
+  // would not pair.
+  if (failure_hold_ == FailureHold::PAIRING_STALL && !pairing_stall_.stalled()) {
+    ESP_LOGD(TAG, "Pairing stall cleared - withdrawing held reason: %s", last_failure_.c_str());
+    // The string is cleared, not merely unheld, and that is the difference
+    // between this release and the others. Dropping the rank alone lets the
+    // next reason overwrite it -- but on a link that keeps failing there may not
+    // be a next reason for a long time, and evaluate_link_status() publishes
+    // whatever is in here whenever the session is not ready. The diagnosis has
+    // been refuted, not superseded, so the honest reading is that no cause is
+    // currently known. Safe to clear unconditionally because the guard above
+    // establishes that the stall is what wrote it.
+    last_failure_.clear();
+    failure_hold_ = FailureHold::NONE;
   }
 }
 
@@ -323,6 +368,12 @@ void BLEConnectionManager::handle_connection_opened(const esp_ble_gattc_cb_param
   encryption_pending_ = false;
   subscription_deferred_ = false;
   
+  // Track this connection for the pairing-stall detector before anything is
+  // decided about it: the cycle is opened here and closed on DISCONNECT, and a
+  // bonded open is not a candidate at all. See pairing_stall.h.
+  pairing_stall_.on_connection_opened(bonded_at_open_);
+  release_pairing_stall_hold_();
+
   // Request encryption only when we already have a stored bond.
   // - Bonded:   request encryption immediately so the pump can resume the
   //             encrypted session before GATT discovery proceeds.
@@ -330,6 +381,26 @@ void BLEConnectionManager::handle_connection_opened(const esp_ble_gattc_cb_param
   //             ESP_GAP_BLE_SEC_REQ_EVT.  A central-initiated pairing
   //             request on an unbonded pump returns 0x52 ("Pairing Not
   //             Supported"), causing the pump's own SEC_REQ to be missed.
+  //
+  // Both halves of that are right, but "unbonded" covers two states that
+  // behave nothing alike, and only the first is described above (issue #230):
+  //
+  //   A. Neither side is bonded and the pump is in pairing mode. It sends
+  //      SEC_REQ, the silent wait is answered, and the node bonds. This is the
+  //      first-time setup flow.
+  //   B. The pump is bonded to us and we are not bonded to it -- after
+  //      `ble_client.remove_bond`, an NVS erase, or a re-flash that lost NVS.
+  //      The pump sees an unencrypted peer it holds a bond for, sends NO
+  //      SEC_REQ, and terminates the link. Staying silent is still the right
+  //      move (initiating returns the 0x52 above; that was tried), but nothing
+  //      here can end it: the pump has to be put into Bluetooth pairing mode by
+  //      hand. Without a diagnosis the node loops on this every ~5 s forever,
+  //      saying "waiting for pump to initiate pairing" each time -- which reads
+  //      as though patience is the answer.
+  //
+  // So the wait below is bounded by a report rather than by an action:
+  // pairing_stall_ counts the cycles and the DISCONNECT handler names the state
+  // once it is a pattern.
   if (pairing_enabled_) {
     if (bonded_at_open_) {  // reuse the check_is_bonded() result captured above
       ESP_LOGI(TAG, "Device is bonded - requesting encryption to resume secure session");
@@ -461,6 +532,12 @@ void BLEConnectionManager::handle_notification(const esp_ble_gattc_cb_param_t *p
     // survive notifications.
     if (failure_hold_released_by_data(failure_hold_))
       failure_hold_ = FailureHold::NONE;
+    // A link carrying data is not a link the pump refused to pair with. This is
+    // what keeps the stall detector quiet on a healthy unbonded node, which is
+    // a supported configuration -- enable_pairing defaults to false and passive
+    // telemetry needs no bond (pairing_stall.h).
+    pairing_stall_.note_data();
+    release_pairing_stall_hold_();
     if (notification_callback_) {
       notification_callback_(notify_evt->value, notify_evt->value_len);
     }
@@ -526,6 +603,9 @@ void BLEConnectionManager::handle_auth_complete(const esp_ble_gap_cb_param_t *pa
     // data instead, which is the evidence that actually refutes it.
     if (failure_hold_released_by_auth(failure_hold_))
       failure_hold_ = FailureHold::NONE;
+    // The bond exists again: whatever the stall detector was counting is over.
+    pairing_stall_.note_bond_established();
+    release_pairing_stall_hold_();
     if (subscription_deferred_) {
       // Service discovery finished while SMP was negotiating; the link is now
       // encrypted, so the held-back CCCD write is safe to send (issue #12).
@@ -658,6 +738,52 @@ void BLEConnectionManager::handle_gattc_event(esp_gattc_cb_event_t event, esp_ga
     
     case ESP_GATTC_DISCONNECT_EVT: {
       ESP_LOGW(TAG, "Disconnected (reason: 0x%02x)", param->disconnect.reason);
+      // Close the pairing-stall cycle first, so that when the pump has been
+      // refusing to pair the reason below cannot claim the fault surface. What
+      // it would put there is "Failed To Establish (0x3e)", which points at
+      // radio trouble -- and the radio is fine here. The connections succeed;
+      // it is the security state that is stuck (issue #230).
+      // The reason matters to the detector, not only to the string below it: a
+      // link the radio dropped is not the pump refusing anything, and counting
+      // one would swap a correct radio diagnostic for a pairing misdiagnosis.
+      const bool report_stall =
+          pairing_stall_.on_disconnected(static_cast<uint16_t>(param->disconnect.reason));
+      if (pairing_stall_.stalled()) {
+        // Its own rank, below both SUBSCRIBE and AUTH, because those record
+        // something that was seen happening and this records three connections
+        // on which nothing did. The full argument is in failure_hold.h; the
+        // short version is that an observed event outranks an inference from an
+        // absence, and the first version of this change got it wrong by putting
+        // the stall at AUTH rank, where it replaced issue #14's bond-erasing
+        // 0x61 about fifteen seconds after that failure had manufactured the
+        // very conditions the stall detects.
+        if (failure_hold_admits(failure_hold_, FailureHold::PAIRING_STALL)) {
+          last_failure_ = "Pump not accepting pairing";
+          failure_hold_ = FailureHold::PAIRING_STALL;
+        }
+      }
+      if (report_stall) {
+        ESP_LOGW(TAG, "Pump has not offered to pair across %u connections",
+                 (unsigned) pairing_stall_.consecutive_cycles());
+        ESP_LOGW(TAG, "  Either it is bonded to a client that is no longer bonded to it "
+                      "(a cleared bond, an NVS erase, a re-flash), or it is not in pairing mode");
+        ESP_LOGW(TAG, "  This node cannot recover either case: initiating from here returns "
+                      "0x52 and loses the pump's own request");
+        ESP_LOGW(TAG, "  Put the pump into Bluetooth pairing mode, at the pump");
+        if (!pairing_enabled_) {
+          // Not "this node would decline": it cannot. ESPHome's own
+          // BLEClientBase::gap_event_handler() answers SEC_REQ with `true` for
+          // its configured peer unconditionally -- which is exactly what the
+          // DECLINE branch further down this file already says. What
+          // enable_pairing actually governs is init_security(), which returns
+          // early and configures no IO capability, no bonding requirement and no
+          // key distribution, so the offer is consented to and no bond is set
+          // up. Saying otherwise would send an operator who has just been told
+          // to walk to the pump away believing it would not help.
+          ESP_LOGW(TAG, "  enable_pairing is false, so this node configures no bonding; set it "
+                        "true before re-pairing, or the pump's offer goes nowhere");
+        }
+      }
       // Latch a human-readable failure reason for the Pump Link Status companion
       // (set before the callback so the component can read it on the same event).
       // Skip while any hold is in place (an auth/encryption failure, or the
@@ -708,8 +834,16 @@ void BLEConnectionManager::handle_gap_event(esp_gap_ble_cb_event_t event, esp_bl
               param->ble_security.ble_req.bd_addr[0], param->ble_security.ble_req.bd_addr[1],
               param->ble_security.ble_req.bd_addr[2], param->ble_security.ble_req.bd_addr[3],
               param->ble_security.ble_req.bd_addr[4], param->ble_security.ble_req.bd_addr[5]);
-      switch (core::gap_security_action(gap_addr_is_pump_(param->ble_security.ble_req.bd_addr),
-                                        pairing_enabled_)) {
+      const bool sec_req_from_pump = gap_addr_is_pump_(param->ble_security.ble_req.bd_addr);
+      if (sec_req_from_pump) {
+        // The pump is willing to pair. That is the single thing a stalled pump
+        // never says, so it ends the stall count whatever enable_pairing
+        // decides below -- consent is this node's question, willingness is the
+        // pump's (pairing_stall.h).
+        pairing_stall_.note_security_request();
+        release_pairing_stall_hold_();
+      }
+      switch (core::gap_security_action(sec_req_from_pump, pairing_enabled_)) {
         case core::GapSecurityAction::ACCEPT:
           ESP_LOGI(TAG, "BLE security request from pump %s - accepting", addr_str);
           esp_ble_gap_security_rsp(param->ble_security.ble_req.bd_addr, true);
