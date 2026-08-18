@@ -363,7 +363,14 @@ MUTATIONS=(
 # recycle sample is the one that shipped: it censors the sample at exactly the
 # threshold the number exists to validate, since an interval that ends in a
 # recycle is never closed by a notification.
-"gap-censored-at-the-budget|components/alpha_hwr/link_watchdog.h|  void on_recycle(uint32_t now_ms) { this->sample_(now_ms, false); }|  void on_recycle(uint32_t now_ms) { (void) now_ms; }"
+"gap-censored-at-the-budget|components/alpha_hwr/link_watchdog.h|  void on_recycle(uint32_t now_ms) {\n    this->sample_(now_ms, false);|  void on_recycle(uint32_t now_ms) {\n    (void) now_ms;"
+# One recycle is one truncated interval. force_disconnect() is asynchronous, so
+# the DISCONNECT event arrives a tick later and on_disconnect() runs; left armed
+# it samples the re-arm-to-event gap as a second truncated interval and
+# link_gaps_truncated reads about twice the recycle count. The trust check on
+# the whole histogram then overstates by 2x, which is the direction that makes
+# the report refuse a run that was actually fine.
+"gap-recycle-leaves-the-link-armed|components/alpha_hwr/link_watchdog.h|    this->sample_(now_ms, false);\n    this->armed_ = false;\n  }\n\n  /// The link dropped|    this->sample_(now_ms, false);\n  }\n\n  /// The link dropped"
 "gap-samples-the-time-spent-disconnected|components/alpha_hwr/link_watchdog.h|    this->last_ms_ = now_ms;\n    this->armed_ = true;|    this->armed_ = true;"
 "gap-never-closes-an-interval|components/alpha_hwr/link_watchdog.h|    }\n    this->last_ms_ = now_ms;\n  }|    }\n  }"
 # The disconnect sample and its arming guard. Dropping the sample loses every

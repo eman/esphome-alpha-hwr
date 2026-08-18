@@ -40,10 +40,21 @@
     observed — and without a count of them that reading is indistinguishable
     from a clean one. This statistic already made exactly that mistake once: a
     maximum reading 2.6s against a budget it had breached five times.
-  - **A boot-time warning when `data_timeout` is too small for the top rungs.**
+  - **A warning when `data_timeout` is too small for the rungs declared.**
     Under the `60s` default nothing can ever be recorded above 60s, so a run
     left at the default produces reassuring zeros whatever the pump does. A
-    measurement run wants `data_timeout: 600s`.
+    measurement run wants `data_timeout: 600s`. Emitted at *config* time, from
+    `esphome config` and `esphome compile`, because the equivalent boot-time
+    warning runs before the API server is up and so reaches the serial console
+    only — confirmed on the bench, where it is absent from the log stream of a
+    boot that emitted it. The boot warning is kept for serial users.
+
+  The entities are **off by default**: they are an instrument for one decision,
+  and switching them on costs eight diagnostic entities plus a boot warning on
+  every install to answer a question only the people running the measurement are
+  asking. `packages/alpha_hwr_pairing.yaml` carries the block commented out with
+  instructions; `tests/ci-compile.yaml` declares it so the schema and codegen
+  stay covered in CI.
 
   `link_watch_time` is the denominator — the time the counts were drawn from,
   obtained as the sum of the sampled intervals rather than from a second clock.

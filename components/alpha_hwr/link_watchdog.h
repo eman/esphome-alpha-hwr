@@ -409,9 +409,31 @@ class LinkGapSampler {
     this->sample_(now_ms, true);
   }
 
-  /// The watchdog fired: record the interval it gave up on, and re-arm with the
-  /// same stamp check_link_liveness_() re-arms the window with.
-  void on_recycle(uint32_t now_ms) { this->sample_(now_ms, false); }
+  /// The watchdog fired: record the interval it gave up on, then stop sampling
+  /// this session.
+  ///
+  /// Disarming is what keeps one recycle from counting as two truncated
+  /// intervals. check_link_liveness_() samples here and then calls
+  /// force_disconnect(), which is asynchronous -- the DISCONNECT event lands a
+  /// tick or two later and the disconnection callback calls on_disconnect().
+  /// Left armed, that second call samples the ~1 s between the re-arm and the
+  /// event and counts it as another truncated interval, so `link_gaps_truncated`
+  /// reads about twice the number of recycles. Measured: open, one notification,
+  /// one recycle, one disconnect gave truncated = 2.
+  ///
+  /// The interval that would be lost is the tail end of a link already being
+  /// torn down, which is an artifact of the asynchronous close rather than a
+  /// quiet period on a live link. Once the watchdog has given up, this session
+  /// is over as far as the statistic is concerned.
+  ///
+  /// Not guarded on armed_ itself: the watchdog only fires while the session is
+  /// connected, and if force_disconnect() produces no DISCONNECT event (the
+  /// documented case where another client holds the ACL) it re-fires once per
+  /// window, and those intervals are real and should be recorded.
+  void on_recycle(uint32_t now_ms) {
+    this->sample_(now_ms, false);
+    this->armed_ = false;
+  }
 
   /// The link dropped for a reason other than the watchdog — supervision
   /// timeout, pump power loss, the encryption-failure teardown. The watchdog

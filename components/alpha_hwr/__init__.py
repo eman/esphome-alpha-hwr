@@ -1,3 +1,4 @@
+import logging
 import os
 import subprocess
 
@@ -24,6 +25,8 @@ from esphome.const import (
     UNIT_CELSIUS,
     UNIT_WATT,
 )
+
+_LOGGER = logging.getLogger(__name__)
 
 CODEOWNERS = ["@eman"]
 DEPENDENCIES = ["ble_client"]
@@ -400,6 +403,47 @@ CONFIG_SCHEMA = cv.Schema(
         ),
     }
 ).extend(cv.COMPONENT_SCHEMA).extend(esp32_ble_tracker.ESP_BLE_DEVICE_SCHEMA)
+
+
+def _warn_if_histogram_cannot_fill(config):
+    """Say at config time when the gap histogram is censored by data_timeout.
+
+    The watchdog closes a quiet interval as soon as the budget expires, so every
+    rung at or above `data_timeout` reads a structural zero however badly the
+    pump behaves -- and a rung exactly at it silently becomes a recycle count
+    rather than a gap count. A measurement run started that way produces
+    reassuring numbers and settles nothing.
+
+    The component also warns at boot, but that fires at setup_priority::DATA,
+    before the API server is up -- so it reaches the serial console only, and
+    nobody flashing over the air ever sees it (verified on the bench: the
+    warning is absent from an `esphome logs` stream of a boot that emitted it).
+    Here it lands in `esphome config` and `esphome compile` output, where the
+    person choosing the value is actually looking.
+    """
+    declared = [key for key in CONF_LINK_GAPS_OVER if key in config]
+    if not declared:
+        return config
+    budget_ms = config[CONF_DATA_TIMEOUT].total_milliseconds
+    if budget_ms == 0:
+        return config  # nothing recycles, so nothing truncates an interval
+    blind = [
+        threshold
+        for threshold, key in zip(LINK_GAP_THRESHOLDS_S, CONF_LINK_GAPS_OVER, strict=True)
+        if key in config and threshold * 1000 >= budget_ms
+    ]
+    if blind:
+        _LOGGER.warning(
+            "alpha_hwr: data_timeout is %ss, so the %s gap counter(s) cannot fill -- "
+            "the watchdog truncates the interval first. Raise data_timeout (600s) "
+            "for a measurement run; see docs/configuration.md",
+            budget_ms // 1000,
+            ", ".join(f"{t}s" for t in blind),
+        )
+    return config
+
+
+FINAL_VALIDATE_SCHEMA = _warn_if_histogram_cannot_fill
 
 
 async def to_code(config):

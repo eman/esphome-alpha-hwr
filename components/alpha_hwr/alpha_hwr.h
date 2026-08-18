@@ -525,6 +525,14 @@ private:
   // the whole story for them.
   sensor::Sensor *link_gap_over_sensors_[LINK_GAP_BUCKETS]{};
   sensor::Sensor *link_gaps_truncated_sensor_{nullptr};
+  // One sentinel per rung, spelled out because there is no aggregate
+  // initialiser for "fill". A rung added without extending this list would be
+  // value-initialised to 0, which equals its starting count -- so the change
+  // gate would never fire and that counter's zero baseline would never reach
+  // Home Assistant, breaking exactly the total_increasing reset accounting the
+  // sentinels exist for. Silent, and only on the new rung, so:
+  static_assert(LINK_GAP_BUCKETS == 6,
+                "add a sentinel below for every rung in LINK_GAP_THRESHOLDS_MS");
   uint32_t link_gap_over_published_[LINK_GAP_BUCKETS]{
       0xFFFFFFFFu, 0xFFFFFFFFu, 0xFFFFFFFFu,
       0xFFFFFFFFu, 0xFFFFFFFFu, 0xFFFFFFFFu};

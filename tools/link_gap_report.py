@@ -241,12 +241,26 @@ class NodeTotals:
         return self.watched_s / POLL_INTERVAL_S
 
 
-def pool(records: list[dict[str, Any]]) -> dict[str, NodeTotals]:
+def pool(records: list[dict[str, Any]]) -> tuple[dict[str, NodeTotals], list[str]]:
+    """Per-node totals, plus the hosts that reported no histogram at all.
+
+    A node whose snapshots carry no histogram entities must not become a
+    NodeTotals: it would appear with 0 watched days, satisfy the "need two
+    installations" refusal, and — because a rate over 0 days is infinite —
+    make every candidate budget FAIL, so the report would print "no candidate
+    clears both" as if that were a finding about the pump rather than about a
+    node that was never instrumented.
+    """
     by_host: dict[str, NodeTotals] = {}
+    silent: list[str] = []
     for record in sorted(records, key=lambda r: float(r.get("at", 0.0))):
         host = str(record.get("host", "?"))
+        if record.get("watched_s") is None:
+            if host not in silent:
+                silent.append(host)
+            continue
         by_host.setdefault(host, NodeTotals(host)).add(record)
-    return by_host
+    return by_host, [h for h in silent if h not in by_host]
 
 
 # --------------------------------------------------------------------------
@@ -274,9 +288,9 @@ def print_survival(nodes: dict[str, NodeTotals], reported: list[int]) -> None:
     print(header)
     total_days = sum(n.days for n in nodes.values())
     for threshold in reported:
-        pooled = sum(n.over[threshold] for n in nodes.values())
+        pooled = sum(n.over.get(threshold, 0.0) for n in nodes.values())
         row = f"  {threshold:>4}s {int(pooled):>8} {rate_per_day(pooled, total_days):>10.4f}   "
-        row += "  ".join(f"{int(n.over[threshold]):>16}" for n in nodes.values())
+        row += "  ".join(f"{int(n.over.get(threshold, 0.0)):>16}" for n in nodes.values())
         print(row)
 
 
@@ -286,9 +300,12 @@ def print_budgets(nodes: dict[str, NodeTotals], reported: list[int]) -> list[int
     passing: list[int] = []
     total_days = sum(n.days for n in nodes.values())
     for threshold in reported:
-        pooled = sum(n.over[threshold] for n in nodes.values())
+        pooled = sum(n.over.get(threshold, 0.0) for n in nodes.values())
         rate = rate_per_day(pooled, total_days)
-        worst = max((rate_per_day(n.over[threshold], n.days) for n in nodes.values()), default=rate)
+        # Only nodes that actually observed something can bound the worst case.
+        # A zero-day node yields an infinite rate, which would fail every rung.
+        per_node = [rate_per_day(n.over.get(threshold, 0.0), n.days) for n in nodes.values() if n.days > 0]
+        worst = max(per_node, default=rate)
         between = 1.0 / rate if rate > 0 else float("inf")
         ok = threshold >= FLOOR_S and worst < TOLERANCE_PER_DAY
         if ok:
@@ -391,15 +408,32 @@ def cmd_report(log_path: str, budget_s: float | None) -> int:
     if not records:
         die(f"{log_path!r} holds no snapshots")
 
-    nodes = pool(records)
+    nodes, silent = pool(records)
     reported = sorted({t for node in nodes.values() for t in node.reported})
     if not reported:
         die("no gap histogram entities in any snapshot -- are they declared?")
 
     print_coverage(nodes)
+    if silent:
+        print(f"  not instrumented, excluded: {', '.join(silent)}")
     print_survival(nodes, reported)
     passing = print_budgets(nodes, reported)
-    print_recommendation(passing, reported, refusals(nodes, reported, budget_s))
+    problems = refusals(nodes, reported, budget_s)
+    if silent:
+        problems.append(
+            f"{', '.join(silent)} reported no histogram entities and were excluded -- "
+            f"the fleet is smaller than it looks"
+        )
+    # A ladder one node reports and another does not is counted as zero for the
+    # node that is missing it, which understates. Say so rather than silently
+    # pooling the two.
+    partial = [t for t in reported if any(t not in n.reported for n in nodes.values())]
+    if partial:
+        problems.append(
+            f"not every node reports the {', '.join(f'{t}s' for t in partial)} rung(s), "
+            f"so the pooled counts for those are understated"
+        )
+    print_recommendation(passing, reported, problems)
     print_caveats()
     return 0
 
@@ -408,18 +442,23 @@ def cmd_report(log_path: str, budget_s: float | None) -> int:
 
 
 def parse_targets(argv: list[str]) -> list[tuple[str, str]]:
-    """Collect (host, key) pairs. --key/--secrets apply to every later --host."""
+    """Collect (host, key) pairs.
+
+    A --key/--secrets binds to every --host after it, so several pumps with
+    different keys can be read in one run. A host given before any key is not an
+    error: it takes whichever key turns up later, which is what makes the
+    obvious `--host H --secrets file` ordering work. Only a host with no key
+    anywhere is refused.
+    """
     key = os.getenv("ALPHA_HWR_API_KEY", "")
-    targets: list[tuple[str, str]] = []
+    pending: list[tuple[str, str]] = []
     items = iter(argv)
     for arg in items:
         if arg == "--host":
             host = next(items, "")
             if not host:
                 die("--host needs a value")
-            if not key:
-                die(f"no api key for {host}: pass --key or --secrets before it")
-            targets.append((host, key))
+            pending.append((host, key))
         elif arg == "--key":
             key = next(items, "")
         elif arg == "--secrets":
@@ -431,10 +470,17 @@ def parse_targets(argv: list[str]) -> list[tuple[str, str]]:
                     key = yaml.safe_load(handle)["api_key"]
             except Exception as exc:  # noqa: BLE001 - report and exit
                 die(f"could not read api_key from {path!r}: {exc}")
-    if not targets:
+    if not pending:
         host = os.getenv("ALPHA_HWR_HOST", "")
-        if host and key:
-            targets.append((host, key))
+        if host:
+            pending.append((host, key))
+
+    # A host that had no key when it was parsed takes the last one seen, so
+    # order does not matter for the common single-pump case.
+    targets = [(host, host_key or key) for host, host_key in pending]
+    for host, host_key in targets:
+        if not host_key:
+            die(f"no api key for {host}: pass --key, --secrets <file>, or set ALPHA_HWR_API_KEY")
     return targets
 
 

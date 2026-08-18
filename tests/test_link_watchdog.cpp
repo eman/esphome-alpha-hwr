@@ -693,21 +693,27 @@ void test_gap_truncated_counts_only_intervals_not_closed_by_data() {
   // was cut off rather than observed -- and the reading looks identical to a
   // clean one without this number. That is not hypothetical: the pre-fix
   // maximum read 2.6s against a budget it had breached five times.
+  // Each ending is exercised on its own session. An earlier version of this
+  // chained the drop straight after a recycle, which is the one sequence where
+  // the two overlap -- so it asserted truncated() == 2 there and quietly
+  // encoded the double-count as the expected answer. A test that agrees with
+  // the bug is worse than no test.
   LinkGapSampler gap;
   gap.on_open(0);
   gap.on_inbound(10000);
   TEST_ASSERT(gap.truncated() == 0, "An interval ended by data is not truncated");
 
-  gap.on_recycle(80000);
-  TEST_ASSERT(gap.truncated() == 1, "One ended by a recycle is");
+  gap.on_disconnect(60000);
+  TEST_ASSERT(gap.truncated() == 1, "One ended by a plain drop is");
 
   gap.on_disconnect(90000);
-  TEST_ASSERT(gap.truncated() == 2, "So is one ended by a drop");
-
-  gap.on_disconnect(120000);
-  TEST_ASSERT(gap.truncated() == 2,
+  TEST_ASSERT(gap.truncated() == 1,
               "A disconnect with no open before it samples nothing, so it "
               "cannot inflate the count either");
+
+  gap.on_open(100000);
+  gap.on_recycle(180000);
+  TEST_ASSERT(gap.truncated() == 2, "One ended by a watchdog recycle is");
 }
 
 void test_gap_buckets_are_censored_at_the_window_in_force() {
@@ -744,6 +750,38 @@ void test_gap_buckets_are_censored_at_the_window_in_force() {
               "counting");
   TEST_ASSERT(sim.gap.truncated() == 2,
               "Both were cut short by the watchdog, and both say so");
+}
+
+void test_gap_a_recycle_is_one_truncated_interval_not_two() {
+  std::cout << "\n=== A recycle and the disconnect it causes are one interval "
+               "==="
+            << std::endl;
+
+  // The component's real sequence, which LinkSim does not reach: the watchdog
+  // samples and calls force_disconnect(), and because that is asynchronous the
+  // DISCONNECT event arrives a tick or two later and the disconnection callback
+  // calls on_disconnect(). Left armed, that second call samples the gap between
+  // the re-arm and the event -- so every recycle counted as two truncated
+  // intervals and link_gaps_truncated read about twice the recycle count.
+  //
+  // LinkSim missed it because its scenarios re-open before the pending
+  // disconnect lands, which is why this drives the sampler directly.
+  LinkGapSampler gap;
+  gap.on_open(0);
+  gap.on_inbound(10000);
+  gap.on_recycle(71000);
+  gap.on_disconnect(72000);
+
+  TEST_ASSERT(gap.truncated() == 1,
+              "One recycle is one truncated interval, not one per callback");
+  TEST_ASSERT(gap.max_ms() == 61000,
+              "...and the interval it gave up on is still the one recorded");
+
+  // The next session starts clean rather than measuring across the downtime.
+  gap.on_open(600000);
+  gap.on_inbound(610000);
+  TEST_ASSERT(gap.max_ms() == 61000 && gap.truncated() == 1,
+              "The reconnect neither samples the downtime nor adds a truncation");
 }
 
 void test_gap_counters_survive_a_reconnect() {
@@ -871,6 +909,7 @@ int main() {
   test_gap_buckets_are_nested();
   test_gap_watched_time_excludes_the_downtime();
   test_gap_truncated_counts_only_intervals_not_closed_by_data();
+  test_gap_a_recycle_is_one_truncated_interval_not_two();
   test_gap_buckets_are_censored_at_the_window_in_force();
   test_gap_counters_survive_a_reconnect();
   test_gap_inbound_with_no_open_before_it_does_not_sample();

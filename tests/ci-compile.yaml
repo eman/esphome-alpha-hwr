@@ -35,6 +35,33 @@ packages:
   alpha_hwr_schedule_editor: !include ../packages/alpha_hwr_schedule_editor.yaml
   dhw_demand: !include ../packages/dhw_demand_detector.yaml
 
+# The gap histogram (issue #176 part 1) is commented out in the pairing package
+# on purpose -- it is a measurement instrument, not something every install
+# should carry. Declared here so its schema and codegen are still compiled and
+# validated on every CI run; without this the eight config keys and their eight
+# setters would have no coverage anywhere.
+#
+# data_timeout is raised to match, so the config-time warning about counters
+# that cannot fill does not fire on a config that is doing the right thing.
+alpha_hwr:
+  data_timeout: 600s
+  link_gaps_over_15s:
+    name: "Pump Link Gaps Over 15s"
+  link_gaps_over_20s:
+    name: "Pump Link Gaps Over 20s"
+  link_gaps_over_30s:
+    name: "Pump Link Gaps Over 30s"
+  link_gaps_over_45s:
+    name: "Pump Link Gaps Over 45s"
+  link_gaps_over_60s:
+    name: "Pump Link Gaps Over 60s"
+  link_gaps_over_90s:
+    name: "Pump Link Gaps Over 90s"
+  link_gaps_truncated:
+    name: "Pump Link Gaps Truncated"
+  link_watch_time:
+    name: "Pump Link Watched Time"
+
 esp32:
   board: esp32-c3-devkitm-1
   variant: esp32c3

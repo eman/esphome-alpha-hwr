@@ -266,14 +266,23 @@ decision rule it applies printed alongside the answer.
 
 #### Running a measurement run
 
+The eight entities are **off by default** — they are an instrument for one
+decision, not something every install should carry. To take part in a run:
+
 1. Set `data_timeout: 600s` on every pump taking part. The watchdog still
-   recovers a deaf link, just more slowly.
-2. Declare the histogram entities (`packages/alpha_hwr_pairing.yaml` names them
-   already).
+   recovers a deaf link, just more slowly. Do this *first*: at the shipped
+   `60s` the top rungs cannot fill, and the run would produce reassuring zeros.
+2. Uncomment the histogram block in `packages/alpha_hwr_pairing.yaml`, or name
+   the eight keys in your own `alpha_hwr:` block. `esphome config` warns if the
+   budget is still too small for the rungs you declared.
 3. Leave it for a few weeks of ordinary service — not a bench session, since the
    point is what normal operation does.
 4. Run `tools/link_gap_report.py` against the nodes, and check
    `link_gaps_truncated` and `link_watch_time` before believing the rates.
+
+> The component also warns at boot, but that runs before the API server is up,
+> so it reaches the serial console only — over the air you will not see it. The
+> `esphome config` warning is the one to rely on.
 
 ## Examples
 
