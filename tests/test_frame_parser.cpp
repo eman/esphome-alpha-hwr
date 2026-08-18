@@ -157,13 +157,25 @@ static void test_class3_payload_len_underflow() {
   std::cout << "\n=== Regression: Class 2/3 payload_len underflow ==="
             << std::endl;
 
-  // A Class 3 frame whose declared length clamps the window to exactly 7 bytes.
-  // Old code guarded `len > 6` then computed `len - 8`, wrapping payload_len to
-  // SIZE_MAX while reporting valid=true.
+  // A Class 3 frame declaring a 7-byte total. Old code guarded `len > 6` then
+  // computed `len - 8`, wrapping payload_len to SIZE_MAX while reporting
+  // valid=true.
+  //
+  // These assertions were passing for the wrong reason, which is worth stating
+  // rather than quietly repairing: a later guard rejects any frame declaring a
+  // total below the protocol's own 8-byte minimum, so this frame now returns
+  // valid=false and never reaches the payload code at all. payload_len was 0
+  // from the initialiser, so "does not underflow" held vacuously.
+  //
+  // Assert the rejection itself, which is what actually protects the caller,
+  // and keep the underflow assertions underneath it as a belt-and-braces check
+  // on the fields a refused frame hands back.
   std::vector<uint8_t> f = {0x24, 0x03, 0x00, 0x07, 0x03, 0x01, 0xAA, 0xBB};
-  // length_field 3 -> expected_total 7, so the 8-byte buffer is clamped to 7.
   ParsedFrame r = parse_frame(f.data(), f.size());
 
+  TEST_ASSERT(!r.valid,
+              "A frame declaring a total below the 8-byte minimum is refused "
+              "outright -- which is what makes the underflow unreachable");
   TEST_ASSERT(r.payload_len < 1024,
               "Clamped 7-byte Class 3 frame does not underflow payload_len");
   TEST_ASSERT(!(r.payload != nullptr && r.payload_len == SIZE_MAX),
@@ -174,10 +186,14 @@ static void test_short_length_field_does_not_read_past_window() {
   std::cout << "\n=== Regression: class byte read past the clamped window ==="
             << std::endl;
 
-  // length_field 0 -> expected_total 4, so the window is shorter than offset 4.
+  // length_field 0 -> expected_total 4, below the 8-byte minimum, so this is
+  // refused before the class byte is read. Same caveat as the test above: the
+  // `class_byte == 0` assertion holds because the frame was rejected, not
+  // because a read was bounded. Both are asserted so the reason is visible.
   std::vector<uint8_t> f = {0x24, 0x00, 0x00, 0x07, 0x0A, 0x02, 0x00, 0x00,
                             0x00, 0x00};
   ParsedFrame r = parse_frame(f.data(), f.size());
+  TEST_ASSERT(!r.valid, "A frame declaring a 4-byte total is refused");
   TEST_ASSERT(r.class_byte == 0,
               "class_byte is not read from beyond the clamped frame window");
 }

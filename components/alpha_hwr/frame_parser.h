@@ -80,7 +80,10 @@ enum class FrameType {
  * - obj_id: Object ID for Class 10 frames (0 for other classes)
  * - payload: Raw payload bytes of the FIRST APDU (excluding header and CRC)
  * - payload_len: Length of that payload, bounded by what the APDU declares
- * - multi_apdu: True if the telegram carries bytes past the first APDU
+ * - multi_apdu: True if the telegram carries bytes past the first APDU. It is a
+ *     statement about the TELEGRAM, not about `payload` -- it can be true on a
+ *     frame too short for any arm to extract a payload from, which is correct:
+ *     something followed APDU 1 whether or not APDU 1 was decodable.
  * - crc_valid: True if CRC checksum is correct
  *
  * On `payload_len` and `multi_apdu`, because the two together are the contract:
