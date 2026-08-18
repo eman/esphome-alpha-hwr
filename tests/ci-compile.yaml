@@ -2,9 +2,9 @@
 #
 # The example configs in the repo root pin `github://...@vX.Y.Z`, so compiling
 # them validates the last *release*, not the branch under test. This config
-# instead points `external_components` at the working tree and includes the
-# packages from disk, so a push that breaks codegen, a YAML lambda, or the C++
-# fails here rather than on someone's pump.
+# includes the packages from disk and overrides `component_source` to the
+# working tree, so a push that breaks codegen, a YAML lambda, or the C++ fails
+# here rather than on someone's pump.
 #
 # Nothing device-specific: placeholder MAC and credentials, never flashed.
 
@@ -21,13 +21,12 @@ substitutions:
   flow_entity: sensor.ci_flow_rate
   tank_lower_temp_entity: sensor.ci_tank_lower_temperature
   dhw_charge_entity: sensor.ci_dhw_charge
-
-# The working tree, not a published tag.
-external_components:
-  - source:
-      type: local
-      path: ../components
-    components: [alpha_hwr, dhw_demand]
+  # Point the packages' `external_components` at the working tree instead of the
+  # release tag, so a push that breaks codegen or the C++ fails here rather than
+  # on someone's pump. Declaring a second `external_components` entry here would
+  # not do it: the tag's entry survives the merge, gets cloned, and only loses
+  # the component by an ordering accident in ESPHome's loader.
+  component_source: ../components
 
 packages:
   alpha_hwr: !include ../packages/alpha_hwr_pairing.yaml

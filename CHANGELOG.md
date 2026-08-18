@@ -141,6 +141,33 @@
 
 ### Changed
 
+- **The packages' component source is a substitution, so a config can redirect
+  it instead of declaring a second one** (`component_source`). Every package
+  ships an `external_components` block pinned to its release tag. A config that
+  wanted a different source — the CI harnesses pointing at the working tree, or
+  a user tracking `@main` — added a second block, and both then resolved: the
+  pinned repo was still cloned on every run.
+
+  Which source actually supplied the component was never stated anywhere. It
+  fell out of ESPHome merging the package's list *before* the config's own
+  (`merge_config` returns `old + new`, packages being `old`) and
+  `install_meta_finder` inserting each source at the front of `sys.meta_path` as
+  it walks that list — so the last one processed wins, and the working tree won
+  only because it happened to be last. Correct today, silent if it ever
+  inverted, and paid for with a clone nobody used.
+
+  `tests/ci-compile.yaml`, `tests/ci-compile-base.yaml` and
+  `tests/ci-compile-schedule.yaml` now set `component_source: ../components` and
+  declare no `external_components` of their own, leaving exactly one source in
+  the merged config. Nothing is cloned, and CI compiling the branch under test
+  is now a property of the config rather than of loader ordering.
+
+  The substitution takes a plain string and ESPHome's shorthand source validator
+  tries a filesystem directory before the `github://` pattern, so one key covers
+  both forms. Unchanged for anyone not setting it: the five example configs
+  still resolve to `@v0.15.0`, and `tools/bump_version.sh` still rewrites the
+  pin, which now lives in the substitution.
+
 - **The host test suite compiles once per translation unit instead of once per
   target.** A full build compiled 142 translation units out of ~40 distinct
   files — `codec.cpp` fourteen times, `transport.cpp` ten — because every target

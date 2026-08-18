@@ -24,13 +24,12 @@ esphome:
 
 substitutions:
   mac_address: "00:00:00:00:00:00"
-
-# The working tree, not a published tag.
-external_components:
-  - source:
-      type: local
-      path: ../components
-    components: [alpha_hwr]
+  # Point the packages' `external_components` at the working tree instead of the
+  # release tag, so a push that breaks codegen or the C++ fails here rather than
+  # on someone's pump. Declaring a second `external_components` entry here would
+  # not do it: the tag's entry survives the merge, gets cloned, and only loses
+  # the component by an ordering accident in ESPHome's loader.
+  component_source: ../components
 
 packages:
   alpha_hwr: !include ../packages/alpha_hwr_base.yaml
