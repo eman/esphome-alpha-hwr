@@ -688,6 +688,26 @@ fi
 trap restore_all EXIT
 trap 'echo; echo -e "${YELLOW}Interrupted — restoring sources.${NC}"; restore_all; exit 130' INT TERM
 
+# Restore, then drop the objects that were compiled from the mutated source.
+#
+# Purging before the build is not enough. The object built from the mutated file
+# is still in the cache afterwards, and the `git checkout` that restores the
+# source can land inside the same whole second the object was written -- GNU
+# make 3.81 (what macOS ships) compares mtimes at 1 s granularity, so it reports
+# the target up to date and keeps the mutated object. Reproduced here: a source
+# 44 ms newer than its object, same whole second, `make -n` says "is up to
+# date".
+#
+# The consequence is the one this whole script exists to prevent. A stale
+# mutated object survives into later entries, their binaries fail for the
+# previous entry's reason, and those entries are scored "caught" while never
+# having been tested -- manufactured confidence, and invisible, because the run
+# still ends 156/156 and exits 0.
+restore_and_purge() {
+  restore_or_die
+  purge_objects_for "$1"
+}
+
 # Establish that the suite passes unmutated. Without this, a pre-existing build
 # or test failure — or a missing compiler — makes every mutation "fail the
 # suite" and get counted as caught, so the job reports full mutation coverage
@@ -735,7 +755,21 @@ fi
 # and the warning check use. tests/Makefile keys its object cache on the flags,
 # so this does not evict a developer's -O2 objects or get linked against them.
 export OPT=-O0
-if (cd "$TESTS_DIR" && make clean >/dev/null 2>&1 && make -j"$JOBS" test >/tmp/mutation_baseline.log 2>&1); then
+# Clear only the object cache this run will use, not every variant. `make clean`
+# would take a developer's -O2 objects with it, which this run never touches --
+# and would contradict the reason the end of the run keeps the cache at all.
+# The Makefile knows where its objects go for the flags in force; ask it.
+RUN_OBJDIR="$(cd "$TESTS_DIR" && make -s print-objdir 2>/dev/null)"
+# Shape-checked before anything is removed: this feeds `rm -rf`, and a make that
+# printed something unexpected must not be able to aim it. An empty or
+# unrecognised answer skips the clean, which only costs a stale-cache rebuild.
+case "$RUN_OBJDIR" in
+  .obj/*) ;;
+  *) RUN_OBJDIR="" ;;
+esac
+if (cd "$TESTS_DIR" && make clean-bin >/dev/null 2>&1 \
+      && { [ -z "$RUN_OBJDIR" ] || rm -rf "$RUN_OBJDIR"; } \
+      && make -j"$JOBS" test >/tmp/mutation_baseline.log 2>&1); then
   echo -e "${GREEN}✓ passes${NC}"
 else
   echo -e "${RED}✗ FAILS${NC}"
@@ -793,7 +827,7 @@ PY
     echo "    The code this mutation targets moved or changed. Update the"
     echo "    mutation rather than deleting it -- the coverage it proves is real."
     SURVIVORS+=("$name (not applied)")
-    restore_or_die
+    restore_and_purge "$file"
     continue
   fi
 
@@ -826,7 +860,7 @@ PY
     echo "    caught. That is a coverage hole in itself -- host-compile the file"
     echo "    (AGENTS §4) rather than dropping the mutation."
     SURVIVORS+=("$name (no target builds $file)")
-    restore_or_die
+    restore_and_purge "$file"
     continue
   fi
 
@@ -873,7 +907,7 @@ PY
     echo "    field contains a '|' and was truncated there; sometimes the"
     echo "    replacement is simply not valid C++. Fix the entry."
     SURVIVORS+=("$name (did not compile)")
-    restore_or_die
+    restore_and_purge "$file"
     continue
   fi
 
@@ -884,7 +918,7 @@ PY
     echo -e "${GREEN}✓ caught${NC}"
     CAUGHT=$((CAUGHT + 1))
   fi
-  restore_or_die
+  restore_and_purge "$file"
 done
 
 # The last mutation's binaries are still on disk, built from a source that has

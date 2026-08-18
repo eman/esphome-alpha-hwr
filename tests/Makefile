@@ -21,7 +21,7 @@ LDFLAGS =
 #
 # That was survivable until tests/test_component_wiring.cpp and
 # tests/test_api_bridge.cpp arrived (issues #212 and #218). Each compiles 21
-# translation units and both include alpha_hwr.h, so 130 of the 163 entries in
+# translation units and both include alpha_hwr.h, so most entries in
 # tools/mutation_check.sh now select at least one of them -- and a full mutation
 # sweep went from minutes to the better part of an hour.
 #
@@ -92,10 +92,17 @@ TESTS = test_protocol test_frame_parser test_read_chain_lifetime test_control_se
 # Recording the variant and dropping the binaries when it changes costs one
 # stat per invocation and removes the whole class. The objects stay, which is
 # the point: switching back and forth is a relink, not a rebuild.
+# Skipped under -n and -q. A dry run must not touch build state, and
+# tools/mutation_targets.py depends on that: it reads the compile commands with
+# `make -B -n` and its docstring promises the call "does not invalidate anyone's
+# binaries". Without this guard, `make -n` deleted all 29 executables.
+DRY_RUN := $(findstring n,$(firstword -$(MAKEFLAGS)))$(findstring q,$(firstword -$(MAKEFLAGS)))
 LAST_VARIANT := $(shell cat .obj/last-variant 2>/dev/null)
+ifeq ($(DRY_RUN),)
 ifneq ($(LAST_VARIANT),$(VARIANT))
 $(shell rm -f $(TESTS))
 $(shell mkdir -p .obj && printf '%s' '$(VARIANT)' > .obj/last-variant)
+endif
 endif
 
 # Default target
@@ -394,13 +401,21 @@ ASAN_CXXFLAGS = -std=c++17 -Wall -Wextra -O1 -g -I. -I./mocks -I../ \
 test-asan:
 	$(MAKE) test CXXFLAGS="$(ASAN_CXXFLAGS)" LDFLAGS="-fsanitize=address,undefined"
 
-# Alternative targets for specific compilers. CXX is part of VARIANT, so these
-# no longer need a clean: the two compilers keep separate object caches.
-test-gcc: CXX = g++
-test-gcc: test
+# Alternative targets for specific compilers.
+#
+# Recursing with a command-line variable rather than a target-specific one, and
+# that is the whole point: VARIANT is `:=`, evaluated once at parse time in
+# global scope, so a target-specific `CXX = clang++` never reaches it. It only
+# reached the recipes -- which meant `make test-clang` linked into the DEFAULT
+# compiler's object cache, and once these targets lost their `clean` it compiled
+# nothing at all and just re-ran the binaries g++ had built. A command-line
+# variable is global in the sub-make, so VARIANT differs and each compiler keeps
+# its own cache.
+test-gcc:
+	$(MAKE) test CXX=g++
 
-test-clang: CXX = clang++
-test-clang: test
+test-clang:
+	$(MAKE) test CXX=clang++
 
 # The Lovelace card. Plain node against a stubbed DOM -- no npm, no lockfile,
 # nothing to install. Kept out of `test` so the mutation check (which drives
@@ -429,6 +444,12 @@ clean:
 clean-bin:
 	rm -f $(TESTS)
 
+# Where this invocation's objects live. tools/mutation_check.sh asks so it can
+# clear the cache for the flags IT is about to use without touching the other
+# variants -- a plain `clean` would take a developer's -O2 objects with it.
+print-objdir:
+	@echo $(OBJDIR)
+
 # Help target
 help:
 	@echo "GENI Protocol Unit Test Makefile"
@@ -453,4 +474,4 @@ help:
 	@echo "Objects are cached under .obj/<flags-hash>/<group>/, so switching"
 	@echo "OPT, CXX or sanitizers keeps both variants rather than rebuilding."
 
-.PHONY: all test test-asan test-gcc test-clang test-js test-all clean clean-bin help
+.PHONY: all test test-asan test-gcc test-clang test-js test-all clean clean-bin print-objdir help

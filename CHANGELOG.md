@@ -78,14 +78,14 @@
 
   That was survivable until `test_component_wiring` and `test_api_bridge`
   arrived. Each compiles 21 translation units and both include `alpha_hwr.h`, so
-  130 of the 163 mutation entries select at least one of them, and a full
+  most mutation entries select at least one of them, and a full
   mutation sweep grew to the better part of an hour — long enough to stop being
   something anyone runs before pushing.
 
   Objects are now cached under `.obj/<flags-hash>/<group>/`, `-MMD` records the
   real include graph, and `tools/mutation_check.sh` builds at `-O0` and deletes
   exactly the objects whose recorded dependencies name the file it mutated.
-  **A full sweep went from about 36 minutes to 7, with all 163 mutations still
+  **A full sweep went from about 36 minutes to 7, with every mutation still
   caught.**
 
   The flags hash is load-bearing rather than tidiness: make cannot see that
@@ -101,16 +101,6 @@
   a link step, so every run fell back to rebuilding everything. It was loud in
   the output and annotated CI, but it silently cost the entire speedup until it
   was noticed.
-
-- **The gap sampler no longer measures across downtime when a notification
-  arrives with no connection behind it.** It arms from that frame instead. No
-  path delivers one today, but the consequence changed with the histogram: an
-  inflated maximum is one number a reader already knows is a floor, while an
-  inflated sample permanently increments the top counters and reads afterwards
-  as a genuine multi-minute excursion — an error in the direction that argues
-  for keeping a default nobody has validated. It arms rather than discarding,
-  so if such a path ever does appear it loses at most that session's first
-  interval rather than all of them.
 
 - **The transport's send-failure branches are tested.** Every write callback in
   the suite returned `true` unconditionally, so the two paths production takes

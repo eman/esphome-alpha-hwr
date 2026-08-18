@@ -89,7 +89,7 @@ When modifying the protocol implementation in `components/alpha_hwr/`:
 3. Run `./tools/mutation_check.sh` if you touched the protocol layer. It breaks
    production code on purpose and asserts the suite notices; a surviving
    mutation means a test is validating a replica rather than the shipped code.
-   A full sweep of all 163 entries takes about 7 minutes; while iterating, pass
+   A full sweep takes about 7 minutes; while iterating, pass
    a name filter (`./tools/mutation_check.sh gap-`) and let CI run the rest.
    **Commit before running it** — it restores its target files from HEAD after
    every mutation, so uncommitted edits to those files are silently discarded,
