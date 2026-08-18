@@ -500,6 +500,34 @@ MUTATIONS=(
 # any test sends against its own declared length.
 "single-event-opspec-length|components/alpha_hwr/schedule_service.cpp|  // never a visible failure; see the header note.\n  apdu[1] = 0x93;|  // never a visible failure; see the header note.\n  apdu[1] = 0xB3;"
 "class10-setpoint-opspec-length|components/alpha_hwr/control_service.cpp|  apdu[1] = 0x88;  // OpSpec: SET + 8 payload bytes (2 sub + 2 obj + 4 float)|  apdu[1] = 0x84;"
+# The APDU acknowledge field (issue #208). transport.cpp read a Class 10 0x81
+# reply as a short ACK carrying an error code and called the write successful
+# when that byte was zero -- so an Unknown Data Item error whose unknown ID
+# happened to be 0x00 was reported accepted, which is exactly the frame captured
+# on hardware. These pin the two bits, the length that lets a refusal match at
+# all, and the verdict drawn from them.
+"apdu-ack-reads-the-wrong-bits|components/alpha_hwr/response_match.h|  return static_cast<ApduAck>((apdu_head >> 6) & 0x03);|  return static_cast<ApduAck>((apdu_head >> 5) & 0x03);"
+"apdu-ack-always-ok|components/alpha_hwr/response_match.h|inline bool apdu_ack_is_ok(uint8_t apdu_head) { return apdu_ack(apdu_head) == ApduAck::OK; }|inline bool apdu_ack_is_ok(uint8_t apdu_head) { (void) apdu_head; return true; }"
+"apdu-length-includes-the-ack-bits|components/alpha_hwr/response_match.h|inline uint8_t apdu_payload_len(uint8_t apdu_head) { return apdu_head & 0x3F; }|inline uint8_t apdu_payload_len(uint8_t apdu_head) { return apdu_head; }"
+# The pre-#208 match condition. A 0xC1 or 0x41 refusal fails this test, falls
+# past the len >= 11 floor, and dies by 3 s timeout instead of being reported.
+"short-ack-matches-only-the-two-known-heads|components/alpha_hwr/transport.cpp|protocol::apdu_payload_len(data[5]) <= 1 &&|(data[5] == 0x01 || data[5] == 0x81) &&"
+# Unknown Class declares a ZERO-length payload, so its head is 0x40 and its
+# frame is 8 bytes. `== 1` admits 0x41 -- which App C.17's format table says
+# cannot occur -- while rejecting the 0x40 that does, leaving it to die by 3 s
+# timeout. The first cut of #208 shipped exactly that; an adversarial review
+# caught it, not the suite. This entry is what makes the suite catch it.
+"short-ack-misses-the-zero-length-refusal|components/alpha_hwr/transport.cpp|protocol::apdu_payload_len(data[5]) <= 1 &&|protocol::apdu_payload_len(data[5]) == 1 &&"
+# A refusal must be reported as ANSWERED to the config-write callers, or their
+# no-readback short-circuit turns a misattributed refusal into a REJECTED
+# verdict for a write that landed.
+# NOTE the shape of this search string. The obvious one contains `success ||
+# data != nullptr`, and this file's format splits fields on `|` -- so a `||` in
+# a search silently truncates the field and the entry cannot apply. It reports
+# "not applied" and exits 1 rather than scoring Survived, which is how this was
+# caught, but the fix is to keep `|` out of the string: hence the named
+# `answered` local in control_service.cpp, which is clearer code regardless.
+"config-write-treats-a-refusal-as-silence|components/alpha_hwr/control_service.cpp|        if (on_ack) on_ack(answered);\n      },\n      3000, false, true); // 3000ms timeout, no register read, expect short ACK|        if (on_ack) on_ack(success);\n      },\n      3000, false, true); // 3000ms timeout, no register read, expect short ACK"
 "sensor-pub-media-temp-range-removed|components/alpha_hwr/sensor_publisher.cpp|    if (temp.media_temperature_c >= -20 && temp.media_temperature_c <= 100) {|    if (true) {"
 "sensor-pub-alarm-dedup-removed|components/alpha_hwr/sensor_publisher.cpp|  if (alarms_sensor_->has_state() && alarms_sensor_->state == codes_str) {|  if (false) {"
 "sensor-pub-head-rate-gap-reset-removed|components/alpha_hwr/sensor_publisher.cpp|      if (dt_s > 30.0f) {|      if (false) {"

@@ -10,6 +10,7 @@
 
 #include <iostream>
 #include <cstdint>
+#include <string>
 
 // Test result tracking (same framework as test_protocol.cpp)
 int tests_passed = 0;
@@ -245,6 +246,83 @@ void test_no_ignoring_when_queued_command_is_class10() {
               "A Class 3 packet is not ignored while awaiting Class 10");
 }
 
+// ── The APDU acknowledge field (issue #208) ─────────────────────────────────
+// transport.cpp used to read a Class 10 `0x81` reply as a short ACK carrying an
+// error code, and call the write successful when that byte was zero. It is an
+// Unknown Data Item error, and the byte after it is the ID of the item the pump
+// did not recognise -- so the old reading reported success exactly when the
+// unknown item's ID happened to be 0x00.
+void test_the_acknowledge_is_the_top_two_bits() {
+  using esphome::alpha_hwr::protocol::ApduAck;
+  using esphome::alpha_hwr::protocol::apdu_ack;
+
+  TEST_ASSERT(apdu_ack(0x01) == ApduAck::OK,
+              "0x01 is ack 00 -- ok, one payload byte");
+  TEST_ASSERT(apdu_ack(0x40) == ApduAck::UNKNOWN_CLASS,
+              "0x40 is ack 01 -- Unknown Class, and it declares NO payload");
+  TEST_ASSERT(apdu_ack(0x81) == ApduAck::UNKNOWN_DATA_ITEM,
+              "0x81 is ack 10 -- Unknown Data Item, NOT a successful short ACK");
+  TEST_ASSERT(apdu_ack(0xC1) == ApduAck::ILLEGAL_OPERATION,
+              "0xC1 is ack 11 -- Illegal Operation");
+
+  // The captured frames from #208, byte 5 of each.
+  TEST_ASSERT(apdu_ack(0x0E) == ApduAck::OK,
+              "The operation-status notification's 0x0E is ok with 14 payload bytes");
+  TEST_ASSERT(apdu_ack(0x13) == ApduAck::OK,
+              "...and a 19-byte DataObject reply is ok too");
+}
+
+void test_the_length_is_the_low_six_bits_and_is_independent_of_the_ack() {
+  using esphome::alpha_hwr::protocol::apdu_payload_len;
+
+  TEST_ASSERT(apdu_payload_len(0x01) == 1, "0x01 declares one payload byte");
+  TEST_ASSERT(apdu_payload_len(0x81) == 1, "0x81 declares one payload byte as well");
+  TEST_ASSERT(apdu_payload_len(0xC1) == 1, "...and so does 0xC1");
+  TEST_ASSERT(apdu_payload_len(0x40) == 0,
+              "but Unknown Class declares none -- its head is 0x40, not 0x41, and a "
+              "matcher keyed on 'exactly one payload byte' misses it entirely");
+
+  // This is what lets the short-ACK branch match a refusal at all. It keys on
+  // the length, so all four acknowledge kinds reach the callback; before #208
+  // it keyed on the whole byte against {0x01, 0x81}, so a 0xC1 or 0x41 refusal
+  // matched nothing, fell through, and failed by 3 s timeout instead -- the log
+  // saying "no response" about a pump that had answered promptly.
+  TEST_ASSERT(apdu_payload_len(0x0E) == 14, "0x0E declares 14 payload bytes");
+  TEST_ASSERT(apdu_payload_len(0xB3) == 51,
+              "0xB3 declares 51 -- the layer write's length, under the two-bit reading");
+  TEST_ASSERT(apdu_payload_len(0x3F) == 63, "the field saturates at 63, not 255");
+}
+
+void test_only_ack_ok_counts_as_success() {
+  using esphome::alpha_hwr::protocol::apdu_ack_is_ok;
+
+  TEST_ASSERT(apdu_ack_is_ok(0x01), "An ordinary short ACK is a success");
+  TEST_ASSERT(!apdu_ack_is_ok(0x81),
+              "The captured 0x81 is a refusal, whatever byte follows it");
+  TEST_ASSERT(!apdu_ack_is_ok(0xC1), "So is the probed 0xC1");
+  TEST_ASSERT(!apdu_ack_is_ok(0x40), "So is 0x40, the Unknown Class in the captured frame");
+
+  // The precise shape of the old bug: `success = (b == 0x01) || (b == 0x81 &&
+  // next == 0x00)`. The frame captured in #208 is `... 0A 81 00 ...`, whose
+  // next byte IS 0x00 -- so that write was reported accepted. Nothing about the
+  // following byte can rescue it now.
+  TEST_ASSERT(!apdu_ack_is_ok(0x81),
+              "The exact captured frame's head refuses, where the old reading accepted it");
+}
+
+void test_every_acknowledge_kind_has_a_name() {
+  using esphome::alpha_hwr::protocol::ApduAck;
+  using esphome::alpha_hwr::protocol::apdu_ack_name;
+  using std::string;
+
+  TEST_ASSERT(string(apdu_ack_name(ApduAck::OK)) == "ok", "ok");
+  TEST_ASSERT(string(apdu_ack_name(ApduAck::UNKNOWN_CLASS)) == "Unknown Class", "Unknown Class");
+  TEST_ASSERT(string(apdu_ack_name(ApduAck::UNKNOWN_DATA_ITEM)) == "Unknown Data Item",
+              "Unknown Data Item");
+  TEST_ASSERT(string(apdu_ack_name(ApduAck::ILLEGAL_OPERATION)) == "Illegal Operation",
+              "Illegal Operation");
+}
+
 int main() {
   std::cout << "===========================================================" << std::endl;
   std::cout << "  Transport Wildcard Class Matching Test Suite" << std::endl;
@@ -257,6 +335,11 @@ int main() {
   test_class10_ignored_while_awaiting_class3();
   test_class3_and_7_not_ignored_for_each_other();
   test_no_ignoring_when_queued_command_is_class10();
+
+  test_the_acknowledge_is_the_top_two_bits();
+  test_the_length_is_the_low_six_bits_and_is_independent_of_the_ack();
+  test_only_ack_ok_counts_as_success();
+  test_every_acknowledge_kind_has_a_name();
   test_wildcard_matched_set_is_exactly_these_five();
   test_new_classes_match_their_own_queued_command();
   test_class10_notification_cannot_answer_any_new_class();

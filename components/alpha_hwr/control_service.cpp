@@ -837,8 +837,26 @@ void ControlService::write_temp_range_config(float min_temp, float max_temp, boo
   // the pump responds with a short ACK (OpSpec 0x01) without Obj/Sub fields
   this->transport_.send_apdu_command(
       apdu, 25, 0, 0,
-      [on_ack](bool success, const uint8_t * /*data*/, size_t /*len*/) {
-        if (on_ack) on_ack(success);
+      [on_ack](bool success, const uint8_t *data, size_t /*len*/) {
+        // What this callback reports is "the pump answered", not "the pump said
+        // yes" -- and the distinction matters since issue #208 made refusals
+        // visible.
+        //
+        // The caller short-circuits to REJECTED without a readback when this is
+        // false, so it must mean silence and nothing else. A refusal is not
+        // silence, and worse, it cannot be attributed with confidence: the
+        // short-ACK branch in transport.cpp matches on "some queued write of
+        // this shape", carrying no sequence number and no object echo, so the
+        // fire-and-forget mode write sent a few hundred ms earlier can be
+        // answered inside this write's window. Reporting a refusal as silence
+        // would turn that misattribution into a REJECTED verdict for a write
+        // that landed, with no readback to catch it.
+        //
+        // So an answered-but-refused write reports true and is settled by the
+        // readback, which is unambiguous. transport.cpp logs the refusal at
+        // warning either way, so it is reported rather than swallowed.
+        const bool answered = success or (data != nullptr);
+        if (on_ack) on_ack(answered);
       },
       3000, false, true); // 3000ms timeout, no register read, expect short ACK
 }
@@ -881,8 +899,11 @@ bool ControlService::write_dhw_config(uint8_t on_minutes, uint8_t off_minutes,
   // Obj/Sub fields), matched by the transport's short-ACK path.
   this->transport_.send_apdu_command(
       apdu, sizeof(apdu), 0, 0,
-      [on_ack](bool success, const uint8_t * /*data*/, size_t /*len*/) {
-        if (on_ack) on_ack(success);
+      [on_ack](bool success, const uint8_t *data, size_t /*len*/) {
+        // "Answered", not "accepted" -- see write_temp_range_config() above for
+        // why a refusal must not be reported as silence (issue #208).
+        const bool answered = success or (data != nullptr);
+        if (on_ack) on_ack(answered);
       },
       3000, false, true);
   return true;

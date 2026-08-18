@@ -61,10 +61,22 @@ constexpr uint8_t CLASS_11_MEASURED_16BIT = 0x0B;
  * that term is sufficient here rather than merely necessary.
  *
  * Note also what adding a class to this set cannot do: both predicates require
- * the *queued* command to be of a set class, and nothing outside the opening
- * sequence queues a Class 2, 5 or 11 command anywhere in this component. So no
- * existing traffic changes path -- the three new members are unreachable until
- * someone sends one.
+ * the *queued* command to be of a set class. When the three were added, nothing
+ * outside the opening sequence queued a Class 2, 5 or 11 command; since that
+ * sequence was removed (issue #174) nothing queues one at all, so they are now
+ * unreachable outright rather than merely unreachable by existing traffic.
+ *
+ * They are kept anyway, and deliberately. This set is a statement about which
+ * classes CAN be matched by class byte alone, which is a property of the
+ * protocol rather than of what this component currently happens to send; the
+ * cost of an unreachable entry in two branch-free predicates is nothing, and
+ * the analysis behind admitting them is above and would have to be redone.
+ * That is a different case from the ERROR session state or `on_authenticating()`,
+ * both of which were deleted for being unreachable -- those were live code paths
+ * promising behaviour they could not deliver, where this is a lookup table with
+ * a row nobody reads. If a Class 2 identity read is ever added (reading
+ * `unit_family`/`unit_type` as a guard against driving a non-HWR pump is the
+ * obvious candidate), it works with no change here.
  */
 inline bool is_wildcard_matched_class(uint8_t class_byte) {
   if (class_byte == CLASS_2_MEASURED_DATA) return true;
@@ -72,6 +84,77 @@ inline bool is_wildcard_matched_class(uint8_t class_byte) {
   if (class_byte == CLASS_5_REFERENCE_VALUES) return true;
   if (class_byte == CLASS_7_DEVICE_INFO) return true;
   return class_byte == CLASS_11_MEASURED_16BIT;
+}
+
+/**
+ * The acknowledge field of a Data Reply APDU, and its payload length.
+ *
+ * Byte 1 of an APDU is `0booLLLLLL`. In a *request* the top two bits are the
+ * operation (00 GET, 10 SET, 11 INFO); in a *reply* they are the acknowledge.
+ * The low six are the payload byte count either way. App C.17 of the GENIbus
+ * documentation gives each acknowledge kind its own reply format:
+ *
+ *     ACK   meaning              reply payload
+ *     ---   ------------------   -----------------------------------------
+ *     00    ok                   the normal payload, LLLLLL bytes of it
+ *     01    Unknown Class        none (LLLLLL == 0)
+ *     10    Unknown Data Item    the ID of the first unknown Data Item
+ *     11    Illegal Operation    the ID of the first inaccessible Data Item
+ *
+ * Note what the payload of an *error* reply is: an item ID. It is not an error
+ * code, and reading it as one is where issue #208 came from -- `transport.cpp`
+ * treated a Class 10 `0x81` head as a short ACK carrying an error code and
+ * called the write successful when that byte happened to be zero. `0x81` is
+ * `10 000001`: Unknown Data Item, one payload byte, and that byte is the ID of
+ * the item the pump did not recognise. So the write failed, and it was reported
+ * as succeeding precisely when the unknown item's ID was 0x00.
+ *
+ * Note the asymmetry in those payloads, because it is easy to lose: only the
+ * two item-related errors carry a byte. Unknown Class declares length 0, so its
+ * reply head is `0x40` and its frame is one byte shorter. A matcher keyed on
+ * "declares exactly one payload byte" therefore admits `0x41` -- a length-1
+ * Unknown Class, which this table says does not occur -- while rejecting the
+ * `0x40` that does. The second APDU of the frame captured in #208 is exactly
+ * that: `40 40`, an Unknown Class error with no payload.
+ *
+ * Evidence that this pump populates the field at all, since #174 declined to
+ * build on the documentation alone: a CRC-verified `0x81` reply captured during
+ * a setpoint write, and a deliberate probe returning `0xC1` (Illegal Operation)
+ * that was predicted byte-for-byte before the build. Two observations, one of
+ * them chosen rather than stumbled into (issue #208).
+ */
+enum class ApduAck : uint8_t {
+  OK = 0,
+  UNKNOWN_CLASS = 1,
+  UNKNOWN_DATA_ITEM = 2,
+  ILLEGAL_OPERATION = 3,
+};
+
+/// The two acknowledge bits of an APDU head byte.
+inline ApduAck apdu_ack(uint8_t apdu_head) {
+  return static_cast<ApduAck>((apdu_head >> 6) & 0x03);
+}
+
+/// The payload byte count an APDU head declares (its low six bits).
+inline uint8_t apdu_payload_len(uint8_t apdu_head) { return apdu_head & 0x3F; }
+
+/// Did the pump accept the operation this APDU answers?
+inline bool apdu_ack_is_ok(uint8_t apdu_head) { return apdu_ack(apdu_head) == ApduAck::OK; }
+
+/// Human-readable acknowledge, for logs. Kept beside the enum so a new kind
+/// cannot be added without a name.
+inline const char *apdu_ack_name(ApduAck ack) {
+  switch (ack) {
+    case ApduAck::OK:
+      return "ok";
+    case ApduAck::UNKNOWN_CLASS:
+      return "Unknown Class";
+    case ApduAck::UNKNOWN_DATA_ITEM:
+      return "Unknown Data Item";
+    case ApduAck::ILLEGAL_OPERATION:
+      return "Illegal Operation";
+  }
+  return "unknown";
 }
 
 /**
