@@ -66,9 +66,7 @@ def _component_source_revision() -> str:
 
 
 alpha_hwr_ns = cg.esphome_ns.namespace("alpha_hwr")
-AlphaHwrComponent = alpha_hwr_ns.class_(
-    "AlphaHwrComponent", cg.PollingComponent, ble_client.BLEClientNode
-)
+AlphaHwrComponent = alpha_hwr_ns.class_("AlphaHwrComponent", cg.PollingComponent, ble_client.BLEClientNode)
 
 CONF_FLOW = "flow"
 CONF_HEAD = "head"
@@ -127,282 +125,280 @@ CONF_LINK_WATCH_TIME = "link_watch_time"
 CONF_PUMP_LAST_LINK_FAILURE = "pump_last_link_failure"
 CONF_TIME_ID = "time_id"
 
-CONFIG_SCHEMA = cv.Schema(
-    {
-        cv.GenerateID(): cv.declare_id(AlphaHwrComponent),
-        cv.Required("ble_client_id"): cv.use_id(ble_client.BLEClient),
-        cv.Optional(CONF_TIME_ID): cv.use_id(time.RealTimeClock),
-        cv.Optional(CONF_ENABLE_PAIRING, default=False): cv.boolean,
-        # 2s default: covers the pump's measured post-boot vulnerability window
-        # (bounded at 320-720ms, during which an encryption request fails with
-        # 0x61 and erases the bond) with ~2.8x margin even assuming zero
-        # host-side processing time. See issue #14 for the measurements.
-        cv.Optional(
-            CONF_RECONNECT_SETTLE_TIME, default="2s"
-        ): cv.positive_time_period_milliseconds,
-        cv.Optional(
-            CONF_CONTROL_STATE_POLL_INTERVAL, default="30s"
-        ): cv.positive_time_period_milliseconds,
-        # Inbound-data watchdog: tear the BLE link down when the pump stops
-        # answering while the session still reports itself connected. A READY
-        # link is polled every 10s (five telemetry registers plus the schedule),
-        # so 60s is six missed poll cycles. 0 disables it. See
-        # components/alpha_hwr/link_watchdog.h.
-        cv.Optional(
-            CONF_DATA_TIMEOUT, default="60s"
-        ): cv.positive_time_period_milliseconds,
-        cv.Optional(CONF_FLOW): sensor.sensor_schema(
-            unit_of_measurement="m³/h",
-            accuracy_decimals=3,
-            device_class="volume_flow_rate",
-            state_class=STATE_CLASS_MEASUREMENT,
-        ),
-        # Head is published in meters of head (the pump's native unit and the
-        # same unit as the pressure setpoints). "m" is not a valid Home
-        # Assistant `pressure` device_class unit, so the class is `distance`:
-        # meters of head is dimensionally a length, and `distance` accepts both
-        # m and ft. This is display metadata only — the published value stays
-        # meters — but it gives Home Assistant the unit picker, so the value can
-        # be shown in feet, the unit the Grundfos manual leads with for this
-        # pump (§13: "Head (H) 15-55: max. 18 ft (5.5 m)"). See issue #157.
-        cv.Optional(CONF_HEAD): sensor.sensor_schema(
-            unit_of_measurement="m",
-            accuracy_decimals=2,
-            device_class="distance",
-            state_class=STATE_CLASS_MEASUREMENT,
-        ),
-        cv.Optional(CONF_POWER): sensor.sensor_schema(
-            unit_of_measurement=UNIT_WATT,
-            accuracy_decimals=1,
-            device_class=DEVICE_CLASS_POWER,
-            state_class=STATE_CLASS_MEASUREMENT,
-        ),
-        cv.Optional(CONF_RPM): sensor.sensor_schema(
-            unit_of_measurement="RPM",
-            accuracy_decimals=0,
-            state_class=STATE_CLASS_MEASUREMENT,
-        ),
-        cv.Optional(CONF_TEMP_MEDIA): sensor.sensor_schema(
-            unit_of_measurement=UNIT_CELSIUS,
-            accuracy_decimals=1,
-            device_class=DEVICE_CLASS_TEMPERATURE,
-            state_class=STATE_CLASS_MEASUREMENT,
-        ),
-        cv.Optional(CONF_TEMP_PCB): sensor.sensor_schema(
-            unit_of_measurement=UNIT_CELSIUS,
-            accuracy_decimals=1,
-            device_class=DEVICE_CLASS_TEMPERATURE,
-            state_class=STATE_CLASS_MEASUREMENT,
-        ),
-        cv.Optional(CONF_TEMP_CONTROL_BOX): sensor.sensor_schema(
-            unit_of_measurement=UNIT_CELSIUS,
-            accuracy_decimals=1,
-            device_class=DEVICE_CLASS_TEMPERATURE,
-            state_class=STATE_CLASS_MEASUREMENT,
-        ),
-        cv.Optional(CONF_VOLTAGE): sensor.sensor_schema(
-            unit_of_measurement="V",
-            accuracy_decimals=1,
-            device_class=DEVICE_CLASS_VOLTAGE,
-            state_class=STATE_CLASS_MEASUREMENT,
-        ),
-        cv.Optional(CONF_VOLTAGE_DC): sensor.sensor_schema(
-            unit_of_measurement="V",
-            accuracy_decimals=1,
-            device_class=DEVICE_CLASS_VOLTAGE,
-            state_class=STATE_CLASS_MEASUREMENT,
-        ),
-        cv.Optional(CONF_CURRENT): sensor.sensor_schema(
-            unit_of_measurement="A",
-            accuracy_decimals=2,
-            device_class=DEVICE_CLASS_CURRENT,
-            state_class=STATE_CLASS_MEASUREMENT,
-        ),
-        cv.Optional(CONF_INLET_PRESSURE): sensor.sensor_schema(
-            unit_of_measurement="bar",
-            accuracy_decimals=2,
-            device_class="pressure",
-            state_class=STATE_CLASS_MEASUREMENT,
-        ),
-        cv.Optional(CONF_HEAD_RATE): sensor.sensor_schema(
-            unit_of_measurement="m/s",
-            accuracy_decimals=4,
-            state_class=STATE_CLASS_MEASUREMENT,
-            entity_category=ENTITY_CATEGORY_DIAGNOSTIC,
-            icon="mdi:gauge",
-        ),
-        cv.Optional(CONF_PAIRING_STATUS): binary_sensor.binary_sensor_schema(
-            device_class=DEVICE_CLASS_CONNECTIVITY,
-        ),
-        cv.Optional(CONF_READY_STATUS): binary_sensor.binary_sensor_schema(
-            icon="mdi:check-network-outline",
-        ),
-        cv.Optional(CONF_ALARMS): text_sensor.text_sensor_schema(
-            icon="mdi:alert-circle",
-        ),
-        cv.Optional(CONF_WARNINGS): text_sensor.text_sensor_schema(
-            icon="mdi:alert",
-        ),
-        cv.Optional(CONF_SCHEDULE_HASH): text_sensor.text_sensor_schema(
-            icon="mdi:pound",
-            entity_category=ENTITY_CATEGORY_DIAGNOSTIC,
-        ),
-        **{
-            cv.Optional(key): text_sensor.text_sensor_schema(
-                icon="mdi:calendar-export",
+CONFIG_SCHEMA = (
+    cv.Schema(
+        {
+            cv.GenerateID(): cv.declare_id(AlphaHwrComponent),
+            cv.Required("ble_client_id"): cv.use_id(ble_client.BLEClient),
+            cv.Optional(CONF_TIME_ID): cv.use_id(time.RealTimeClock),
+            cv.Optional(CONF_ENABLE_PAIRING, default=False): cv.boolean,
+            # 2s default: covers the pump's measured post-boot vulnerability window
+            # (bounded at 320-720ms, during which an encryption request fails with
+            # 0x61 and erases the bond) with ~2.8x margin even assuming zero
+            # host-side processing time. See issue #14 for the measurements.
+            cv.Optional(CONF_RECONNECT_SETTLE_TIME, default="2s"): cv.positive_time_period_milliseconds,
+            cv.Optional(CONF_CONTROL_STATE_POLL_INTERVAL, default="30s"): cv.positive_time_period_milliseconds,
+            # Inbound-data watchdog: tear the BLE link down when the pump stops
+            # answering while the session still reports itself connected. A READY
+            # link is polled every 10s (five telemetry registers plus the schedule),
+            # so 60s is six missed poll cycles. 0 disables it. See
+            # components/alpha_hwr/link_watchdog.h.
+            cv.Optional(CONF_DATA_TIMEOUT, default="60s"): cv.positive_time_period_milliseconds,
+            cv.Optional(CONF_FLOW): sensor.sensor_schema(
+                unit_of_measurement="m³/h",
+                accuracy_decimals=3,
+                device_class="volume_flow_rate",
+                state_class=STATE_CLASS_MEASUREMENT,
+            ),
+            # Head is published in meters of head (the pump's native unit and the
+            # same unit as the pressure setpoints). "m" is not a valid Home
+            # Assistant `pressure` device_class unit, so the class is `distance`:
+            # meters of head is dimensionally a length, and `distance` accepts both
+            # m and ft. This is display metadata only — the published value stays
+            # meters — but it gives Home Assistant the unit picker, so the value can
+            # be shown in feet, the unit the Grundfos manual leads with for this
+            # pump (§13: "Head (H) 15-55: max. 18 ft (5.5 m)"). See issue #157.
+            cv.Optional(CONF_HEAD): sensor.sensor_schema(
+                unit_of_measurement="m",
+                accuracy_decimals=2,
+                device_class="distance",
+                state_class=STATE_CLASS_MEASUREMENT,
+            ),
+            cv.Optional(CONF_POWER): sensor.sensor_schema(
+                unit_of_measurement=UNIT_WATT,
+                accuracy_decimals=1,
+                device_class=DEVICE_CLASS_POWER,
+                state_class=STATE_CLASS_MEASUREMENT,
+            ),
+            cv.Optional(CONF_RPM): sensor.sensor_schema(
+                unit_of_measurement="RPM",
+                accuracy_decimals=0,
+                state_class=STATE_CLASS_MEASUREMENT,
+            ),
+            cv.Optional(CONF_TEMP_MEDIA): sensor.sensor_schema(
+                unit_of_measurement=UNIT_CELSIUS,
+                accuracy_decimals=1,
+                device_class=DEVICE_CLASS_TEMPERATURE,
+                state_class=STATE_CLASS_MEASUREMENT,
+            ),
+            cv.Optional(CONF_TEMP_PCB): sensor.sensor_schema(
+                unit_of_measurement=UNIT_CELSIUS,
+                accuracy_decimals=1,
+                device_class=DEVICE_CLASS_TEMPERATURE,
+                state_class=STATE_CLASS_MEASUREMENT,
+            ),
+            cv.Optional(CONF_TEMP_CONTROL_BOX): sensor.sensor_schema(
+                unit_of_measurement=UNIT_CELSIUS,
+                accuracy_decimals=1,
+                device_class=DEVICE_CLASS_TEMPERATURE,
+                state_class=STATE_CLASS_MEASUREMENT,
+            ),
+            cv.Optional(CONF_VOLTAGE): sensor.sensor_schema(
+                unit_of_measurement="V",
+                accuracy_decimals=1,
+                device_class=DEVICE_CLASS_VOLTAGE,
+                state_class=STATE_CLASS_MEASUREMENT,
+            ),
+            cv.Optional(CONF_VOLTAGE_DC): sensor.sensor_schema(
+                unit_of_measurement="V",
+                accuracy_decimals=1,
+                device_class=DEVICE_CLASS_VOLTAGE,
+                state_class=STATE_CLASS_MEASUREMENT,
+            ),
+            cv.Optional(CONF_CURRENT): sensor.sensor_schema(
+                unit_of_measurement="A",
+                accuracy_decimals=2,
+                device_class=DEVICE_CLASS_CURRENT,
+                state_class=STATE_CLASS_MEASUREMENT,
+            ),
+            cv.Optional(CONF_INLET_PRESSURE): sensor.sensor_schema(
+                unit_of_measurement="bar",
+                accuracy_decimals=2,
+                device_class="pressure",
+                state_class=STATE_CLASS_MEASUREMENT,
+            ),
+            cv.Optional(CONF_HEAD_RATE): sensor.sensor_schema(
+                unit_of_measurement="m/s",
+                accuracy_decimals=4,
+                state_class=STATE_CLASS_MEASUREMENT,
                 entity_category=ENTITY_CATEGORY_DIAGNOSTIC,
-            )
-            for key in CONF_SCHEDULE_LAYERS
-        },
-        cv.Optional(CONF_CONTROL_MODE): text_sensor.text_sensor_schema(
-            icon="mdi:cog",
-        ),
-        # Run state: off / engaged / scheduled / stalled (issue #124). The only
-        # entity that separates AUTO from STOP while the schedule is enabled —
-        # "Engage Pump" reads off for both.
-        cv.Optional(CONF_PUMP_RUN_STATE): text_sensor.text_sensor_schema(
-            icon="mdi:pump",
-        ),
-        # Which build of this component is installed: source revision + firmware
-        # build timestamp, so HA history can be correlated with installs. The
-        # release version alone only changes at a release (issue #124).
-        cv.Optional(CONF_COMPONENT_BUILD): text_sensor.text_sensor_schema(
-            icon="mdi:source-commit",
-            entity_category=ENTITY_CATEGORY_DIAGNOSTIC,
-        ),
-        # Alarms the illegal "schedule enabled but pump stopped" state, which
-        # silently loses every window (issue #124).
-        cv.Optional(CONF_SCHEDULE_STALLED): binary_sensor.binary_sensor_schema(
-            device_class="problem",
-            icon="mdi:calendar-alert",
-            entity_category=ENTITY_CATEGORY_DIAGNOSTIC,
-        ),
-        cv.Optional(CONF_SERIAL_NUMBER): text_sensor.text_sensor_schema(
-            icon="mdi:barcode",
-            entity_category=ENTITY_CATEGORY_DIAGNOSTIC,
-        ),
-        cv.Optional(CONF_SOFTWARE_VERSION): text_sensor.text_sensor_schema(
-            icon="mdi:update",
-            entity_category=ENTITY_CATEGORY_DIAGNOSTIC,
-        ),
-        cv.Optional(CONF_HARDWARE_VERSION): text_sensor.text_sensor_schema(
-            icon="mdi:chip",
-            entity_category=ENTITY_CATEGORY_DIAGNOSTIC,
-        ),
-        cv.Optional(CONF_BLE_VERSION): text_sensor.text_sensor_schema(
-            icon="mdi:bluetooth",
-            entity_category=ENTITY_CATEGORY_DIAGNOSTIC,
-        ),
-        cv.Optional(CONF_PRODUCT_NAME): text_sensor.text_sensor_schema(
-            icon="mdi:information",
-            entity_category=ENTITY_CATEGORY_DIAGNOSTIC,
-        ),
-        cv.Optional(CONF_PRODUCT_VERSION): text_sensor.text_sensor_schema(
-            icon="mdi:tag",
-            entity_category=ENTITY_CATEGORY_DIAGNOSTIC,
-        ),
-        cv.Optional(CONF_SINGLE_EVENTS): text_sensor.text_sensor_schema(
-            icon="mdi:calendar-star",
-        ),
-        cv.Optional(CONF_VACATION): text_sensor.text_sensor_schema(
-            icon="mdi:airplane",
-        ),
-        cv.Optional(CONF_EVENT_LOG): text_sensor.text_sensor_schema(
-            icon="mdi:history",
-            entity_category=ENTITY_CATEGORY_DIAGNOSTIC,
-        ),
-        cv.Optional(CONF_HISTORY): text_sensor.text_sensor_schema(
-            icon="mdi:chart-line",
-            entity_category=ENTITY_CATEGORY_DIAGNOSTIC,
-        ),
-        cv.Optional(CONF_CYCLE_TIMESTAMPS): text_sensor.text_sensor_schema(
-            icon="mdi:clock-outline",
-            entity_category=ENTITY_CATEGORY_DIAGNOSTIC,
-        ),
-        cv.Optional(CONF_START_COUNT): sensor.sensor_schema(
-            accuracy_decimals=0,
-            icon="mdi:counter",
-            entity_category=ENTITY_CATEGORY_DIAGNOSTIC,
-            state_class=STATE_CLASS_MEASUREMENT,
-        ),
-        cv.Optional(CONF_OPERATING_HOURS): sensor.sensor_schema(
-            unit_of_measurement="h",
-            accuracy_decimals=1,
-            icon="mdi:timer-sand",
-            device_class="duration",
-            entity_category=ENTITY_CATEGORY_DIAGNOSTIC,
-            state_class=STATE_CLASS_MEASUREMENT,
-        ),
-        cv.Optional(CONF_CLOCK_DIFF): sensor.sensor_schema(
-            unit_of_measurement="s",
-            accuracy_decimals=0,
-            icon="mdi:timer-sand",
-            device_class="duration",
-            entity_category=ENTITY_CATEGORY_DIAGNOSTIC,
-            state_class=STATE_CLASS_MEASUREMENT,
-        ),
-        cv.Optional(CONF_LAST_CLOCK_SYNC): text_sensor.text_sensor_schema(
-            icon="mdi:clock-check",
-            entity_category=ENTITY_CATEGORY_DIAGNOSTIC,
-        ),
-        # Link diagnostics (issue #176). Both read 0 on a healthy link, so an
-        # automation can threshold on the recycle count rather than having to
-        # notice a flap cadence live, and the observed gap is what a
-        # data-driven data_timeout default has to be chosen from.
-        cv.Optional(CONF_LINK_RECYCLES): sensor.sensor_schema(
-            icon="mdi:restart-alert",
-            accuracy_decimals=0,
-            entity_category=ENTITY_CATEGORY_DIAGNOSTIC,
-            state_class=STATE_CLASS_MEASUREMENT,
-        ),
-        cv.Optional(CONF_LINK_MAX_GAP): sensor.sensor_schema(
-            unit_of_measurement="s",
-            icon="mdi:timer-alert-outline",
-            accuracy_decimals=1,
-            entity_category=ENTITY_CATEGORY_DIAGNOSTIC,
-            state_class=STATE_CLASS_MEASUREMENT,
-        ),
-        # The tail histogram, its trust check, and its denominator (issue #176
-        # part 1). link_max_gap above is one point of this distribution; these
-        # give its shape, which is what "how often would a budget of T have
-        # fired" actually needs.
-        #
-        # total_increasing rather than measurement, and that is the reason these
-        # are numeric counters at all: they are RAM values that restart at every
-        # boot, and Home Assistant's long-term statistics recognise the reset and
-        # keep accumulating. A run measured in weeks survives the OTAs and
-        # crashes it will certainly meet; a running maximum does not.
-        **{
-            cv.Optional(key): sensor.sensor_schema(
+                icon="mdi:gauge",
+            ),
+            cv.Optional(CONF_PAIRING_STATUS): binary_sensor.binary_sensor_schema(
+                device_class=DEVICE_CLASS_CONNECTIVITY,
+            ),
+            cv.Optional(CONF_READY_STATUS): binary_sensor.binary_sensor_schema(
+                icon="mdi:check-network-outline",
+            ),
+            cv.Optional(CONF_ALARMS): text_sensor.text_sensor_schema(
+                icon="mdi:alert-circle",
+            ),
+            cv.Optional(CONF_WARNINGS): text_sensor.text_sensor_schema(
+                icon="mdi:alert",
+            ),
+            cv.Optional(CONF_SCHEDULE_HASH): text_sensor.text_sensor_schema(
+                icon="mdi:pound",
+                entity_category=ENTITY_CATEGORY_DIAGNOSTIC,
+            ),
+            **{
+                cv.Optional(key): text_sensor.text_sensor_schema(
+                    icon="mdi:calendar-export",
+                    entity_category=ENTITY_CATEGORY_DIAGNOSTIC,
+                )
+                for key in CONF_SCHEDULE_LAYERS
+            },
+            cv.Optional(CONF_CONTROL_MODE): text_sensor.text_sensor_schema(
+                icon="mdi:cog",
+            ),
+            # Run state: off / engaged / scheduled / stalled (issue #124). The only
+            # entity that separates AUTO from STOP while the schedule is enabled —
+            # "Engage Pump" reads off for both.
+            cv.Optional(CONF_PUMP_RUN_STATE): text_sensor.text_sensor_schema(
+                icon="mdi:pump",
+            ),
+            # Which build of this component is installed: source revision + firmware
+            # build timestamp, so HA history can be correlated with installs. The
+            # release version alone only changes at a release (issue #124).
+            cv.Optional(CONF_COMPONENT_BUILD): text_sensor.text_sensor_schema(
+                icon="mdi:source-commit",
+                entity_category=ENTITY_CATEGORY_DIAGNOSTIC,
+            ),
+            # Alarms the illegal "schedule enabled but pump stopped" state, which
+            # silently loses every window (issue #124).
+            cv.Optional(CONF_SCHEDULE_STALLED): binary_sensor.binary_sensor_schema(
+                device_class="problem",
+                icon="mdi:calendar-alert",
+                entity_category=ENTITY_CATEGORY_DIAGNOSTIC,
+            ),
+            cv.Optional(CONF_SERIAL_NUMBER): text_sensor.text_sensor_schema(
+                icon="mdi:barcode",
+                entity_category=ENTITY_CATEGORY_DIAGNOSTIC,
+            ),
+            cv.Optional(CONF_SOFTWARE_VERSION): text_sensor.text_sensor_schema(
+                icon="mdi:update",
+                entity_category=ENTITY_CATEGORY_DIAGNOSTIC,
+            ),
+            cv.Optional(CONF_HARDWARE_VERSION): text_sensor.text_sensor_schema(
+                icon="mdi:chip",
+                entity_category=ENTITY_CATEGORY_DIAGNOSTIC,
+            ),
+            cv.Optional(CONF_BLE_VERSION): text_sensor.text_sensor_schema(
+                icon="mdi:bluetooth",
+                entity_category=ENTITY_CATEGORY_DIAGNOSTIC,
+            ),
+            cv.Optional(CONF_PRODUCT_NAME): text_sensor.text_sensor_schema(
+                icon="mdi:information",
+                entity_category=ENTITY_CATEGORY_DIAGNOSTIC,
+            ),
+            cv.Optional(CONF_PRODUCT_VERSION): text_sensor.text_sensor_schema(
+                icon="mdi:tag",
+                entity_category=ENTITY_CATEGORY_DIAGNOSTIC,
+            ),
+            cv.Optional(CONF_SINGLE_EVENTS): text_sensor.text_sensor_schema(
+                icon="mdi:calendar-star",
+            ),
+            cv.Optional(CONF_VACATION): text_sensor.text_sensor_schema(
+                icon="mdi:airplane",
+            ),
+            cv.Optional(CONF_EVENT_LOG): text_sensor.text_sensor_schema(
+                icon="mdi:history",
+                entity_category=ENTITY_CATEGORY_DIAGNOSTIC,
+            ),
+            cv.Optional(CONF_HISTORY): text_sensor.text_sensor_schema(
+                icon="mdi:chart-line",
+                entity_category=ENTITY_CATEGORY_DIAGNOSTIC,
+            ),
+            cv.Optional(CONF_CYCLE_TIMESTAMPS): text_sensor.text_sensor_schema(
+                icon="mdi:clock-outline",
+                entity_category=ENTITY_CATEGORY_DIAGNOSTIC,
+            ),
+            cv.Optional(CONF_START_COUNT): sensor.sensor_schema(
+                accuracy_decimals=0,
+                icon="mdi:counter",
+                entity_category=ENTITY_CATEGORY_DIAGNOSTIC,
+                state_class=STATE_CLASS_MEASUREMENT,
+            ),
+            cv.Optional(CONF_OPERATING_HOURS): sensor.sensor_schema(
+                unit_of_measurement="h",
+                accuracy_decimals=1,
+                icon="mdi:timer-sand",
+                device_class="duration",
+                entity_category=ENTITY_CATEGORY_DIAGNOSTIC,
+                state_class=STATE_CLASS_MEASUREMENT,
+            ),
+            cv.Optional(CONF_CLOCK_DIFF): sensor.sensor_schema(
+                unit_of_measurement="s",
+                accuracy_decimals=0,
+                icon="mdi:timer-sand",
+                device_class="duration",
+                entity_category=ENTITY_CATEGORY_DIAGNOSTIC,
+                state_class=STATE_CLASS_MEASUREMENT,
+            ),
+            cv.Optional(CONF_LAST_CLOCK_SYNC): text_sensor.text_sensor_schema(
+                icon="mdi:clock-check",
+                entity_category=ENTITY_CATEGORY_DIAGNOSTIC,
+            ),
+            # Link diagnostics (issue #176). Both read 0 on a healthy link, so an
+            # automation can threshold on the recycle count rather than having to
+            # notice a flap cadence live, and the observed gap is what a
+            # data-driven data_timeout default has to be chosen from.
+            cv.Optional(CONF_LINK_RECYCLES): sensor.sensor_schema(
+                icon="mdi:restart-alert",
+                accuracy_decimals=0,
+                entity_category=ENTITY_CATEGORY_DIAGNOSTIC,
+                state_class=STATE_CLASS_MEASUREMENT,
+            ),
+            cv.Optional(CONF_LINK_MAX_GAP): sensor.sensor_schema(
+                unit_of_measurement="s",
                 icon="mdi:timer-alert-outline",
+                accuracy_decimals=1,
+                entity_category=ENTITY_CATEGORY_DIAGNOSTIC,
+                state_class=STATE_CLASS_MEASUREMENT,
+            ),
+            # The tail histogram, its trust check, and its denominator (issue #176
+            # part 1). link_max_gap above is one point of this distribution; these
+            # give its shape, which is what "how often would a budget of T have
+            # fired" actually needs.
+            #
+            # total_increasing rather than measurement, and that is the reason these
+            # are numeric counters at all: they are RAM values that restart at every
+            # boot, and Home Assistant's long-term statistics recognise the reset and
+            # keep accumulating. A run measured in weeks survives the OTAs and
+            # crashes it will certainly meet; a running maximum does not.
+            **{
+                cv.Optional(key): sensor.sensor_schema(
+                    icon="mdi:timer-alert-outline",
+                    accuracy_decimals=0,
+                    entity_category=ENTITY_CATEGORY_DIAGNOSTIC,
+                    state_class=STATE_CLASS_TOTAL_INCREASING,
+                )
+                for key in CONF_LINK_GAPS_OVER
+            },
+            cv.Optional(CONF_LINK_GAPS_TRUNCATED): sensor.sensor_schema(
+                icon="mdi:content-cut",
                 accuracy_decimals=0,
                 entity_category=ENTITY_CATEGORY_DIAGNOSTIC,
                 state_class=STATE_CLASS_TOTAL_INCREASING,
-            )
-            for key in CONF_LINK_GAPS_OVER
-        },
-        cv.Optional(CONF_LINK_GAPS_TRUNCATED): sensor.sensor_schema(
-            icon="mdi:content-cut",
-            accuracy_decimals=0,
-            entity_category=ENTITY_CATEGORY_DIAGNOSTIC,
-            state_class=STATE_CLASS_TOTAL_INCREASING,
-        ),
-        cv.Optional(CONF_LINK_WATCH_TIME): sensor.sensor_schema(
-            unit_of_measurement="s",
-            icon="mdi:timer-outline",
-            accuracy_decimals=0,
-            device_class="duration",
-            entity_category=ENTITY_CATEGORY_DIAGNOSTIC,
-            state_class=STATE_CLASS_TOTAL_INCREASING,
-        ),
-        cv.Optional(CONF_PUMP_LINK_STATUS): text_sensor.text_sensor_schema(
-            icon="mdi:bluetooth-connect",
-        ),
-        cv.Optional(CONF_PUMP_LAST_LINK_FAILURE): text_sensor.text_sensor_schema(
-            icon="mdi:alert-circle-outline",
-        ),
-    }
-).extend(cv.COMPONENT_SCHEMA).extend(esp32_ble_tracker.ESP_BLE_DEVICE_SCHEMA)
+            ),
+            cv.Optional(CONF_LINK_WATCH_TIME): sensor.sensor_schema(
+                unit_of_measurement="s",
+                icon="mdi:timer-outline",
+                accuracy_decimals=0,
+                device_class="duration",
+                entity_category=ENTITY_CATEGORY_DIAGNOSTIC,
+                state_class=STATE_CLASS_TOTAL_INCREASING,
+            ),
+            cv.Optional(CONF_PUMP_LINK_STATUS): text_sensor.text_sensor_schema(
+                icon="mdi:bluetooth-connect",
+            ),
+            cv.Optional(CONF_PUMP_LAST_LINK_FAILURE): text_sensor.text_sensor_schema(
+                icon="mdi:alert-circle-outline",
+            ),
+        }
+    )
+    .extend(cv.COMPONENT_SCHEMA)
+    .extend(esp32_ble_tracker.ESP_BLE_DEVICE_SCHEMA)
+)
 
 
 def _warn_if_histogram_cannot_fill(config):
@@ -645,9 +641,7 @@ async def to_code(config):
     # index-based setter: the name is the only thing that tells an operator what
     # a counter means, and a name/index/threshold mismatch is invisible in a
     # reading. Resolving the setter by name makes drift a build failure.
-    for threshold_s, key in zip(
-        LINK_GAP_THRESHOLDS_S, CONF_LINK_GAPS_OVER, strict=True
-    ):
+    for threshold_s, key in zip(LINK_GAP_THRESHOLDS_S, CONF_LINK_GAPS_OVER, strict=True):
         if key in config:
             sens = await sensor.new_sensor(config[key])
             cg.add(getattr(var, f"set_link_gaps_over_{threshold_s}s_sensor")(sens))
@@ -670,6 +664,4 @@ async def to_code(config):
 
     # Set control state polling interval (fixes issue #54)
     if CONF_CONTROL_STATE_POLL_INTERVAL in config:
-        cg.add(var.set_control_state_poll_interval(
-            config[CONF_CONTROL_STATE_POLL_INTERVAL]
-        ))
+        cg.add(var.set_control_state_poll_interval(config[CONF_CONTROL_STATE_POLL_INTERVAL]))

@@ -139,7 +139,7 @@ async def read_node(host: str, key: str) -> dict[str, Any]:
         await maybe_await(client.subscribe_states(on_state))
         try:
             await asyncio.wait_for(done.wait(), 10)
-        except asyncio.TimeoutError:
+        except TimeoutError:
             pass
     finally:
         await maybe_await(client.disconnect())
