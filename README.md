@@ -374,22 +374,28 @@ More detail and automation examples are in
 `alpha_hwr_pairing.yaml` enables BLE pairing and stores the bond in NVS. Typical
 first-time flow:
 
-1. Put the pump into Bluetooth pairing mode.
+1. Put the pump into Bluetooth pairing mode — more involved than one button
+   press; see
+   [the procedure](docs/configuration.md#enable_pairing).
 2. Flash the ESPHome node with the paired package.
 3. Watch logs for the BLE pairing to complete.
 
 After that, reconnects reuse the stored bond.
 
+The pump accepts **one BLE connection at a time**, which is worth knowing before
+you start: while this node is connected, the Grundfos GO app cannot be, and vice
+versa.
+
 > **Clearing the node's bond needs physical access to the pump to undo.**
 > `ble_client.remove_bond`, an NVS erase, or a re-flash that loses NVS leaves
 > the pump bonded to a node that is no longer bonded to it. The pump then
-> refuses the link on every attempt and never offers to pair again. The only fix
-> is to put it back into pairing mode at the pump itself, with
-> `enable_pairing: true` set first — without that this node configures no
-> bonding and the pump's offer goes nowhere. The node reports
-> this on **Pump Link Fault** as `Pump not accepting pairing` once it has
-> happened three connections running; see
-> [`docs/configuration.md`](docs/configuration.md#enable_pairing).
+> refuses the link on every attempt and never offers to pair again. Recovering
+> means standing at the pump and running the
+> [re-pairing procedure](docs/configuration.md#enable_pairing) — which needs the
+> Grundfos GO app, and needs this node stopped first so it is not holding the
+> pump's only connection. Set `enable_pairing: true` before you start, or the
+> pump's offer goes nowhere. The node reports this on **Pump Link Fault** as
+> `Pump not accepting pairing` once it has happened three connections running.
 
 ## Examples in this repo
 
