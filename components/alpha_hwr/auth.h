@@ -91,6 +91,12 @@ class Authentication {
   /// is why it is not simply the transport's 3000 ms default -- five unanswered
   /// reads at that default would spend 15 s of the link watchdog's 60 s budget
   /// before anything else got to run. At 1000 ms the same worst case is 5 s.
+  /// Stage 1 sends its identity read once and retransmits once if it goes
+  /// unanswered (issue #210). One retry, matching GENIpro's own behaviour on a
+  /// Data Reply that misses the Reply Timeout; the burst of three it replaced
+  /// retried on success and gave up on failure.
+  static constexpr int STAGE1_MAX_ATTEMPTS = 2;
+
   static constexpr uint32_t REPLY_TIMEOUT_MS = 1000;
 
   /// Last resort: finish the sequence even if no callback ever comes back.
@@ -212,7 +218,7 @@ class Authentication {
   uint8_t reads_sent_ = 0;
 
   // Sequence stage functions
-  void stage1_legacy_burst(int repeat_count);
+  void stage1_legacy_read(int attempt);
   void stage2_class10_burst(int repeat_count);
   void stage3_extensions();
   void complete();

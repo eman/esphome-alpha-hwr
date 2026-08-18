@@ -139,6 +139,39 @@
 
 ### Changed
 
+- **Stage 1 of the opening sequence sends its identity read once and retries
+  only if it goes unanswered** (issue #210). It used to send three
+  unconditionally.
+
+  The bursts were a hedge against delivery uncertainty, from `connection.md`:
+  *"The client should send these packets in bursts to ensure the device receives
+  them despite any radio interference or sleep states."* Sound, while a dropped
+  packet was invisible. Issue #204 made it visible, and the hedge stopped
+  fitting the moment it did.
+
+  It had also inverted. Three unconditional sends advance on every callback
+  regardless of what the callback says, so they repeat the read when the *first*
+  one succeeded and give up when all three failed — the opposite of what a retry
+  is for. One send plus one retransmission on timeout is the shape that was
+  wanted, and it is what GENIpro itself does on a Data Reply that misses the
+  Reply Timeout.
+
+  A retransmission that also goes unanswered still advances, which is the
+  standing fail-open policy; whether a *refused* read should be treated
+  differently is issue #225.
+
+  Costs on the bench specimen: the answered case drops two round trips (~350 ms
+  at its ~175 ms average) and the unanswered case one `REPLY_TIMEOUT_MS`. The
+  sizing note in `link_watchdog.h` is corrected accordingly — worst case to
+  first inbound data moves from 21.5 s to 20.45 s against the 60 s default, so
+  the change is toward more slack, but that arithmetic is what the whole
+  watchdog default rests on and is quoted elsewhere.
+
+  One thing that got narrower for free: `complete()`'s count could previously be
+  ambiguous on every handshake, because stage 1's three byte-identical reads
+  meant a late reply could be credited to a later one. That now applies only on
+  the retry path, so a pump answering normally has no ambiguity at all.
+
 - **The host test suite compiles once per translation unit instead of once per
   target.** A full build compiled 142 translation units out of ~40 distinct
   files — `codec.cpp` fourteen times, `transport.cpp` ten — because every target

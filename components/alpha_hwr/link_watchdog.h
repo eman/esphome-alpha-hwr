@@ -74,25 +74,37 @@
 // The opening sequence is what varies, and since issue #174 it varies with the
 // pump rather than with a constant:
 //
-//   answered      450 ms of stage-2 timers + 5 round trips.  Measured 1.33 s on
-//                 the bench specimen, whose replies average ~175 ms.
-//   unanswered    450 ms + 5 x REPLY_TIMEOUT_MS (1000 ms) = 5.45 s. This is the
-//                 case the watchdog exists for, so it is the one that sizes it.
+//   answered      450 ms of stage-2 timers + 3 round trips (stage 1's one
+//                 identity read, stage 3's two).  On the bench specimen, whose
+//                 replies average ~175 ms, that calculates to ~0.98 s.
+//   unanswered    450 ms + 4 x REPLY_TIMEOUT_MS (1000 ms) = 4.45 s -- stage 1's
+//                 read plus its one retransmission, then stage 3's two. This is
+//                 the case the watchdog exists for, so it is the one that sizes
+//                 it.
 //   callback lost 450 ms + SEQUENCE_BACKSTOP_MS (15 s) = 15.45 s. Only reachable
 //                 if the transport drops a queued callback -- see auth.h -- and
 //                 quoted because it is the true ceiling, not because it is
 //                 expected.
 //
-// So: 5.5 + 5.45 + 10.5 = 21.5 s worst case to first inbound data against the
-// 60 s default, leaving ~38 s of slack; and 5.5 + 15.45 + 10.5 = 31.5 s even
+// So: 5.5 + 4.45 + 10.5 = 20.45 s worst case to first inbound data against the
+// 60 s default, leaving ~40 s of slack; and 5.5 + 15.45 + 10.5 = 31.5 s even
 // with the backstop firing, leaving ~28 s. Both fit, which is the property this
 // note exists to establish -- the previous arithmetic reached 17.2 s from an
 // auth chain that no longer takes 1200 ms.
 //
-// Measured on hardware: the opening sequence itself takes 1.33 s on the bench
-// specimen (2026-08-17), start of handshake to completion, with all five reads
-// answered. That is the only segment issue #174 changed, and it is the segment
-// quoted above.
+// Both numbers moved with issue #210, which stopped stage 1 sending its
+// identity read three times unconditionally and made it one send plus one
+// retransmission if unanswered. The answered case lost two round trips; the
+// unanswered case lost one REPLY_TIMEOUT_MS, since two of the three sends went
+// away but one came back as the retry. The direction is toward more slack, so
+// nothing here needed re-deriving to stay safe -- but the figures are quoted
+// elsewhere, so they are corrected rather than left stale.
+//
+// Measured on hardware: 1.33 s on the bench specimen (2026-08-17), start of
+// handshake to completion, with all five reads answered. That measurement
+// predates issue #210 and is NOT re-measured: it is the five-read sequence, and
+// the answered case above is now three reads. Treat the 0.98 s as calculated
+// rather than observed until someone re-measures it.
 //
 // The open-to-READY figures previously recorded here -- 5.90/6.17/5.94 s across
 // three reconnects -- predate the change and are NOT re-measured. They remain
