@@ -68,9 +68,10 @@
   pools them across boots the way `total_increasing` does, and prints what each
   candidate default would have cost in recycles per day, with the decision rule
   printed alongside the answer. It refuses to recommend anything when the
-  evidence does not support it: under two weeks of watched link, fewer than two
-  installations, a material fraction of intervals truncated, or a run whose
-  budget could not let the rungs fill.
+  evidence does not support it: under two weeks of watched link, a material
+  fraction of intervals truncated, or a run whose budget could not let the rungs
+  fill. Any number of nodes pool; a recommendation describes the installations
+  that reported it, which is a caveat rather than a gate.
 
 - **The component's BLE lifecycle is host-tested** — `tests/test_component_wiring.cpp`,
   16 assertions, plus the ESP-IDF and ESPHome mocks that make it possible

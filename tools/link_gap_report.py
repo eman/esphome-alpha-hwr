@@ -67,9 +67,15 @@ FLOOR_S = 41
 # is deliberately stingy: less than one per installation per 30 days.
 TOLERANCE_PER_DAY = 1.0 / 30.0
 
-# Evidence required before recommending anything at all.
+# Evidence required before recommending anything at all. Deliberately only
+# properties of the DATA -- how long it ran, whether the tail was clipped,
+# whether the budget let the rungs fill. There is no minimum node count: how
+# many installations exist is a fact about the world, not about the evidence,
+# and gating on it made the report refuse forever on a one-pump setup no matter
+# how clean the month it had. What a single installation cannot support is the
+# claim that the number GENERALISES, and that belongs in the caveats with the
+# other limits.
 MIN_DAYS = 14.0
-MIN_NODES = 2
 # Truncated intervals are observations whose true length is unknown, so a run
 # full of them has a tail that was clipped rather than measured. Expressed per
 # watched day rather than as a fraction of intervals: the number of intervals is
@@ -374,9 +380,6 @@ def refusals(nodes: dict[str, NodeTotals], reported: list[int], budget_s: float 
         problems.append(
             f"only {total_days:.1f} days of watched link, and the issue asks for weeks (need {MIN_DAYS:.0f})"
         )
-    if len(nodes) < MIN_NODES:
-        problems.append(f"{len(nodes)} installation(s) reporting, need {MIN_NODES} independent ones")
-
     truncated = sum(n.truncated for n in nodes.values())
     truncated_rate = rate_per_day(truncated, total_days) if total_days > 0 else 0.0
     if truncated_rate > MAX_TRUNCATED_PER_DAY:
@@ -438,6 +441,10 @@ def print_caveats() -> None:
     print("    budgets the cost, which is the side that argues against lowering the default.")
     print("  - Rates are per day of WATCHED link, not per calendar day. Time disconnected is")
     print("    not sampled, because the watchdog is not running then either.")
+    print("  - A recommendation describes the installations that reported it. One pump")
+    print("    characterises that pump; whether the number carries to a different site,")
+    print("    radio environment or pump firmware is not something these counters can")
+    print("    answer. Add nodes to the log as they appear and rerun -- they pool.")
     print("  - A counter at or above the data_timeout in force cannot fill. Check --budget.")
     print("  - Counts between a node's last snapshot and a reboot are lost. Frequent")
     print("    snapshots keep that tail small; the reboot count above says how often it")
