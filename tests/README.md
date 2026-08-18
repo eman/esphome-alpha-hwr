@@ -9,6 +9,29 @@ cd tests
 make test
 ```
 
+### The object cache
+
+Sources are compiled once per translation unit into `.obj/<flags-hash>/<group>/`
+and linked from there, so editing one header recompiles the units that include
+it rather than every target that might. Before this, a full build compiled 142
+translation units out of ~40 distinct files.
+
+Two things follow that are worth knowing:
+
+- **Objects are keyed by the compiler and flags that produced them**, because
+  make cannot see that flags changed. `make OPT=-O0`, `make test-asan` and
+  `make test-clang` each get their own cache and coexist rather than evicting
+  each other. The binaries are *not* keyed, so switching variants drops them and
+  relinks — otherwise `make test` straight after `make test-asan` would re-run
+  the sanitized build.
+- **`-DUSE_TIME` and `-DUSE_TEXT_SENSOR` objects are kept apart** rather than
+  pooled. Those defines change which code exists (AGENTS.md §4), so sharing an
+  object between a target that sets one and a target that does not would report
+  guards as covered that were never compiled.
+
+`make clean` removes every variant. `make clean-bin` removes only the
+executables, which is what `tools/mutation_check.sh` wants at the end of a run.
+
 ## Test Coverage
 
 The test suite verifies:
@@ -66,6 +89,11 @@ When modifying the protocol implementation in `components/alpha_hwr/`:
 3. Run `./tools/mutation_check.sh` if you touched the protocol layer. It breaks
    production code on purpose and asserts the suite notices; a surviving
    mutation means a test is validating a replica rather than the shipped code.
+   A full sweep of all 163 entries takes about 7 minutes; while iterating, pass
+   a name filter (`./tools/mutation_check.sh gap-`) and let CI run the rest.
+   **Commit before running it** — it restores its target files from HEAD after
+   every mutation, so uncommitted edits to those files are silently discarded,
+   and a run killed part-way can leave a mutation in the working tree.
 4. Only commit source files (`.cpp`, `.h`, `Makefile`)
 5. Do not commit compiled binaries or temporary files
 
