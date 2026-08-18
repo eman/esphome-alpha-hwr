@@ -269,20 +269,151 @@ decision rule it applies printed alongside the answer.
 The eight entities are **off by default** — they are an instrument for one
 decision, not something every install should carry. To take part in a run:
 
-1. Set `data_timeout: 600s` on every pump taking part. The watchdog still
-   recovers a deaf link, just more slowly. Do this *first*: at the shipped
-   `60s` the top rungs cannot fill, and the run would produce reassuring zeros.
-2. Uncomment the histogram block in `packages/alpha_hwr_pairing.yaml`, or name
-   the eight keys in your own `alpha_hwr:` block. `esphome config` warns if the
-   budget is still too small for the rungs you declared.
-3. Leave it for a few weeks of ordinary service — not a bench session, since the
-   point is what normal operation does.
-4. Run `tools/link_gap_report.py` against the nodes, and check
-   `link_gaps_truncated` and `link_watch_time` before believing the rates.
+**1. Raise `data_timeout` first.** Set `data_timeout: 600s` on every pump taking
+part. The watchdog still recovers a deaf link, just more slowly. Do this
+*before* declaring the entities: at the shipped `60s` the top rungs cannot fill,
+and the run would produce reassuring zeros whatever the pump did.
+
+**2. Declare the entities.** Uncomment the histogram block in
+`packages/alpha_hwr_pairing.yaml`, or name the eight keys in your own
+`alpha_hwr:` block. `esphome config` warns if the budget is still too small for
+the rungs you declared.
 
 > The component also warns at boot, but that runs before the API server is up,
 > so it reaches the serial console only — over the air you will not see it. The
 > `esphome config` warning is the one to rely on.
+
+**3. Snapshot periodically.** This is not optional, and it is the step most
+easily missed: the counters are RAM values that restart at every boot, so a
+single read at the end tells you about the current boot and nothing else — and a
+run measured in weeks will meet an OTA. `snapshot` appends one record per node
+to a log; `report` reconstructs the totals across boots from it, using the same
+reset rule Home Assistant applies to a `total_increasing` sensor.
+
+```bash
+venv/bin/python tools/link_gap_report.py snapshot \
+    --host hwr-pump.local --secrets secrets.yaml
+```
+
+The log defaults to `link_gap_log.jsonl` in the working directory (gitignored);
+`--log FILE` puts it elsewhere. Repeat `--host` to read several pumps in one
+run — a `--key` or `--secrets` binds to every `--host` after it, and one
+connection is opened and closed per node, because connection count is what costs
+heap on these nodes (issue #127).
+
+**Cadence: every couple of days for the first fortnight, then weekly.** The
+reason is the `unsure` column described below — snapshot intervals longer than
+the watched time a node has banked could hide a reboot, and early in a run that
+is every interval. Once the node has more watched time banked than your snapshot
+gap, hidden reboots become impossible and the column stays at zero.
+
+**4. Leave it alone for a few weeks** of ordinary service — not a bench session,
+since the point is what normal operation does. The report refuses below 14 days.
+
+**5. Run the report.**
+
+```bash
+venv/bin/python tools/link_gap_report.py report --budget 600
+```
+
+`--budget` is the `data_timeout` that was in force during the run. It is not
+readable over the API, so you supply it, and the report refuses rather than
+guesses if any rung you declared sits at or above it.
+
+`report` needs nothing but the log file, so it runs on a plain `python3`;
+only `snapshot` needs `aioesphomeapi`, which the esphome venv provides.
+
+#### Reading the report
+
+Five sections. A real run, three weeks on one pump snapshotted every three days,
+with one OTA reboot in the middle:
+
+```
+COVERAGE
+  node                        watched  snapshots  reboots  unsure  truncated
+  hwr-pump                     20.86d          8        1       3          2
+  pooled                       20.86d
+```
+
+**COVERAGE is the "should I believe any of this" section.** `watched` is
+live-link time, not calendar time — if it is far below the wall-clock length of
+your run, the counts came from less observation than you think. `reboots` is how
+many times the counters restarted and were stitched back together. `unsure`
+counts snapshot intervals long enough that a reboot could have happened and
+climbed back past the previous total unseen, which would silently drop that
+session; a nonzero count means the totals are a **lower bound**. `truncated` is
+intervals cut short by a recycle or a drop rather than ending on their own —
+each one is an observation whose true length is unknown.
+
+```
+SURVIVAL  (intervals longer than T, and the rate they arrived at)
+      T   pooled  /node-day           hwr-pump
+    15s      975    46.7299                975
+    20s       72     3.4508                 72
+    30s        2     0.0959                  2
+    45s        1     0.0479                  1
+    60s        0     0.0000                  0
+    90s        0     0.0000                  0
+```
+
+**SURVIVAL is the measurement.** Each row is how many quiet intervals ran longer
+than T — which is exactly how many times a `data_timeout` of T would have fired,
+because the counter uses the same comparison the watchdog does. Per-node columns
+sit alongside the pooled figure so one bad installation is not hidden by
+averaging.
+
+```
+BUDGETS  (what each candidate default would have cost)
+      T  recycles/day  days between    worst node  verdict
+    30s        0.0959          10.4        0.0959  FAIL below the 41s floor
+    45s        0.0479          20.9        0.0479  FAIL over the recycle tolerance
+    60s        0.0000         never        0.0000  PASS
+```
+
+*(excerpt — the real table carries a row for every rung, 15s through 90s)*
+
+**BUDGETS turns that into cost.** `worst node` is the highest per-node rate, not
+the pooled one, so a candidate has to be defensible everywhere rather than on
+average.
+
+```
+RECOMMENDATION
+  data_timeout: 60s
+  Conservative alternative: 90s
+```
+
+**RECOMMENDATION applies a rule the report then prints in full**, so it can be
+argued with rather than taken on trust:
+
+- **Floor: T ≥ 41s.** 31.5s is the calculated worst case from connection-open to
+  first inbound data with the sequence backstop firing (see the sizing note in
+  `components/alpha_hwr/link_watchdog.h`), plus 30% margin on a number derived
+  from constants rather than measured.
+- **Tolerance: under one spurious recycle per installation per 30 days.** Each
+  recycle takes another run at the encryption-on-open window that can erase the
+  bond (issue #14), which is what makes recycles worth being stingy about.
+- **Choose the smallest rung meeting both.** Detection latency is the cost on
+  the other side, and these counters cannot measure it — that half is judgement,
+  and the report says so rather than dressing it as arithmetic.
+
+If the evidence does not support a recommendation the report says
+`INSUFFICIENT EVIDENCE` and lists why: under 14 days of watched link, a
+truncation rate high enough that the tail was clipped rather than observed, or a
+budget that could not let the declared rungs fill. Those are all properties of
+the data. There is deliberately no minimum node count — how many installations
+exist is a fact about the world, not about the evidence — so a single pump can
+produce a recommendation, and the caveats record that it describes that pump.
+
+**CAVEATS is printed every time and cannot be suppressed.** The one that most
+affects how you read BUDGETS: `recycles/day` is an *upper* bound on what a
+budget would cost, because the backoff widens the window after the first recycle
+of a deaf episode, so repeated excursions do not each cost one. It understates
+the benefit for the same reason. The rule budgets the cost, which is the side
+that argues against lowering the default.
+
+A measured default that ends up where it started is a real result, not a failed
+run: it replaces "this is a constants calculation" with "this is what a month on
+real hardware looked like".
 
 ## Examples
 
