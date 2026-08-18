@@ -140,13 +140,11 @@ void AlphaHwrComponent::setup() {
     // power loss, the encryption-failure teardown) would report only its
     // steady-state cadence. The sampler ignores this if no open preceded it.
     this->link_gap_.on_disconnect(millis());
-    // Cancel in-flight auth so its pending scheduler lambdas are invalidated
-    // and do not fire against the next BLE connection.
-    this->auth_.cancel();
-    // Also cancel the pending stabilize-to-auth timer, so a disconnect inside
-    // the stabilize window can't leave it to start auth against the next connection.
-    this->cancel_timeout("hwr_auth_start");
-    // Stop telemetry so the next auth-complete callback can restart it cleanly.
+    // Cancel the pending stabilize timer, so a disconnect inside that window
+    // cannot leave it to declare the NEXT connection ready before it has
+    // stabilized (issue #15).
+    this->cancel_timeout(SESSION_READY_TIMER);
+    // Stop telemetry so the next ready callback can restart it cleanly.
     this->telemetry_service_.stop();
     // Reset initial-read flag so device info, clock sync, etc. are re-fetched
     // after reconnect (pump may have rebooted).
@@ -220,13 +218,30 @@ void AlphaHwrComponent::setup() {
       [this]() { this->session_.on_service_found(); });
 
   ble_manager_.set_subscribed_callback([this]() {
-    this->session_.on_subscribed();
+    this->session_.on_subscribed();  // -> STABILIZING
 
-    // Wait for pump to stabilize, then authenticate
-    this->set_timeout("hwr_auth_start", 2000, [this]() {
-      ESP_LOGI(TAG, "Pump stabilized. Starting authentication...");
-      this->authenticate();
-    });
+    // Nothing is sent between the CCCD write and the initial read chain.
+    //
+    // What used to go here were four GENIbus reads -- a Class 2 GET of
+    // unit_family/unit_type/unit_version, a Class 10 GET of the operation-status
+    // object, and two INFO queries -- called an authentication handshake and
+    // documented as unlocking control. They are reads, so they cannot change
+    // device state, and every one of their replies was discarded. A pump
+    // reached Pump Ready across ten connection cycles without them, including
+    // two bond-cleared re-pairings and five power cycles, reading all five
+    // Class 7 strings and accepting Class 3 START and STOP each time
+    // (issue #174). So the sequence is gone, and what is left of this step is
+    // the delay.
+    //
+    // The delay stays, because it was never part of the sequence. It separates
+    // the CCCD write and the encryption negotiation behind it from the first
+    // GENI traffic (issues #12/#13), and each connection already takes a run at
+    // the window where an encryption request can fail with 0x61 and erase the
+    // bond (issue #14). Removing the reads moves first traffic ~1.3 s earlier
+    // on its own; taking this out too would compound that with nothing measured
+    // behind it. See SESSION_STABILIZE_MS.
+    this->set_timeout(SESSION_READY_TIMER, SESSION_STABILIZE_MS,
+                      [this]() { this->on_session_stabilized_(); });
   });
 
   ble_manager_.set_notification_callback(
@@ -252,10 +267,12 @@ void AlphaHwrComponent::setup() {
 
         // Data arrived, so whatever the link was doing, it is doing it again --
         // but only frames received while the session is READY count as that
-        // proof. A pump that answers the handshake and then goes silent
-        // delivers one frame per session, and link_watchdog.h records that
-        // control-mode notifications *are* received during the handshake on
-        // this specimen. Resetting on those would clear the window and the
+        // proof. Nothing is sent between the CCCD write and READY any more
+        // (issue #174), so a pre-READY frame can only be one the pump
+        // volunteered -- and link_watchdog.h records that this specimen does
+        // volunteer operation-status notifications. A pump that emits one and
+        // then goes silent delivers one frame per session. Resetting on those
+        // would clear the window and the
         // counter once per session forever: the backoff would never engage, and
         // the counter an automation is supposed to threshold on would read 0
         // while the node recycled ~1,200 times a day. Simulated at exactly that.
@@ -270,8 +287,9 @@ void AlphaHwrComponent::setup() {
 
         this->link_last_inbound_ms_ = inbound_now;
 
-        // Pump Link Status: this — not auth completing — is what proves the
-        // link works, so it is where a run of failed attempts is forgiven.
+        // Pump Link Status: this — not the session being declared ready — is
+        // what proves the link works, so it is where a run of failed attempts
+        // is forgiven.
         // Gated so the common case is one branch, not two stores per frame.
         if (!this->link_reached_ready_) {
           this->link_reached_ready_ = true;
@@ -318,42 +336,6 @@ void AlphaHwrComponent::setup() {
   transport_.set_packet_callback([this](const uint8_t *data, size_t len) {
     // Route to telemetry service for processing
     this->telemetry_service_.on_packet(data, len);
-  });
-
-  // Initialize authentication module callbacks
-  auth_.set_scheduler_callback(
-      [this](uint32_t delay_ms, std::function<void()> callback) {
-        this->set_timeout(delay_ms, std::move(callback));
-      });
-
-  auth_.set_completion_callback([this]() {
-    this->session_.on_authenticated();
-    ESP_LOGI(TAG, "✓ Authentication handshake complete - pump ready");
-
-    // Release an auth-failure hold on the fault string. Nothing else releases
-    // it once the pump has stopped producing successful AUTH_CMPL events, and
-    // the string is displayed only while the session is not ready — so a hold
-    // that outlives READY cannot report the pairing failure any more, it can
-    // only mask the next outage's cause with it (failure_hold.h). Unlike the
-    // link-status counters below, this is safe on a deaf link: if the link is
-    // deaf, the watchdog writes the true reason 60 s later, which is the point.
-    this->ble_manager_.on_session_ready();
-
-    // Start telemetry service when authenticated
-    this->telemetry_service_.start();
-
-    // Pump Link Status: deliberately does NOT mark this a working link. Auth
-    // completing proves only that a chain of timers ran; on a deaf link it
-    // happens just the same. Clearing link_consecutive_failures_ here would
-    // reset the count on every watchdog recycle, so a permanently deaf pump
-    // could never accumulate the LINK_FAIL_K failures that surface the
-    // "Reconnecting" rung — it would flip between Connected and Connecting
-    // forever. The reset lives on the notification path instead, where inbound
-    // data actually proves the link works.
-    this->evaluate_link_status();
-
-    // Trigger the one-time data read chain
-    this->trigger_initial_data_reads();
   });
 
   telemetry_service_.set_sensor_publisher(&sensor_publisher_);
@@ -470,9 +452,10 @@ void AlphaHwrComponent::setup() {
         this->publish_schedule_hash();
       });
 
-  // Control mode text sensor will be populated when we receive the passive
-  // notification from the pump during authentication. Do NOT publish a
-  // default/unknown value here.
+  // Control mode text sensor will be populated from the operation-status
+  // notification -- volunteered by the pump, or fetched by the control-state
+  // sync on the initial read chain. Do NOT publish a default/unknown value
+  // here.
 }
 
 bool AlphaHwrComponent::parse_device(
@@ -521,7 +504,7 @@ void AlphaHwrComponent::loop() {
 }
 
 // Inbound-data watchdog. See link_watchdog.h for why a link can be open,
-// authenticated and completely deaf, and why the remedy is a disconnect rather
+// ready and completely deaf, and why the remedy is a disconnect rather
 // than a session-state transition.
 void AlphaHwrComponent::check_link_liveness_() {
   if (!link_data_timeout_expired(this->session_.is_connected(), millis(),
@@ -537,8 +520,9 @@ void AlphaHwrComponent::check_link_liveness_() {
 
   // Consecutive recycles that produced no data (issue #176). Reset only by a
   // notification received while the session is READY (see the reset site in the
-  // notification callback: handshake frames do not count as proof the link
-  // works), so it reads 0 in normal operation and an automation can threshold
+  // notification callback: a frame the pump volunteered before READY does not
+  // count as proof the link works), so it reads 0 in normal operation and an
+  // automation can threshold
   // on it -- a value to alert on rather than a flap cadence somebody has to be
   // watching to notice.
   this->link_recycles_without_data_++;
@@ -560,7 +544,7 @@ void AlphaHwrComponent::check_link_liveness_() {
 
   // Count this as a failed attempt, even though the session may have reached
   // READY: by the watchdog's own evidence it never worked. Paired with the
-  // notification path owning the reset (see the auth-completion callback), this
+  // notification path owning the reset (see on_session_stabilized_()), this
   // is what lets a persistently deaf pump accumulate LINK_FAIL_K failures and
   // surface as "Reconnecting" rather than flapping between Connected and
   // Connecting forever.
@@ -662,7 +646,7 @@ void AlphaHwrComponent::publish_link_diagnostics_(uint32_t now_ms) {
 }
 
 // Pump Link Status state machine. The status is the FIRST matching condition
-// below (a priority ladder), re-evaluated on the connection/disconnection/auth
+// below (a priority ladder), re-evaluated on the connection/disconnection/ready
 // callbacks and on the ~1s loop() tick above:
 //
 //   Connected     the GENI session has reached READY (session_.is_ready()): the
@@ -976,7 +960,8 @@ void AlphaHwrComponent::update() {
   if (session_.is_ready() && parent_ &&
       parent_->get_conn_id() != esp32_ble_client::UNSET_CONN_ID) {
     // If session is ready but initial data reads haven't been triggered yet
-    // (e.g., BLE connection persisted through ESP32 restart, no re-auth),
+    // (e.g., BLE connection persisted through ESP32 restart, so the session
+    // was already ready and on_session_stabilized_() never ran),
     // trigger them now.
     if (!initial_data_read_done_) {
       ESP_LOGD(TAG,
@@ -1297,14 +1282,43 @@ void AlphaHwrComponent::read_pump_clock() {
   });
 }
 
-void AlphaHwrComponent::authenticate() {
+void AlphaHwrComponent::on_session_stabilized_() {
+  // The transport's write callback dereferences parent_ unchecked (see
+  // set_write_callback() in setup()), and telemetry_service_.start() opens the
+  // path to it. authenticate() carried this guard; it is kept for the same
+  // reason, not because this callback is otherwise reachable without a client.
   if (!parent_) {
     ESP_LOGW(TAG, "Parent BLE client not available");
     return;
   }
 
-  session_.on_authenticating();
-  auth_.start();
+  session_.on_ready();
+  ESP_LOGI(TAG, "Pump stabilized - session ready");
+
+  // Release an auth-failure hold on the fault string. Nothing else releases it
+  // once the pump has stopped producing successful AUTH_CMPL events, and the
+  // string is displayed only while the session is not ready -- so a hold that
+  // outlives READY cannot report the pairing failure any more, it can only mask
+  // the next outage's cause with it (failure_hold.h). This is BLE pairing, not
+  // the removed GENI sequence. Unlike the link-status counters below, it is
+  // safe on a deaf link: if the link is deaf, the watchdog writes the true
+  // reason 60 s later, which is the point.
+  ble_manager_.on_session_ready();
+
+  telemetry_service_.start();
+
+  // Pump Link Status: deliberately does NOT mark this a working link. Reaching
+  // READY now proves strictly less than it used to -- not one frame has been
+  // exchanged, where before at least a chain of timers had run. Clearing
+  // link_consecutive_failures_ here would reset the count on every watchdog
+  // recycle, so a permanently deaf pump could never accumulate the LINK_FAIL_K
+  // failures that surface the "Reconnecting" rung -- it would flip between
+  // Connected and Connecting forever. The reset lives on the notification path
+  // instead, where inbound data actually proves the link works.
+  evaluate_link_status();
+
+  // Trigger the one-time data read chain
+  trigger_initial_data_reads();
 }
 
 void AlphaHwrComponent::gap_event_handler(esp_gap_ble_cb_event_t event,

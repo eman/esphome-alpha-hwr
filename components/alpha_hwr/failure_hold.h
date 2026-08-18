@@ -141,9 +141,10 @@ inline bool failure_hold_released_by_auth(FailureHold h) {
 /// True when the GENI session reaching READY releases this hold.
 ///
 /// Only AUTH, and only as its backstop -- see the note above. READY is a weak
-/// signal on purpose: the component's own auth-completion path records that
-/// reaching it proves a chain of timers ran and happens on a deaf link just
-/// the same. That is exactly why it must NOT release DATA or SUBSCRIBE, whose
+/// signal on purpose: the component's own on_session_stabilized_() records that
+/// reaching it proves only that a timer fired, and happens on a deaf link just
+/// the same. (AUTH here is BLE pairing, not the GENI opening sequence removed
+/// in issue #174.) That is exactly why it must NOT release DATA or SUBSCRIBE, whose
 /// whole claim is that no data arrived: a deaf link reaches READY on every
 /// cycle and would clear the watchdog's reason each time. For AUTH the
 /// weakness does not matter -- if the link is in fact deaf, the watchdog

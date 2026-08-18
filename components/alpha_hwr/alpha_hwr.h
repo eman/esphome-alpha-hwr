@@ -15,7 +15,6 @@
 #include "esphome/components/time/real_time_clock.h"
 #endif
 #include "api_bridge.h"
-#include "auth.h"
 #include "ble_connection_manager.h"
 #include "codec.h"
 #include "control_service.h"
@@ -99,8 +98,7 @@ class AlphaHwrComponent : public PollingComponent,
                           public esp32_ble_tracker::ESPBTDeviceListener {
 public:
   explicit AlphaHwrComponent(ble_client::BLEClient *parent)
-      : PollingComponent(10000), auth_(transport_),
-        telemetry_service_(transport_), control_service_(transport_, session_),
+      : PollingComponent(10000), telemetry_service_(transport_), control_service_(transport_, session_),
         schedule_service_(transport_, session_),
         device_info_service_(transport_), time_service_(&transport_),
         event_log_service_(transport_, session_),
@@ -425,7 +423,23 @@ private:
   uint32_t control_state_poll_interval_ms_{30000};  // Control state poll interval (ms); default 30s (fixes #54)
   uint32_t last_control_state_poll_time_{0};        // Timestamp of last control state poll
 
-  void authenticate();
+  // How long after notifications are enabled the session waits before it is
+  // declared ready. Nothing is sent during this window -- see the arming site
+  // in setup() for what it separates and why it is not simply removed.
+  static constexpr uint32_t SESSION_STABILIZE_MS = 2000;
+
+  // The name of that timer. A named constant because the arm and the cancel are
+  // ~80 lines apart and a typo in either is silent: an uncancelled timer
+  // declares the NEXT connection ready before it has stabilized, which is
+  // issue #15 in a new costume.
+  static constexpr const char *SESSION_READY_TIMER = "hwr_session_ready";
+
+  // Runs once per connection, SESSION_STABILIZE_MS after notifications are
+  // enabled: declares the session ready and starts everything downstream of
+  // that. Replaces authenticate() plus Authentication's completion callback,
+  // which between them did exactly this and sent four GENIbus reads whose
+  // replies this component discarded (issue #174).
+  void on_session_stabilized_();
   void trigger_initial_data_reads();
 
   // BLE connection manager (handles all BLE operations)
@@ -436,9 +450,6 @@ private:
 
   // Session state management (handles connection state machine)
   core::Session session_;
-
-  // Authentication module (handles 3-stage handshake)
-  core::Authentication auth_;
 
   // Telemetry service (handles all telemetry operations)
   services::TelemetryService telemetry_service_;
@@ -575,9 +586,10 @@ private:
   time::RealTimeClock *time_id_{nullptr};
 #endif
 
-  // Tracks whether the post-auth data read chain has been triggered.
+  // Tracks whether the post-ready data read chain has been triggered.
   // Ensures device info, event log, history, etc. are read even when
-  // the BLE connection persists through an ESP32 restart (no re-auth).
+  // the BLE connection persists through an ESP32 restart (the session was
+  // already ready, so on_session_stabilized_() never ran).
   bool initial_data_read_done_{false};
 
   // millis() when the current initial-read attempt was triggered. The chain is
@@ -622,7 +634,7 @@ private:
   // Generation counter for the initial-read chain timers. Bumped on
   // disconnect so pending set_timeout lambdas from a previous connection
   // self-invalidate instead of firing reads against the next connection
-  // (same pattern as auth_sequence_ / scheduler_sequence_). See issue #18.
+  // (same pattern as scheduler_sequence_). See issue #18.
   uint32_t read_chain_gen_{0};
 
   // Time synchronization tracking.
@@ -699,13 +711,13 @@ private:
 
   // Pump Link Status evaluator: coarse link-health enum from session/bond/timing,
   // published (plus the latched last-failure string) on change. Driven by the
-  // connection/disconnection/auth callbacks and a periodic check in loop().
+  // connection/disconnection/ready callbacks and a periodic check in loop().
   void evaluate_link_status();
 
   // Inbound-data watchdog (link_watchdog.h): recycles a link that is open and
   // apparently healthy but delivers no notifications. Timed from
   // connection-open and refreshed on every received notification, so it covers
-  // both a handshake that never produced data and a session that goes deaf.
+  // both a connection that never produced data and a session that goes deaf.
   void check_link_liveness_();
   uint32_t link_last_inbound_ms_{0};
 
@@ -713,10 +725,11 @@ private:
   // configured budget and never changes; this is the window currently in force.
   // It doubles on every recycle that produced no data and resets to the
   // configured value on a notification received while the session is READY (a
-  // deaf pump still answers the handshake, so resetting on those would mean the
+  // deaf pump still volunteers operation-status notifications of its own
+  // accord, so resetting on those would mean the
   // backoff never engages), so a link that can recover is unaffected while a
   // permanently deaf one stops being recycled ~1,300 times a day. Not reset at
-  // connection-open: a widened window governs the next connection's handshake
+  // connection-open: a widened window governs the next connection's opening
   // too. Initialised from the configured value in setup().
   uint32_t link_data_timeout_current_ms_{60000};
 
@@ -1434,10 +1447,12 @@ public:
    * Reads device identification strings (serial, versions, product name) from
    * the pump and publishes them to configured text sensors.
    *
-   * This is typically called once after authentication to populate device info.
+   * This is typically called once from the initial read chain to populate
+   * device info.
    *
    * Usage:
-   *   Called automatically in authenticate() after successful authentication
+   *   Called automatically from trigger_initial_data_reads(), which
+   *   on_session_stabilized_() starts
    */
   void read_device_info();
 

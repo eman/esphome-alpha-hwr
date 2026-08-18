@@ -78,7 +78,7 @@ struct Rig {
   ControlService control;
   Rig() : control(transport, session) {
     transport.set_write_callback([](const uint8_t *, size_t) { return true; });
-    session.on_authenticated();
+    session.on_ready();
   }
 };
 

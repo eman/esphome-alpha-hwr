@@ -5,19 +5,20 @@
 
 // Inbound-data watchdog for the GENI link.
 //
-// The session FSM tracks the *handshake*, not whether the pump is answering.
-// READY is still reached whether or not the pump replies -- but the reason is
-// no longer that nothing looks.
+// The session FSM tracks a timer, not whether the pump is answering. READY is
+// announced a fixed SESSION_STABILIZE_MS after notifications are enabled, with
+// no frame having been exchanged in either direction -- so a deaf pump reaches
+// it exactly as a live one does, and this watchdog is the only thing that
+// notices.
 //
-// This used to read "a pure scheduler chain ... 1200 ms later (150 + 100 + 250
-// + 200 + 500) without ever inspecting a reply". That stopped being true when
-// issue #174 made the opening sequence reply-driven. Stages 1 and 3 now send
-// matched reads and advance when the transport either matches the reply or
-// gives up on it, and complete() reports how many of the five were answered.
-// What survives is the *policy*: an unanswered read advances the sequence
-// exactly as an answered one does, deliberately, because two logs from one
-// specimen justify waiting for a reply and not requiring one. So a deaf pump
-// still reaches READY, and this watchdog is still the thing that notices.
+// That statement got simpler rather than weaker. This file used to reason about
+// an opening sequence of four GENIbus reads: first that it "never inspected a
+// reply", then, after issue #174 made it reply-driven, that an unanswered read
+// advanced it just as an answered one did. The sequence has since been removed
+// outright -- the reads were never consumed, and a pump reached Pump Ready
+// without them across ten connection cycles including two bond-cleared
+// re-pairings. So there is no sequence left to be slow, to be answered, or to
+// hang. What is left before READY is a delay.
 //
 // Notification subscription has the same shape. Of the six terminal paths
 // through BLEConnectionManager::subscribe_to_notifications(), four return
@@ -39,17 +40,18 @@
 // that never completes. Nothing in the component recovers from this, because
 // recovery is driven by BLE disconnection callbacks and the BLE link is fine.
 //
-// The watchdog below is a liveness check rather than a handshake gate, which
+// The watchdog below is a liveness check rather than a readiness gate, which
 // is deliberate:
 //
-//   - It does not block READY. Gating READY on "a notification arrived during
-//     auth" appears to hold on this pump — control-mode notifications are
-//     received during the handshake, which is why alpha_hwr.cpp does not
-//     publish a default control mode at setup — but that rests on a single
-//     specimen, and no capture or fixture in this repo pins the timing, so it
-//     is an observation rather than a measured margin. A pump variant that
-//     stayed quiet until first polled would never become ready at all. Failing
-//     open and recycling a proven-dead link is the safer trade.
+//   - It does not block READY. Gating READY on "a notification arrived before
+//     the stabilize window elapsed" would now rest entirely on the pump
+//     volunteering one unprompted, since this component sends nothing in that
+//     window. This specimen does volunteer operation-status notifications,
+//     which is why alpha_hwr.cpp does not publish a default control mode at
+//     setup — but that is one specimen, and no capture or fixture in this repo
+//     pins the timing. A pump variant that stayed quiet until first polled
+//     would never become ready at all. Failing open and recycling a
+//     proven-dead link is the safer trade.
 //   - One timer covers every cause: the undetected CCCD failure, the four
 //     silent early returns, and a link that goes deaf mid-session. Whatever the
 //     reason, "connected and heard nothing" is the observable.
@@ -65,53 +67,31 @@
 // behaviour. In steady state the 60 s default therefore tolerates five missed
 // poll cycles and acts on the sixth.
 //
-// The worst case is the handshake, not steady state, because the window is
-// timed from connection-open and update() is a free-running poller the
-// handshake does not synchronise with. The fixed part is 500 ms post-connect +
+// The worst case is a connect, not steady state, because the window is timed
+// from connection-open and update() is a free-running poller that the connect
+// path does not synchronise with. The fixed part is 500 ms post-connect +
 // 3 x 1000 ms discovery retries + 2000 ms stabilize = 5.5 s, then up to 10 s to
 // the next poll and 500 ms to its schedule read = 10.5 s after READY.
 //
-// The opening sequence is what varies, and since issue #174 it varies with the
-// pump rather than with a constant:
+// Nothing sits between those two terms any more. The opening sequence used to,
+// and it is gone (issue #174): no reads to be answered slowly, no
+// REPLY_TIMEOUT_MS to multiply by four when they were not answered at all, and
+// no whole-sequence backstop ceiling.
 //
-//   answered      450 ms of stage-2 timers + 3 round trips (stage 1's one
-//                 identity read, stage 3's two).  On the bench specimen, whose
-//                 replies average ~175 ms, that calculates to ~0.98 s.
-//   unanswered    450 ms + 4 x REPLY_TIMEOUT_MS (1000 ms) = 4.45 s -- stage 1's
-//                 read plus its one retransmission, then stage 3's two. This is
-//                 the case the watchdog exists for, so it is the one that sizes
-//                 it.
-//   callback lost 450 ms + SEQUENCE_BACKSTOP_MS (15 s) = 15.45 s. Only reachable
-//                 if the transport drops a queued callback -- see auth.h -- and
-//                 quoted because it is the true ceiling, not because it is
-//                 expected.
+//   5.5 + 0 + 10.5 = 16.0 s worst case to first inbound data, against the 60 s
+//   default -- leaving 44 s of slack.
 //
-// So: 5.5 + 4.45 + 10.5 = 20.45 s worst case to first inbound data against the
-// 60 s default, leaving ~40 s of slack; and 5.5 + 15.45 + 10.5 = 31.5 s even
-// with the backstop firing, leaving ~28 s. Both fit, which is the property this
-// note exists to establish -- the previous arithmetic reached 17.2 s from an
-// auth chain that no longer takes 1200 ms.
-//
-// Both numbers moved with issue #210, which stopped stage 1 sending its
-// identity read three times unconditionally and made it one send plus one
-// retransmission if unanswered. The answered case lost two round trips; the
-// unanswered case lost one REPLY_TIMEOUT_MS, since two of the three sends went
-// away but one came back as the retry. The direction is toward more slack, so
-// nothing here needed re-deriving to stay safe -- but the figures are quoted
-// elsewhere, so they are corrected rather than left stale.
-//
-// Measured on hardware: 1.33 s on the bench specimen (2026-08-17), start of
-// handshake to completion, with all five reads answered. That measurement
-// predates issue #210 and is NOT re-measured: it is the five-read sequence, and
-// the answered case above is now three reads. Treat the 0.98 s as calculated
-// rather than observed until someone re-measures it.
+// There is no second, larger case. The branch that used to reach 31.5 s was the
+// sequence backstop firing, and the sequence is gone. Every figure this note
+// carried for the sequence itself -- 0.98 s calculated for an answered
+// handshake, 4.45 s unanswered, 15.45 s with the backstop, and the 1.33 s
+// measured on the bench specimen on 2026-08-17 -- described code that no longer
+// runs and has been removed rather than left to mislead.
 //
 // The open-to-READY figures previously recorded here -- 5.90/6.17/5.94 s across
-// three reconnects -- predate the change and are NOT re-measured. They remain
-// indicative rather than current: the fixed 5.5 s before the handshake is
-// unaffected, so the expected shift is roughly the difference between the old
-// 1.2 s constant and whatever the pump now takes to answer. Re-measure before
-// relying on them.
+// three reconnects -- predate the removal and are NOT re-measured. The expected
+// shift is the whole of the old sequence, roughly 1.0-1.3 s faster on a
+// responsive pump. Re-measure before relying on them.
 //
 // That margin cannot be eroded by configuration: the interval is fixed at
 // PollingComponent(10000) in the constructor, and `update_interval` is not in
@@ -126,7 +106,8 @@
 //     reach READY again. So the link status still reads "Connected" for most of
 //     the time, and both link text sensors flap once per cycle. The watchdog's
 //     purpose is to recover a link that CAN recover; it does not make a dead
-//     pump legible, and it is not a substitute for verifying the handshake.
+//     pump legible, and it is not a substitute for the component ever asking
+//     the pump a question and checking the answer.
 //   - Each recycle re-enters the encryption-on-open path on a bonded pump, so a
 //     deaf link now takes one more run at the post-boot window where an
 //     encryption request can fail with 0x61 and erase the bond (issue #14),
@@ -147,8 +128,8 @@ namespace alpha_hwr {
 ///
 /// @param connected       Session is in any non-IDLE, non-ERROR state
 ///                        (Session::is_connected()). The window is timed from
-///                        connection-open, not from READY, so the handshake
-///                        paths that never reach READY are covered too.
+///                        connection-open, not from READY, so a session that
+///                        never reaches READY is covered too.
 /// @param now_ms          Current millis().
 /// @param last_inbound_ms millis() at the last received notification, or at
 ///                        connection-open if none has arrived yet.
@@ -191,12 +172,12 @@ static const uint32_t LINK_DATA_TIMEOUT_BACKOFF_CAP_MS = 3600000u;
 /// caller resets to the configured value on a notification received while the
 /// session is READY, so a pump that comes back hours later is served by the
 /// configured budget again rather than by an hour-wide window. READY-gated
-/// rather than on any notification, because a deaf pump still answers the
-/// handshake: resetting on those frames would clear the window once per session
-/// forever and the backoff would never engage (see the reset site in
-/// alpha_hwr.cpp). The widened window therefore also governs the next
-/// connection's handshake, which is why a recycle is not the only way for the
-/// gap statistic to read above the configured budget.
+/// rather than on any notification, because a deaf pump still volunteers
+/// operation-status notifications of its own accord: resetting on those frames
+/// would clear the window once per session forever and the backoff would never
+/// engage (see the reset site in alpha_hwr.cpp). The widened window therefore
+/// also governs the next connection's opening, which is why a recycle is not
+/// the only way for the gap statistic to read above the configured budget.
 ///
 /// @param current_ms The window that just expired.
 /// @param cap_ms     Ceiling; the window never grows past this.
@@ -241,9 +222,15 @@ inline uint32_t link_data_timeout_next(uint32_t current_ms, uint32_t cap_ms) {
 ///                an all-zero histogram is indistinguishable from one that was
 ///                never wired up, and a nonzero 15 s counter is the cheapest
 ///                proof the whole path works.
-///   30 s, 45 s   Straddle the handshake worst cases: 21.5 s to first inbound
-///                data, 31.5 s with the sequence backstop firing. A default
-///                below these would recycle links that were merely connecting.
+///   30 s, 45 s   Margin above the connect worst case. That figure was 21.5 s,
+///                and 31.5 s with the opening sequence's backstop firing, when
+///                these rungs were chosen to straddle it; removing the sequence
+///                took it to 16.0 s (see the sizing note above), so both rungs
+///                now sit clear above it rather than either side. A default
+///                below these would still recycle links that were merely
+///                connecting. The rungs are left where they are: they are a
+///                deployed instrument, and moving them would discard the
+///                counts already gathered against them.
 ///   60 s         The value under test. Its counter is what says whether the
 ///                shipped default was ever close to firing.
 ///   90 s         Above the default deliberately. Without a rung up here the
@@ -321,15 +308,15 @@ static const uint32_t LINK_GAP_WATCH_PUBLISH_MS = 300000u;
 /// both of which the first cut of this got wrong:
 ///
 ///   - **The open-to-first-notification interval counts.** It is inside the
-///     window, and the sizing note above makes it the *binding* case: 17.2 s
+///     window, and the sizing note above makes it the *binding* case: 16.0 s
 ///     worst case against a 60 s budget, where steady state is bounded by our
-///     own 10 s poll. Excluding it as "the handshake, not the pump's cadence"
+///     own 10 s poll. Excluding it as "the connect, not the pump's cadence"
 ///     left the statistic structurally unable to report the case the default is
 ///     tightest against. Including it costs nothing visible in practice: the
 ///     interval is a few seconds (the 5.90/6.17/5.94 s measured above is open
-///     to READY, and this file records that control-mode notifications arrive
-///     *during* the handshake, so first-inbound is earlier than that: 4.9 s and
-///     5.2 s on two bench boots), while the running maximum reaches the 10 s
+///     to READY, and 4.9 s and 5.2 s to first inbound on two bench boots --
+///     both measured while the opening sequence still ran, so treat them as
+///     upper bounds now), while the running maximum reaches the 10 s
 ///     poll interval within the first poll cycle of the first connection and
 ///     stays there — 9.5/9.6 s measured, against a 60 s budget.
 ///   - **An interval that ends in a recycle counts too**, which is what

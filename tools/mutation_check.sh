@@ -49,17 +49,6 @@ JOBS="${JOBS:-4}"
 # The search string must appear exactly once; the script fails loudly if not,
 # so a refactor that moves the code is reported rather than silently skipped.
 #
-# Deliberately absent: a mutation on Authentication's `auth_sequence_++`.
-# BOTH start() and cancel() increment it, and either alone is enough to
-# invalidate a stale scheduler lambda -- so removing one is an equivalent
-# mutant that no test can kill, and adding it here would be an uncatchable
-# entry rather than a coverage gap. Removing *both* is catchable, and
-# test_stale_timers_cannot_re_enter_a_restarted_handshake() does catch it, but
-# no single search/replace spans two functions. Verified by experiment after
-# this check flagged the single-point version as surviving; the redundancy is
-# defence in depth and was left in production rather than trimmed to suit the
-# tooling.
-#
 # Also deliberately absent: deleting the `if (current_ms == 0) return 0;` guard
 # from link_data_timeout_next(). It is an equivalent mutant, verified by
 # experiment after this check flagged it as surviving: with current_ms == 0 the
@@ -449,16 +438,6 @@ MUTATIONS=(
 "motor-current-staleness-mask-removed|components/dhw_demand/dhw_demand_logic.h|  out.current_used =\n      reading_is_fresh(in.motor_current_last_update_ms, in.now_ms, in.motor_max_stale_ms)\n          ? in.motor_current\n          : NAN;|  out.current_used = in.motor_current;"
 "motor-speed-on-threshold|components/dhw_demand/dhw_demand_logic.h|    return motor_speed >= 10.0f;|    return motor_speed > 10.0f;"
 "motor-channel-precedence-swapped|components/dhw_demand/dhw_demand_logic.h|  if (!std::isnan(motor_speed))\n    return motor_speed >= 10.0f;\n  if (!std::isnan(motor_current))\n    return motor_current >= pump_off_current_threshold;|  if (!std::isnan(motor_current))\n    return motor_current >= pump_off_current_threshold;\n  if (!std::isnan(motor_speed))\n    return motor_speed >= 10.0f;"
-"auth-stage2-repeat-count|components/alpha_hwr/auth.cpp|  if (repeat_count < 5) {|  if (repeat_count < 4) {"
-# Stage 3 stopped being two blind sends when issue #174 made it two matched
-# reads, so this entry's old search string (two consecutive send_packet calls)
-# matched nothing. mutation_check.sh reports that loudly as "could not apply"
-# and exits 1 rather than scoring it Survived -- so a stale entry is a red
-# build, not a silent hole. Retargeted at the same property: EXT_1 first.
-# Killed by tests/test_auth.cpp as well as by the end-to-end wiring test, so it
-# is not new coverage -- the comment here previously credited it to the wiring
-# test alone, which overstated what that test added. Kept because it is a cheap
-# check that the two agree.
 # The upload codec must accept a window that crosses midnight. It rejected them
 # for a long time as an "inverted interval", which made the bulk path the only
 # one that could not express a window the single-entry service, schedule_entry.h
@@ -476,16 +455,30 @@ MUTATIONS=(
 # gate was only ever observed agreeing and could be reduced to `return true`
 # with the whole suite green.
 "ready-gate-ignores-caches|components/alpha_hwr/alpha_hwr.cpp|  return control_service_.is_cache_valid() && schedule_service_.is_overview_cache_valid();|  return true;"
-# Stage 1's retransmission (issue #210). The burst of three this replaced had
-# its retry condition inverted -- it advanced on every callback, so it repeated
-# the read when the FIRST one succeeded and gave up when all three failed. These
-# three pin the direction, the bound, and the fact that a retry happens at all;
-# a mutation that survives here would restore a shape that looks like a retry
-# and is not one.
-"auth-stage1-never-retransmits|components/alpha_hwr/auth.cpp|              if (!success) {|              if (false) {"
-"auth-stage1-retransmits-an-answered-read|components/alpha_hwr/auth.cpp|              if (!success) {|              if (success) {"
-"auth-stage1-retransmit-is-unbounded|components/alpha_hwr/auth.h|  static constexpr int STAGE1_MAX_ATTEMPTS = 2;|  static constexpr int STAGE1_MAX_ATTEMPTS = 9;"
-"auth-never-reports-completion|components/alpha_hwr/auth.cpp|  if (completion_callback_) {|  if (false) {"
+# The connect path replaced the opening sequence with a wait (issue #174). Both
+# halves of it have to be real: the wait must be waited out, and the timer that
+# ends it must not survive the connection it belongs to -- issue #15's defect in
+# a new costume. Nothing else pins either; the deleted auth entries pinned the
+# equivalents for a sequence that no longer exists.
+#
+# stabilize-window-is-not-waited-out is killed ONLY by the quiet-window
+# assertion in test_the_full_connection_reaches_pump_ready(). With the constant
+# at 0 the read chain starts immediately and the run still reaches Pump Ready,
+# so a suite checking only the end state would let it survive. That coupling is
+# deliberate: this mutation is what makes that assertion non-decorative.
+"stabilize-window-is-not-waited-out|components/alpha_hwr/alpha_hwr.h|  static constexpr uint32_t SESSION_STABILIZE_MS = 2000;|  static constexpr uint32_t SESSION_STABILIZE_MS = 0;"
+"stabilize-timer-outlives-a-disconnect|components/alpha_hwr/alpha_hwr.cpp|    this->cancel_timeout(SESSION_READY_TIMER);|    (void) 0;"
+# Reaching READY is now the only thing the connect path does, so everything
+# downstream hangs off one call site. Both were previously covered from the far
+# side, by auth-never-reports-completion.
+#
+# Note the anchors. A bare two-space "  telemetry_service_.start();" is a
+# SUBSTRING of the eight-space call in update(), and the applier replaces the
+# first occurrence in the file -- so it would mutate update() instead and report
+# green for a site nothing tested. That is not the loud exit-1 an unmatched
+# search gives. Re-verify both anchors after any reindent of alpha_hwr.cpp.
+"ready-never-starts-telemetry|components/alpha_hwr/alpha_hwr.cpp|  telemetry_service_.start();\n\n  // Pump Link Status|  // Pump Link Status"
+"ready-never-triggers-the-initial-reads|components/alpha_hwr/alpha_hwr.cpp|  trigger_initial_data_reads();\n}|  (void) 0;\n}"
 # The BLE lifecycle wiring, host-testable since issue #174's audit tail. Both
 # of these shipped untested: alpha_hwr.cpp and ble_connection_manager.cpp were
 # compiled only by `esphome compile`, so nothing could fail when they broke.
@@ -496,7 +489,7 @@ MUTATIONS=(
 # transitions that do exist, so the removal of the ones that did not stays
 # honest.
 "session-is-connected-always-true|components/alpha_hwr/session.cpp|bool Session::is_connected() const { return state_ != SessionState::IDLE; }|bool Session::is_connected() const { return true; }"
-"session-authenticated-does-not-reach-ready|components/alpha_hwr/session.cpp|  transition_to(SessionState::READY,|  transition_to(SessionState::AUTHENTICATING,"
+"session-ready-transition-does-not-reach-ready|components/alpha_hwr/session.cpp|  transition_to(SessionState::READY,|  transition_to(SessionState::STABILIZING,"
 "session-disconnect-does-not-reach-idle|components/alpha_hwr/session.cpp|  transition_to(SessionState::IDLE,|  transition_to(SessionState::READY,"
 # Both halves of the APDU length invariant (issue #174). Byte 1 declares the
 # payload byte count in bits 5-0, and two frames shipped declaring a count they
@@ -507,19 +500,6 @@ MUTATIONS=(
 # any test sends against its own declared length.
 "single-event-opspec-length|components/alpha_hwr/schedule_service.cpp|  // never a visible failure; see the header note.\n  apdu[1] = 0x93;|  // never a visible failure; see the header note.\n  apdu[1] = 0xB3;"
 "class10-setpoint-opspec-length|components/alpha_hwr/control_service.cpp|  apdu[1] = 0x88;  // OpSpec: SET + 8 payload bytes (2 sub + 2 obj + 4 float)|  apdu[1] = 0x84;"
-# The backstop must actually complete a stalled sequence. Stages 1 and 3 are
-# continued only by the transport's command callback, and Transport::reset()
-# drops it without invoking it -- so an inert backstop restores a node that sits
-# in AUTHENTICATING forever, connected and never ready. Nothing tested it until
-# tests/test_auth.cpp began resetting the transport with a read pending.
-"auth-backstop-is-inert|components/alpha_hwr/auth.cpp|      if (!this->running_) return;              // Finished normally; nothing to do.|      if (true) return;"
-# Stage 2 must stay a blind send. Matching its Class 10 reply consumes the
-# frame, and that frame is the operation-status notification TelemetryService
-# publishes control mode, operation mode and setpoint from on every connect --
-# so this mutation silently stops that publish. It survived the whole suite
-# until tests/test_auth.cpp began counting frames reaching the packet callback.
-"auth-stage2-must-stay-blind|components/alpha_hwr/auth.cpp|    send_packet(AUTH_CLASS10, sizeof(AUTH_CLASS10));|    send_read(AUTH_CLASS10, sizeof(AUTH_CLASS10), [](bool, const uint8_t *, size_t) {});"
-"auth-extension-packet-order|components/alpha_hwr/auth.cpp|  send_read(AUTH_EXT_1, sizeof(AUTH_EXT_1), [this](bool, const uint8_t *, size_t) {|  send_read(AUTH_EXT_2, sizeof(AUTH_EXT_2), [this](bool, const uint8_t *, size_t) {"
 "sensor-pub-media-temp-range-removed|components/alpha_hwr/sensor_publisher.cpp|    if (temp.media_temperature_c >= -20 && temp.media_temperature_c <= 100) {|    if (true) {"
 "sensor-pub-alarm-dedup-removed|components/alpha_hwr/sensor_publisher.cpp|  if (alarms_sensor_->has_state() && alarms_sensor_->state == codes_str) {|  if (false) {"
 "sensor-pub-head-rate-gap-reset-removed|components/alpha_hwr/sensor_publisher.cpp|      if (dt_s > 30.0f) {|      if (false) {"
@@ -872,7 +852,7 @@ PY
   # outcome, so entries have to produce code that compiles and is wrong.
 
   # Only the targets that actually compile this file. A mutation to
-  # dhw_demand_logic.h cannot change what test_auth decides, and rebuilding it
+  # dhw_demand_logic.h cannot change what test_session decides, and rebuilding it
   # 54 times was most of this check's wall-clock. See tools/mutation_targets.py
   # for why the map comes from the compiler rather than the Makefile, and for
   # why mis-selection can only cause a false SURVIVED, never a false caught.

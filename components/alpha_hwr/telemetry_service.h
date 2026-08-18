@@ -70,7 +70,7 @@ class TelemetryService {
   /**
    * Start telemetry service.
    * 
-   * Call this when the pump is authenticated and ready for telemetry.
+   * Call this when the session is ready for telemetry.
    */
   void start();
 

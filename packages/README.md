@@ -213,7 +213,7 @@ See the root directory for complete example configurations:
 
 These packages follow the **principle of least surprise**:
 
-- `alpha_hwr_base.yaml` - Works out of the box, no authentication required
+- `alpha_hwr_base.yaml` - Works out of the box, no BLE pairing required
 - `alpha_hwr_pairing.yaml` - Automatic pairing, no user intervention needed
 
 Both packages are designed to be **drop-in replacements** for manually configuring the component, reducing boilerplate and ensuring consistency across deployments.

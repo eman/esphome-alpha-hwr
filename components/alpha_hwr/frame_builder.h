@@ -93,6 +93,20 @@ void build_class10_read(uint32_t register_addr, uint8_t *packet_out, uint8_t sou
  * "Bits 6-0 = length" was the wording here, and the code has always disagreed
  * with it -- build_data_object_set() masks 0x3F, six bits, and ORs in 0x80,
  * leaving bit 6 clear. Six bits is also what the caps in the .cpp assume.
+ *
+ * **The width of the operation field is not settled, and the tree holds both
+ * readings.** This paragraph moved here from auth.h when the opening sequence
+ * was removed; it is the one part of that file's decode that is still live.
+ * Every length this component sends bar one is under 32, so a three-bit
+ * operation with a five-bit length reads them identically -- and the rival
+ * reading is in the tree, at schedule_service.h, which labels 0x93 "OpSpec 4"
+ * and 0xB3 "OpSpec 5". The two readings diverge on exactly two frames, in
+ * opposite directions: the 53-byte layer write (51 body bytes) is right under
+ * the two-bit reading and wrong under the three-bit one, and the 21-byte
+ * single-event write (19 body bytes) is the reverse. Both send 0xB3. So one of
+ * those two frames is malformed and the tree cannot say which. Nothing here
+ * leans on the answer; it is recorded so the next person does not rediscover
+ * the conflict from scratch (issue #174).
  * 
  * Reference: alpha_hwr/protocol/frame_builder.py::build_data_object_set()
  */

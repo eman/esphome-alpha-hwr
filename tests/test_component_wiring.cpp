@@ -212,13 +212,17 @@ struct Rig {
   bool ready_is_on() const { return ready.state; }
 };
 
-/// The pump's answer to each request the opening sequence and the initial read
-/// chain send. Frames carry real CRCs, stamped with the production routine via
-/// with_crc(), so the transport's own checking is exercised rather than
-/// bypassed.
+/// The pump's answer to each request the initial read chain sends. Frames carry
+/// real CRCs, stamped with the production routine via with_crc(), so the
+/// transport's own checking is exercised rather than bypassed.
 ///
-/// Shapes are the ones captured from hardware and recorded in auth.h and
-/// transport.cpp; only the CRC is recomputed here.
+/// Shapes are the ones captured from hardware and recorded in transport.cpp;
+/// only the CRC is recomputed here.
+///
+/// There are no Class 2, Class 5 or Class 11 branches, and their absence is
+/// load-bearing rather than an oversight: those three classes were unique to
+/// the opening sequence removed in issue #174, so a rig that still answered
+/// them would look like it expected requests nothing sends any more.
 /// Wrap a DataObject body in the response envelope the transport expects:
 /// type identifiers at bytes 8-9, a 3-byte size header, then the body.
 static std::vector<uint8_t> data_object_frame(uint8_t type_hi, uint8_t type_lo,
@@ -242,13 +246,7 @@ void Rig::answer_outstanding_writes() {
     const uint8_t cls = req[4];
     const uint8_t opspec = req[5];
 
-    if (cls == 0x02) {  // identity read
-      notify(with_crc({0x24, 0x07, 0xF8, 0xE7, 0x02, 0x03, 0x34, 0x07, 0x02, 0x00, 0x00}));
-    } else if (cls == 0x05) {  // Class 5 INFO
-      notify(with_crc({0x24, 0x05, 0xF8, 0xE7, 0x05, 0x01, 0xA1, 0x00, 0x00}));
-    } else if (cls == 0x0B) {  // Class 11 INFO
-      notify(with_crc({0x24, 0x05, 0xF8, 0xE7, 0x0B, 0x01, 0x80, 0x00, 0x00}));
-    } else if (cls == 0x0A && opspec == 0x03 && req.size() >= 9) {
+    if (cls == 0x0A && opspec == 0x03 && req.size() >= 9) {
       const uint8_t obj = req[6];
       const uint16_t sub = static_cast<uint16_t>((req[7] << 8) | req[8]);
       if (obj == 0x56) {
@@ -498,11 +496,11 @@ void test_the_component_registers_with_the_ble_client() {
 }
 
 // ── The whole chain, end to end ─────────────────────────────────────────────
-// This is what the previous round could not reach: a GATT link brought up
-// event by event, the opening read sequence answered frame by frame, and the
-// initial read chain driven to the point where `Pump Ready` turns on. Nothing
-// is called on the component's behalf -- every step goes in through a real
-// handler, and every reply is a CRC-valid frame through the real transport.
+// This is what the earlier rounds could not reach: a GATT link brought up event
+// by event and the initial read chain driven to the point where `Pump Ready`
+// turns on. Nothing is called on the component's behalf -- every step goes in
+// through a real handler, and every reply is a CRC-valid frame through the real
+// transport.
 void test_the_full_connection_reaches_pump_ready() {
   std::cout << "\n=== The full chain reaches Pump Ready ===" << std::endl;
 
@@ -511,39 +509,152 @@ void test_the_full_connection_reaches_pump_ready() {
   r.connect_and_subscribe();
   TEST_ASSERT(!r.ready_is_on(), "Subscribed, but not ready -- nothing has been read yet");
 
+  // The stabilize window is quiet. This is half of what replaced the opening
+  // sequence: between the CCCD write and the session being declared ready,
+  // nothing goes on the wire at all. (`writes` records characteristic writes,
+  // so the CCCD descriptor write is not among them.)
+  //
+  // This assertion is what kills the stabilize-window-is-not-waited-out
+  // mutation. With SESSION_STABILIZE_MS at 0 the read chain starts immediately
+  // and the run still reaches Pump Ready, so the end-state assertion below
+  // would pass on its own.
+  TEST_ASSERT(esp_gattc_mock().writes.empty(),
+              "Subscribed, and nothing has been written -- the stabilize window "
+              "sends no frames");
+
   const bool became_ready = r.run_until_ready();
 
-  // The opening sequence waits 2 s after subscribe, then runs; the initial read
-  // chain follows it on its own timers. Drive well past both.
-
-  // Assert the opening sequence by CONTENT, not by count. `>= 10` was
-  // vacuous: the run makes ~53 writes in total, so the initial read chain
-  // satisfies the count on its own and stage 1 and stage 2 could both be
-  // deleted with this still passing.
+  // Assert the opening sequence by CONTENT, not by count. `>= 10` was vacuous:
+  // the run makes tens of writes in total, so the initial read chain satisfied
+  // any count assertion on its own.
   //
-  // The window is the sequence's own length -- eight writes since issue #210
-  // made stage 1 one identity read plus a retransmission only if unanswered,
-  // and this pump answers. Looking further would start counting the initial
-  // read chain's writes as though they belonged to the handshake.
+  // What is pinned now is an ABSENCE, and it is checkable because those three
+  // classes were unique to the removed sequence -- nothing else in this
+  // component ever queues a Class 2, Class 5 or Class 11 command. So the scan
+  // covers the WHOLE run rather than a window: a version that merely relocated
+  // the packets later would pass a windowed check and fails this one.
   const auto &w = esp_gattc_mock().writes;
-  int class2 = 0, class10_obj86 = 0, class5 = 0, class11 = 0;
-  for (size_t i = 0; i < w.size() && i < 8; i++) {
-    if (w[i].size() < 9) continue;
-    if (w[i][4] == 0x02) class2++;
-    else if (w[i][4] == 0x0A && w[i][6] == 0x56) class10_obj86++;
-    else if (w[i][4] == 0x05) class5++;
-    else if (w[i][4] == 0x0B) class11++;
+  int class2 = 0, class5 = 0, class11 = 0;
+  for (const auto &req : w) {
+    if (req.size() < 6) continue;
+    if (req[4] == 0x02) class2++;
+    else if (req[4] == 0x05) class5++;
+    else if (req[4] == 0x0B) class11++;
   }
-  TEST_ASSERT(class2 == 1,
-              "The opening sequence's first write is the Class 2 identity read, "
-              "sent once because this pump answers it");
-  TEST_ASSERT(class10_obj86 == 5,
-              "...followed by five Class 10 operation-status reads");
-  TEST_ASSERT(class5 == 1 && class11 == 1,
-              "...then one Class 5 and one Class 11 INFO query, in that order");
+  TEST_ASSERT(class2 == 0 && class5 == 0 && class11 == 0,
+              "No Class 2 identity read and no Class 5 or Class 11 INFO query is "
+              "sent, anywhere in the connection");
   TEST_ASSERT(became_ready,
-              "Pump Ready turns on once the session is authenticated and both "
-              "caches are populated");
+              "Pump Ready turns on once the session is ready and both caches "
+              "are populated");
+
+  // Telemetry polling actually started. Pump Ready does NOT depend on it --
+  // the control cache is filled by the read chain and the schedule cache by
+  // the overview read -- so a build where telemetry_service_.start() is never
+  // called reaches Pump Ready with every live sensor frozen at nothing, and
+  // every assertion above still passes. That is what the
+  // ready-never-starts-telemetry mutation showed, and this is what kills it.
+  //
+  // Motor state (0x570045) is the first register of the poll set and is read
+  // from nowhere else.
+  int motor_state_polls = 0;
+  int device_info_reads = 0;
+  for (const auto &req : w) {
+    if (req.size() >= 9 && req[4] == 0x0A && req[5] == 0x03 &&
+        req[6] == 0x57 && req[7] == 0x00 && req[8] == 0x45) {
+      motor_state_polls++;
+    }
+    if (req.size() >= 7 && req[4] == 0x07 && req[6] == 0x01) device_info_reads++;
+  }
+  TEST_ASSERT(motor_state_polls > 0,
+              "Telemetry polling ran -- the session being ready starts it, and "
+              "nothing else does once the read chain has latched");
+  TEST_ASSERT(device_info_reads == 1,
+              "...and the initial read chain ran exactly once");
+}
+
+// ── The read chain starts on the ready path, not on the next poll ───────────
+// update() re-arms the chain when initial_data_read_done_ is still false, so a
+// build where on_session_stabilized_() never triggers it still gets there --
+// just up to a whole 10 s poll interval later. That fallback exists for a
+// connection that persists through an ESP32 restart, not as the normal path,
+// and the difference is invisible to any assertion that only waits for Pump
+// Ready. Pinning the timing is what makes ready-never-triggers-the-initial-reads
+// a catchable mutation rather than an equivalent one.
+void test_the_read_chain_starts_without_waiting_for_a_poll() {
+  std::cout << "\n=== The read chain does not wait for the next poll ===" << std::endl;
+
+  Rig r;
+  r.setup();
+  r.connect_and_subscribe();
+
+  // 2 s stabilize + 1 s to the device-info leg = ~3 s. Stop short of the 10 s
+  // poll interval, which is the fallback this is distinguishing from.
+  r.advance(6000, 60);
+
+  int device_info_reads = 0;
+  for (const auto &req : esp_gattc_mock().writes) {
+    if (req.size() >= 7 && req[4] == 0x07 && req[6] == 0x01) device_info_reads++;
+  }
+  TEST_ASSERT(device_info_reads == 1,
+              "The Class 7 device-info read is sent ~3 s after subscribe, off "
+              "the ready path -- not up to 10 s later off the next update()");
+}
+
+// ── The stabilize timer belongs to its own connection ───────────────────────
+// The opening sequence used to be guarded by Authentication's sequence number,
+// and tests/test_auth.cpp pinned that. Removing the sequence (issue #174) left
+// exactly one thing that can fire into a connection it does not belong to: the
+// timer that declares the session ready. If a disconnect inside that window
+// does not cancel it, it declares the NEXT connection ready before it has
+// stabilized, which is issue #15 in a new costume and silent when it happens.
+void test_a_disconnect_inside_the_stabilize_window_cancels_it() {
+  std::cout << "\n=== A disconnect inside the stabilize window cancels it ===" << std::endl;
+
+  Rig r;
+  r.setup();
+  r.connect_and_subscribe();
+  r.advance(1000, 10);  // inside the window
+  TEST_ASSERT(esp_gattc_mock().writes.empty(),
+              "Still inside the stabilize window, so nothing has been sent");
+
+  r.disconnect(ESP_GATT_CONN_TIMEOUT);
+  r.advance(30000, 60);  // well past when the timer would have been due
+
+  TEST_ASSERT(esp_gattc_mock().writes.empty(),
+              "The cancelled timer never declares the session ready, so the read "
+              "chain never runs against a link that is gone");
+  TEST_ASSERT(!r.ready_is_on(), "...and Pump Ready stays off");
+}
+
+// ── A reconnect runs the chain once, not twice ──────────────────────────────
+// Same hazard from the other side: a stale timer surviving into the next
+// connection would interleave a second read chain with the real one.
+void test_a_reconnect_reaches_ready_exactly_once() {
+  std::cout << "\n=== A reconnect reaches ready exactly once ===" << std::endl;
+
+  Rig r;
+  r.setup();
+  r.connect_and_subscribe();
+  r.advance(1000, 10);          // drop inside the stabilize window
+  r.disconnect(ESP_GATT_CONN_TIMEOUT);
+  r.advance(5000, 20);
+
+  esp_gattc_mock().writes.clear();
+  r.answered_writes = 0;
+  r.connect_and_subscribe();
+  const bool became_ready = r.run_until_ready();
+  TEST_ASSERT(became_ready, "The reconnect reaches Pump Ready");
+
+  // The Class 7 product-name read is sent once per read chain, so counting it
+  // counts chains. Two would mean the dropped connection's timer survived.
+  int product_name_reads = 0;
+  for (const auto &req : esp_gattc_mock().writes) {
+    if (req.size() >= 7 && req[4] == 0x07 && req[6] == 0x01) product_name_reads++;
+  }
+  TEST_ASSERT(product_name_reads == 1,
+              "The initial read chain runs once on the reconnect, not twice "
+              "interleaved with a chain the dropped connection left behind");
 }
 
 // ── One cache is not enough ─────────────────────────────────────────────────
@@ -726,6 +837,9 @@ int main() {
   test_a_strangers_auth_failure_does_not_latch_a_fault();
   test_the_component_registers_with_the_ble_client();
   test_the_full_connection_reaches_pump_ready();
+  test_the_read_chain_starts_without_waiting_for_a_poll();
+  test_a_disconnect_inside_the_stabilize_window_cancels_it();
+  test_a_reconnect_reaches_ready_exactly_once();
   test_one_cache_is_not_enough_for_ready();
   test_ready_clears_on_disconnect();
   test_link_gap_baseline_is_published_once_at_zero();

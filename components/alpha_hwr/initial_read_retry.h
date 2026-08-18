@@ -11,9 +11,9 @@ namespace core {
  *
  * trigger_initial_data_reads() latches initial_data_read_done_. Until this
  * predicate existed, a BLE disconnect was the only thing that cleared it: fine
- * when the chain runs after a fresh handshake, but the chain also runs from
- * update() when the link persists through an ESP32 restart and there is no
- * re-auth, and on that path it can fire before the pump is answering. The reads
+ * when the chain runs after a fresh connection, but the chain also runs from
+ * update() when the link persists through an ESP32 restart, so the session was
+ * already ready, and on that path it can fire before the pump is answering. The reads
  * failed, the latch stayed set, and nothing retried -- so the device stayed
  * half-initialised for as long as the link stayed up. Telemetry keeps streaming
  * throughout, so it looks alive, but device info and the operating statistics
