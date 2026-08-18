@@ -547,6 +547,58 @@ void test_the_full_connection_reaches_pump_ready() {
   TEST_ASSERT(became_ready,
               "Pump Ready turns on once the session is ready and both caches "
               "are populated");
+
+  // Telemetry polling actually started. Pump Ready does NOT depend on it --
+  // the control cache is filled by the read chain and the schedule cache by
+  // the overview read -- so a build where telemetry_service_.start() is never
+  // called reaches Pump Ready with every live sensor frozen at nothing, and
+  // every assertion above still passes. That is what the
+  // ready-never-starts-telemetry mutation showed, and this is what kills it.
+  //
+  // Motor state (0x570045) is the first register of the poll set and is read
+  // from nowhere else.
+  int motor_state_polls = 0;
+  int device_info_reads = 0;
+  for (const auto &req : w) {
+    if (req.size() >= 9 && req[4] == 0x0A && req[5] == 0x03 &&
+        req[6] == 0x57 && req[7] == 0x00 && req[8] == 0x45) {
+      motor_state_polls++;
+    }
+    if (req.size() >= 7 && req[4] == 0x07 && req[6] == 0x01) device_info_reads++;
+  }
+  TEST_ASSERT(motor_state_polls > 0,
+              "Telemetry polling ran -- the session being ready starts it, and "
+              "nothing else does once the read chain has latched");
+  TEST_ASSERT(device_info_reads == 1,
+              "...and the initial read chain ran exactly once");
+}
+
+// ── The read chain starts on the ready path, not on the next poll ───────────
+// update() re-arms the chain when initial_data_read_done_ is still false, so a
+// build where on_session_stabilized_() never triggers it still gets there --
+// just up to a whole 10 s poll interval later. That fallback exists for a
+// connection that persists through an ESP32 restart, not as the normal path,
+// and the difference is invisible to any assertion that only waits for Pump
+// Ready. Pinning the timing is what makes ready-never-triggers-the-initial-reads
+// a catchable mutation rather than an equivalent one.
+void test_the_read_chain_starts_without_waiting_for_a_poll() {
+  std::cout << "\n=== The read chain does not wait for the next poll ===" << std::endl;
+
+  Rig r;
+  r.setup();
+  r.connect_and_subscribe();
+
+  // 2 s stabilize + 1 s to the device-info leg = ~3 s. Stop short of the 10 s
+  // poll interval, which is the fallback this is distinguishing from.
+  r.advance(6000, 60);
+
+  int device_info_reads = 0;
+  for (const auto &req : esp_gattc_mock().writes) {
+    if (req.size() >= 7 && req[4] == 0x07 && req[6] == 0x01) device_info_reads++;
+  }
+  TEST_ASSERT(device_info_reads == 1,
+              "The Class 7 device-info read is sent ~3 s after subscribe, off "
+              "the ready path -- not up to 10 s later off the next update()");
 }
 
 // ── The stabilize timer belongs to its own connection ───────────────────────
@@ -785,6 +837,7 @@ int main() {
   test_a_strangers_auth_failure_does_not_latch_a_fault();
   test_the_component_registers_with_the_ble_client();
   test_the_full_connection_reaches_pump_ready();
+  test_the_read_chain_starts_without_waiting_for_a_poll();
   test_a_disconnect_inside_the_stabilize_window_cancels_it();
   test_a_reconnect_reaches_ready_exactly_once();
   test_one_cache_is_not_enough_for_ready();
