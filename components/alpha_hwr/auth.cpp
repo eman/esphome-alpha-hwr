@@ -47,7 +47,7 @@ void Authentication::start() {
   }
 
   // Start Stage 1 immediately
-  stage1_legacy_burst(0);
+  stage1_legacy_read(0);
 }
 
 void Authentication::cancel() {
@@ -102,28 +102,61 @@ bool Authentication::send_read(
   return true;
 }
 
-void Authentication::stage1_legacy_burst(int repeat_count) {
+void Authentication::stage1_legacy_read(int attempt) {
   if (!running_) return;
-  
-  if (repeat_count < 3) {
-    // The Class 2 identity read. Paced by the pump's answer rather than by a
-    // 50 ms timer: the next one goes out when this one is answered, so a slower
-    // pump stretches the sequence instead of being talked over, and a faster
-    // one is not waited on. The repeats are kept -- nothing establishes that
-    // this pump needs three identical reads, and nothing establishes that no
-    // pump does (issue #174).
-    ESP_LOGD(TAG, "Stage 1: Sending legacy magic packet %d/3", repeat_count + 1);
-    send_read(AUTH_LEGACY, sizeof(AUTH_LEGACY),
-              [this, repeat_count](bool, const uint8_t *, size_t) {
-                this->stage1_legacy_burst(repeat_count + 1);
-              });
-  } else {
-    // Stage 1 complete. The 100 ms that used to separate the stages is gone
-    // with them: it existed to let stage 1 land, and a matched reply is a
-    // stronger statement that it landed than any delay is.
+
+  // The Class 2 identity read, sent once and retried only if it goes
+  // unanswered (issue #210).
+  //
+  // It used to be sent three times unconditionally. That was a hedge against
+  // delivery uncertainty, from connection.md: "The client should send these
+  // packets in bursts to ensure the device receives them despite any radio
+  // interference or sleep states." Sound, while a dropped packet was invisible.
+  //
+  // Issue #204 made it visible -- an unanswered read now arrives here as
+  // success == false -- and the hedge stopped fitting the moment it did. Worse,
+  // it had inverted: three unconditional sends retry when the FIRST one
+  // succeeded and give up when all three failed, which is the opposite of what
+  // a retry is for. Reading unit_family three times returns unit_family three
+  // times; nothing suggests the count matters once delivery is known, and a
+  // cumulative side effect would sit oddly in a protocol specified this
+  // carefully.
+  //
+  // One retransmission, matching what the reference stack does. Section 2.6 of
+  // the GENIbus documentation on a Data Reply that does not arrive within the
+  // Reply Timeout: "GENIpro automatically tries one retransmission when this
+  // happens."
+  //
+  // A retry that also goes unanswered still advances. That is the standing
+  // policy -- an unanswered read advances exactly as an answered one does,
+  // because two logs from one specimen justify waiting for a reply and not
+  // requiring one -- and whether a *refused* read should be treated differently
+  // is issue #225, not this one.
+  if (attempt >= STAGE1_MAX_ATTEMPTS) {
+    ESP_LOGW(TAG, "Stage 1: no answer after %d attempts, advancing anyway",
+             STAGE1_MAX_ATTEMPTS);
     ESP_LOGD(TAG, "Stage 1 complete, starting Stage 2");
     stage2_class10_burst(0);
+    return;
   }
+
+  ESP_LOGD(TAG, "Stage 1: Sending legacy magic packet, attempt %d/%d",
+           attempt + 1, STAGE1_MAX_ATTEMPTS);
+  send_read(AUTH_LEGACY, sizeof(AUTH_LEGACY),
+            [this, attempt](bool success, const uint8_t *, size_t) {
+              if (!success) {
+                // Unanswered. Retransmit rather than advance, which is the one
+                // thing the old burst could not do: it advanced on every
+                // callback regardless of what the callback said.
+                this->stage1_legacy_read(attempt + 1);
+                return;
+              }
+              // Answered. The 100 ms that used to separate the stages is gone
+              // with it: it existed to let stage 1 land, and a matched reply is
+              // a stronger statement that it landed than any delay is.
+              ESP_LOGD(TAG, "Stage 1 complete, starting Stage 2");
+              this->stage2_class10_burst(0);
+            });
 }
 
 void Authentication::stage2_class10_burst(int repeat_count) {
@@ -203,17 +236,24 @@ void Authentication::complete() {
   // pump that answered nothing produced the same single line -- which is why
   // ten unanswered packets could have gone unnoticed indefinitely.
   //
-  // Counted over the five matched reads only; stage 2's five are still sent
-  // blind, so nothing here knows whether they were answered.
+  // Counted over the matched reads only -- three when stage 1 is answered
+  // first time, four when it needs its retransmission (issue #210). Stage 2's
+  // five are still sent blind, so nothing here knows whether they were
+  // answered. Both counts come from reads_sent_, so the denominator follows
+  // whatever actually went out rather than a constant that could drift.
   //
   // And read the count as "how many reads got an answer", not "every read got
-  // its own answer". Stage 1's three reads are byte-identical, so a reply that
-  // arrives after REPLY_TIMEOUT_MS is matched to whichever of them is
-  // outstanding when it lands -- the transport matches by class, and identical
-  // requests have indistinguishable replies. A slow pump can therefore report
-  // 5/5 while one particular read went unanswered and a later one was credited
-  // twice. That is tolerable because nothing acts on the count: it is a log
-  // line, and the sequence proceeds identically either way.
+  // its own answer". Where stage 1 retransmits, the two sends are
+  // byte-identical, so a reply that arrives after REPLY_TIMEOUT_MS is matched
+  // to whichever is outstanding when it lands -- the transport matches by
+  // class, and identical requests have indistinguishable replies. A slow pump
+  // can therefore report 4/4 while the first read went unanswered and the retry
+  // was credited twice. That is tolerable because nothing acts on the count: it
+  // is a log line, and the sequence proceeds identically either way.
+  //
+  // Narrower than it was: this used to apply to stage 1's three unconditional
+  // sends on every handshake, and now applies only to the two on the retry
+  // path, so a pump answering normally has no ambiguity here at all.
   if (replies_matched_ == reads_sent_) {
     ESP_LOGI(TAG, "Authentication handshake complete (%u/%u reads answered)",
              replies_matched_, reads_sent_);

@@ -202,24 +202,25 @@ void test_handshake_sends_the_documented_sequence() {
   AuthRig r;
   r.run_full_handshake();
 
-  TEST_ASSERT(r.sent.size() == 10,
-              "Ten packets: 3 legacy + 5 class-10 + 2 extensions");
-  if (r.sent.size() != 10)
+  // Eight, not the ten this asserted before issue #210: stage 1's identity
+  // read is sent once and retransmitted only if it goes unanswered, so a pump
+  // that answers costs one packet there rather than three.
+  TEST_ASSERT(r.sent.size() == 8,
+              "Eight packets: 1 legacy + 5 class-10 + 2 extensions");
+  if (r.sent.size() != 8)
     return;
 
-  bool legacy_ok = true;
-  for (int i = 0; i < 3; i++)
-    legacy_ok &= (r.sent[i] == as_packet(AUTH_LEGACY, sizeof(AUTH_LEGACY)));
-  TEST_ASSERT(legacy_ok, "Stage 1 is three byte-exact legacy magic packets");
+  TEST_ASSERT(r.sent[0] == as_packet(AUTH_LEGACY, sizeof(AUTH_LEGACY)),
+              "Stage 1 is one byte-exact legacy magic packet when it is answered");
 
   bool class10_ok = true;
-  for (int i = 3; i < 8; i++)
+  for (int i = 1; i < 6; i++)
     class10_ok &= (r.sent[i] == as_packet(AUTH_CLASS10, sizeof(AUTH_CLASS10)));
   TEST_ASSERT(class10_ok, "Stage 2 is five byte-exact Class 10 unlock packets");
 
-  TEST_ASSERT(r.sent[8] == as_packet(AUTH_EXT_1, sizeof(AUTH_EXT_1)),
+  TEST_ASSERT(r.sent[6] == as_packet(AUTH_EXT_1, sizeof(AUTH_EXT_1)),
               "Stage 3 sends EXT_1 (Class 0x05) first");
-  TEST_ASSERT(r.sent[9] == as_packet(AUTH_EXT_2, sizeof(AUTH_EXT_2)),
+  TEST_ASSERT(r.sent[7] == as_packet(AUTH_EXT_2, sizeof(AUTH_EXT_2)),
               "Stage 3 sends EXT_2 (Class 0x0B) second — the order is specified");
   TEST_ASSERT(r.completions == 1, "Completion callback fires exactly once");
   TEST_ASSERT(!r.auth.is_running(), "Not running once complete");
@@ -290,9 +291,11 @@ void test_a_read_is_not_left_until_it_is_answered() {
   // Answer it, and only it. The second read may issue; the third may not.
   r.answer_class(0x02);
   r.advance(300);
-  TEST_ASSERT(r.auth.reads_sent() == 2,
-              "Answering the first read issues exactly the second, not the rest");
-  TEST_ASSERT(r.auth.replies_matched() == 1, "One reply credited, not three");
+  TEST_ASSERT(r.auth.reads_sent() == 1,
+              "Answering stage 1's read advances to stage 2 rather than "
+              "repeating it — stage 2 issues no matched reads, so the count "
+              "stays at one");
+  TEST_ASSERT(r.auth.replies_matched() == 1, "One reply credited");
   TEST_ASSERT(r.completions == 0, "Still not complete");
 }
 
@@ -381,6 +384,66 @@ void test_the_backstop_rescues_a_dropped_callback() {
 // A pump that answers nothing must still reach READY. Two logs from one
 // specimen justify waiting for a reply; they do not justify requiring one, and
 // a variant that stays quiet until first polled has to get through here.
+// ── Stage 1 retransmits once, and only when it has to (issue #210) ──────────
+// The burst of three it replaced advanced on every callback regardless of what
+// the callback said, so it retried when the first read had SUCCEEDED and gave
+// up when all three had failed -- a retry with its condition inverted. These
+// two pin the direction, which the packet counts elsewhere only imply.
+void test_stage1_does_not_retransmit_an_answered_read() {
+  std::cout << "\n=== An answered stage 1 read is sent once ===" << std::endl;
+  mock_millis = 0;
+  AuthRig r;
+  r.auto_answer = false;  // answer by hand, so the timing is the test's
+  r.auth.start();
+  r.advance(300);         // under REPLY_TIMEOUT_MS
+
+  TEST_ASSERT(r.sent.size() == 1, "One packet out, nothing answered yet");
+  r.answer_class(0x02);
+  // Well past REPLY_TIMEOUT_MS: if the answer were being ignored, the retry
+  // path would have fired by now.
+  r.advance(3000);
+
+  int legacy = 0;
+  for (const auto &p : r.sent)
+    if (p == as_packet(AUTH_LEGACY, sizeof(AUTH_LEGACY))) legacy++;
+  TEST_ASSERT(legacy == 1,
+              "The identity read is not repeated once the pump has answered it");
+}
+
+void test_stage1_retransmits_once_and_only_once() {
+  std::cout << "\n=== An unanswered stage 1 read is retransmitted exactly once ==="
+            << std::endl;
+  mock_millis = 0;
+  AuthRig r;
+  r.auto_answer = false;
+  r.auth.start();
+
+  r.advance(300);
+  TEST_ASSERT(r.sent.size() == 1, "One packet out, nothing answered yet");
+
+  // Past the first timeout: the retransmit goes out.
+  r.advance(1200);
+  int legacy_after_first_timeout = 0;
+  for (const auto &p : r.sent)
+    if (p == as_packet(AUTH_LEGACY, sizeof(AUTH_LEGACY))) legacy_after_first_timeout++;
+  TEST_ASSERT(legacy_after_first_timeout == 2,
+              "An unanswered read is retransmitted");
+
+  // Past the second timeout and well beyond: it advances rather than retrying
+  // forever. A retry loop here would stall the handshake against a deaf pump,
+  // which is the failure the standing fail-open policy exists to avoid.
+  r.advance(8000);
+  int legacy_total = 0;
+  for (const auto &p : r.sent)
+    if (p == as_packet(AUTH_LEGACY, sizeof(AUTH_LEGACY))) legacy_total++;
+  TEST_ASSERT(legacy_total == 2,
+              "...exactly once -- a second failure advances the sequence rather "
+              "than retrying again");
+  TEST_ASSERT(Authentication::STAGE1_MAX_ATTEMPTS == 2,
+              "Two attempts total: the original and one retransmission, which "
+              "is what GENIpro does on a missed Reply Timeout");
+}
+
 void test_an_unanswered_sequence_still_completes() {
   std::cout << "\n=== A pump that answers nothing still completes ===" << std::endl;
   mock_millis = 0;
@@ -401,8 +464,12 @@ void test_an_unanswered_sequence_still_completes() {
   // 24 hours before it was pinned this way.
   TEST_ASSERT(Authentication::REPLY_TIMEOUT_MS == 1000u,
               "The per-read timeout is 1000 ms, not whatever the tests are told");
-  TEST_ASSERT(r.sent.size() == 10,
-              "All ten packets are still sent when none of them is answered");
+  // Nine, not ten: stage 1 sends once, sees the timeout, and retransmits once
+  // before advancing. That is the retry the burst of three could never be --
+  // it fired on success and stopped on failure (issue #210).
+  TEST_ASSERT(r.sent.size() == 9,
+              "Nine packets when none is answered: 1 legacy + 1 retransmit + "
+              "5 class-10 + 2 extensions");
   TEST_ASSERT(r.completions == 1,
               "And the sequence completes anyway -- an unanswered read is not "
               "a failure, it is a read that went unanswered");
@@ -450,12 +517,12 @@ void test_start_while_running_is_ignored() {
   // The sequence is reply-paced now, so "sends nothing" cannot be measured as
   // "the packet count stopped moving" -- it moves whenever the pump answers.
   // What must hold is that the second start() did not restage anything: the
-  // connection still delivers ten packets total and completes once.
+  // connection still delivers eight packets total and completes once.
   (void) after_first;
   r.auth.start();  // must not restage the burst
   r.run_to_completion();
-  TEST_ASSERT(r.sent.size() == 10,
-              "The interrupted-looking sequence still delivers exactly ten "
+  TEST_ASSERT(r.sent.size() == 8,
+              "The interrupted-looking sequence still delivers exactly eight "
               "packets, not two interleaved handshakes");
   TEST_ASSERT(r.completions == 1, "And completes once, not twice");
 }
@@ -506,8 +573,8 @@ void test_restart_after_cancel_runs_a_full_handshake() {
   r.auth.start();
   r.run_to_completion();
 
-  TEST_ASSERT(r.sent.size() == 10,
-              "The restarted handshake sends all ten packets");
+  TEST_ASSERT(r.sent.size() == 8,
+              "The restarted handshake sends all eight packets");
   TEST_ASSERT(r.completions == 1,
               "And completes once — the cancelled run's timers stayed dead");
 }
@@ -551,9 +618,9 @@ void test_stale_timers_cannot_re_enter_a_restarted_handshake() {
   // Now let everything queued run: A's orphan first, then B's.
   r.run_to_completion();
 
-  TEST_ASSERT(r.sent.size() == sent_by_a + 10,
-              "Exactly ten packets belong to B — A's orphaned timer did not "
-              "re-enter the burst and add more");
+  TEST_ASSERT(r.sent.size() == sent_by_a + 8,
+              "Exactly eight packets belong to B — A's orphaned callback did "
+              "not re-enter the sequence and add more");
   TEST_ASSERT(r.completions == 1,
               "And exactly one completion, not one per handshake");
 }
@@ -591,11 +658,11 @@ void test_missing_scheduler_stalls_without_completing() {
     }
   }
 
-  // Stage 1's three reads complete on their replies and stage 2's first packet
-  // goes out -- and there it stops, because stage 2's repeat is the one thing
-  // still scheduled rather than answered.
-  TEST_ASSERT(sent.size() == 4,
-              "Stage 1's three reads finish on replies, then stage 2 stalls "
+  // Stage 1's read completes on its reply and stage 2's first packet goes out
+  // -- and there it stops, because stage 2's repeat is the one thing still
+  // scheduled rather than answered.
+  TEST_ASSERT(sent.size() == 2,
+              "Stage 1's single read finishes on its reply, then stage 2 stalls "
               "after its first packet with nothing to schedule the rest");
   TEST_ASSERT(completions == 0,
               "And completion is never claimed — a stalled handshake must not "
@@ -617,6 +684,8 @@ int main() {
   test_the_read_timeout_actually_in_force_is_the_constant();
   test_stage2_replies_are_not_consumed();
   test_the_backstop_rescues_a_dropped_callback();
+  test_stage1_does_not_retransmit_an_answered_read();
+  test_stage1_retransmits_once_and_only_once();
   test_an_unanswered_sequence_still_completes();
   test_auth_packets_carry_valid_crcs();
   test_start_while_running_is_ignored();

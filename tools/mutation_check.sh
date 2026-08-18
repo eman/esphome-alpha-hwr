@@ -476,6 +476,15 @@ MUTATIONS=(
 # gate was only ever observed agreeing and could be reduced to `return true`
 # with the whole suite green.
 "ready-gate-ignores-caches|components/alpha_hwr/alpha_hwr.cpp|  return control_service_.is_cache_valid() && schedule_service_.is_overview_cache_valid();|  return true;"
+# Stage 1's retransmission (issue #210). The burst of three this replaced had
+# its retry condition inverted -- it advanced on every callback, so it repeated
+# the read when the FIRST one succeeded and gave up when all three failed. These
+# three pin the direction, the bound, and the fact that a retry happens at all;
+# a mutation that survives here would restore a shape that looks like a retry
+# and is not one.
+"auth-stage1-never-retransmits|components/alpha_hwr/auth.cpp|              if (!success) {|              if (false) {"
+"auth-stage1-retransmits-an-answered-read|components/alpha_hwr/auth.cpp|              if (!success) {|              if (success) {"
+"auth-stage1-retransmit-is-unbounded|components/alpha_hwr/auth.h|  static constexpr int STAGE1_MAX_ATTEMPTS = 2;|  static constexpr int STAGE1_MAX_ATTEMPTS = 9;"
 "auth-never-reports-completion|components/alpha_hwr/auth.cpp|  if (completion_callback_) {|  if (false) {"
 # The BLE lifecycle wiring, host-testable since issue #174's audit tail. Both
 # of these shipped untested: alpha_hwr.cpp and ble_connection_manager.cpp were

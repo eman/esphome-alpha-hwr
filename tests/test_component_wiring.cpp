@@ -520,17 +520,23 @@ void test_the_full_connection_reaches_pump_ready() {
   // vacuous: the run makes ~53 writes in total, so the initial read chain
   // satisfies the count on its own and stage 1 and stage 2 could both be
   // deleted with this still passing.
+  //
+  // The window is the sequence's own length -- eight writes since issue #210
+  // made stage 1 one identity read plus a retransmission only if unanswered,
+  // and this pump answers. Looking further would start counting the initial
+  // read chain's writes as though they belonged to the handshake.
   const auto &w = esp_gattc_mock().writes;
   int class2 = 0, class10_obj86 = 0, class5 = 0, class11 = 0;
-  for (size_t i = 0; i < w.size() && i < 10; i++) {
+  for (size_t i = 0; i < w.size() && i < 8; i++) {
     if (w[i].size() < 9) continue;
     if (w[i][4] == 0x02) class2++;
     else if (w[i][4] == 0x0A && w[i][6] == 0x56) class10_obj86++;
     else if (w[i][4] == 0x05) class5++;
     else if (w[i][4] == 0x0B) class11++;
   }
-  TEST_ASSERT(class2 == 3,
-              "The opening sequence's first three writes are the Class 2 identity read");
+  TEST_ASSERT(class2 == 1,
+              "The opening sequence's first write is the Class 2 identity read, "
+              "sent once because this pump answers it");
   TEST_ASSERT(class10_obj86 == 5,
               "...followed by five Class 10 operation-status reads");
   TEST_ASSERT(class5 == 1 && class11 == 1,
