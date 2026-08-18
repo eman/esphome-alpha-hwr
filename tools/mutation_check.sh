@@ -500,6 +500,18 @@ MUTATIONS=(
 # any test sends against its own declared length.
 "single-event-opspec-length|components/alpha_hwr/schedule_service.cpp|  // never a visible failure; see the header note.\n  apdu[1] = 0x93;|  // never a visible failure; see the header note.\n  apdu[1] = 0xB3;"
 "class10-setpoint-opspec-length|components/alpha_hwr/control_service.cpp|  apdu[1] = 0x88;  // OpSpec: SET + 8 payload bytes (2 sub + 2 obj + 4 float)|  apdu[1] = 0x84;"
+# The APDU acknowledge field (issue #208). transport.cpp read a Class 10 0x81
+# reply as a short ACK carrying an error code and called the write successful
+# when that byte was zero -- so an Unknown Data Item error whose unknown ID
+# happened to be 0x00 was reported accepted, which is exactly the frame captured
+# on hardware. These pin the two bits, the length that lets a refusal match at
+# all, and the verdict drawn from them.
+"apdu-ack-reads-the-wrong-bits|components/alpha_hwr/response_match.h|  return static_cast<ApduAck>((apdu_head >> 6) & 0x03);|  return static_cast<ApduAck>((apdu_head >> 5) & 0x03);"
+"apdu-ack-always-ok|components/alpha_hwr/response_match.h|inline bool apdu_ack_is_ok(uint8_t apdu_head) { return apdu_ack(apdu_head) == ApduAck::OK; }|inline bool apdu_ack_is_ok(uint8_t apdu_head) { (void) apdu_head; return true; }"
+"apdu-length-includes-the-ack-bits|components/alpha_hwr/response_match.h|inline uint8_t apdu_payload_len(uint8_t apdu_head) { return apdu_head & 0x3F; }|inline uint8_t apdu_payload_len(uint8_t apdu_head) { return apdu_head; }"
+# The pre-#208 match condition. A 0xC1 or 0x41 refusal fails this test, falls
+# past the len >= 11 floor, and dies by 3 s timeout instead of being reported.
+"short-ack-matches-only-the-two-known-heads|components/alpha_hwr/transport.cpp|protocol::apdu_payload_len(data[5]) == 1 &&|(data[5] == 0x01 || data[5] == 0x81) &&"
 "sensor-pub-media-temp-range-removed|components/alpha_hwr/sensor_publisher.cpp|    if (temp.media_temperature_c >= -20 && temp.media_temperature_c <= 100) {|    if (true) {"
 "sensor-pub-alarm-dedup-removed|components/alpha_hwr/sensor_publisher.cpp|  if (alarms_sensor_->has_state() && alarms_sensor_->state == codes_str) {|  if (false) {"
 "sensor-pub-head-rate-gap-reset-removed|components/alpha_hwr/sensor_publisher.cpp|      if (dt_s > 30.0f) {|      if (false) {"

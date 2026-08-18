@@ -471,7 +471,7 @@ bool Transport::try_dispatch_response(const uint8_t* data, size_t len) {
     // Object 0601/Sub 5600 mode writes using OpSpec 0x90) are ACKed with a short
     // Class 10 OpSpec 0x01 frame that does not carry Obj/Sub fields.
     // Handle that before the generic len>=12 DataObject parser below.
-    if (queued_class == 0x0A && len >= 6 && data[4] == 0x0A && (data[5] == 0x01 || data[5] == 0x81) &&
+    if (queued_class == 0x0A && len >= 6 && data[4] == 0x0A && protocol::apdu_payload_len(data[5]) == 1 &&
         cmd.expect_type_low_ver == 0x0000 && cmd.expect_type_high == 0x0000 &&
         cmd.packet.size() > 9 &&
         (cmd.packet[5] == 0x97 || cmd.packet[5] == 0x96 || cmd.packet[5] == 0xB3 ||
@@ -481,10 +481,28 @@ bool Transport::try_dispatch_response(const uint8_t* data, size_t len) {
          (cmd.packet[6] == 91 && cmd.packet[7] == 0x01 && cmd.packet[8] == 0xA5) || // Obj 91 Sub 421 DHW config (#106)
          (cmd.packet[6] == 0x01 && cmd.packet[7] == 0xAE && cmd.packet[8] == 0x00 && cmd.packet[9] == 91) || // new format SubID 430 Obj 91
          (cmd.packet[6] == 0x56 && cmd.packet[7] == 0x00 && cmd.packet[8] == 0x06 && cmd.packet[9] == 0x01))) {  // Sub 5600 Obj 0601 (mode write)
-      uint8_t err_code = (len >= 7) ? data[6] : 0xFF;
-      ESP_LOGI(TAG, "Matched short Class 10 ACK (OpSpec 0x%02X) for Class 10 SET write. ErrCode=0x%02X", data[5], err_code);
+      // The acknowledge is the top two bits of the APDU head, not the byte
+      // after it (issue #208). What follows an error reply is the ID of the
+      // offending Data Item; this used to be read as an error code, so an
+      // Unknown Data Item whose ID happened to be 0x00 was reported as a
+      // successful write, and every other ID reported failure for the wrong
+      // reason. See response_match.h for the encoding and the two captured
+      // frames behind it.
+      const protocol::ApduAck ack = protocol::apdu_ack(data[5]);
+      const bool success = protocol::apdu_ack_is_ok(data[5]);
+      if (success) {
+        ESP_LOGI(TAG, "Matched short Class 10 ACK (head 0x%02X, ok) for Class 10 SET write", data[5]);
+      } else {
+        // Reported at warning level because it is the pump refusing the write,
+        // which nothing else in this path would surface: before #208 a refusal
+        // did not match here at all and the command failed by 3 s timeout, so
+        // the log said "no response" about a pump that had answered promptly.
+        const unsigned item_id = (len >= 7) ? data[6] : 0xFFu;
+        ESP_LOGW(TAG,
+                 "Class 10 SET refused: head 0x%02X (%s), offending item ID 0x%02X",
+                 data[5], protocol::apdu_ack_name(ack), item_id);
+      }
       if (cmd.callback) {
-        bool success = (data[5] == 0x01) || (data[5] == 0x81 && err_code == 0x00);
         cmd.callback(success, data, len);
       }
       this->command_queue_.pop_front();
@@ -585,9 +603,12 @@ bool Transport::try_dispatch_response(const uint8_t* data, size_t len) {
     //
     // Byte 5 is the APDU body length, not an operation code (`byte5 ==
     // total_len - 8` holds for all 24,233 CRC-valid inbound frames, no
-    // exceptions). Strictly it is a flag bit plus a length -- the short-ACK
-    // branch above reads 0x81 as bit 7 set over length 1 -- but no captured
-    // Class 10 response has bit 7 set, so over the corpus it is a plain length.
+    // exceptions). Strictly it is a two-bit acknowledge over a six-bit length --
+    // the short-ACK branch above decodes both (issue #208) -- but no frame in
+    // that corpus has either acknowledge bit set, so across it byte 5 is a
+    // plain length. That is a statement about the corpus and not about the
+    // pump: the corpus is the phone app's traffic, in which nothing was
+    // refused.
     // Either way this test does not ask "is this a register read". It asks
     // "is this response's body 48, 43, 20, 46, 45 or 9 bytes". Four of the six
     // really are telemetry reply sizes -- pairing the captured reads of the same

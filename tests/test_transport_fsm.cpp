@@ -606,6 +606,100 @@ void test_reset_abandons_a_pending_command_without_telling_it() {
               "caller waiting on this reply waits forever.");
 }
 
+// ── A refused Class 10 write reports failure, not success or silence ────────
+// The short-ACK branch in try_dispatch_response() exists because some Class 10
+// SET commands are answered with a 9-byte frame carrying no Obj/Sub fields. It
+// used to key on the whole head byte against {0x01, 0x81} and derive success
+// from the byte AFTER it, read as an error code. Both halves were wrong
+// (issue #208):
+//
+//   - 0x81 is acknowledge 10, Unknown Data Item. The byte after it is the ID of
+//     the item the pump did not recognise, so "err_code == 0x00" meant "the
+//     unknown item's ID was zero" -- and the frame captured on hardware is
+//     exactly `... 0A 81 00 ...`, so that refusal was reported as accepted.
+//   - A 0xC1 (Illegal Operation) or 0x41 (Unknown Class) refusal matched
+//     nothing at all, fell past this branch and past the len >= 11 floor, and
+//     failed by 3 s timeout -- logging "no response" about a pump that had
+//     answered in milliseconds.
+//
+// Driven through the real Transport rather than the pure predicate, because
+// what regressed was the dispatch decision, not the arithmetic.
+static void queue_a_class10_temperature_write(esphome::alpha_hwr::core::Transport &t,
+                                              int *cb_calls, bool *cb_success) {
+  // OpSpec 0x97 with the Obj 91 / Sub 430 address, which is one of the shapes
+  // the short-ACK branch is guarded on.
+  std::vector<uint8_t> req = {0x27, 0x0B, 0xE7, 0xF8, 0x0A, 0x97, 91, 0x01, 0xAE, 0x00, 0x00, 0x00};
+  t.send_command(req, 0, 0,
+                 [cb_calls, cb_success](bool ok, const uint8_t *, size_t) {
+                   (*cb_calls)++;
+                   *cb_success = ok;
+                 });
+  mock_millis += 50;
+  t.loop();
+}
+
+void test_a_refused_class10_write_reports_failure() {
+  std::cout << "\n=== A refused Class 10 write reports failure ===" << std::endl;
+
+  struct Case {
+    uint8_t head;
+    uint8_t next;
+    bool expect_success;
+    const char *what;
+  };
+  const Case cases[] = {
+      {0x01, 0x00, true, "0x01 (ack ok) is still accepted"},
+      {0x81, 0x00, false,
+       "0x81 with a following 0x00 -- the exact frame captured on hardware -- is a "
+       "refusal, where the old reading called it accepted"},
+      {0x81, 0x2F, false, "0x81 with any other item ID is a refusal too"},
+      {0xC1, 0x2F, false, "0xC1 (Illegal Operation) is a refusal, not a timeout"},
+      {0x41, 0x00, false, "0x41 (Unknown Class) likewise"},
+  };
+
+  for (const Case &c : cases) {
+    esphome::alpha_hwr::core::Transport transport;
+    transport.set_write_callback([](const uint8_t *, size_t) -> bool { return true; });
+
+    int cb_calls = 0;
+    bool cb_success = true;
+    queue_a_class10_temperature_write(transport, &cb_calls, &cb_success);
+
+    std::vector<uint8_t> reply = with_crc({0x24, 0x05, 0xF8, 0xE7, 0x0A, c.head, c.next, 0x00, 0x00});
+    transport.on_notification(reply.data(), reply.size());
+
+    TEST_ASSERT(cb_calls == 1, c.what);
+    TEST_ASSERT(cb_success == c.expect_success, "  ...with the right verdict");
+  }
+}
+
+// The refusal must also free the transport, or one refused write wedges every
+// command behind it -- which would be a far worse bug than the misreport.
+void test_a_refused_write_still_frees_the_transport() {
+  std::cout << "\n=== A refused write frees the transport ===" << std::endl;
+
+  esphome::alpha_hwr::core::Transport transport;
+  transport.set_write_callback([](const uint8_t *, size_t) -> bool { return true; });
+
+  int first_calls = 0;
+  bool first_success = true;
+  queue_a_class10_temperature_write(transport, &first_calls, &first_success);
+
+  std::vector<uint8_t> refusal = with_crc({0x24, 0x05, 0xF8, 0xE7, 0x0A, 0x81, 0x00, 0x00, 0x00});
+  transport.on_notification(refusal.data(), refusal.size());
+  TEST_ASSERT(first_calls == 1 && !first_success, "The refused write reported failure");
+
+  int second_calls = 0;
+  bool second_success = false;
+  queue_a_class10_temperature_write(transport, &second_calls, &second_success);
+  std::vector<uint8_t> ok = with_crc({0x24, 0x05, 0xF8, 0xE7, 0x0A, 0x01, 0x00, 0x00, 0x00});
+  transport.on_notification(ok.data(), ok.size());
+
+  TEST_ASSERT(second_calls == 1 && second_success,
+              "...and the next command still goes out and is answered, so the "
+              "queue advanced rather than wedging on the refusal");
+}
+
 int main() {
   test_reassembly_continuation_0x24();
   test_reassembly_continuation_0x27();
@@ -628,6 +722,8 @@ int main() {
   test_missing_write_callback_drops_the_command();
   test_a_command_honours_its_own_timeout_not_the_default();
   test_reset_abandons_a_pending_command_without_telling_it();
+  test_a_refused_class10_write_reports_failure();
+  test_a_refused_write_still_frees_the_transport();
   
   std::cout << "\n===========================================================" << std::endl;
   std::cout << "  Test Results" << std::endl;
