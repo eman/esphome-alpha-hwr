@@ -78,9 +78,36 @@ enum class FrameType {
  * - opspec: Operation specification byte (Class 10 only)
  * - sub_id: Sub-ID for Class 10 frames (0 for other classes)
  * - obj_id: Object ID for Class 10 frames (0 for other classes)
- * - payload: Raw payload bytes (excluding header and CRC)
- * - payload_len: Length of payload in bytes
+ * - payload: Raw payload bytes of the FIRST APDU (excluding header and CRC)
+ * - payload_len: Length of that payload, bounded by what the APDU declares
+ * - multi_apdu: True if the telegram carries bytes past the first APDU. It is a
+ *     statement about the TELEGRAM, not about `payload` -- it can be true on a
+ *     frame too short for any arm to extract a payload from, which is correct:
+ *     something followed APDU 1 whether or not APDU 1 was decodable.
  * - crc_valid: True if CRC checksum is correct
+ *
+ * On `payload_len` and `multi_apdu`, because the two together are the contract:
+ *
+ * A GENIbus telegram may carry several APDUs. App C.17 says errors are reported
+ * per-APDU -- "errors in one APDU will in no way influence the reply to sound
+ * APDU's" -- so an error reply substitutes for one APDU's answer inside a
+ * telegram carrying others. Every frame in the 24,233-frame reference corpus
+ * happens to hold exactly one, which is why `byte5 == total_len - 8` looked like
+ * a property of the protocol; it is a property of that capture.
+ *
+ * This parser reports the FIRST APDU only, bounded by the length that APDU
+ * declares in the low six bits of its head byte. Before issue #226 it returned
+ * everything between the header and the CRC, so on a two-APDU telegram the
+ * payload ran on into the next APDU with nothing to say so -- a Class 2 reply
+ * declaring one payload byte reported three, the extra two being the whole of
+ * APDU 2.
+ *
+ * Reporting the first APDU rather than exposing a list is deliberate: no caller
+ * in this component wants a list, every one of them asks a question about a
+ * single answer, and a list would push the single-APDU assumption into all of
+ * them instead of resolving it here. `multi_apdu` is the escape hatch -- it says
+ * "there was more in this telegram than you are being shown", so a caller that
+ * cares can refuse rather than silently seeing a truncated view.
  */
 struct ParsedFrame {
   bool valid;
@@ -92,6 +119,7 @@ struct ParsedFrame {
   const uint8_t* payload;
   size_t payload_len;
   bool crc_valid;
+  bool multi_apdu;
 
   // Default constructor
   ParsedFrame() 
@@ -103,7 +131,8 @@ struct ParsedFrame {
       obj_id(0),
       payload(nullptr),
       payload_len(0),
-      crc_valid(false) {}
+      crc_valid(false),
+      multi_apdu(false) {}
 };
 
 /**

@@ -93,6 +93,41 @@ ParsedFrame parse_frame(const uint8_t* data, size_t len) {
     result.opspec = data[5];
   }
 
+  // Where APDU 1 ends, and whether anything follows it.
+  //
+  // The head byte's low six bits declare the APDU's body length (the two above
+  // them are the acknowledge -- see response_match.h). So APDU 1 occupies the
+  // class byte, the head byte, and `declared` bytes after it. Anything between
+  // that point and the CRC belongs to a further APDU, which App C.17 permits
+  // and which the reference corpus happens never to contain (issue #226).
+  //
+  // Every payload assignment below is bounded by this. Without it they took
+  // everything up to the CRC, so a second APDU was handed to callers as though
+  // it were part of the first one's payload.
+  size_t apdu1_end = 6;
+  if (len > 5) {
+    apdu1_end = 6 + static_cast<size_t>(data[5] & 0x3F);
+  }
+  const size_t body_limit = len - 2;  // len >= 8 is guaranteed above
+  if (apdu1_end > body_limit) {
+    // A head declaring more than the frame holds. Trust the frame, not the
+    // declaration, and leave multi_apdu false -- there is nothing after this.
+    apdu1_end = body_limit;
+  }
+  result.multi_apdu = (apdu1_end < body_limit);
+
+  // Assign a payload without letting it run past APDU 1.
+  auto set_payload = [&](size_t offset, size_t naive_len) {
+    if (offset >= apdu1_end) {
+      result.payload = nullptr;
+      result.payload_len = 0;
+      return;
+    }
+    const size_t bounded = apdu1_end - offset;
+    result.payload = data + offset;
+    result.payload_len = (naive_len < bounded) ? naive_len : bounded;
+  };
+
   // Parse based on class
   if (result.class_byte == CLASS_10 && len > 5) {
     uint8_t opspec = result.opspec;
@@ -107,8 +142,7 @@ ParsedFrame parse_frame(const uint8_t* data, size_t len) {
         opspec == 0x2D) {
       if (len >= 15) {
         // For register read responses, payload starts at offset 13
-        result.payload = data + 13;
-        result.payload_len = len - 15;  // Subtract header (13 bytes) + CRC (2 bytes)
+        set_payload(13, len - 15);  // header (13 bytes) + CRC (2 bytes)
         // Store sequence number as sub_id and register ID as obj_id for routing
         result.sub_id = (data[6] << 8) | data[7];  // Sequence number (big-endian)
         result.obj_id = (data[8] << 8) | data[9];  // Register ID (big-endian)
@@ -118,16 +152,14 @@ ParsedFrame parse_frame(const uint8_t* data, size_t len) {
       if (len >= 12) {
         result.sub_id = (data[6] << 8) | data[7];  // Big-endian uint16
         result.obj_id = (data[8] << 8) | data[9];  // Big-endian uint16
-        result.payload = data + 10;  // From after ObjID
-        result.payload_len = len - 12;  // Subtract header (10 bytes) + CRC (2 bytes)
+        set_payload(10, len - 12);  // header (10 bytes) + CRC (2 bytes)
       }
     } else {
       // Default Class 10 format: Sub-ID and Obj-ID at offsets 6-9
       if (len >= 12) {
         result.sub_id = (data[6] << 8) | data[7];  // Big-endian uint16
         result.obj_id = (data[8] << 8) | data[9];  // Big-endian uint16
-        result.payload = data + 10;  // From after ObjID
-        result.payload_len = len - 12;  // Subtract header (10 bytes) + CRC (2 bytes)
+        set_payload(10, len - 12);  // header (10 bytes) + CRC (2 bytes)
       }
     }
   } else {
@@ -138,8 +170,7 @@ ParsedFrame parse_frame(const uint8_t* data, size_t len) {
     // `crc_valid` true -- an unbounded payload_len handed to any consumer that
     // honours the contract.
     if (len >= 8) {
-      result.payload = data + 6;  // From after OpSpec
-      result.payload_len = len - 8;  // Subtract header (6 bytes) + CRC (2 bytes)
+      set_payload(6, len - 8);  // header (6 bytes) + CRC (2 bytes)
     }
   }
 

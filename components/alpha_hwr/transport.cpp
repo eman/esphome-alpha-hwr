@@ -587,9 +587,12 @@ bool Transport::try_dispatch_response(const uint8_t* data, size_t len) {
   // sub 10200-10219 all answer 00 00 F4 02.
   //
   // Byte 5 is likewise not an operation code in the response direction: it is
-  // the APDU body length. `byte5 == total_len - 8` held for all 24,233 CRC-valid captured
-  // inbound frames without exception. It is still called `opspec` below because
-  // the matching logic keys off specific values of it.
+  // the APDU body length. `byte5 == total_len - 8` held for all 24,233 CRC-valid
+  // captured inbound frames without exception -- but read that as "every frame
+  // in that corpus carries exactly one APDU", which is what it actually says. A
+  // telegram may carry several, and then byte 5 is the FIRST APDU's length and
+  // the equality does not hold (issue #226). It is still called `opspec` below
+  // because the matching logic keys off specific values of it.
   // ---------------------------------------------------------------------------
   uint8_t opspec = data[5];
   uint16_t packet_type_high = (data[6] << 8) | data[7];
@@ -621,8 +624,10 @@ bool Transport::try_dispatch_response(const uint8_t* data, size_t len) {
     // The telemetry-response filter, and why it only guards wildcard commands.
     //
     // Byte 5 is the APDU body length, not an operation code (`byte5 ==
-    // total_len - 8` holds for all 24,233 CRC-valid inbound frames, no
-    // exceptions). Strictly it is a two-bit acknowledge over a six-bit length --
+    // total_len - 8` holds for all 24,233 CRC-valid inbound frames -- which is a
+    // statement that the corpus is single-APDU throughout, not that telegrams
+    // always are; see issue #226). Strictly it is a two-bit acknowledge over a
+    // six-bit length --
     // the short-ACK branch above decodes both (issue #208) -- but no frame in
     // that corpus has either acknowledge bit set, so across it byte 5 is a
     // plain length. That is a statement about the corpus and not about the
@@ -692,7 +697,9 @@ bool Transport::try_dispatch_response(const uint8_t* data, size_t len) {
     //   - Byte 5 is the APDU body length in the response direction, not an
     //     operation code, so `== 0x02` selects "a 10-byte frame" rather than a
     //     packet format. Verified: `byte5 == total_len - 8` holds for all
-    //     24,233 CRC-valid inbound frames, no exceptions.
+    //     24,233 CRC-valid inbound frames -- every one of which carries a single
+    //     APDU. On a multi-APDU telegram byte 5 is the first APDU's length and
+    //     the equality fails (issue #226).
     //   - Zero of 21,720 captured Class 10 responses had byte 5 == 0x02, and a
     //     10-byte frame cannot reach here anyway: the `len < 11` guard above
     //     returns first. (An earlier version of this comment claimed the

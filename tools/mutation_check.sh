@@ -508,6 +508,12 @@ MUTATIONS=(
 # all, and the verdict drawn from them.
 "apdu-ack-reads-the-wrong-bits|components/alpha_hwr/response_match.h|  return static_cast<ApduAck>((apdu_head >> 6) & 0x03);|  return static_cast<ApduAck>((apdu_head >> 5) & 0x03);"
 "apdu-ack-always-ok|components/alpha_hwr/response_match.h|inline bool apdu_ack_is_ok(uint8_t apdu_head) { return apdu_ack(apdu_head) == ApduAck::OK; }|inline bool apdu_ack_is_ok(uint8_t apdu_head) { (void) apdu_head; return true; }"
+# The single-APDU assumption in frame_parser's OUTPUT (issue #226). A telegram
+# may carry several APDUs -- App C.17 reports errors per-APDU -- and the parser
+# used to return everything between the header and the CRC, handing the next
+# APDU to callers as part of this one's payload.
+"parser-payload-runs-past-the-first-apdu|components/alpha_hwr/frame_parser.cpp|    const size_t bounded = apdu1_end - offset;\n    result.payload = data + offset;\n    result.payload_len = (naive_len < bounded) ? naive_len : bounded;|    result.payload = data + offset;\n    result.payload_len = naive_len;"
+"parser-never-flags-a-multi-apdu-telegram|components/alpha_hwr/frame_parser.cpp|  result.multi_apdu = (apdu1_end < body_limit);|  result.multi_apdu = false;"
 "apdu-length-includes-the-ack-bits|components/alpha_hwr/response_match.h|inline uint8_t apdu_payload_len(uint8_t apdu_head) { return apdu_head & 0x3F; }|inline uint8_t apdu_payload_len(uint8_t apdu_head) { return apdu_head; }"
 # The pre-#208 match condition. A 0xC1 or 0x41 refusal fails this test, falls
 # past the len >= 11 floor, and dies by 3 s timeout instead of being reported.
