@@ -756,11 +756,10 @@ MUTATIONS=(
 #
 # Deliberately absent for the same reason: the apdu_is_set() term in the
 # short-ACK condition. Every command reaching that branch is already a wildcard
-# match (expect_type 0/0), and no GET in the tree is sent that way with an
-# address matching one of the arms -- so dropping the term changes no outcome
-# today. It stays as the spec-correct way to say what the seven OpSpec constants
-# it replaced had in common, and as defence for the writer who adds the first
-# such GET.
+# match (expect_type 0/0) AND has declared expect_short_ack, and nothing declares
+# that for a GET -- so dropping the term changes no outcome today. It stays as
+# the spec-correct way to say what the seven OpSpec constants it replaced had in
+# common, and as defence for the writer who adds the first such GET.
 #
 # Issue #248: the mode write must be AWAITED. Its reply is byte-identical to the
 # acknowledgement the config write sent 400 ms later is waiting for, and the

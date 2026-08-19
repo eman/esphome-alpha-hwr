@@ -359,6 +359,14 @@
   causing. The captures contradict them directly: 20 layer writes and 34
   overview writes, every one answered in 36–193 ms.
 
+  Two of the three did not even time out quietly. `quiet_timeout` was set on the
+  layer write but not on the schedule enable or the single-event write, so those
+  two took the warning branch: every schedule enable/disable has been logging
+  `Command timeout waiting for Obj 55809 Sub 0`, and every single-event write
+  `Obj 56321 Sub 0`, once per write, for a reply that was already sitting in the
+  log a few lines above. Anyone who has looked at a schedule change in the debug
+  log has seen this.
+
   Each of those writes now settles in tens of milliseconds instead of three
   seconds. A five-layer schedule upload was spending fifteen seconds waiting for
   replies it had already been sent. Worse than the delay, since #248 each bogus
