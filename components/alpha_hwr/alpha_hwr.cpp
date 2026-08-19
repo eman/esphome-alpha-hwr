@@ -173,6 +173,19 @@ void AlphaHwrComponent::setup() {
     if (this->ready_sensor_) {
       this->ready_sensor_->publish_state(false);
     }
+    // Clear the readiness latch HERE, alongside the sensor it mirrors, and not
+    // only at connection-open. Clearing it only on open left it true for the
+    // whole disconnected window -- and the fault surface reads it as "healthy",
+    // so Pump Link Fault published "None" across exactly the reconnect that
+    // docs/configuration.md promises will show "No data from pump (60s)". That
+    // regression reached every user regardless of ready_timeout, because the
+    // display gate is not conditional on the watchdog being enabled.
+    //
+    // The rule is simply that this tracks the same thing the sensor does: the
+    // pump is usable, and a link that is down is not usable. The clear at
+    // connection-open stays as well; it is what arms the watchdog for the new
+    // connection.
+    this->link_pump_ready_seen_ = false;
     // Invalidate pending initial-read-chain timers so a disconnect mid-chain
     // can't leave them to fire reads against the next connection (issue #18).
     // The chain re-runs fresh on reconnect, so nothing is lost.
@@ -641,7 +654,17 @@ void AlphaHwrComponent::check_link_readiness_() {
   // esp_ble_gattc_close() is asynchronous, so the session stays connected for
   // some number of loop() ticks and the window would still be expired on every
   // one of them.
-  this->link_ready_since_ms_ = millis();
+  const uint32_t rearm_ms = millis();
+  this->link_ready_since_ms_ = rearm_ms;
+  // And the data window with it, which commit 2 did in only one direction.
+  // That commit stopped a liveness teardown being followed by a readiness one;
+  // this is the mirror. Without it a readiness teardown is followed by a
+  // LIVENESS teardown as soon as the data budget falls due -- seconds later,
+  // while the asynchronous close is still in flight -- giving two recycles and
+  // two counts for one outage, and replacing the readiness diagnosis with the
+  // less specific "No data from pump". Whichever watchdog acts, both windows
+  // have been consumed by the same outage.
+  this->link_last_inbound_ms_ = rearm_ms;
   // Its own rank. force_disconnect() defaults to the inbound-data watchdog's,
   // and taking that default was a real defect: DATA is released by any inbound
   // notification, so this diagnosis was erased by the very telemetry that makes

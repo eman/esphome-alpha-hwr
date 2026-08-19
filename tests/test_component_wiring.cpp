@@ -98,6 +98,9 @@ struct Rig {
     component.set_link_gaps_over_45s_sensor(&gaps_over[3]);
     component.set_link_gaps_over_60s_sensor(&gaps_over[4]);
     component.set_link_gaps_over_90s_sensor(&gaps_over[5]);
+    // Explicit, because the shipped default is 0 (off). Tests exercising the
+    // readiness watchdog have to ask for it, exactly as a user must.
+    component.set_ready_timeout(300000);
     component.set_link_recycles_sensor(&recycles);
     component.set_link_gaps_truncated_sensor(&gaps_truncated);
     component.set_link_watch_time_sensor(&watch_time);
@@ -1124,6 +1127,36 @@ void test_readiness_recycles_reach_the_counter_an_automation_watches() {
               "line nobody kept");
 }
 
+
+void test_the_fault_is_visible_across_the_reconnect_it_describes() {
+  std::cout << "\n=== The fault survives the disconnect it explains ===" << std::endl;
+
+  // docs/configuration.md promises this in so many words: "During the reconnect
+  // the Pump Link Fault sensor reads `No data from pump (60s)` -- held there
+  // rather than overwritten by the local disconnect that caused it."
+  //
+  // Moving the display gate from session-ready to pump-ready (issue #211) broke
+  // that for every user, at a default where the readiness watchdog is off: the
+  // readiness latch was cleared only at connection-OPEN, so it stayed true for
+  // the whole disconnected window and the surface read it as healthy. The fault
+  // published "None" across exactly the reconnect it exists to explain.
+  Rig r;
+  r.setup();
+  r.connect_and_subscribe();
+  TEST_ASSERT(r.run_until_ready(), "Ready first, so the latch is set");
+
+  // Go deaf and let the data watchdog recycle the link.
+  r.answer_writes = false;
+  r.advance(120000, 120);
+  r.disconnect(ESP_GATT_CONN_TERMINATE_PEER_USER);
+  r.advance(30000, 30);
+
+  TEST_ASSERT(r.link_fault.state.find("No data") != std::string::npos,
+              "The reason is still on the surface while the link is down. It "
+              "read \"None\" when the readiness latch outlived the connection "
+              "that set it");
+}
+
 int main() {
   std::cout << "===========================================================" << std::endl;
   std::cout << "  Component BLE Wiring Test Suite" << std::endl;
@@ -1156,6 +1189,7 @@ int main() {
   test_the_readiness_fault_survives_the_telemetry_that_masks_it();
   test_a_node_without_the_ready_entity_is_not_recycled_forever();
   test_readiness_recycles_reach_the_counter_an_automation_watches();
+  test_the_fault_is_visible_across_the_reconnect_it_describes();
 
   std::cout << "\n==========================================" << std::endl;
   std::cout << "Results: " << tests_passed << " passed, " << tests_failed

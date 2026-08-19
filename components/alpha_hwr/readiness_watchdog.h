@@ -54,19 +54,19 @@
 //   * 10 s window: fired. 20 s window: fired. 40 s window: did not.
 //
 // So a fresh connection on a bonded pump reaches usable somewhere between 20
-// and 40 s -- about 24 s from the recycle stamp, with the read chain (device
+// and 40 s -- about 22 s from the recycle stamp, with the read chain (device
 // info, statistics, control mode, twenty event-log entries, alarms, warnings,
 // four trend channels, ten cycle timestamps) dominating at roughly 175 ms per
-// reply. The 300 s default is therefore around twelve times the measured
-// figure.
+// reply. 300 s -- the suggested value if the watchdog is enabled, since it is off
+// by default -- is therefore around twelve times the measured figure.
 //
 // Two cautions on that number. It is one pump, and it is a BONDED reconnect: a
 // first pairing, with the SMP exchange in front of the same chain, is still
 // unmeasured. And an earlier figure of 15.45 s from this same specimen was
 // misleading -- it was taken from a reboot where the BLE link survived, so it
 // timed the read chain alone and none of the connect. If a first pairing is
-// ever timed and comes in far above this, raise the default rather than
-// trusting the bracket above.
+// ever timed and comes in far above this, raise the suggested value rather
+// than trusting the bracket above.
 //
 // The asymmetry that justifies erring high is unchanged: a bound that is too
 // loose still converts "silent forever" into "recovers eventually", which is

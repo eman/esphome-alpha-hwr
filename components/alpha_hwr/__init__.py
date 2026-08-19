@@ -152,20 +152,29 @@ CONFIG_SCHEMA = (
             # cleared only by the pump actually becoming usable.
             #
             # DEFAULTS OFF, and that is a deliberate retreat from an earlier
-            # default of 300s. A node that connects to the pump WITHOUT a bond
-            # connects fine and then never reaches its usable state: observed on
-            # hardware, an unbonded node opens the link, fails pairing with
-            # 0x52, runs discovery, drops, and repeats, with Pump Ready off
-            # throughout. On such a node any nonzero budget here recycles a link
-            # that was never going to become ready -- every five minutes, then
-            # hourly, forever -- and each recycle takes another run at the
-            # encryption-on-open window that can erase a bond (issue #14).
+            # default of 300s.
             #
-            # Whether that state is reachable from a supported configuration is
-            # issue #244. Until it is settled, the watchdog is opt-in: set it on
-            # a node that reliably reaches Pump Ready today, where it turns
-            # "connected, streaming, silently unusable" into a recycle and a
-            # named fault (issue #211).
+            # The retreat is NOT based on a clean observation, and saying so
+            # matters because the observation is what a reviewer would lean on.
+            # An attempt to measure a node with no bond produced a capture that
+            # does not support a general claim: the board was running a
+            # pre-#229 build, with enable_pairing TRUE rather than the default,
+            # so it INITIATED pairing and got 0x52 -- which is issue #230's
+            # shape, not the default configuration's. It also bonded within
+            # 252 ms anyway (issue #245), at an RSSI of -96 to -101 dBm. Three
+            # confounds, no conclusion.
+            #
+            # So what is actually known is this: nobody has yet observed the
+            # configuration this default would be reasoning about. Shipping a
+            # watchdog ON, whose safety argument rests on an unobserved
+            # configuration, and whose failure mode is a forced reconnect that
+            # takes another run at the bond-erasing encryption-on-open window
+            # (issue #14), is not defensible. Issue #244 is where that question
+            # lives.
+            #
+            # Opt-in, therefore: set it on a node that reliably reaches Pump
+            # Ready today, where it turns "connected, streaming, silently
+            # unusable" into a recycle and a named fault (issue #211).
             #
             # 300s is the suggested value if you do enable it, measured on
             # hardware: a fresh connection on a bonded pump reaches ready in

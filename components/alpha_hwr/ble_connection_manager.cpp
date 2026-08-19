@@ -549,8 +549,17 @@ void BLEConnectionManager::handle_notification(const esp_ble_gattc_cb_param_t *p
     // so a watchdog hold would otherwise never be released. Scoped to the
     // watchdog's own hold: see failure_hold.h for why an auth-failure hold must
     // survive notifications.
-    if (failure_hold_released_by_data(failure_hold_))
+    if (failure_hold_released_by_data(failure_hold_)) {
+      // Cleared, not merely unheld -- the same rule the pairing-stall and
+      // session-ready releases follow. Leaving the string behind was harmless
+      // while the fault surface blanked at session-ready, because nobody saw
+      // it; moving that gate to pump-ready (issue #211) put an unheld string
+      // back on display, where the next low-ranked reason overwrites it. That
+      // is the #175 defect again. Inbound data refutes "no data from pump", so
+      // the honest reading is that no cause is currently known.
+      last_failure_.clear();
       failure_hold_ = FailureHold::NONE;
+    }
     // A link carrying data is not a link the pump refused to pair with. This is
     // what keeps the stall detector quiet on a healthy unbonded node, which is
     // a supported configuration -- enable_pairing defaults to false and passive

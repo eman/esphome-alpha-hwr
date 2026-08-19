@@ -248,13 +248,13 @@ readiness, up to an hour, and resetting when the pump does become ready. Without
 that, a pump that is merely slow would be recycled forever.
 
 > **This defaults to `0s`, meaning off, and enabling it needs one check first.**
-> A node that connects to the pump *without a bond* connects normally and then
-> never reaches its usable state — observed on hardware: the link opens, pairing
-> fails with `0x52`, discovery runs, the link drops, and it repeats, with
-> **Pump Ready** off the whole time. On a node like that any nonzero budget here
-> recycles a link that was never going to become ready, every five minutes and
-> then hourly, forever — and each recycle takes another run at the window where
-> an encryption failure can erase a bond.
+> The behaviour of a node that never bonds has not been established — an attempt
+> to measure it was confounded three ways at once (a pre-release build, pairing
+> enabled rather than the default, and a signal at the noise floor), so nobody
+> has yet observed the configuration this default would be reasoning about.
+> Shipping the watchdog on, when its failure mode is a forced reconnect and each
+> reconnect takes another run at the window where an encryption failure can
+> erase a bond, is not a trade worth making on an unknown.
 >
 > So enable it only on a node that **reliably reaches Pump Ready today**. There
 > it does what it is for: turns "connected, telemetry flowing, silently
@@ -264,13 +264,13 @@ that, a pump that is merely slow would be recycled forever.
 > **The suggested value if you enable it is `300s`, and it is measured.** Setting the
 > window deliberately short on a bench pump and watching which value fired gives
 > a bracket: a 10-second window fired, 20 fired, 40 did not. So a fresh
-> connection on a bonded pump reaches usable in roughly 24 seconds — the read
-> chain dominates, at about 175 ms per reply — and the `300s` default is around
-> twelve times that.
+> connection on a bonded pump reaches usable in roughly 22 seconds — the read
+> chain dominates, at about 175 ms per reply — and `300s` -- the suggested value, since the watchdog is off by default --
+> is around twelve times that.
 >
 > Two cautions. It is one pump, and it is a *bonded reconnect*; a first pairing,
 > with the pairing exchange in front of the same read chain, is still untimed.
-> Raise the default rather than trusting this bracket if your pump is slower.
+> Raise the value rather than trusting this bracket if your pump is slower.
 > The reason to err high is unchanged: too loose still converts "silent forever"
 > into "recovers eventually", while too tight recycles a pump that was merely
 > slow.
@@ -339,7 +339,7 @@ Two optional diagnostic sensors expose the state:
 
 | Entity | Reads |
 | --- | --- |
-| `link_recycles` | Consecutive recycles with no data in between. `0` on a healthy link. |
+| `link_recycles` | Consecutive recycles that did not produce a working link — no data, or (if `ready_timeout` is on) never became usable. `0` on a healthy link. |
 | `link_max_gap` | Longest quiet interval since boot, in seconds. |
 
 `link_recycles` is the one to alert on. The Pump Link Fault sensor shows the

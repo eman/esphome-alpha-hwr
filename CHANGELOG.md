@@ -46,21 +46,21 @@
   here.
 
   **It defaults to `0s` — off — and that is a deliberate retreat.** An earlier
-  draft shipped it on at `300s`, on the reasoning that a node with no bond never
-  gets a working link anyway so the hazard was moot. Hardware says otherwise: an
-  unbonded node connects fine, fails pairing with `0x52`, runs discovery, drops
-  and repeats, with `Pump Ready` off throughout. Any nonzero budget would
-  therefore recycle such a node every five minutes and then hourly, forever,
-  each recycle taking another run at the window where an encryption failure can
-  erase a bond. Whether that state is reachable from a supported configuration
-  is issue #244; until that is settled the watchdog is opt-in, for nodes that
-  reliably reach ready today.
+  draft shipped it on at `300s`, reasoning that a node with no bond never gets a
+  working link anyway, so the hazard was moot. That reasoning was not tested:
+  the run meant to test it was confounded three ways — a pre-release build, with
+  pairing enabled rather than at its default, at a signal level of −96 to −101
+  dBm — and it bonded within 252 ms regardless (issue #245). So the
+  configuration the default would be reasoning about remains unobserved, which
+  is issue #244. Shipping a watchdog on, whose failure mode is a forced
+  reconnect and whose safety rests on an unobserved case, is not a trade worth
+  making; it is opt-in, for nodes that reliably reach ready today.
 
   The suggested value when enabling is `300s`, and it is
   bracketed on hardware by setting the window short and watching which value
   fired: 10 s fired, 20 s fired, 40 s did not. A fresh connection on a bonded
-  pump therefore reaches usable in roughly 24 s, so the default is about twelve
-  times the measured figure. That bracket is one pump and a *bonded* reconnect;
+  pump therefore reaches usable in roughly 22 s, so the suggested value is about
+  twelve times the measured figure. That bracket is one pump and a *bonded* reconnect;
   a first pairing is still untimed. Too loose still turns "silent forever" into
   "recovers eventually"; too tight recycles a pump that was merely slow. `0s`
   disables it.

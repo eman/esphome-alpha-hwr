@@ -44,6 +44,12 @@ packages:
 # that cannot fill does not fire on a config that is doing the right thing.
 alpha_hwr:
   data_timeout: 600s
+  # Set explicitly because the shipped default is 0 (off), and a feature that
+  # nothing in CI configures is a feature CI never compiles the guts of: the
+  # predicate returns immediately at 0 and the recycle path is never built into
+  # a firmware image at all. This file already deviates from production for the
+  # same reason (data_timeout above, and the whole gap histogram below).
+  ready_timeout: 300s
   link_gaps_over_15s:
     name: "Pump Link Gaps Over 15s"
   link_gaps_over_20s:
