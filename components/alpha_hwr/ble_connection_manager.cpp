@@ -771,10 +771,9 @@ void BLEConnectionManager::handle_gattc_event(esp_gattc_cb_event_t event, esp_ga
                       "0x52 and loses the pump's own request");
         ESP_LOGW(TAG, "  Put the pump into Bluetooth pairing mode, at the pump");
         // Not one button press: the front panel auto-locks and is unlocked from
-        // the Grundfos GO app, and the pump holds a single BLE connection, so
-        // this node has to be stopped before the app can connect at all -- which
-        // it will not be, since it is looping through this fault. A log line
-        // cannot carry that, so it carries the pointer.
+        // the Grundfos GO app, and the button commonly needs several presses
+        // before it takes. A log line cannot carry a seven-step procedure, so it
+        // carries the pointer.
         ESP_LOGW(TAG, "  It takes more than a button press: see docs/configuration.md, "
                       "enable_pairing");
         if (!pairing_enabled_) {

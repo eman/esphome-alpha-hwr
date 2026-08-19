@@ -26,8 +26,8 @@
 //      -- which reads as though patience is the answer. It is not: state B is
 //      not remotely recoverable, and the only fix is to put the pump into
 //      Bluetooth pairing mode by hand, at the pump -- a procedure that needs
-//      the Grundfos GO app and needs this node stopped first, because the pump
-//      holds one BLE connection at a time. docs/configuration.md carries it.
+//      the Grundfos GO app to unlock the front panel, and that commonly takes
+//      several presses of the pairing button. docs/configuration.md carries it.
 //
 // This detector exists to turn that silent forever-loop into a diagnosis. It
 // does NOT change what the connect path does -- nothing here initiates
