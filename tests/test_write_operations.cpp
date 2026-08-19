@@ -131,6 +131,25 @@ struct PumpSim {
   // request, and only the pre-write values separate them.
   float temp_max_clamp{0};
   bool honor_mode_change{true};       // apply 0x0A01 mode changes
+  // Answer the unfused 0x0A01 mode write with a short ACK, and how late.
+  //
+  // Default ON because the pump does it: 31 mode writes in the reference
+  // captures, all 31 acknowledged, 38-113 ms. (They are only visible once the
+  // capture is reassembled -- a mode write is a 22-byte frame against a 20-byte
+  // ATT payload, so it spans two packets. See
+  // resources/traffic_capture/README.md.)
+  //
+  // A mock that answers less than the pump does is not the safe default here:
+  // it would make the mode command time out on every write, which under the
+  // reply-debt guard (issue #248) costs the config write behind it its own
+  // acknowledgement -- so the code guarding against a real hazard would look
+  // like it was causing one.
+  //
+  // The delay is what issue #248 is about: a mode reply arriving after
+  // CONFIG_STEP2_DELAY_MS lands inside the config write's window and is
+  // byte-identical to that write's own acknowledgement.
+  bool ack_mode_write{true};
+  uint32_t mode_ack_delay_ms{0};
   bool honor_setpoint_writes{true};   // apply setpoint values from 0601/register writes
   bool obj91_includes_limits{true};   // firmware echoes the 5 limit tail bytes
   bool respond_dhw_reads{true};       // reply to Obj 91 Sub 421 reads
@@ -234,6 +253,12 @@ struct Harness {
   int frames_dhw_read{0};   // Obj 91 Sub 421 reads
   int frames_dhw_write{0};   // Obj 91 Sub 421 writes
   int frames_temp_write{0};  // Obj 91 Sub 430 temperature-range writes (OpSpec 0x97)
+  // When each of those reached the pump. The step-2 timing is a claim the
+  // MODE_ACK_TIMEOUT_MS comment makes -- an answered mode write must not delay
+  // the config write behind it -- and a test that does not look at the clock
+  // cannot check it.
+  uint64_t last_0a01_ms{0};
+  uint64_t last_temp_write_ms{0};
   int frames_clock_read{0};   // Obj 94 Sub 101 reads
   int frames_clock_write{0};  // Obj 94 Sub 100 writes
   std::vector<uint8_t> last_clock_write;  // the whole 22-byte clock-write APDU
@@ -367,7 +392,16 @@ struct Harness {
     } else if (opspec == 0x90 && apdu_len >= 18 && apdu[2] == 0x56 && apdu[4] == 0x0A && apdu[5] == 0x01) {
       // Unfused mode change (0x0A01, PR #98)
       frames_0a01++;
+      last_0a01_ms = mock_millis;
       if (sim.honor_mode_change) sim.mode_byte = apdu[13];
+      if (sim.ack_mode_write) {
+        if (sim.mode_ack_delay_ms == 0) {
+          inject_short_ack();
+        } else {
+          tasks.push_back({mock_millis + sim.mode_ack_delay_ms,
+                           [this]() { inject_short_ack(); }});
+        }
+      }
     } else if (opspec == 0x88 && apdu_len >= 10) {
       // Setpoint register write
       frames_register++;
@@ -392,6 +426,7 @@ struct Harness {
       // Temperature-range config write; capture the limits tail for the
       // preservation assertion (issue #106).
       frames_temp_write++;
+      last_temp_write_ms = mock_millis;
       bool aa = apdu[11] != 0;
       float mn = protocol::decode_float_be(apdu + 12);
       float mx = protocol::decode_float_be(apdu + 16);
@@ -1580,6 +1615,104 @@ static void test_temperature_range_baseline_is_read_not_remembered() {
               "never made");
   TEST_ASSERT(r && std::fabs(r->temp_min - 28.0f) < 0.2f && std::fabs(r->temp_max - 52.0f) < 0.2f,
               "and the settled values are the pump's current ones");
+}
+
+// Issue #248: a mode reply must never be read as the config write's ACK, at any
+// delay. Swept rather than sampled, because the first fix passed at one delay
+// and failed across a whole band nobody had tried.
+//
+// run_set_temperature_range_ sends two Class 10 writes CONFIG_STEP2_DELAY_MS
+// apart, and only the second carries a callback. transport.cpp's short-ACK
+// branch can test only the QUEUED command's shape -- a GENIbus reply carries no
+// sequence number and no object echo -- so the first write's reply, arriving
+// with no owner, is byte-identical to what the second is waiting for.
+//
+// The scenario makes the two verdicts differ: the pump stores the values but
+// never answers the config write, so the truthful settle is ACCEPTED with the
+// missing-ACK note. If the mode reply is stolen, the write looks acknowledged
+// and the note disappears -- an event claiming the pump answered a frame it
+// never answered.
+//
+// COVERAGE HAS A BOUND, and it is asserted here rather than left to be
+// discovered. The two guards compose: the wait consumes anything up to
+// MODE_ACK_TIMEOUT_MS (400 ms), and the reply debt covers
+// STALE_REPLY_WINDOW_MS (500 ms) beyond that. So a mode reply is attributable
+// out to 900 ms and not past it -- after that the debt has expired, and the
+// config write's own 3 s window is open to whatever arrives.
+//
+// 900 ms is three times the slowest reply the captures contain (295 ms, n~12k
+// after reassembly and de-duplication; nothing exceeds 400). The uncovered band
+// is therefore populated by no observation, which is the argument for stopping
+// there rather than widening the window until the sweep goes quiet. Widening is
+// nearly free under a debt -- it is spent once, not per frame -- so if a pump is
+// ever seen replying past 900 ms, raise the window rather than redesign.
+//
+// The first fix covered only 0-1000 ms with a single guard and left 1100-3900
+// wide open; that band is what this sweep exists to keep shut.
+static void test_temperature_range_mode_ack_is_never_stolen() {
+  std::cout << "\n=== set_temperature_range: a mode ACK is not read as the config write's ==="
+            << std::endl;
+  // Up to the composed bound of MODE_ACK_TIMEOUT_MS + STALE_REPLY_WINDOW_MS,
+  // less the ~20 ms the harness's inject() adds on top of the requested delay --
+  // so the last case sits just inside 900, not on it. A case AT the boundary
+  // would be testing the harness's arithmetic rather than the guard's.
+  const uint32_t delays[] = {0, 54, 121, 200, 295, 401, 500, 700, 850};
+  int stolen = 0;
+  for (uint32_t d : delays) {
+    Harness h;
+    h.sim.mode_byte = 0x02;
+    h.prime_cache();
+    h.prime_temp_limits();
+    h.sim.ack_mode_write = true;
+    h.sim.mode_ack_delay_ms = d;
+    h.sim.ack_temp_write = false;   // the config write itself is never answered
+
+    h.write_op.submit_set_temperature_range(30.0f, 50.0f, true, "tr_sweep");
+    h.advance(40000);
+    const WriteResult *r = h.result_for("tr_sweep");
+    const bool claimed_an_ack = r && r->detail.find("not acknowledged") == std::string::npos;
+    if (claimed_an_ack) {
+      stolen++;
+      std::cout << "    delay=" << d << " ms: the config write claimed an acknowledgement" << std::endl;
+    }
+  }
+  TEST_ASSERT(stolen == 0,
+              "out to the composed 900 ms bound, the config write never reports an "
+              "acknowledgement it did not receive -- the mode write's reply belongs "
+              "to the mode write");
+}
+
+// The wait is free when the pump answers, which is the claim
+// MODE_ACK_TIMEOUT_MS rests on: it is set equal to CONFIG_STEP2_DELAY_MS so an
+// answered mode write frees the queue long before step 2 is due, and an
+// unanswered one expires exactly when step 2 was going to run anyway.
+//
+// This asserts on the CLOCK. Its predecessor asserted only that the settle was
+// accepted with an empty detail, which is true on an unmodified tree as well --
+// it passed with the entire production change reverted.
+static void test_mode_ack_does_not_delay_step_two() {
+  std::cout << "\n=== set_temperature_range: the mode ACK wait does not delay step 2 ===" << std::endl;
+  uint64_t answered_gap = 0, unanswered_gap = 0;
+  for (int answered = 1; answered >= 0; answered--) {
+    Harness h;
+    h.sim.mode_byte = 0x02;
+    h.prime_cache();
+    h.prime_temp_limits();
+    h.sim.ack_mode_write = answered != 0;
+    h.sim.mode_ack_delay_ms = 54;  // the corpus p50
+
+    h.write_op.submit_set_temperature_range(30.0f, 50.0f, true, "tr_timing");
+    h.advance(30000);
+    TEST_ASSERT(h.frames_0a01 == 1 && h.frames_temp_write == 1, "both writes went out");
+    const uint64_t gap = h.last_temp_write_ms - h.last_0a01_ms;
+    (answered ? answered_gap : unanswered_gap) = gap;
+  }
+  TEST_ASSERT(answered_gap < 500,
+              "an answered mode write leaves step 2 at its usual delay, not pushed out "
+              "by the wait");
+  TEST_ASSERT(unanswered_gap < 500,
+              "and an unanswered one costs nothing either -- the wait expires exactly "
+              "when step 2 was due, which is why it is set to that delay");
 }
 
 static void test_temperature_range_clamped() {
@@ -3664,6 +3797,8 @@ int main() {
   test_temperature_range_accepted();
   test_temperature_range_ignored_write_is_rejected();
   test_temperature_range_baseline_is_read_not_remembered();
+  test_temperature_range_mode_ack_is_never_stolen();
+  test_mode_ack_does_not_delay_step_two();
   test_temperature_range_clamped();
   test_temperature_range_unacked_but_stored();
   test_temperature_range_unacked_and_not_stored();

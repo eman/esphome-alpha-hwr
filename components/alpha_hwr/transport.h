@@ -116,6 +116,23 @@ namespace core {
  */
 class Transport {
  public:
+
+  /// How long a reply owed by an abandoned command may still turn up, during
+  /// which the short-ACK branch declines to match on shape alone (issue #248).
+  ///
+  /// 500 ms, against a measured tail of 295. Across resources/traffic_capture --
+  /// reassembled from ATT fragments and de-duplicated, n~12k -- replies arrive at
+  /// p50 54 ms, p90 84, p99 121, max 295, and NOTHING exceeds 400. (An earlier
+  /// revision cited a 994 ms maximum and sized two constants from it; that figure
+  /// was an artifact of scanning un-reassembled packets. See
+  /// resources/traffic_capture/README.md.)
+  ///
+  /// It does not have to cover the worst case alone, which is why it is not
+  /// larger: the mode write is awaited, so its acknowledgement is normally
+  /// consumed by the command that earned it, and this is the backstop for one
+  /// that arrives after that wait gave up.
+  static constexpr uint32_t STALE_REPLY_WINDOW_MS = 500;
+
   /**
    * Callback type for complete packets.
    */
@@ -152,6 +169,12 @@ class Transport {
     bool expect_short_ack{false};     // When true, disables the Class 10 wildcard matching path
     bool quiet_timeout{false};        // When true, a response timeout is expected (fire-and-forget
                                       // write); log it at DEBUG instead of WARNING
+    // This command had an ambiguous frame withheld from it because an earlier
+    // command was still owed one (issue #248). It must therefore NOT record a
+    // fresh debt when it times out: the reply it was waiting for is the frame
+    // that was taken from it, and counting that twice is what makes the
+    // suppression self-sustaining.
+    bool suppressed_a_frame{false};
   };
 
   Transport();
@@ -344,6 +367,41 @@ class Transport {
    * @return true if this is a frame start byte
    */
   static bool is_frame_start(uint8_t byte);
+
+
+  /// How many replies the pump still owes us for commands that gave up.
+  ///
+  /// A COUNT, not a deadline, and the distinction is the design. The first cut
+  /// kept only "suppress until time T" and it cascaded: a suppressed frame
+  /// leaves its own command to time out, that timeout re-arms the window, and
+  /// the next command's acknowledgement lands inside the new one. With the pump
+  /// answering in ~54 ms and pacing at 50, the loop closes on itself and every
+  /// following write fails against a healthy pump -- four for four in the
+  /// harness that found it.
+  ///
+  /// A debt cannot do that. A timeout adds one owed reply; consuming an
+  /// ambiguous frame pays one off; and a command that already had a frame
+  /// suppressed adds nothing on its own timeout, because the reply it was owed
+  /// is the frame we took. Damage is bounded at exactly one lost acknowledgement
+  /// per genuinely late reply, and the sequence always converges.
+  uint8_t owed_replies_{0};
+
+  /// Whether that debt is still live, and since when. The flag is what makes the
+  /// timestamp safe to read: a bare millis() deadline compared with a signed
+  /// difference goes positive again 24.9 days after it was set and would then
+  /// suppress matching for another 24.9 days. Same shape as peer_resync_pending_
+  /// above, for the same reason.
+  bool owed_pending_{false};
+  uint32_t owed_since_ms_{0};
+
+  /// Is a reply to an abandoned command still plausibly in flight? Clears an
+  /// expired debt, so it is not const.
+  bool stale_reply_possible_();
+
+  /// Record that a command gave up without its reply. `already_suppressed` is
+  /// that command's own flag: when set, its debt was collected by the
+  /// suppression itself and must not be counted again.
+  void note_reply_owed_(bool already_suppressed);
 
   /**
    * Extract expected packet length from buffer.
