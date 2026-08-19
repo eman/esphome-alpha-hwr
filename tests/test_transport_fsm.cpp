@@ -3,6 +3,7 @@
 #include <cstdint>
 #include "fixture_crc.h"
 #include "../components/alpha_hwr/transport.h"
+#include "../components/alpha_hwr/frame_builder.h"
 
 uint32_t mock_millis = 0;
 int tests_passed = 0;
@@ -638,6 +639,47 @@ static void queue_a_class10_temperature_write(esphome::alpha_hwr::core::Transpor
   t.loop();
 }
 
+// ── An APDU larger than a telegram is refused, not built past the buffer ────
+// The size ceilings are the protocol's: a telegram is at most 259 bytes and its
+// PDU at most 253 (App. Prog. Manual, "Short form technical specification").
+// build_geni_packet used to test `length > 255` instead -- the widest value the
+// length byte can hold -- and a frame is `length + 4` bytes, so an accepted
+// length of 255 wrote 259 bytes into the 256-byte buffer send_apdu_command
+// declared. Nothing built an APDU that large, which is why it survived; the
+// ceiling sitting above the buffer is the defect either way.
+//
+// Driven through send_apdu_command because that is where the buffer lives. ASan
+// is what makes the oversize case an assertion about memory and not just about
+// a return value -- the suite runs under it in CI.
+void test_an_oversize_apdu_is_refused() {
+  std::cout << "\n=== An APDU too large for a telegram is refused ===" << std::endl;
+  esphome::alpha_hwr::core::Transport transport;
+  int writes = 0;
+  transport.set_write_callback([&](const uint8_t *, size_t) -> bool { writes++; return true; });
+
+  // One byte past what a PDU may carry: DA + SA + APDU must fit MAX_PDU_LEN.
+  std::vector<uint8_t> too_big(esphome::alpha_hwr::protocol::MAX_PDU_LEN - 1, 0xAA);
+  int cb_calls = 0;
+  bool cb_success = true;
+  transport.send_apdu_command(too_big.data(), too_big.size(), 0, 0,
+                              [&](bool ok, const uint8_t *, size_t) { cb_calls++; cb_success = ok; });
+  TEST_ASSERT(cb_calls == 1 && !cb_success,
+              "the caller is told immediately rather than waiting out a timeout for a "
+              "command that was never queued");
+  transport.loop();
+  TEST_ASSERT(writes == 0, "and nothing reached the wire");
+
+  // The largest APDU that IS legal still builds, and its telegram is longer than
+  // the 256 bytes the buffer used to be -- which is the case that overflowed.
+  std::vector<uint8_t> biggest(esphome::alpha_hwr::protocol::MAX_PDU_LEN - 2, 0xBB);
+  cb_calls = 0;
+  transport.send_apdu_command(biggest.data(), biggest.size(), 0, 0,
+                              [&](bool, const uint8_t *, size_t) { cb_calls++; });
+  TEST_ASSERT(cb_calls == 0, "the largest legal APDU is accepted, not refused");
+  for (int i = 0; i < 40; i++) { mock_millis += 20; transport.loop(); }
+  TEST_ASSERT(writes > 0, "and it is sent");
+}
+
 void test_a_refused_class10_write_reports_failure() {
   std::cout << "\n=== A refused Class 10 write reports failure ===" << std::endl;
 
@@ -649,7 +691,28 @@ void test_a_refused_class10_write_reports_failure() {
     const char *what;
   };
   const Case cases[] = {
-      {0x01, 0x00, true, true, "0x01 (ack ok) is still accepted"},
+      {0x01, 0x00, true, true, "0x01 (ack ok) with Class 10 ack OK is accepted"},
+      // The SECOND acknowledge. A Class 10 reply carries its own status byte
+      // after the head, and the head can say ok while it does not. Named by the
+      // GO app's decoder (GeniAPDU.CLASS10_ACK_BUSY / _OPERATION_FAILED) and
+      // present in the captures with exactly those values: of 136 short Class 10
+      // replies, 24 are busy and 12 are operation-failed, all with head ack ok.
+      // Reading the head alone called every one of them a successful write.
+      {0x01, 0x02, true, false,
+       "Class 10 busy is not success, though the APDU head says ok"},
+      {0x01, 0x04, true, false,
+       "Class 10 operation-failed is not success, though the APDU head says ok"},
+      {0x01, 0x07, true, false,
+       "and an unknown Class 10 status is not success either -- only 0 is"},
+      // No payload, so no Class 10 status byte: the head is the whole answer.
+      {0x00, 0x00, false, true, "a zero-length Class 10 reply with ack ok is accepted"},
+      // A head that DECLARES one payload byte on an eight-byte frame -- the byte
+      // it points at is the CRC high byte, not a status. The bound has to be the
+      // real short-ACK length of 9; at `len >= 7` this frame's CRC decides the
+      // write's verdict.
+      {0x01, 0x00, false, true,
+       "an 8-byte frame whose head declares a payload does not have its CRC read "
+       "as the Class 10 status"},
       {0x81, 0x00, true, false,
        "0x81 with a following 0x00 -- the exact frame captured on hardware -- is a "
        "refusal, where the old reading called it accepted"},
@@ -761,6 +824,7 @@ int main() {
   test_missing_write_callback_drops_the_command();
   test_a_command_honours_its_own_timeout_not_the_default();
   test_reset_abandons_a_pending_command_without_telling_it();
+  test_an_oversize_apdu_is_refused();
   test_a_refused_class10_write_reports_failure();
   test_the_dhw_config_write_shape_also_reports_a_refusal();
   test_a_refused_write_still_frees_the_transport();

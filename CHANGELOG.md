@@ -309,6 +309,51 @@
 
 ### Changed
 
+- **A Class 10 reply carries two acknowledgements, and both are now read.** The
+  APDU head says whether the request was understood; Class 10 then adds a status
+  byte of its own — `OK` / `BUSY` / `OPERATION_FAILED`. Only the head was being
+  read, so a pump answering "busy" or "that failed" would be reported as a
+  successful write.
+
+  Named by the Grundfos GO app's own decoder (`GeniAPDU.CLASS10_ACK_*`, read from
+  the byte after the head — the only source that documents it; neither the
+  specification's Class 10 reply diagram nor the public GENIbus libraries have
+  it), and present in `resources/traffic_capture` with exactly those three values
+  and no others: 459 short Class 10 replies, 420 `OK`, 26 `BUSY`, 13
+  `OPERATION_FAILED`, every one with head acknowledge `OK`.
+
+  **Defensive rather than a live fix, and worth being exact about which.** Every
+  non-`OK` value in the corpus answers a *read*, and reads carry Obj/Sub so they
+  never reach this branch; all 420 captured write acknowledgements carry `0x00`.
+  So no write has been misreported. What the change buys is that one no longer
+  can be. The two objects involved are firmware-update related
+  (`FwUpdate_ECUOverview_obj`, `FwUpdate_SetECUInFocus_obj_2`), and one of them
+  answers `BUSY` on half its reads and real data on the other half — a value that
+  alternates with data is a status, which is what settles the reading.
+
+  Also corrected while in this branch: the payload byte was read at `len >= 7`,
+  where a real short acknowledgement is 9 bytes. On an 8-byte CRC-valid frame
+  declaring one payload byte, that read the **CRC high byte** as the status — and
+  since the status now decides the verdict rather than the wording of a log line,
+  the bound matters.
+
+- **`build_geni_packet` could write past its caller's buffer.** GENIbus caps a
+  telegram at 259 bytes and its PDU at 253; the guard tested `length > 255` — the
+  widest value the length byte can hold — and a frame is `length + 4` bytes, so
+  an accepted length of 255 wrote **259 bytes into the 256-byte buffer**
+  `send_apdu_command` declared.
+
+  Latent: the largest APDU anything builds is the 53-byte schedule write, so no
+  call has come close. Found by reading the specification's size table rather
+  than by hitting it, and it reproduces as a stack-buffer-overflow under ASan and
+  as a stack-canary abort at plain `-O2`. The cap is now the protocol's
+  `MAX_PDU_LEN` and the buffers are `MAX_TELEGRAM_LEN`, because even a legal
+  maximum telegram did not fit in 256 bytes.
+
+  `resources/traffic_capture/README.md` records how to read that corpus without
+  reaching false conclusions from it — ATT reassembly, and the three files that
+  are the same session.
+
 - **A config write the pump stored but did not acknowledge no longer settles
   `rejected`** (issue #234). `set_temperature_range` and `set_cycle_times` both
   short-circuited to `rejected` when no acknowledgement arrived inside the

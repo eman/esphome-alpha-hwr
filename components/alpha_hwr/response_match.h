@@ -141,6 +141,86 @@ inline uint8_t apdu_payload_len(uint8_t apdu_head) { return apdu_head & 0x3F; }
 /// Did the pump accept the operation this APDU answers?
 inline bool apdu_ack_is_ok(uint8_t apdu_head) { return apdu_ack(apdu_head) == ApduAck::OK; }
 
+/// The SECOND acknowledge a Class 10 reply carries, after the APDU head's.
+///
+/// Class 10 answers a request with the generic APDU acknowledge in the head and
+/// then a status byte of its own in the payload. The Grundfos GO app names all
+/// three (`GeniAPDU.CLASS10_ACK_OK/_BUSY/_OPERATION_FAILED`, read from
+/// `raw[apdu_offset + 2]` by `getAcknowledgeCodeForClass10()`), and the captures
+/// contain exactly those three values and no others: across
+/// resources/traffic_capture, 136 short Class 10 replies split 100 OK, 24 BUSY,
+/// 12 OPERATION_FAILED, and every one of them has head acknowledge OK.
+///
+/// It is request-consistent in a way that rules out coincidence: Obj 202 Sub 100
+/// answers BUSY every time (24/24) and Obj 202 Sub 200 answers OPERATION_FAILED
+/// every time (12/12), while every other object answers OK.
+///
+/// Reading only the head's acknowledge therefore reports success for a pump that
+/// said "busy" or "that failed" -- the same defect issue #208 fixed one layer up,
+/// one layer further down. 36 of those 136 replies are not OK.
+///
+/// Only meaningful when the head's acknowledge IS OK. A refusal (Unknown Data
+/// Item, Illegal Operation) puts the offending item's ID in that byte instead,
+/// which is what #208 established; the two readings are told apart by the head,
+/// never by the byte itself.
+enum class Class10Ack : uint8_t {
+  OK = 0,
+  BUSY = 2,
+  OPERATION_FAILED = 4,
+};
+
+/// Human-readable Class 10 acknowledge, for logs.
+inline const char *class10_ack_name(uint8_t code) {
+  switch (code) {
+    case 0:
+      return "ok";
+    case 2:
+      return "busy";
+    case 4:
+      return "operation failed";
+    default:
+      return "unknown";
+  }
+}
+
+/// Did a Class 10 reply accept the request, reading BOTH acknowledges?
+///
+/// `head` is the APDU head byte and `first_payload` the byte after it, which is
+/// only present when the head declares a payload. A zero-length Class 10 reply
+/// carries no status byte and is taken at the head's word.
+inline bool class10_reply_is_ok(uint8_t head, bool has_payload, uint8_t first_payload) {
+  if (!apdu_ack_is_ok(head)) return false;
+  if (!has_payload) return true;
+  return first_payload == static_cast<uint8_t>(Class10Ack::OK);
+}
+
+/// The operation an APDU head requests, in the REQUEST direction.
+///
+/// Same two bits as the acknowledge, read the other way round (App. Prog.
+/// Manual fig C.2): 00 GET, 10 SET, 11 INFO. There is no operation 01. The
+/// direction decides which reading applies -- a head is an operation in a
+/// request and an acknowledge in a reply, and nothing in the byte says which,
+/// so only the caller's knowledge of what it is holding disambiguates.
+enum class ApduOp : uint8_t {
+  GET = 0,
+  SET = 2,
+  INFO = 3,
+};
+
+/// The operation bits of a request's APDU head.
+inline ApduOp apdu_op(uint8_t apdu_head) {
+  return static_cast<ApduOp>((apdu_head >> 6) & 0x03);
+}
+
+/// Is this request APDU head a SET?
+///
+/// Used to gate the short-ACK match (issue #248) on the one operation whose
+/// reply is acknowledgement-only: "the SET operation never returns anything but
+/// the APDU Head" (fig 3.5 note 1). A GET's reply carries data, and a one-byte
+/// data reply is byte-identical to a short ACK -- which is why the queued
+/// command's operation, not the reply's shape, is what may be tested here.
+inline bool apdu_is_set(uint8_t apdu_head) { return apdu_op(apdu_head) == ApduOp::SET; }
+
 /// Human-readable acknowledge, for logs. Kept beside the enum so a new kind
 /// cannot be added without a name.
 inline const char *apdu_ack_name(ApduAck ack) {
