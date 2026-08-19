@@ -133,6 +133,27 @@ class Transport {
   /// that arrives after that wait gave up.
   static constexpr uint32_t STALE_REPLY_WINDOW_MS = 500;
 
+  /// How long an awaited Class 10 SET waits for its acknowledgement (issue #253).
+  ///
+  /// A SET reply is head-only by specification -- "the SET operation never
+  /// returns anything but the APDU Head" (App. Prog. Manual fig 3.5 note 1) --
+  /// so there is nothing to wait for beyond the acknowledgement itself, and
+  /// nothing a longer wait could collect.
+  ///
+  /// 400 ms against a measured worst case of 193. Across
+  /// resources/traffic_capture, reassembled and de-duplicated, the pump answers
+  /// every SET in 36-193 ms; the widest tail anywhere in that corpus, over all
+  /// ~10k request/reply pairs, is 295 ms. The value is deliberately the same as
+  /// ControlService::MODE_ACK_TIMEOUT_MS, which was sized to equal the delay its
+  /// caller already waits -- there is no reason for two numbers here, and the
+  /// pump does not distinguish these writes anyway.
+  ///
+  /// It is short on purpose. A send that is not answered must not hold the queue
+  /// for longer than the next scheduled step, and no caller of these writes
+  /// treats the acknowledgement as its verdict: every one of them confirms by
+  /// reading the value back.
+  static constexpr uint32_t SET_ACK_TIMEOUT_MS = 400;
+
   /**
    * Callback type for complete packets.
    */
@@ -167,8 +188,12 @@ class Transport {
     bool waiting_for_response{false};
     bool allow_register_read{false};  // When true, don't filter register-read OpSpecs
     bool expect_short_ack{false};     // When true, disables the Class 10 wildcard matching path
-    bool quiet_timeout{false};        // When true, a response timeout is expected (fire-and-forget
-                                      // write); log it at DEBUG instead of WARNING
+    // When true, silence is not worth a warning: the caller's verdict comes from
+    // a readback, not from this acknowledgement. It does NOT mean silence is
+    // expected -- every Class 10 SET in the captures is answered -- and it has
+    // no effect beyond the log level. In particular the reply debt is recorded
+    // either way (issue #248).
+    bool quiet_timeout{false};
     // This command had an ambiguous frame withheld from it because an earlier
     // command was still owed one (issue #248). It must therefore NOT record a
     // fresh debt when it times out: the reply it was waiting for is the frame

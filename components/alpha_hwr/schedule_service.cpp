@@ -189,8 +189,8 @@ void ScheduleService::set_state_async(bool enable, std::function<void(bool)> on_
   this->overview_structure_[5] = 0x01;  // keep cache consistent
 
   // Class 10 OpSpec 0x93, Object 84, SubID 1,
-  // Type 218 (ClockProgramOverview) — but sent expecting a response window so
-  // the caller gets a completion signal instead of fire-and-forget.
+  // Type 218 (ClockProgramOverview) — sent with a callback so the caller gets a
+  // completion signal.
   uint8_t apdu[21];
   apdu[0] = 0x0A;
   apdu[1] = 0x93;
@@ -205,12 +205,24 @@ void ScheduleService::set_state_async(bool enable, std::function<void(bool)> on_
   apdu[10] = 0x0A;
   memcpy(apdu + 11, structure_bytes, 10);
 
+  // Awaited as the short Class 10 ACK it actually gets (issue #253).
+  //
+  // This asked for a reply carrying type 0xDA01, which a SET reply cannot carry
+  // -- "the SET operation never returns anything but the APDU Head" (GENIbus
+  // App. Prog. Manual fig 3.5 note 1) -- so it timed out at 3 s on every write
+  // and the note below was written to explain the silence. The captures say the
+  // opposite: 34 writes to this address in resources/traffic_capture, every one
+  // answered in 50-193 ms with the ordinary short ACK.
+  //
+  // The verdict is unchanged and still comes from the readback. What changes is
+  // that the acknowledgement is consumed by the write that earned it rather than
+  // left for the next Class 10 write, and that the write settles in tens of
+  // milliseconds rather than three seconds.
   this->transport_.send_apdu_command(
-      apdu, sizeof(apdu), 0xDA01, 0,
+      apdu, sizeof(apdu), 0, 0,
       [enable, on_sent](bool acked, const uint8_t * /*data*/, size_t /*len*/) {
-        // The pump's two-phase commit often closes the window without a
-        // matchable ACK even on success; the authoritative confirm is the
-        // caller's poll_state_async() readback. Report "sent" either way.
+        // The authoritative confirm is still the caller's poll_state_async()
+        // readback, so this reports "sent" whether or not the pump answered.
         ESP_LOGD(TAG, "Schedule %s write %s", enable ? "enable" : "disable",
                  acked ? "ACKed" : "window closed (verify via readback)");
         // Deliberately do not touch overview_structure_[4] either. Operations
@@ -232,7 +244,8 @@ void ScheduleService::set_state_async(bool enable, std::function<void(bool)> on_
         if (on_sent)
           on_sent(true);
       },
-      3000);
+      core::Transport::SET_ACK_TIMEOUT_MS, /*allow_register_read=*/false,
+      /*expect_short_ack=*/true, /*quiet_timeout=*/true);
 }
 
 void ScheduleService::read_single_event_async(
@@ -591,8 +604,26 @@ bool ScheduleService::validate_entries(
 
 void ScheduleService::write_class10_command(const uint8_t *apdu,
                                             size_t apdu_len) {
-  // Build GENI frame and queue the packet with pacing and non-blocking wait
-  this->transport_.send_apdu_command(apdu, apdu_len);
+  // The ClockProgramOverview commit, and the only caller of this helper.
+  //
+  // Awaited since issue #253. The callback exists to make the transport wait --
+  // a null one means the command is popped the moment its last chunk goes out --
+  // and reports nothing onward, because this helper has no caller that could act
+  // on it: send_configuration_commit() returns true for "sent" and its own
+  // callers confirm by re-reading the schedule.
+  //
+  // The commit is the most frequent Class 10 SET this component makes: every
+  // setpoint write, every control request and every layer write schedules one.
+  // Leaving it unawaited meant one unclaimed acknowledgement per schedule
+  // change, in the exact shape the next write's matcher accepts (issue #248).
+  // 34 instances in resources/traffic_capture, every one answered in 50-193 ms.
+  this->transport_.send_apdu_command(
+      apdu, apdu_len, 0, 0,
+      [](bool success, const uint8_t * /*data*/, size_t /*len*/) {
+        ESP_LOGV(TAG, "Configuration commit %s", success ? "acknowledged" : "unanswered");
+      },
+      core::Transport::SET_ACK_TIMEOUT_MS, /*allow_register_read=*/false,
+      /*expect_short_ack=*/true, /*quiet_timeout=*/true);
 }
 
 // -------------------------------------------------------------------------
@@ -704,20 +735,46 @@ void ScheduleService::write_cached_layer_async(
 
   ESP_LOGI(TAG, "Writing cached layer %d to pump...", layer);
 
+  // This write DOES get an answer, and it always did (issue #253).
+  //
+  // What stood here was `0xDE01, 0` -- wait for a reply carrying type 0xDE01,
+  // the ClockProgramLayer object -- with a 3 s window and quiet_timeout set,
+  // explained as "fire-and-forget write (pump commits on timeout)". That
+  // explanation was built backwards from a symptom. The reply never came
+  // because a SET reply cannot carry a type: "the SET operation never returns
+  // anything but the APDU Head" (GENIbus App. Prog. Manual fig 3.5 note 1). So
+  // the command waited out its full 3 s every time, the timeout was hidden at
+  // DEBUG by quiet_timeout, and the callback below reported success from the
+  // timeout path -- which is why it looked like it worked.
+  //
+  // resources/traffic_capture settles it directly: 20 layer writes across the
+  // five layers, every one answered in 36-142 ms with the ordinary short Class
+  // 10 ACK, `24 05 F8 E7 0A 01 00 AE A2` -- the same nine bytes every other SET
+  // is answered with.
+  //
+  // Two things follow. A full schedule write settles ~3 s per layer sooner, five
+  // layers at a time. And since issue #254 those bogus timeouts were recording a
+  // reply debt each, so a write that was answered promptly was also, on paper,
+  // owed a reply -- and the next Class 10 write within STALE_REPLY_WINDOW_MS
+  // paid for it.
+  //
+  // on_complete(true) unconditionally is DELIBERATELY unchanged. `success` now
+  // means "answered", not "accepted", and this write's callers confirm by
+  // re-reading the layer; turning silence into a failure verdict here is the
+  // #234 mistake and belongs to whoever changes that contract on purpose.
   this->transport_.send_apdu_command(
-      apdu, sizeof(apdu), 0xDE01, 0,
-      [this, on_complete, layer](bool /*success*/, const uint8_t * /*data*/,
+      apdu, sizeof(apdu), 0, 0,
+      [this, on_complete, layer](bool success, const uint8_t * /*data*/,
                                  size_t /*len*/) {
+        ESP_LOGV(TAG, "Layer %d write %s", layer, success ? "acknowledged" : "unanswered");
         // Send configuration commit after write
         this->send_configuration_commit();
         ESP_LOGI(TAG, "Layer %d write + config commit sent", layer);
         if (on_complete)
           on_complete(true);
       },
-      // quiet_timeout=true: fire-and-forget write (pump commits on timeout); the
-      // expected response timeout is logged at DEBUG, not WARN.
-      3000, /*allow_register_read=*/false, /*expect_short_ack=*/false,
-      /*quiet_timeout=*/true);
+      core::Transport::SET_ACK_TIMEOUT_MS, /*allow_register_read=*/false,
+      /*expect_short_ack=*/true, /*quiet_timeout=*/true);
 }
 
 // -------------------------------------------------------------------------
@@ -856,8 +913,13 @@ void ScheduleService::write_single_event_async(
       event.end_timestamp, local_utc_offset_seconds((time_t) event.end_timestamp));
   wire.to_bytes(apdu + 11);
 
+  // Awaited as the short Class 10 ACK it actually gets (issue #253) -- the same
+  // correction as set_state_async() and the layer write above. This asked for
+  // type 0xDC01, which a SET reply cannot carry, so every single-event write
+  // burned a full 3 s window. With up to 35 slots that is the dominant cost of a
+  // single-event sweep, and WATCHDOG_SINGLE_EVENT_MS was sized around it.
   this->transport_.send_apdu_command(
-      apdu, sizeof(apdu), 0xDC01, 0,
+      apdu, sizeof(apdu), 0, 0,
       [this, on_complete, event](bool /*success*/, const uint8_t * /*data*/,
                                  size_t /*len*/) {
         this->send_configuration_commit();
@@ -879,7 +941,8 @@ void ScheduleService::write_single_event_async(
         if (on_complete)
           on_complete(true);
       },
-      3000);
+      core::Transport::SET_ACK_TIMEOUT_MS, /*allow_register_read=*/false,
+      /*expect_short_ack=*/true, /*quiet_timeout=*/true);
 }
 
 int ScheduleService::find_free_single_event_slot(

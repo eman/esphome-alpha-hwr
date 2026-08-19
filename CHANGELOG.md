@@ -309,6 +309,102 @@
 
 ### Changed
 
+- **Every Class 10 write now waits for its own acknowledgement** (issue #253).
+  This finishes what #248 began. That change stopped a reply being handed to
+  whichever write happened to be waiting; it did not stop replies being left with
+  nobody waiting for them at all. Four sends still went out with no callback —
+  the fused Obj 0601 control request, the OpSpec 0x88 setpoint register write,
+  the Obj 94 clock write and the ClockProgramOverview commit — and a send with no
+  callback never enters the transport's response state, so it never times out,
+  so it never records the reply debt that was supposed to catch a stray answer.
+  Auditing for those turned up three more, described below, that were waiting for
+  the wrong thing rather than for nothing.
+
+  **There is nothing in a reply to correlate with.** Across
+  `resources/traffic_capture`, reassembled and de-duplicated, all 195 Class 10
+  SETs in 20 distinct address shapes — clock, schedule layers, overview commit,
+  control request, mode write, temperature range, DHW config — are answered by
+  the *same nine bytes*, `24 05 F8 E7 0A 01 00 AE A2`. Not one bit distinguishes
+  which write is being acknowledged. The specification says so in advance: *"the
+  SET operation never returns anything but the APDU Head"* (Application
+  Programmers Manual, fig 3.5 note 1). Correlation is positional or it does not
+  exist.
+
+  So the wait is the only mechanism available, and it is cheap: 400 ms against a
+  worst case of 193 ms for these shapes and 295 ms anywhere in the corpus. None
+  of these callers treats the acknowledgement as its verdict — every one confirms
+  by reading the value back — so the wait exists to *spend* the reply, not to
+  learn from it.
+
+  **The short-ACK branch is gated on a declaration rather than a list of
+  addresses.** It carried five hard-coded address shapes, which is why closing
+  these sends had been deferred: each conversion meant remembering to add a row.
+  The list could not have been doing the job anyway — it inspected the queued
+  command, so it never narrowed *which* write a reply answered, only which writes
+  were allowed to be answered at all. It had already accumulated one dead row for
+  a frame nothing builds and one added speculatively for a send with no callback
+  to use it. What admits a frame now is `expect_short_ack`, the caller's own
+  statement that it is awaiting exactly this reply — strictly narrower for
+  anything that does not opt in.
+
+  **And a three-second stall on every Object 84 write, with a false explanation
+  attached.** Three more writes — the schedule layer image, the schedule
+  enable/disable, and the single-event slot — were not fire-and-forget at all.
+  Each awaited a reply carrying a *type* (`0xDE01`, `0xDA01`, `0xDC01`), which a
+  SET reply cannot carry. So each timed out on every single attempt, with
+  `quiet_timeout` keeping that at DEBUG and the callback reporting success from
+  the timeout path. Two comments explained the silence — the pump "commits on
+  timeout", the pump's "two-phase commit often closes the window without a
+  matchable ACK" — and both were written backwards from a symptom the code was
+  causing. The captures contradict them directly: 20 layer writes and 34
+  overview writes, every one answered in 36–193 ms.
+
+  Two of the three did not even time out quietly. `quiet_timeout` was set on the
+  layer write but not on the schedule enable or the single-event write, so those
+  two took the warning branch: every schedule enable/disable has been logging
+  `Command timeout waiting for Obj 55809 Sub 0`, and every single-event write
+  `Obj 56321 Sub 0`, once per write, for a reply that was already sitting in the
+  log a few lines above. Anyone who has looked at a schedule change in the debug
+  log has seen this.
+
+  Each of those writes now settles in tens of milliseconds instead of three
+  seconds. A five-layer schedule upload was spending fifteen seconds waiting for
+  replies it had already been sent. Worse than the delay, since #248 each bogus
+  timeout was recording a reply debt, so a write that had been answered promptly
+  was also, on paper, owed a reply — and the next Class 10 write within the
+  stale-reply window paid for it.
+
+  **The settle window is now measured rather than inherited.** Those confirm
+  readbacks are scheduled *from the write's callback*, so the 3 s timeout had
+  been silently acting as part of the settle window — the real interval between
+  a schedule write and its readback has always been 4500 ms, not the 1500 ms
+  written down. Rather than guess which part of that the pump needed, a probe
+  build set the settle to 100 ms with a 200 ms retry ladder and wrote to a spare
+  schedule layer: **four writes, set and clear, and the first confirm read
+  matched every time.** The pump makes an Object 84 write visible to a read
+  within 100 ms of acknowledging it.
+
+  So `SCHED_SETTLE_DELAY_MS` stays at the 1500 ms it always claimed — now 15×
+  a delay shown to be sufficient — and the schedule-enable confirm shares that
+  constant instead of carrying a literal of its own. With the retry behind it
+  the ladder covers 3500 ms before any `rejected` verdict, comfortably past the
+  2500 ms the Grundfos GO app holds the bus quiet after a SET.
+
+  The measurement is scoped, and the constant says so: it was taken on the layer
+  image, applied to the overview path by inference, and says nothing about the
+  Obj 91 config writes — `CONFIG_CONFIRM_DELAY_MS` is what issue #250 is about
+  and is untouched here.
+
+  The test simulator was modelling the same false belief: it echoed the object
+  back after these writes, because that is what the firmware asked for. It now
+  answers them the way the pump does.
+
+  One honest limit: the `0x88` setpoint register write is the one converted send
+  whose exact frame the corpus does **not** contain — the Grundfos GO app sets
+  setpoints through the fused control request instead. It rests on the class-wide
+  rule and the specification, and on bench verification, rather than on a
+  captured instance of itself.
+
 - **A reply is no longer given to whichever write happens to be waiting**
   (issue #248). GENIbus replies carry no sequence number and no object echo, and
   the specification is explicit about the consequence: *"the Data Reply is not
@@ -346,13 +442,9 @@
   once, not per frame — so a pump seen replying later wants a larger window, not a
   redesign.
 
-  Not fixed: `send_control_request`, `set_class10_setpoint` and the schedule layer
-  writes still fire and forget. The captures say what they should do — every
-  Class 10 write is acknowledged, 420 of 420 — but each carries timing
-  assumptions worth changing on their own evidence. Notably the schedule writes
-  are documented as committing *on* their timeout with the acknowledgement
-  arriving outside the response window, and the captures show them acknowledged
-  at 36–143 ms. #248 stays open for them.
+  Not fixed here: `send_control_request`, `set_class10_setpoint`, the clock write
+  and the ClockProgramOverview commit still fired and forgot. Issue #253 tracked
+  those and closed them; see the entry above.
 
 
 - **A Class 10 reply carries two acknowledgements, and both are now read.** The
@@ -365,12 +457,16 @@
   the byte after the head — the only source that documents it; neither the
   specification's Class 10 reply diagram nor the public GENIbus libraries have
   it), and present in `resources/traffic_capture` with exactly those three values
-  and no others: 459 short Class 10 replies, 420 `OK`, 26 `BUSY`, 13
-  `OPERATION_FAILED`, every one with head acknowledge `OK`.
+  and no others: 222 short Class 10 replies, 195 `OK`, 18 `BUSY`, 9
+  `OPERATION_FAILED`, every one with head acknowledge `OK`. (These counts were
+  first published as 459/420/26/13, which a recount for #253 could not reproduce
+  at any level of de-duplication — 222 with the ten unique files, 287 with all
+  fourteen. The three-way split and every conclusion drawn from it stand; only
+  the totals were wrong.)
 
   **Defensive rather than a live fix, and worth being exact about which.** Every
   non-`OK` value in the corpus answers a *read*, and reads carry Obj/Sub so they
-  never reach this branch; all 420 captured write acknowledgements carry `0x00`.
+  never reach this branch; all 195 captured write acknowledgements carry `0x00`.
   So no write has been misreported. What the change buys is that one no longer
   can be. The two objects involved are firmware-update related
   (`FwUpdate_ECUOverview_obj`, `FwUpdate_SetECUInFocus_obj_2`), and one of them

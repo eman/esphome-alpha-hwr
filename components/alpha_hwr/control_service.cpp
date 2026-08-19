@@ -679,10 +679,26 @@ bool ControlService::send_control_request(ControlMode mode, bool start_pump, flo
   apdu[5] = 0x01;  // Obj ID low
   memcpy(&apdu[6], payload, 12);
 
-  // Send command and optionally schedule configuration commit.
-  // Multi-step setters (mode switch + dedicated write) disable this here and
-  // issue a single commit after the step-2 write.
-  this->transport_.send_apdu_command(apdu, 18);
+  // Awaited (issue #253). Same arrangement as the mode write above: the
+  // callback is what makes the transport wait, and it reports nothing onward --
+  // the callers of this send confirm by reading the run state and setpoint back.
+  //
+  // This is the fused Obj 0601 write, and it is the one the Grundfos GO app uses
+  // for start/stop and for setting a setpoint: 16 instances in
+  // resources/traffic_capture, every one answered in 49-88 ms. Its address shape
+  // was already listed in the short-ACK branch before anything could use it,
+  // added on the reasoning that a writer giving it a callback would want it
+  // back. That list is gone; the declaration below is what replaces it.
+  //
+  // Multi-step setters (mode switch + dedicated write) disable the commit here
+  // and issue a single commit after the step-2 write.
+  this->transport_.send_apdu_command(
+      apdu, 18, 0, 0,
+      [](bool success, const uint8_t * /*data*/, size_t /*len*/) {
+        ESP_LOGV(TAG, "Control request %s", success ? "acknowledged" : "unanswered");
+      },
+      core::Transport::SET_ACK_TIMEOUT_MS, /*allow_register_read=*/false,
+      /*expect_short_ack=*/true, /*quiet_timeout=*/true);
 
   if (queue_commit && schedule_callback_) {
     schedule_callback_([this]() { this->send_configuration_commit(); }, 200);
@@ -799,7 +815,25 @@ void ControlService::set_class10_setpoint(float value, uint16_t sub_id, uint16_t
   apdu[5] = obj_id & 0xFF;
   protocol::encode_float_be(value, &apdu[6]);
 
-  this->transport_.send_apdu_command(apdu, 10);
+  // Awaited (issue #253). The callback exists to make the transport wait and
+  // reports nothing onward -- run_set_setpoint_() decides by reading the value
+  // back at SETPOINT_CONFIRM_DELAY_MS, and that is unchanged.
+  //
+  // This is the one converted send whose exact frame the capture corpus does
+  // NOT contain: the Grundfos GO app sets a setpoint through the fused Obj 0601
+  // control request, so no `0A 88` SET was ever recorded. What the corpus does
+  // establish is the class-wide rule -- 195 SETs, 20 distinct address shapes,
+  // every one answered with the same nine bytes -- and the specification states
+  // it without reference to any address: "the SET operation never returns
+  // anything but the APDU Head" (App. Prog. Manual fig 3.5 note 1). Bench
+  // verification is what closes the gap for this one, not the captures.
+  this->transport_.send_apdu_command(
+      apdu, 10, 0, 0,
+      [](bool success, const uint8_t * /*data*/, size_t /*len*/) {
+        ESP_LOGV(TAG, "Setpoint write %s", success ? "acknowledged" : "unanswered");
+      },
+      core::Transport::SET_ACK_TIMEOUT_MS, /*allow_register_read=*/false,
+      /*expect_short_ack=*/true, /*quiet_timeout=*/true);
 
   // Schedule configuration commit after setpoint write
   if (schedule_callback_) {

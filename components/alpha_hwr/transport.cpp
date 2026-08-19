@@ -135,11 +135,16 @@ void Transport::loop() {
           ESP_LOGD(TAG, "Command timeout (wildcard match) — pump did not respond (now=%" PRIu32 ", timestamp=%" PRIu32 ", timeout=%" PRIu32 ")",
                    now, cmd.timestamp_ms, cmd.timeout_ms);
         } else if (cmd.quiet_timeout) {
-          // Fire-and-forget write (e.g. schedule layer commit): the pump commits
-          // on timeout and its ACK arrives outside the response window, so this
-          // timeout is the expected settling path, not an error. See the write
-          // callsites in schedule_service.cpp, which treat it as success.
-          ESP_LOGD(TAG, "Command timeout (expected, fire-and-forget) for Obj %d Sub %d (now=%" PRIu32 ", timestamp=%" PRIu32 ", timeout=%" PRIu32 ")",
+          // A write whose caller does not treat the acknowledgement as its
+          // verdict -- it confirms by reading the value back -- so silence here
+          // is not an error to report, only a fact to record. It is NOT
+          // "expected": every Class 10 SET in resources/traffic_capture is
+          // answered, 195 of 195. The flag used to be explained as "the pump
+          // commits on timeout and its ACK arrives outside the response
+          // window", which was a story told about a schedule layer write that
+          // was waiting for a reply the protocol forbids (issue #253).
+          // quiet_timeout means "do not log this at warning" and nothing more.
+          ESP_LOGD(TAG, "Command timeout (unanswered; the readback decides) for Obj %d Sub %d (now=%" PRIu32 ", timestamp=%" PRIu32 ", timeout=%" PRIu32 ")",
                    cmd.expect_type_low_ver, cmd.expect_type_high, now, cmd.timestamp_ms, cmd.timeout_ms);
         } else {
           ESP_LOGW(TAG, "Command timeout waiting for Obj %d Sub %d (now=%" PRIu32 ", timestamp=%" PRIu32 ", timeout=%" PRIu32 ")",
@@ -151,12 +156,11 @@ void Transport::loop() {
         // the shape the short-ACK branch accepts.
         //
         // Every timeout counts, quiet ones included. An earlier cut exempted
-        // them, reasoning that a quiet timeout means silence is expected. The
-        // two sends that set the flag say otherwise in their own comments: the
-        // mode write is acknowledged in every captured instance, and the
-        // schedule layer write is documented as having its acknowledgement
-        // arrive AFTER the window closes. Those are the likeliest sources of a
-        // late reply, not the least, and exempting them left this issue's hole
+        // them, reasoning that a quiet timeout means silence is expected. It is
+        // not: the flag is set by the Class 10 writes whose verdict comes from a
+        // readback, and every one of those is acknowledged in every captured
+        // instance -- 195 SETs, no exceptions. They are the likeliest sources of
+        // a late reply, not the least, and exempting them left this issue's hole
         // open from 1.1 s to 4 s. `quiet_timeout` means "do not log this at
         // warning" and nothing else.
         this->note_reply_owed_(cmd.suppressed_a_frame);
@@ -527,12 +531,17 @@ bool Transport::try_dispatch_response(const uint8_t* data, size_t len) {
     // DataObject parser below.
     //
     // Every term below inspects the QUEUED COMMAND. None inspects the reply,
-    // because there is nothing in the reply to inspect: GENIbus replies carry no
-    // sequence number and no object echo, and the specification is explicit that
-    // "the Data Reply is not self contained, meaning that the Data Request is
-    // necessary to process it" (App. Prog. Manual fig 3.5 note 3). What follows
-    // from that -- that this branch is sound only while one request is
-    // outstanding -- is issue #248 and is not addressed here.
+    // because there is nothing in the reply to inspect. That is not a shortcut:
+    // every SET reply this pump has ever been captured sending is the SAME NINE
+    // BYTES, `24 05 F8 E7 0A 01 00 AE A2`, across 195 writes in 20 distinct
+    // address shapes -- the clock, the schedule layers, the overview commit, the
+    // control request, the mode write, the temperature range, the DHW config.
+    // Not one bit distinguishes which write is being acknowledged. The
+    // specification says why: "the SET operation never returns anything but the
+    // APDU Head" (App. Prog. Manual fig 3.5 note 1), and "the Data Reply is not
+    // self contained, meaning that the Data Request is necessary to process it"
+    // (note 3). Correlation is positional -- which request is outstanding -- and
+    // there is nothing else on offer.
     //
     // The queued-command test is "is this a SET": the operation is the top two
     // bits of the APDU head, 10 = SET (fig C.2), and the low six are its payload
@@ -540,20 +549,22 @@ bool Transport::try_dispatch_response(const uint8_t* data, size_t len) {
     // 0x8F -- are all SET with different lengths, so naming the operation says
     // what was meant and does not admit a GET the way a longer list eventually
     // would.
+    //
+    // `expect_short_ack` is the caller's declaration that it is awaiting exactly
+    // this frame, and it replaces the list of five address shapes that used to
+    // stand here (issue #253). The list could not be right: it inspected the
+    // queued command, so it never narrowed WHICH write a reply answered -- only
+    // which writes were allowed to be answered at all -- and every send closed
+    // since has had to remember to add a row, with one row already gone dead
+    // (`01 AE 00 5B`, a "new format" nothing builds) and one added speculatively
+    // for a send that had no callback to use it. Requiring the declaration is
+    // strictly narrower for anything that does not opt in, and it puts the
+    // decision at the call site that knows the answer.
     const bool short_ack_shape =
         queued_class == 0x0A && len >= 6 && data[4] == 0x0A && protocol::apdu_payload_len(data[5]) <= 1 &&
         cmd.expect_type_low_ver == 0x0000 && cmd.expect_type_high == 0x0000 &&
-        cmd.packet.size() > 9 && protocol::apdu_is_set(cmd.packet[5]) &&
-        // The address shapes that reach here. The Sub 5600 / Obj 0601 shape is
-        // emitted only by send_control_request(), which still sends without a
-        // callback and so never enters AWAITING_RESPONSE -- it is kept because a
-        // writer giving it one would need it back, and issue #248 lists it among
-        // the sends still to be closed.
-        ((cmd.packet[6] == 91 && cmd.packet[7] == 0x01 && cmd.packet[8] == 0xAE) || // Obj 91 Sub 430 temperature range
-         (cmd.packet[6] == 91 && cmd.packet[7] == 0x01 && cmd.packet[8] == 0xA5) || // Obj 91 Sub 421 DHW config (#106)
-         (cmd.packet[6] == 0x01 && cmd.packet[7] == 0xAE && cmd.packet[8] == 0x00 && cmd.packet[9] == 91) || // new format SubID 430 Obj 91
-         (cmd.packet[6] == 0x56 && cmd.packet[7] == 0x00 && cmd.packet[8] == 0x06 && cmd.packet[9] == 0x01) || // Sub 5600 Obj 0601 (control request)
-         (cmd.packet[6] == 0x56 && cmd.packet[7] == 0x00 && cmd.packet[8] == 0x0A && cmd.packet[9] == 0x01));  // Sub 5600 Obj 0A01 (mode write, #248)
+        cmd.expect_short_ack &&
+        cmd.packet.size() > 5 && protocol::apdu_is_set(cmd.packet[5]);
 
     // The frame has the right shape -- but shape is all we can test, so before
     // treating it as THIS command's answer, settle any debt owed to a command
@@ -776,14 +787,15 @@ bool Transport::try_dispatch_response(const uint8_t* data, size_t len) {
     // Two notes on the condition below. It deliberately omits the
     // `!cmd.expect_short_ack` term that the wildcard MATCH further down
     // carries, so a 0/0 command with expect_short_ack set would be guarded as a
-    // wildcard without matching as one. send_set_mode_request() is exactly
-    // that caller since issue #248 -- 0/0 with expect_short_ack -- and the
-    // behaviour is what it wants: a Class 10 telemetry frame arriving while it
+    // wildcard without matching as one. Every awaited Class 10 SET is exactly
+    // that caller -- 0/0 with expect_short_ack (issues #248 and #253) -- and the
+    // behaviour is what they want: a Class 10 telemetry frame arriving while one
     // waits is guarded here and falls through to the packet callback rather than
     // being taken for its acknowledgement. Adding the term would change that, so
-    // it stays recorded rather than "fixed". And with the event-log workaround gone, nothing passes
-    // allow_register_read=true any more -- the parameter and its Command field
-    // are vestigial, kept because removing them is a separate change.
+    // it stays recorded rather than "fixed". And with the event-log workaround
+    // gone, nothing passes allow_register_read=true any more -- the parameter
+    // and its Command field are vestigial, kept because removing them is a
+    // separate change.
     bool wildcard_command = (cmd.expect_type_low_ver == 0x0000 && cmd.expect_type_high == 0x0000);
 
      if (is_register_read && wildcard_command && !cmd.allow_register_read) {

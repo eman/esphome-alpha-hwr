@@ -52,7 +52,10 @@ Agents should consult these resources before making architectural decisions:
   second acknowledge byte (`GeniAPDU.CLASS10_ACK_OK/_BUSY/_OPERATION_FAILED`) is
   named nowhere else. Check it before concluding a field is undocumented.
 * **The captures** in `resources/traffic_capture` — read that directory's
-  `README.md` first. Frames longer than the 20-byte ATT payload fragment, so a
+  `README.md` first. (`resources/` is gitignored: the corpus, the decompiled app
+  and the profiles are local working material, not repo content. Comments
+  throughout the component cite paths under it, and those paths resolve only in
+  a working copy that has them.) Frames longer than the 20-byte ATT payload fragment, so a
   scan that does not reassemble finds every read and no write; and three of the
   files are the same session. Both have produced confidently wrong conclusions
   that reached code comments and issues.

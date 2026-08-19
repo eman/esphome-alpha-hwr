@@ -756,11 +756,10 @@ MUTATIONS=(
 #
 # Deliberately absent for the same reason: the apdu_is_set() term in the
 # short-ACK condition. Every command reaching that branch is already a wildcard
-# match (expect_type 0/0), and no GET in the tree is sent that way with an
-# address matching one of the arms -- so dropping the term changes no outcome
-# today. It stays as the spec-correct way to say what the seven OpSpec constants
-# it replaced had in common, and as defence for the writer who adds the first
-# such GET.
+# match (expect_type 0/0) AND has declared expect_short_ack, and nothing declares
+# that for a GET -- so dropping the term changes no outcome today. It stays as
+# the spec-correct way to say what the seven OpSpec constants it replaced had in
+# common, and as defence for the writer who adds the first such GET.
 #
 # Issue #248: the mode write must be AWAITED. Its reply is byte-identical to the
 # acknowledgement the config write sent 400 ms later is waiting for, and the
@@ -781,6 +780,39 @@ MUTATIONS=(
 # And the window, which bounds how long an unpaid debt lingers.
 "stale-reply-window-never-expires|components/alpha_hwr/transport.cpp|  if (millis() - this->owed_since_ms_ >= STALE_REPLY_WINDOW_MS) {|  if (false) {"
 "stale-reply-window-too-short-for-the-tail|components/alpha_hwr/transport.h|  static constexpr uint32_t STALE_REPLY_WINDOW_MS = 500;|  static constexpr uint32_t STALE_REPLY_WINDOW_MS = 60;"
+# Issue #253: the other four Class 10 sends, and the gate that lets any of them
+# be answered.
+#
+# What admits a short ACK is now the caller's declaration -- expect_short_ack --
+# rather than a list of five address shapes the transport recognised. Making the
+# term unconditional widens the branch back to every Class 10 SET, including the
+# ones that never asked to be answered, so the declaration has to be shown to be
+# load-bearing rather than decorative.
+"short-ack-taken-without-a-declaration|components/alpha_hwr/transport.cpp|        cmd.expect_short_ack &&|        true &&"
+# One per converted send. Two shapes of mistake are represented, because both
+# were made in this tree: declaring the wrong thing (the two control writes), and
+# waiting for a reply the protocol cannot produce (the other three). The second
+# is not hypothetical -- the schedule layer write shipped for a long time asking
+# for type 0xDE01, which a SET reply can never carry ("the SET operation never
+# returns anything but the APDU Head", App. Prog. Manual fig 3.5 note 1), so it
+# burned a full 3 s window on every layer of every schedule write while
+# quiet_timeout kept the timeout at DEBUG.
+"control-request-not-declared-as-awaiting-an-ack|components/alpha_hwr/control_service.cpp|      /*expect_short_ack=*/true, /*quiet_timeout=*/true);\n\n  if (queue_commit && schedule_callback_) {|      /*expect_short_ack=*/false, /*quiet_timeout=*/true);\n\n  if (queue_commit && schedule_callback_) {"
+"setpoint-write-not-declared-as-awaiting-an-ack|components/alpha_hwr/control_service.cpp|      /*expect_short_ack=*/true, /*quiet_timeout=*/true);\n\n  // Schedule configuration commit after setpoint write|      /*expect_short_ack=*/false, /*quiet_timeout=*/true);\n\n  // Schedule configuration commit after setpoint write"
+"clock-write-expects-a-type-a-set-cannot-return|components/alpha_hwr/time_service.cpp|      apdu, sizeof(apdu), 0, 0,|      apdu, sizeof(apdu), 0x0141, 0,"
+"commit-write-expects-a-type-a-set-cannot-return|components/alpha_hwr/schedule_service.cpp|      apdu, apdu_len, 0, 0,|      apdu, apdu_len, 0xDA01, 0,"
+# Three Object 84 writes made the same mistake, so each gets its own entry: the
+# search strings need the lambda capture list because `apdu, sizeof(apdu), 0, 0,`
+# now appears three times in this file.
+"layer-write-expects-a-type-a-set-cannot-return|components/alpha_hwr/schedule_service.cpp|      apdu, sizeof(apdu), 0, 0,\n      [this, on_complete, layer]|      apdu, sizeof(apdu), 0xDE01, 0,\n      [this, on_complete, layer]"
+"schedule-enable-expects-a-type-a-set-cannot-return|components/alpha_hwr/schedule_service.cpp|      apdu, sizeof(apdu), 0, 0,\n      [enable, on_sent]|      apdu, sizeof(apdu), 0xDA01, 0,\n      [enable, on_sent]"
+"single-event-write-expects-a-type-a-set-cannot-return|components/alpha_hwr/schedule_service.cpp|      apdu, sizeof(apdu), 0, 0,\n      [this, on_complete, event]|      apdu, sizeof(apdu), 0xDC01, 0,\n      [this, on_complete, event]"
+# The wait itself has to be long enough to collect the reply. At zero every
+# awaited write times out before the pump can answer, and each timeout records a
+# reply debt that spends the NEXT write's acknowledgement -- so the failure is
+# not the write that was rushed but the one after it, which is why it needs an
+# entry rather than an argument.
+"set-ack-timeout-is-zero|components/alpha_hwr/transport.h|  static constexpr uint32_t SET_ACK_TIMEOUT_MS = 400;|  static constexpr uint32_t SET_ACK_TIMEOUT_MS = 0;"
 # The telegram size ceilings are the protocol's, and the buffer has to hold the
 # largest legal one: MAX_PDU_LEN yields a 257-byte telegram, which did not fit
 # the 256-byte buffers callers declared.

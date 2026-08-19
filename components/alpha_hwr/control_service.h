@@ -471,10 +471,11 @@ class ControlService {
   /// this one be free: a wait long enough to outlast the tail would have to
   /// exceed the step-2 delay, and would then be paid on every unanswered write.
   ///
-  /// The pump does answer this write -- 31 mode writes in the captures, every one
-  /// acknowledged, 38-113 ms. Every Class 10 write in that corpus is
-  /// acknowledged, 420 of 420. See resources/traffic_capture/README.md, including
-  /// why an earlier revision concluded the opposite.
+  /// The pump does answer this write -- 12 mode writes in the de-duplicated
+  /// captures, every one acknowledged, 38-85 ms. Every Class 10 SET in that
+  /// corpus is acknowledged, 195 of 195. See resources/traffic_capture/README.md,
+  /// including why an earlier revision concluded the opposite, and why the count
+  /// there was once given as 420.
   static constexpr uint32_t MODE_ACK_TIMEOUT_MS = 400;
 
   // Sub-ID constants for setpoint registers (Reference: control.py lines 137-141)

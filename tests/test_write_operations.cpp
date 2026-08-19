@@ -133,11 +133,12 @@ struct PumpSim {
   bool honor_mode_change{true};       // apply 0x0A01 mode changes
   // Answer the unfused 0x0A01 mode write with a short ACK, and how late.
   //
-  // Default ON because the pump does it: 31 mode writes in the reference
-  // captures, all 31 acknowledged, 38-113 ms. (They are only visible once the
-  // capture is reassembled -- a mode write is a 22-byte frame against a 20-byte
-  // ATT payload, so it spans two packets. See
-  // resources/traffic_capture/README.md.)
+  // Default ON because the pump does it: 12 mode writes in the de-duplicated
+  // reference captures, all 12 acknowledged, 38-85 ms. (They are only visible
+  // once the capture is reassembled -- a mode write is a 22-byte frame against a
+  // 20-byte ATT payload, so it spans two packets. See
+  // resources/traffic_capture/README.md, which also records why this was once
+  // written down as 31.)
   //
   // A mock that answers less than the pump does is not the safe default here:
   // it would make the mode command time out on every write, which under the
@@ -150,6 +151,20 @@ struct PumpSim {
   // byte-identical to that write's own acknowledgement.
   bool ack_mode_write{true};
   uint32_t mode_ack_delay_ms{0};
+  // The other Class 10 SETs this harness sees, answered for exactly the same
+  // reason and defaulted ON for exactly the same reason (issue #253). Every
+  // Class 10 SET in resources/traffic_capture is acknowledged -- 195 writes
+  // across 20 distinct address shapes, all with the identical nine bytes
+  // `24 05 F8 E7 0A 01 00 AE A2`, 36-193 ms. A simulator that stayed silent
+  // would make each of these writes time out, and each timeout records a reply
+  // debt that costs the NEXT write its acknowledgement.
+  bool ack_control_write{true};       // the fused Obj 0601 write
+  bool ack_setpoint_write{true};      // the OpSpec 0x88 register write
+  bool ack_clock_write{true};         // Obj 94 Sub 100
+  // The Object 84 writes -- schedule layer, single event, overview/commit. All
+  // three asked the transport for a reply carrying a type, which a SET reply
+  // cannot carry, so all three timed out on every write until issue #253.
+  bool ack_object84_writes{true};
   bool honor_setpoint_writes{true};   // apply setpoint values from 0601/register writes
   bool obj91_includes_limits{true};   // firmware echoes the 5 limit tail bytes
   bool respond_dhw_reads{true};       // reply to Obj 91 Sub 421 reads
@@ -259,6 +274,8 @@ struct Harness {
   // cannot check it.
   uint64_t last_0a01_ms{0};
   uint64_t last_temp_write_ms{0};
+  uint64_t last_register_write_ms{0};
+  uint64_t last_clock_write_ms{0};
   int frames_clock_read{0};   // Obj 94 Sub 101 reads
   int frames_clock_write{0};  // Obj 94 Sub 100 writes
   std::vector<uint8_t> last_clock_write;  // the whole 22-byte clock-write APDU
@@ -295,7 +312,22 @@ struct Harness {
       on_outgoing_chunk(data, len);
       return true;
     });
+    // Frames the transport did not match to a command end up here. A short
+    // Class 10 acknowledgement reaching this point is an acknowledgement no
+    // command claimed -- which is the whole of issue #248, seen from the other
+    // end: every SET reply is byte-identical, so one left lying about is one the
+    // next Class 10 write can be handed. Counted rather than asserted here,
+    // because the reply-debt path deliberately lets a genuinely late frame
+    // through after consuming it (issue #254); the tests that assert zero are
+    // the ones running against a pump that answers on time.
+    transport.set_packet_callback([this](const uint8_t *data, size_t len) {
+      if (len >= 6 && data[4] == 0x0A && (data[5] & 0x3F) <= 1) stray_short_acks++;
+    });
   }
+
+  /// Short Class 10 acknowledgements that reached the packet callback because
+  /// no queued command consumed them. See the constructor.
+  int stray_short_acks{0};
 
   // -- Outgoing traffic: reassemble chunks into frames, hand to the sim
   void on_outgoing_chunk(const uint8_t *data, size_t len) {
@@ -389,6 +421,7 @@ struct Harness {
       sim.mode_byte = apdu[13];
       float sp = protocol::decode_float_be(apdu + 14);
       if (!std::isnan(sp)) sim.apply_setpoint(sim.sub_for_mode(), sp);
+      if (sim.ack_control_write) inject_short_ack();
     } else if (opspec == 0x90 && apdu_len >= 18 && apdu[2] == 0x56 && apdu[4] == 0x0A && apdu[5] == 0x01) {
       // Unfused mode change (0x0A01, PR #98)
       frames_0a01++;
@@ -405,8 +438,10 @@ struct Harness {
     } else if (opspec == 0x88 && apdu_len >= 10) {
       // Setpoint register write
       frames_register++;
+      last_register_write_ms = mock_millis;
       int sub = (apdu[2] << 8) | apdu[3];
       sim.apply_setpoint(sub, protocol::decode_float_be(apdu + 6));
+      if (sim.ack_setpoint_write) inject_short_ack();
     } else if (opspec == 0x03 && apdu_len >= 5 && apdu[2] == 91 && apdu[3] == 0x01 && apdu[4] == 0xAE) {
       // Obj 91 Sub 430 config read
       if (sim.drop_obj91_reads > 0) {
@@ -467,10 +502,13 @@ struct Harness {
       }
     } else if (opspec == 0x94 && apdu_len >= 22 && apdu[2] == 0x5E && apdu[3] == 0x00 &&
                apdu[4] == 0x64) {
-      // Obj 94 Sub 100 DateTimeConfig write. The pump answers nothing the
-      // firmware waits for, so no injection here -- which is the point of the
-      // operation confirming by reading Sub 101 back.
+      // Obj 94 Sub 100 DateTimeConfig write. The pump DOES answer it -- nine
+      // instances in resources/traffic_capture, all acknowledged in 38-90 ms --
+      // and the firmware waits for that answer since issue #253. The operation
+      // still confirms by reading Sub 101 back; the acknowledgement is not the
+      // verdict, it is just spent on the write that earned it.
       frames_clock_write++;
+      last_clock_write_ms = mock_millis;
       last_clock_write.assign(apdu, apdu + 22);
       if (sim.honor_clock_writes) {
         struct tm t {};
@@ -484,6 +522,7 @@ struct Harness {
         sim.clock_epoch = ::mktime(&t) + sim.clock_write_skew_s;
         sim.clock_base_ms = mock_millis;
       }
+      if (sim.ack_clock_write) inject_short_ack();
     } else if (apdu[2] == 84 && apdu_len >= 5) {
       uint16_t sub = (apdu[3] << 8) | apdu[4];
       if (opspec == 0x03) {
@@ -533,7 +572,14 @@ struct Harness {
             }
           }
         }
-        inject_layer_frame(static_cast<uint8_t>(sub - 1000));
+        // A short ACK, not the object back. Every SET this pump answers, it
+        // answers with the same nine bytes: "the SET operation never returns
+        // anything but the APDU Head" (App. Prog. Manual fig 3.5 note 1), and
+        // resources/traffic_capture has 20 layer writes, all answered that way
+        // in 36-142 ms. This simulator used to echo the layer object back,
+        // because the firmware asked for type 0xDE01 -- which is how a write
+        // that timed out on every attempt looked healthy from here (issue #253).
+        if (sim.ack_object84_writes) inject_short_ack();
       } else if (opspec == 0x93 && sub >= 900 && sub < 935 && apdu_len >= 21) {
         // Single-event write (10 bytes at apdu+11)
         if (sim.honor_layer_writes) {
@@ -548,13 +594,13 @@ struct Harness {
             memcpy(slot + 1, was + 1, 9);
           }
         }
-        inject_single_event_frame(static_cast<uint8_t>(sub - 900));
+        if (sim.ack_object84_writes) inject_short_ack();
       } else if (opspec == 0x93 && sub == 1 && apdu_len >= 21) {
         // ClockProgramOverview write (set_state / configuration commit)
         sim.overview_writes++;
         memcpy(sim.last_overview_write, apdu + 11, 10);
         if (sim.honor_overview_writes) sim.sched_enabled = apdu[15] != 0;
-        if (sim.respond_overview_reads) inject_overview_frame();
+        if (sim.ack_object84_writes) inject_short_ack();
       }
     }
   }
@@ -2979,6 +3025,95 @@ static void test_set_clock_accepted() {
   TEST_ASSERT(r && r->command == WriteCommand::SET_CLOCK, "reported as set_clock");
 }
 
+// ── No Class 10 write leaves its acknowledgement lying about ──────────────
+// Issue #253. Four Class 10 sends used to go out with no callback, so the
+// transport never entered AWAITING_RESPONSE for them and nothing consumed their
+// replies. Three of the four are reachable from here: the fused Obj 0601
+// control request and the OpSpec 0x88 register write, both inside SET_SETPOINT,
+// and the Obj 94 Sub 100 clock write inside SET_CLOCK. (The ClockProgram commit
+// and the layer write are ScheduleService's, and test_schedule_service.cpp
+// covers those.)
+//
+// The assertion is deliberately not "the operation still works" -- it did
+// before, which is why this went unnoticed for so long. It is that the
+// acknowledgement is SPENT: the harness counts every short Class 10 frame that
+// reaches the packet callback, which is where a reply lands when no command
+// claimed it. Reverting any of these call sites to a null callback puts its
+// reply there and turns this red.
+//
+// The simulator answers all three because the pump does: 195 Class 10 SETs in
+// resources/traffic_capture, every one acknowledged, none of them
+// distinguishable from another.
+static void test_no_class10_write_leaves_an_unclaimed_ack() {
+  std::cout << "\n=== Every Class 10 write consumes its own acknowledgement ===" << std::endl;
+
+  {
+    Harness h;
+    h.prime_cache();
+    h.write_op.submit_set_setpoint(ControlMode::CONSTANT_SPEED, 2000.0f, "ff1");
+    h.advance(10000);
+    TEST_ASSERT(h.events_for("ff1") == 1, "set_setpoint settled");
+    TEST_ASSERT(h.frames_0601 == 1 && h.frames_register == 1,
+                "both of its Class 10 writes went out -- the fused control request "
+                "and the register write");
+    TEST_ASSERT(h.stray_short_acks == 0,
+                "and neither left an acknowledgement for the next write to be handed");
+  }
+
+  {
+    Harness h;
+    h.prime_cache();
+    const time_t now = 1786104000;
+    h.sim.clock_epoch = now - 3600;
+    h.sim.clock_base_ms = mock_millis;
+    h.write_op.submit_set_clock(node_time(now), "ff2");
+    h.advance(10000);
+    TEST_ASSERT(h.events_for("ff2") == 1, "set_clock settled");
+    TEST_ASSERT(h.frames_clock_write == 1, "its Sub 100 write went out");
+    TEST_ASSERT(h.stray_short_acks == 0,
+                "and the clock write's acknowledgement was consumed by the clock write");
+  }
+
+  // The Object 84 writes -- schedule entry (a layer write plus an overview
+  // commit), schedule enable (the overview write directly) and a single event.
+  // None of these was fire-and-forget; each asked the transport for a reply
+  // carrying a type, which a SET reply cannot carry, so each timed out on every
+  // attempt and left its real acknowledgement with no owner.
+  {
+    Harness h;
+    h.prime_cache();
+    h.write_op.submit_set_schedule_entry(1, 0, 6, 0, 8, 0, "ff3");
+    h.advance(30000);
+    TEST_ASSERT(h.events_for("ff3") == 1, "set_schedule_entry settled");
+    TEST_ASSERT(h.frames_layer_write >= 1, "a layer write went out");
+    TEST_ASSERT(h.sim.overview_writes >= 1, "and the commit behind it");
+    TEST_ASSERT(h.stray_short_acks == 0,
+                "neither the layer write nor the commit left an acknowledgement behind");
+  }
+
+  {
+    Harness h;
+    h.prime_cache();
+    h.write_op.submit_set_schedule_enabled(true, "ff4");
+    h.advance(30000);
+    TEST_ASSERT(h.events_for("ff4") == 1, "set_schedule_enabled settled");
+    TEST_ASSERT(h.sim.overview_writes >= 1, "the overview write went out");
+    TEST_ASSERT(h.stray_short_acks == 0,
+                "and its acknowledgement was consumed by it");
+  }
+
+  {
+    Harness h;
+    h.prime_cache();
+    h.write_op.submit_set_single_event(1786104000, 1786107600, "ff5");
+    h.advance(60000);
+    TEST_ASSERT(h.events_for("ff5") == 1, "set_single_event settled");
+    TEST_ASSERT(h.stray_short_acks == 0,
+                "the single-event write and its commit each consumed their own "
+                "acknowledgement");
+  }
+}
+
 static void test_set_clock_wire_struct() {
   std::cout << "\n=== set_clock: the APDU on the wire ===" << std::endl;
   Harness h;
@@ -3857,6 +3992,7 @@ int main() {
   test_refresh_schedule_all_layers_fail();
   test_refresh_schedule_partial_layer_failure();
   test_set_clock_accepted();
+  test_no_class10_write_leaves_an_unclaimed_ack();
   test_set_clock_wire_struct();
   test_set_clock_ignored_write_is_rejected();
   test_set_clock_already_correct_is_accepted();

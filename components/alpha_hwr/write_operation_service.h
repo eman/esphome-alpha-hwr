@@ -574,7 +574,33 @@ class WriteOperationService {
   // Schedule budgets: entry = poll + fresh layer read + write + commit +
   // settle + verify (+ retry) at 3-5 s per read; single events include a
   // possible full 35-slot cache scan when resolving a free slot.
-  static constexpr uint32_t SCHED_SETTLE_DELAY_MS = 1500;  // flash two-phase commit; bench-tune
+  // How long after a schedule write before the confirm read is taken.
+  //
+  // MEASURED, on the pump, 2026-08-19. Until issue #253 every Object 84 write
+  // waited out a full 3 s timeout for a reply the protocol cannot produce, and
+  // this delay is scheduled from that callback -- so the interval that actually
+  // shipped was 1500 + 3000, and nobody had established which part of it the
+  // pump needed.
+  //
+  // A probe build set this to 100 ms with a 200 ms retry ladder and wrote to a
+  // spare schedule layer. Four writes, set and clear, in both directions: the
+  // FIRST confirm read matched every time. The pump makes an Object 84 write
+  // visible to a read within 100 ms of acknowledging it -- write to settle was
+  // 350-515 ms end to end.
+  //
+  // So 1500 is 15x a delay demonstrated to be sufficient, and it restores the
+  // number this constant always claimed rather than the 4500 the broken timeout
+  // was silently adding. With SCHED_RETRY_DELAY_MS behind it the ladder covers
+  // 3500 ms before any REJECTED verdict, which is comfortably past the 2500 ms
+  // the Grundfos GO app holds the bus quiet after a SET (issue #250).
+  //
+  // Scope of the measurement: taken on the layer image (Sub 1000+). The
+  // overview/enable path (Sub 1) is the same object and a smaller write and is
+  // assumed to behave the same -- assumed, not measured, which is why both
+  // paths use this one constant rather than the overview getting a tighter one.
+  // It says NOTHING about the Obj 91 config writes, whose own interval is
+  // CONFIG_CONFIRM_DELAY_MS and is what #250 is actually about.
+  static constexpr uint32_t SCHED_SETTLE_DELAY_MS = 1500;
   static constexpr uint32_t SCHED_RETRY_DELAY_MS = 2000;
   static constexpr uint8_t SCHED_MAX_ATTEMPTS = 1;
   static constexpr uint32_t WATCHDOG_SCHED_ENTRY_MS = 20000;
@@ -583,12 +609,14 @@ class WriteOperationService {
   // to ENABLED_MAX_ATTEMPTS retries), so it gets the same budget: the retry
   // ladder is 800 + 2x1000 ms of delay on top of the APDU timeouts.
   static constexpr uint32_t WATCHDOG_REMOTE_MODE_MS = 12000;
-  // SET_CLOCK: a fire-and-forget write (no ACK window at all -- an APDU with
-  // no callback is popped as soon as its last chunk goes out), then the settle
-  // delay and, only while the readback will not decode, up to
-  // CLOCK_MAX_ATTEMPTS retries. That is CLOCK_MAX_ATTEMPTS + 1 = three reads
-  // at the 5 s timeout get_clock_async() asks for: 1500 + 3 x (5000 + 1500) =
-  // 19500 ms with an idle transport, measured at 19560.
+  // SET_CLOCK: the write's own acknowledgement window (awaited since issue
+  // #253, and at most Transport::SET_ACK_TIMEOUT_MS = 400 ms -- the pump
+  // answers this write in 38-90 ms across the captures, so the wait normally
+  // costs a fraction of that), then the settle delay and, only while the
+  // readback will not decode, up to CLOCK_MAX_ATTEMPTS retries. That is
+  // CLOCK_MAX_ATTEMPTS + 1 = three reads at the 5 s timeout get_clock_async()
+  // asks for: 400 + 1500 + 3 x (5000 + 1500) = 19900 ms with an idle transport.
+  // WATCHDOG_SET_CLOCK_MS is 30 s, so the added wait is well inside budget.
   static constexpr uint32_t CLOCK_CONFIRM_DELAY_MS = 1500;
   static constexpr uint32_t CLOCK_RETRY_DELAY_MS = 1500;
   static constexpr uint8_t CLOCK_MAX_ATTEMPTS = 2;
