@@ -27,6 +27,35 @@ Our mission is to provide a robust, reliable, and feature-rich ESPHome component
 Agents should consult these resources before making architectural decisions:
 
 * **Protocol Documentation**: [https://eman.github.io/alpha-hwr/reimplementation/](https://eman.github.io/alpha-hwr/reimplementation/) (The "Bible" for the GENI byte-level protocol).
+* **The GENIbus specification itself**: *GENIbus — The Application Programmers
+  Manual* (Grundfos, 3rd ed.), carried as `doc/genispec.pdf` in
+  [christoph2/GENIBus](https://github.com/christoph2/GENIBus). Authority for the
+  telegram and APDU formats, the acknowledge codes (App. C.12/C.13) and the bus
+  timing. Three things in it are load-bearing here and easy to rediscover the
+  hard way:
+  * a reply arrives 3–50 ms after its request and the master idles before the
+    next one (fig 1), so only one request is ever outstanding — which is why no
+    reply carries an identifier;
+  * *"to an APDU in a Request there always corresponds an APDU in the Data
+    Reply"* and *"the Data Reply is not self contained, meaning that the Data
+    Request is necessary to process it"* (fig 3.5), so correlation is positional
+    and a reply read without its request is a guess (issue #248);
+  * *"the SET operation never returns anything but the APDU Head"*, which is why
+    a write's acknowledgement and a one-byte read reply are the same bytes.
+
+  `src/genibus/linklayer/parser.py` in that repo is a clean reference APDU
+  dissector.
+* **The decompiled Grundfos GO app** (`resources/apps/grundfos_apk/decompiled`)
+  is the authority on what *this* pump family actually does, as against what
+  GENIbus permits. `com/grundfos/go_flutter_ble_plugin/geni/` holds the frame
+  layer. It documents things the specification does not — the Class 10 reply's
+  second acknowledge byte (`GeniAPDU.CLASS10_ACK_OK/_BUSY/_OPERATION_FAILED`) is
+  named nowhere else. Check it before concluding a field is undocumented.
+* **The captures** in `resources/traffic_capture` — read that directory's
+  `README.md` first. Frames longer than the 20-byte ATT payload fragment, so a
+  scan that does not reassemble finds every read and no write; and three of the
+  files are the same session. Both have produced confidently wrong conclusions
+  that reached code comments and issues.
 * **ESPHome BLE Client**: [https://esphome.io/components/ble_client/](https://esphome.io/components/ble_client/)
 * **ESPHome Bluetooth Proxy**: [https://esphome.io/components/bluetooth_proxy/](https://esphome.io/components/bluetooth_proxy/)
 

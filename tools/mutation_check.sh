@@ -735,6 +735,37 @@ MUTATIONS=(
 "parser-payload-runs-past-the-first-apdu|components/alpha_hwr/frame_parser.cpp|    const size_t bounded = apdu1_end - offset;\n    result.payload = data + offset;\n    result.payload_len = (naive_len < bounded) ? naive_len : bounded;|    result.payload = data + offset;\n    result.payload_len = naive_len;"
 "parser-never-flags-a-multi-apdu-telegram|components/alpha_hwr/frame_parser.cpp|  result.multi_apdu = (apdu1_end < body_limit);|  result.multi_apdu = false;"
 "apdu-length-includes-the-ack-bits|components/alpha_hwr/response_match.h|inline uint8_t apdu_payload_len(uint8_t apdu_head) { return apdu_head & 0x3F; }|inline uint8_t apdu_payload_len(uint8_t apdu_head) { return apdu_head; }"
+# A Class 10 reply carries TWO acknowledges. The head's says whether the APDU was
+# understood; the byte after it is Class 10's own status -- OK / BUSY /
+# OPERATION_FAILED, named by the GO app's decoder (GeniAPDU.CLASS10_ACK_*, read
+# from raw[apdu_offset + 2]) and present in the captures with exactly those three
+# values and no others.
+"class10-ack-byte-ignored|components/alpha_hwr/transport.cpp|      const bool success = protocol::class10_reply_is_ok(data[5], has_payload, class10_ack);|      const bool success = protocol::apdu_ack_is_ok(data[5]);"
+"class10-ack-only-busy-rejected|components/alpha_hwr/response_match.h|  return first_payload == static_cast<uint8_t>(Class10Ack::OK);|  return first_payload != static_cast<uint8_t>(Class10Ack::BUSY);"
+# The payload byte exists only on a 9-byte frame. At `len >= 7` an 8-byte
+# CRC-valid frame declaring one payload byte has its CRC HIGH BYTE read as the
+# Class 10 status -- and that byte now decides the verdict, not just a log line.
+"class10-ack-reads-the-crc-byte|components/alpha_hwr/transport.cpp|      const bool has_payload = protocol::apdu_payload_len(data[5]) == 1 && len >= 9;|      const bool has_payload = protocol::apdu_payload_len(data[5]) == 1 && len >= 7;"
+# Deliberately absent: a mutation on class10_reply_is_ok()'s `!has_payload` early
+# return. Its only caller passes 0 for the status byte when there is none, so
+# dropping the guard still compares 0 == OK and every outcome is unchanged -- an
+# equivalent mutant, confirmed by experiment. The guard stays because the
+# function's contract is "the byte may not exist" and a caller that passed the
+# raw frame byte instead would read the CRC as a status code. Same reasoning as
+# the parse_int_field ERANGE note below.
+#
+# Deliberately absent for the same reason: the apdu_is_set() term in the
+# short-ACK condition. Every command reaching that branch is already a wildcard
+# match (expect_type 0/0), and no GET in the tree is sent that way with an
+# address matching one of the arms -- so dropping the term changes no outcome
+# today. It stays as the spec-correct way to say what the seven OpSpec constants
+# it replaced had in common, and as defence for the writer who adds the first
+# such GET.
+#
+# The telegram size ceilings are the protocol's, and the buffer has to hold the
+# largest legal one: MAX_PDU_LEN yields a 257-byte telegram, which did not fit
+# the 256-byte buffers callers declared.
+"builder-cap-is-the-length-byte-not-the-pdu|components/alpha_hwr/frame_builder.cpp|  if (length > protocol::MAX_PDU_LEN) {|  if (length > 255) {"
 # The pre-#208 match condition. A 0xC1 or 0x41 refusal fails this test, falls
 # past the len >= 11 floor, and dies by 3 s timeout instead of being reported.
 "short-ack-matches-only-the-two-known-heads|components/alpha_hwr/transport.cpp|protocol::apdu_payload_len(data[5]) <= 1 &&|(data[5] == 0x01 || data[5] == 0x81) &&"
