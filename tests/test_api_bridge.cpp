@@ -415,15 +415,19 @@ static void test_partially_numeric_arguments_are_rejected() {
 // above would be indistinguishable from rejecting everything.
 //
 // One limit worth stating rather than implying. These assertions pin the
-// contract, but they cannot catch the defect that made three of them necessary
-// (#255): `long` is 64 bits here and 32 on the ESP32-C3, so a bound that
-// narrows on the pump is exact on this host, and every case below passed while
-// the firmware refused all of them. No host test can see that -- the width is
-// the thing under test and the host has the wrong one. What catches it is a
-// static_assert in api_bridge.cpp on the parse type, written so it fails the
-// ESP32-C3 firmware build and passes here; CI builds that firmware. The cases
-// below are still worth having: they are what the assert protects, and a
-// mutation on the epoch ceiling dies against them.
+// contract, but no runtime assertion here could have caught the defect that
+// made three of them necessary (#255): `long` is 64 bits on this host and 32 on
+// the ESP32-C3, so a bound that narrows on the pump is exact in this binary.
+// Every case below passed while the firmware refused all of them, this file
+// included `0,4294967295` in the accepted list the whole time, and the suite
+// stayed green. The width is the thing under test and the host has the wrong
+// one.
+//
+// What catches it is a pair of static_asserts on the parse type in
+// api_bridge.cpp -- which this build compiles, so the second of them fails
+// HERE, not only in CI's firmware build. That is the honest division: the
+// compile-time check owns the width, and the cases below own the boundaries,
+// where a mutation on the epoch ceiling dies against them.
 static void test_well_formed_arguments_still_reach_the_operation_layer() {
   std::cout << "\n=== well-formed arguments are still accepted ===" << std::endl;
 

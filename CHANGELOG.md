@@ -1110,14 +1110,17 @@
   the Grundfos Home app, is what settles the ceiling: `ClockProgramSingleEvent`,
   object type 220, fixed size 10, declares `begin` and `end` as `uint32_t`.
 
-  The host suite could not have caught this and still cannot: `long` is 64 bits
-  there, so the firmware refused inputs that this suite asserted, by name, were
-  accepted — including `0,4294967295`. It stayed green throughout. The guard is
-  therefore a `static_assert` on the parse type, written so that narrowing the
-  alias back fails the **ESP32-C3 firmware build** and passes the host build;
-  CI builds that firmware. Verified both ways: with the alias narrowed, the host
-  suite reports zero failures and the firmware build stops with `the comparison
-  reduces to '(2147483647 >= 4294967295)'`.
+  No *runtime* test can catch this class, and it is worth being exact about why:
+  the host's `long` is 64 bits, so the firmware refused inputs this suite
+  asserted by name were accepted — `0,4294967295` among them — and it stayed
+  green throughout. A test binary cannot observe a bound narrowing on a word
+  size it does not have. The guard is therefore two `static_assert`s on the
+  parse type, chosen so that between them every build catches the regression:
+  one reduces to `2147483647 >= 4294967295` and fails **only** on the ESP32-C3,
+  reproducing the defect exactly; the other refuses any bound type of
+  implementation-defined width and so fails the host unit-test build as well.
+  Verified by narrowing the alias back and building both: `make -C tests test`
+  stops on the second, `esphome compile` stops on the first.
 
 - **The Lovelace card mangled — and could destroy — a schedule window that
   crosses midnight** (issue #174). A cell whose end is earlier than its start

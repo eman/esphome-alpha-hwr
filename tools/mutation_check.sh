@@ -903,14 +903,19 @@ MUTATIONS=(
 # entry claiming otherwise would be a false guarantee. Confirmed by experiment:
 # the mutation survived the full suite.
 #
-# Deliberately absent, for a harder reason: a mutation narrowing `using ParseInt
-# = long long` back to `long`, which is issue #255 exactly. It survives here and
-# always will -- `long` is 64 bits on this host, so the mutated parser behaves
-# identically and no host test can distinguish them. The guard for that one is
-# the static_assert beside the alias in api_bridge.cpp, which fails the ESP32-C3
-# firmware build and passes the host build on purpose. Confirmed by experiment:
-# the mutation survived the full suite, and `esphome compile tests/ci-compile.yaml`
-# stopped on the assert.
+# Deliberately absent, for a different reason: a mutation narrowing `using
+# ParseInt = long long` back to `long`, which is issue #255 exactly. It is
+# guarded, but not by anything this script can score. Two static_asserts sit
+# beside the alias -- one that fails only where the bound narrows (the ESP32-C3
+# firmware build) and one that fails on any build, including this suite's. So
+# the mutated file does not compile, and a mutation that does not compile is
+# scored a SURVIVOR here on purpose: the suite never ran, so the entry would
+# prove nothing about coverage. Confirmed by experiment: `make -C tests test`
+# stops with "bounds must travel in a type of guaranteed width", and `esphome
+# compile tests/ci-compile.yaml` stops with "the comparison reduces to
+# '(2147483647 >= 4294967295)'". A compile-time guard is the only kind
+# available -- no runtime test can observe a bound narrowing on a word size the
+# test binary does not have.
 "bridge-parser-accepts-leading-junk|components/alpha_hwr/api_bridge.cpp|  if (!starts_cleanly) return false;|  // mutated: let strtol skip whitespace and signs"
 # Timestamps are compared AFTER narrowing to the wire's 32 bits; comparing the
 # wider parse let an ordered pair reach the pump reversed.

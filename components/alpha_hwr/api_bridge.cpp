@@ -2,9 +2,11 @@
 #ifdef ALPHA_HWR_HAS_API_BRIDGE
 
 #include <cmath>
+#include <cstdint>
 #include <cstdio>
 #include <limits>
 #include <map>
+#include <type_traits>
 #include "alpha_hwr.h"
 #include "esphome/core/application.h"
 #include "esphome/core/log.h"
@@ -133,17 +135,36 @@ void AlphaHwrApiBridge::setup(AlphaHwrComponent *component) {
 // rejected every input any client could send -- for as long as the parser has
 // existed -- while this suite asserted the opposite and stayed green (#255).
 //
-// The width is therefore named once, carried everywhere, and asserted. The
-// assertion is deliberately one the DEVICE build fails and the host build
-// passes, because that is the only place the defect can appear: narrow the
-// alias back to `long` and CI's ESP32-C3 firmware build stops, where no host
-// test could ever have noticed. `long long` is also what keeps epochs past
-// 2038 parsable -- `std::strtol` on a 32-bit `long` saturates at 2147483647
+// The width is therefore named once, carried everywhere, and asserted twice --
+// because the two assertions catch the regression in different places, and
+// only one of them can run where the defect actually appeared.
+//
+// `long long` is guaranteed at least 64 bits by the standard, so nothing below
+// depends on the host and target agreeing; it is also what keeps epochs past
+// 2038 parsable, since `std::strtol` on a 32-bit `long` saturates at 2147483647
 // and sets ERANGE, which this parser treats as a rejection.
 using ParseInt = long long;
+
+// (1) Semantic, and the one that reproduces #255 exactly: it fails only where
+// the bound would narrow. On the ESP32-C3 it reduces to `2147483647 >=
+// 4294967295` and stops CI's firmware build; on this host it is trivially true,
+// which is the whole reason the bug shipped.
 static_assert(std::numeric_limits<ParseInt>::max() >= 4294967295LL,
               "ParseInt must hold the wire's uint32 ceiling at every word size; "
               "`long` does not on the ESP32-C3 (issue #255)");
+
+// (2) Structural, and the one the HOST can make. No runtime test can catch a
+// bound that narrows on a word size the test binary does not have -- so the
+// check the host is capable of is that bounds are never carried in a type whose
+// width is implementation-defined. `long long` and `int64_t` both promise at
+// least the 64 bits this parser needs; `long` promises 32. Where a platform
+// makes `int64_t` an alias of `long`, `long` is 64 bits there and admitting it
+// is correct. Narrow the alias back and the unit-test build fails too, not just
+// the firmware build.
+static_assert(std::is_same<ParseInt, long long>::value ||
+                  std::is_same<ParseInt, int64_t>::value,
+              "bounds must travel in a type of guaranteed width; `long` is 32 bits on "
+              "the ESP32-C3 and 64 here, and that difference is issue #255");
 
 /// Whole-string decimal parse. Rejects an empty field, leading/trailing
 /// characters of any kind (including whitespace), and anything outside
