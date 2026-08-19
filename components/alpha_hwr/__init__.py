@@ -87,6 +87,7 @@ CONF_RECONNECT_SETTLE_TIME = "reconnect_settle_time"
 CONF_CONTROL_STATE_POLL_INTERVAL = "control_state_poll_interval"
 CONF_DATA_TIMEOUT = "data_timeout"
 CONF_READY_TIMEOUT = "ready_timeout"
+CONF_READY_RECYCLE = "ready_recycle"
 CONF_ALARMS = "alarms"
 CONF_WARNINGS = "warnings"
 CONF_SCHEDULE_HASH = "schedule_hash"
@@ -151,36 +152,34 @@ CONFIG_SCHEMA = (
             # invisible to it. This one is timed from connection-open and is
             # cleared only by the pump actually becoming usable.
             #
-            # DEFAULTS OFF, and that is a deliberate retreat from an earlier
-            # default of 300s.
+            # How long a connection may go without the pump becoming usable
+            # before the component says so. Defaults ON, because saying so costs
+            # nothing: by itself this only latches a fault string and logs.
             #
-            # The retreat is NOT based on a clean observation, and saying so
-            # matters because the observation is what a reviewer would lean on.
-            # An attempt to measure a node with no bond produced a capture that
-            # does not support a general claim: the board was running a
-            # pre-#229 build, with enable_pairing TRUE rather than the default,
-            # so it INITIATED pairing and got 0x52 -- which is issue #230's
-            # shape, not the default configuration's. It also bonded within
-            # 252 ms anyway (issue #245), at an RSSI of -96 to -101 dBm. Three
-            # confounds, no conclusion.
+            # 300s against a fresh connection that reaches ready in about 22s on
+            # a bonded pump -- measured by setting the window short on hardware
+            # and watching which values fired (10s fired, 20s fired, 40s did
+            # not). A first pairing is still untimed, so err high rather than
+            # low. 0 disables it.
+            cv.Optional(CONF_READY_TIMEOUT, default="300s"): cv.positive_time_period_milliseconds,
+            # ...and whether reaching that bound also tears the link down so the
+            # normal reconnect runs. Defaults OFF, and the asymmetry between
+            # these two options is the point.
             #
-            # So what is actually known is this: nobody has yet observed the
-            # configuration this default would be reasoning about. Shipping a
-            # watchdog ON, whose safety argument rests on an unobserved
-            # configuration, and whose failure mode is a forced reconnect that
-            # takes another run at the bond-erasing encryption-on-open window
-            # (issue #14), is not defensible. Issue #244 is where that question
-            # lives.
+            # Naming the fault is free. Recycling is not: every forced reconnect
+            # takes another run at the encryption-on-open window that can erase
+            # the pump's bond (issue #14), and a bond erased that way needs
+            # physical access to the pump to restore (issue #230). On a node
+            # that never becomes ready it would do that on an escalating
+            # schedule indefinitely.
             #
-            # Opt-in, therefore: set it on a node that reliably reaches Pump
-            # Ready today, where it turns "connected, streaming, silently
-            # unusable" into a recycle and a named fault (issue #211).
-            #
-            # 300s is the suggested value if you do enable it, measured on
-            # hardware: a fresh connection on a bonded pump reaches ready in
-            # about 22s, bracketed by a 20s window that fired and a 40s window
-            # that did not. See components/alpha_hwr/readiness_watchdog.h.
-            cv.Optional(CONF_READY_TIMEOUT, default="0s"): cv.positive_time_period_milliseconds,
+            # Whether such a node exists in a supported configuration is issue
+            # #244 -- an attempt to measure it was confounded three ways at once
+            # (a pre-release build, pairing enabled rather than defaulted, and a
+            # signal at the noise floor) and it bonded within 252 ms regardless
+            # (issue #245). So the diagnosis ships on and the remedy waits for
+            # someone who wants it and can see their node reaches ready today.
+            cv.Optional(CONF_READY_RECYCLE, default=False): cv.boolean,
             cv.Optional(CONF_FLOW): sensor.sensor_schema(
                 unit_of_measurement="m³/h",
                 accuracy_decimals=3,
@@ -509,6 +508,7 @@ async def to_code(config):
     cg.add(var.set_reconnect_settle_time(config[CONF_RECONNECT_SETTLE_TIME]))
     cg.add(var.set_data_timeout(config[CONF_DATA_TIMEOUT]))
     cg.add(var.set_ready_timeout(config[CONF_READY_TIMEOUT]))
+    cg.add(var.set_ready_recycle(config[CONF_READY_RECYCLE]))
     if config[CONF_RECONNECT_SETTLE_TIME].total_milliseconds > 0:
         # Register as an esp32_ble_tracker listener (at codegen, so the count
         # macro that enables the listener path is defined) — this is what makes

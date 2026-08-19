@@ -114,6 +114,15 @@ class BLEConnectionManager {
   ///             do. Pass the rank; do not assume it.
   void force_disconnect(const char *reason, FailureHold rank = FailureHold::DATA);
 
+  /// Latch a failure reason WITHOUT touching the link.
+  ///
+  /// force_disconnect() is this plus a teardown, and separating them is the
+  /// point: naming a fault is free, while tearing the link down takes another
+  /// run at the encryption-on-open window that can erase a bond (issue #14).
+  /// A caller that only wants to say what is wrong should not have to pay the
+  /// second cost to get the first (issue #211).
+  void note_failure(const char *reason, FailureHold rank);
+
   /// Tell the manager the GENI session reached READY. Releases an
   /// auth-failure hold, which nothing else can do once the pump has stopped
   /// producing AUTH_CMPL events (failure_hold.h): the pairing reason is shown

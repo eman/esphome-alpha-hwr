@@ -290,6 +290,13 @@ void BLEConnectionManager::subscribe_to_notifications() {
   }
 }
 
+void BLEConnectionManager::note_failure(const char *reason, FailureHold rank) {
+  if (failure_hold_admits(failure_hold_, rank)) {
+    last_failure_ = reason;
+    failure_hold_ = rank;
+  }
+}
+
 void BLEConnectionManager::force_disconnect(const char *reason, FailureHold rank) {
   ESP_LOGW(TAG, "Forcing BLE disconnect: %s", reason);
   // Latch the real cause before tearing the link down. The DISCONNECT event we
@@ -303,10 +310,7 @@ void BLEConnectionManager::force_disconnect(const char *reason, FailureHold rank
   // operator back on the generic string issue #175 exists to replace. Both
   // outrank DATA, so one rank comparison covers them (failure_hold.h) — an
   // earlier `!= SUBSCRIBE` here let the same overwrite through on AUTH.
-  if (failure_hold_admits(failure_hold_, rank)) {
-    last_failure_ = reason;
-    failure_hold_ = rank;
-  }
+  note_failure(reason, rank);
   // This teardown is ours, so the cycle it ends is not evidence about the
   // pump's willingness to pair. Without this, the watchdog recycling an
   // unbonded link that subscribed and went quiet would read as a pairing

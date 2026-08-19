@@ -98,9 +98,10 @@ struct Rig {
     component.set_link_gaps_over_45s_sensor(&gaps_over[3]);
     component.set_link_gaps_over_60s_sensor(&gaps_over[4]);
     component.set_link_gaps_over_90s_sensor(&gaps_over[5]);
-    // Explicit, because the shipped default is 0 (off). Tests exercising the
-    // readiness watchdog have to ask for it, exactly as a user must.
+    // The shipped defaults: naming on at 300s, recycling off. A test that
+    // wants the link torn down asks for it, exactly as a user must.
     component.set_ready_timeout(300000);
+    component.set_ready_recycle(false);
     component.set_link_recycles_sensor(&recycles);
     component.set_link_gaps_truncated_sensor(&gaps_truncated);
     component.set_link_watch_time_sensor(&watch_time);
@@ -992,6 +993,7 @@ void test_a_link_that_never_becomes_ready_is_recycled() {
 
   Rig r;
   r.answer_writes = false;  // the reads go out and nothing answers them
+  r.component.set_ready_recycle(true);  // this test is about the opt-in half
   r.setup();
   r.connect_and_subscribe();
 
@@ -1119,6 +1121,7 @@ void test_readiness_recycles_reach_the_counter_an_automation_watches() {
   // because a readiness recycle never touches the data counter.
   Rig r;
   r.answer_writes = false;
+  r.component.set_ready_recycle(true);  // this test is about the opt-in half
   r.setup();
   r.connect_and_subscribe();
   advance_with_telemetry(r, 400000);
@@ -1157,6 +1160,35 @@ void test_the_fault_is_visible_across_the_reconnect_it_describes() {
               "that set it");
 }
 
+
+void test_the_default_names_the_fault_without_touching_the_link() {
+  std::cout << "\n=== The default names it and does not recycle ===" << std::endl;
+
+  // The split (issue #211). Naming costs nothing; recycling takes another run
+  // at the encryption-on-open window that can erase a bond, and on a node that
+  // never becomes ready it would do that on an escalating schedule for as long
+  // as the node is up. So the diagnosis ships on and the remedy is opt-in.
+  //
+  // This is the shipped configuration: ready_timeout 300s, ready_recycle off.
+  Rig r;
+  r.answer_writes = false;
+  r.setup();
+  r.connect_and_subscribe();
+  const int disconnects = r.client.mock_disconnect_calls();
+
+  advance_with_telemetry(r, 400000);
+
+  TEST_ASSERT(r.link_fault.state.find("never became ready") != std::string::npos,
+              "The fault is named — this is the half the reporter of #211 said "
+              "he could not build from outside");
+  TEST_ASSERT(r.client.mock_disconnect_calls() == disconnects,
+              "...and the link was NOT torn down. A default that reconnects is "
+              "a default that gambles a bond on an unobserved configuration");
+  TEST_ASSERT(r.recycles.state == 0.0f,
+              "...and nothing was counted as a recycle, because nothing was "
+              "recycled — that counter is one an automation thresholds on");
+}
+
 int main() {
   std::cout << "===========================================================" << std::endl;
   std::cout << "  Component BLE Wiring Test Suite" << std::endl;
@@ -1190,6 +1222,7 @@ int main() {
   test_a_node_without_the_ready_entity_is_not_recycled_forever();
   test_readiness_recycles_reach_the_counter_an_automation_watches();
   test_the_fault_is_visible_across_the_reconnect_it_describes();
+  test_the_default_names_the_fault_without_touching_the_link();
 
   std::cout << "\n==========================================" << std::endl;
   std::cout << "Results: " << tests_passed << " passed, " << tests_failed

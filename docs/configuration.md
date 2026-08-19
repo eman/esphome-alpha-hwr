@@ -30,7 +30,8 @@ events fire.
 | `reconnect_settle_time` | time | `2s` | Delay after disconnect before reconnecting |
 | `control_state_poll_interval` | time | `30s` | Interval for periodic control state polling. Set to `0s` to disable. |
 | `data_timeout` | time | `60s` | Tear the BLE link down after this long with no data from the pump, so the normal reconnect runs. Set to `0s` to disable. |
-| `ready_timeout` | time | `0s` (off) | Tear the BLE link down if the pump has not become usable this long after connecting, so the normal reconnect runs. **Opt-in** — see below before enabling. |
+| `ready_timeout` | time | `300s` | Report a fault if the pump has not become usable this long after connecting. Naming only; see `ready_recycle`. `0s` disables. |
+| `ready_recycle` | boolean | `false` | Also tear the link down when `ready_timeout` expires, so the normal reconnect runs. **Opt-in** — see below. |
 
 ### `time_id`
 
@@ -247,16 +248,29 @@ Like `data_timeout` it backs off, doubling on each recycle that never reached
 readiness, up to an hour, and resetting when the pump does become ready. Without
 that, a pump that is merely slow would be recycled forever.
 
-> **This defaults to `0s`, meaning off, and enabling it needs one check first.**
+These are two options because they carry very different costs.
+
+**`ready_timeout` names the fault, and is on.** By itself it does nothing to the
+link: it logs, and it puts `Pump never became ready (300s)` on **Pump Link
+Fault**, escalating the window each time it reports. That is free, and it is the
+part an automation cannot do for itself — from outside, *starting up* and
+*stuck* look identical.
+
+> **`ready_recycle` tears the link down, and is off.** Every forced reconnect
+> takes another run at the window where an encryption failure can erase the
+> pump's bond, and a bond erased that way needs physical access to the pump to
+> restore. On a node that never becomes ready, that would happen on an
+> escalating schedule for as long as the node is up.
+>
 > The behaviour of a node that never bonds has not been established — an attempt
 > to measure it was confounded three ways at once (a pre-release build, pairing
-> enabled rather than the default, and a signal at the noise floor), so nobody
-> has yet observed the configuration this default would be reasoning about.
-> Shipping the watchdog on, when its failure mode is a forced reconnect and each
-> reconnect takes another run at the window where an encryption failure can
-> erase a bond, is not a trade worth making on an unknown.
+> enabled rather than the default, and a signal at the noise floor), and it
+> bonded within 252 ms regardless. So nobody has yet observed the configuration
+> that risk would apply to.
 >
-> So enable it only on a node that **reliably reaches Pump Ready today**. There
+> Enable it only on a node that **reliably reaches Pump Ready today**, where an
+> expired budget means something has genuinely gone wrong rather than that this
+> node never works. There
 > it does what it is for: turns "connected, telemetry flowing, silently
 > unusable" into a recycle and a named fault instead of an automation waiting
 > forever.

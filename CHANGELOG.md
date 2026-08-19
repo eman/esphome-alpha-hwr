@@ -45,7 +45,20 @@
   gate is now the pump being ready, which is what "healthy" has always meant
   here.
 
-  **It defaults to `0s` — off — and that is a deliberate retreat.** An earlier
+  **It is two options, because naming a fault and reconnecting carry very
+  different costs.** `ready_timeout` (default `300s`) only says what is wrong:
+  it logs and latches `Pump never became ready (300s)`, escalating the window on
+  each report. That is free, and it is the half the reporter said he could not
+  build — an automation can see `Pump Ready` has been off a while but cannot
+  tell *starting up* from *stuck*. `ready_recycle` (default `false`) is what
+  tears the link down, opt-in because every forced reconnect takes another run
+  at the window where an encryption failure can erase the pump's bond, which
+  then needs physical access to restore.
+
+  An earlier draft bundled them and shipped the pair off, which meant nobody got
+  the diagnosis either.
+
+  **The recycle half defaults off, and that is a deliberate retreat.** An earlier
   draft shipped it on at `300s`, reasoning that a node with no bond never gets a
   working link anyway, so the hazard was moot. That reasoning was not tested:
   the run meant to test it was confounded three ways — a pre-release build, with

@@ -319,6 +319,13 @@ public:
   // liveness, and the two are not interchangeable -- a session stuck with the
   // pump still volunteering telemetry re-arms the liveness watchdog on every
   // frame and is invisible to it (issue #211).
+  // Whether an expired readiness budget also tears the link down, or only says
+  // so. Defaults to false, and the asymmetry is the whole reason the two are
+  // separate options: naming the fault costs nothing, while recycling takes
+  // another run at the encryption-on-open window that can erase a bond
+  // (issue #14) -- and on a configuration nobody has yet observed (issue #244)
+  // it may do that forever. So the diagnosis ships on and the remedy is opt-in.
+  void set_ready_recycle(bool enabled) { link_ready_recycle_ = enabled; }
   void set_ready_timeout(uint32_t ms) {
     this->link_ready_timeout_ms_ = ms;
     this->link_ready_timeout_current_ms_ = ms;
@@ -430,10 +437,11 @@ private:
   bool reconnect_timer_armed_{false}; // True once the settle timer has started this episode
 
   uint32_t link_data_timeout_ms_{60000};  // Inbound-data watchdog budget (ms); 0 = disabled
-  // 0, matching the schema default -- the watchdog is opt-in (issue #211).
-  // Kept in step deliberately: while these said 300000 and the schema said 0,
-  // every host test inherited a budget no shipped config produces.
-  uint32_t link_ready_timeout_ms_{0};  // Readiness watchdog budget (ms); 0 = disabled
+  // 300000, matching the schema default. Kept in step deliberately: while these
+  // and the schema disagreed, every host test inherited a budget no shipped
+  // config produced.
+  uint32_t link_ready_timeout_ms_{300000};  // Readiness watchdog budget (ms); 0 = disabled
+  bool link_ready_recycle_{false};          // ...and whether expiry also recycles the link
 
   uint32_t control_state_poll_interval_ms_{30000};  // Control state poll interval (ms); default 30s (fixes #54)
   uint32_t last_control_state_poll_time_{0};        // Timestamp of last control state poll
@@ -780,7 +788,7 @@ private:
   // Backoff, sharing the data watchdog's doubling and ceiling. Reset when the
   // pump actually becomes ready, which is the only evidence that the previous
   // window was merely too short rather than the link being stuck.
-  uint32_t link_ready_timeout_current_ms_{0};
+  uint32_t link_ready_timeout_current_ms_{300000};
   // Consecutive recycles that never reached readiness.
   //
   // Added INTO the published link_recycles rather than exposed separately. The

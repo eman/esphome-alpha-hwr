@@ -624,10 +624,52 @@ void AlphaHwrComponent::check_link_readiness_() {
   }
 
   const uint32_t expired_ms = this->link_ready_timeout_current_ms_;
-  this->link_recycles_without_ready_++;
+  // Widen and re-arm before deciding what to DO about it. Both branches below
+  // need this: the recycling one so the asynchronous close cannot re-fire it on
+  // every tick, and the naming one because there is no teardown to interrupt
+  // the condition at all -- without a re-arm it would re-latch every second
+  // forever. Backed off, it reports on an escalating cadence instead, and the
+  // string carries the window it actually waited.
   this->link_ready_timeout_current_ms_ =
       link_readiness_timeout_next(this->link_ready_timeout_current_ms_,
                                   LINK_READY_TIMEOUT_BACKOFF_CAP_MS);
+
+  char reason[64];
+  if (expired_ms % 1000 == 0) {
+    snprintf(reason, sizeof(reason), "Pump never became ready (%" PRIu32 "s)",
+             expired_ms / 1000);
+  } else {
+    snprintf(reason, sizeof(reason), "Pump never became ready (%" PRIu32 "ms)",
+             expired_ms);
+  }
+
+  // Re-arm before anything else. On the recycling branch this is because
+  // esp_ble_gattc_close() is asynchronous and the session stays connected for
+  // some ticks; on the naming branch it is because nothing interrupts the
+  // condition at all.
+  const uint32_t rearm_ms = millis();
+  this->link_ready_since_ms_ = rearm_ms;
+
+  if (!this->link_ready_recycle_) {
+    // Naming without recycling: the default, and the half of this feature that
+    // carries no hazard. It is also the half the reporter of issue #211 said he
+    // could not build from outside -- an automation can already see that Pump
+    // Ready has been off for a while, but cannot tell *starting up* from
+    // *stuck*, and only the component can name that.
+    //
+    // Deliberately does NOT touch link_recycles_without_ready_: nothing was
+    // recycled, and counting one on a surface called "recycles" would be a lie
+    // an automation thresholds on.
+    ESP_LOGW(TAG,
+             "Pump connected %" PRIu32 " ms without becoming ready while %s "
+             "(next report in %" PRIu32 " ms; set ready_recycle to reconnect)",
+             expired_ms, this->session_.get_state_name(),
+             this->link_ready_timeout_current_ms_);
+    this->ble_manager_.note_failure(reason, core::FailureHold::READY);
+    return;
+  }
+
+  this->link_recycles_without_ready_++;
 
   ESP_LOGE(TAG,
            "Pump connected %" PRIu32 " ms without becoming ready while %s - "
@@ -640,38 +682,12 @@ void AlphaHwrComponent::check_link_readiness_() {
   // Same reasoning as the liveness watchdog: by this watchdog's own evidence
   // the connection never worked, whatever the session state says.
   this->link_reached_ready_ = false;
-
-  char reason[64];
-  if (expired_ms % 1000 == 0) {
-    snprintf(reason, sizeof(reason), "Pump never became ready (%" PRIu32 "s)",
-             expired_ms / 1000);
-  } else {
-    snprintf(reason, sizeof(reason), "Pump never became ready (%" PRIu32 "ms)",
-             expired_ms);
-  }
-
-  // Re-arm before disconnecting, for the reason the liveness watchdog does:
-  // esp_ble_gattc_close() is asynchronous, so the session stays connected for
-  // some number of loop() ticks and the window would still be expired on every
-  // one of them.
-  const uint32_t rearm_ms = millis();
-  this->link_ready_since_ms_ = rearm_ms;
-  // And the data window with it, which commit 2 did in only one direction.
-  // That commit stopped a liveness teardown being followed by a readiness one;
-  // this is the mirror. Without it a readiness teardown is followed by a
-  // LIVENESS teardown as soon as the data budget falls due -- seconds later,
-  // while the asynchronous close is still in flight -- giving two recycles and
-  // two counts for one outage, and replacing the readiness diagnosis with the
-  // less specific "No data from pump". Whichever watchdog acts, both windows
-  // have been consumed by the same outage.
+  // The data window is consumed by this outage too; without it the liveness
+  // watchdog fires seconds later and counts the same outage twice.
   this->link_last_inbound_ms_ = rearm_ms;
-  // Its own rank. force_disconnect() defaults to the inbound-data watchdog's,
-  // and taking that default was a real defect: DATA is released by any inbound
-  // notification, so this diagnosis was erased by the very telemetry that makes
-  // the failure invisible -- in the one failure mode defined by that telemetry
-  // never stopping.
   this->ble_manager_.force_disconnect(reason, core::FailureHold::READY);
 }
+
 
 // Link diagnostics for issue #176: the consecutive-recycle counter an
 // automation can threshold on, and the longest quiet interval seen, which is

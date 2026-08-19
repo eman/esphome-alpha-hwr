@@ -506,6 +506,10 @@ MUTATIONS=(
 # is assigned from millis() eleven lines above it.)
 "readiness-watchdog-rearmed-by-activity|components/alpha_hwr/alpha_hwr.cpp|        this->link_last_inbound_ms_ = inbound_now;|        this->link_last_inbound_ms_ = inbound_now;\n        this->link_ready_since_ms_ = inbound_now;"
 "readiness-watchdog-not-checked|components/alpha_hwr/alpha_hwr.cpp|    if (!this->check_link_liveness_())\n      this->check_link_readiness_();|    this->check_link_liveness_();"
+# The split (issue #211): naming ships on, recycling is opt-in. Removing the
+# gate makes every default installation start tearing its link down, which is
+# the bond-erase exposure the split exists to withhold.
+"readiness-recycles-by-default|components/alpha_hwr/alpha_hwr.cpp|  if (!this->link_ready_recycle_) {|  if (false) {"
 # The rank. Both halves of the defect that nearly shipped: taking the default at
 # the call site, and ignoring the parameter inside. force_disconnect() used to
 # hardcode DATA, so the readiness reason was held at the one rank released by
