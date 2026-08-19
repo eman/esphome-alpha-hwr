@@ -26,6 +26,7 @@ using esphome::alpha_hwr::core::FailureHold;
 using esphome::alpha_hwr::core::failure_hold_admits;
 using esphome::alpha_hwr::core::failure_hold_released_by_auth;
 using esphome::alpha_hwr::core::failure_hold_released_by_data;
+using esphome::alpha_hwr::core::failure_hold_released_by_pump_ready;
 using esphome::alpha_hwr::core::failure_hold_released_by_session_ready;
 
 int tests_passed = 0;
@@ -44,6 +45,7 @@ int tests_failed = 0;
 // what stops a fifth enumerator from skipping the tables below.
 static const FailureHold ALL[] = {
     FailureHold::NONE,
+    FailureHold::READY,
     FailureHold::DATA,
     FailureHold::PAIRING_STALL,
     FailureHold::SUBSCRIBE,
@@ -53,6 +55,7 @@ static const FailureHold ALL[] = {
 static const char *name(FailureHold h) {
   switch (h) {
     case FailureHold::NONE: return "NONE";
+    case FailureHold::READY: return "READY";
     case FailureHold::DATA: return "DATA";
     case FailureHold::PAIRING_STALL: return "PAIRING_STALL";
     case FailureHold::SUBSCRIBE: return "SUBSCRIBE";
@@ -94,30 +97,42 @@ void test_a_hold_admits_only_its_equals_and_betters() {
   struct Row { FailureHold held; FailureHold incoming; bool writes; };
   static const Row TABLE[] = {
       {FailureHold::NONE,          FailureHold::NONE,          true},
+      {FailureHold::NONE,          FailureHold::READY,         true},
       {FailureHold::NONE,          FailureHold::DATA,          true},
       {FailureHold::NONE,          FailureHold::PAIRING_STALL, true},
       {FailureHold::NONE,          FailureHold::SUBSCRIBE,     true},
       {FailureHold::NONE,          FailureHold::AUTH,          true},
 
+      {FailureHold::READY,         FailureHold::NONE,          false},
+      {FailureHold::READY,         FailureHold::READY,         true},
+      {FailureHold::READY,         FailureHold::DATA,          true},
+      {FailureHold::READY,         FailureHold::PAIRING_STALL, true},
+      {FailureHold::READY,         FailureHold::SUBSCRIBE,     true},
+      {FailureHold::READY,         FailureHold::AUTH,          true},
+
       {FailureHold::DATA,          FailureHold::NONE,          false},
+      {FailureHold::DATA,          FailureHold::READY,         false},
       {FailureHold::DATA,          FailureHold::DATA,          true},
       {FailureHold::DATA,          FailureHold::PAIRING_STALL, true},
       {FailureHold::DATA,          FailureHold::SUBSCRIBE,     true},
       {FailureHold::DATA,          FailureHold::AUTH,          true},
 
       {FailureHold::PAIRING_STALL, FailureHold::NONE,          false},
+      {FailureHold::PAIRING_STALL, FailureHold::READY,         false},
       {FailureHold::PAIRING_STALL, FailureHold::DATA,          false},
       {FailureHold::PAIRING_STALL, FailureHold::PAIRING_STALL, true},
       {FailureHold::PAIRING_STALL, FailureHold::SUBSCRIBE,     true},
       {FailureHold::PAIRING_STALL, FailureHold::AUTH,          true},
 
       {FailureHold::SUBSCRIBE,     FailureHold::NONE,          false},
+      {FailureHold::SUBSCRIBE,     FailureHold::READY,         false},
       {FailureHold::SUBSCRIBE,     FailureHold::DATA,          false},
       {FailureHold::SUBSCRIBE,     FailureHold::PAIRING_STALL, false},
       {FailureHold::SUBSCRIBE,     FailureHold::SUBSCRIBE,     true},
       {FailureHold::SUBSCRIBE,     FailureHold::AUTH,          true},
 
       {FailureHold::AUTH,          FailureHold::NONE,          false},
+      {FailureHold::AUTH,          FailureHold::READY,         false},
       {FailureHold::AUTH,          FailureHold::DATA,          false},
       {FailureHold::AUTH,          FailureHold::PAIRING_STALL, false},
       {FailureHold::AUTH,          FailureHold::SUBSCRIBE,     false},
@@ -177,21 +192,15 @@ void test_the_release_matrix() {
     bool by_data;
     bool by_auth;
     bool by_ready;
+    bool by_pump_ready;
   };
   static const Row TABLE[] = {
-      {FailureHold::NONE,          false, false, false},
-      {FailureHold::DATA,          true,  false, false},
-      // The only hold released by all three, and the only one that is an
-      // inference from an absence rather than an observed event. Each of the
-      // three refutes it outright: data means something is getting through, a
-      // successful auth means the bond it said could not be formed has been,
-      // and READY means the link survived far past where a refusing pump drops
-      // it. That breadth is deliberate -- the caller also drops it the moment
-      // the detector stops claiming a stall, because for a held reason
-      // "something else will overwrite it" can mean never.
-      {FailureHold::PAIRING_STALL, true,  true,  true},
-      {FailureHold::SUBSCRIBE,     true,  false, false},
-      {FailureHold::AUTH,          false, true,  true},
+      {FailureHold::NONE,           false, false, false, false},
+      {FailureHold::READY,          false, false, false, true},
+      {FailureHold::DATA,           true, false, false, false},
+      {FailureHold::PAIRING_STALL,  true, true, true, false},
+      {FailureHold::SUBSCRIBE,      true, false, false, false},
+      {FailureHold::AUTH,           false, true, true, false},
   };
 
   TEST_ASSERT(sizeof(TABLE) / sizeof(TABLE[0]) == sizeof(ALL) / sizeof(ALL[0]),
@@ -207,6 +216,9 @@ void test_the_release_matrix() {
     TEST_ASSERT(failure_hold_released_by_session_ready(r.hold) == r.by_ready,
                 std::string(name(r.hold)) + ": reaching READY " +
                     (r.by_ready ? "releases" : "does not release") + " it");
+    TEST_ASSERT(failure_hold_released_by_pump_ready(r.hold) == r.by_pump_ready,
+                std::string(name(r.hold)) + ": the pump becoming ready " +
+                    (r.by_pump_ready ? "releases" : "does not release") + " it");
   }
 
   // The property that actually matters, kept as a property: no hold may be
@@ -216,7 +228,8 @@ void test_the_release_matrix() {
     if (h == FailureHold::NONE) continue;
     TEST_ASSERT(failure_hold_released_by_data(h) ||
                     failure_hold_released_by_auth(h) ||
-                    failure_hold_released_by_session_ready(h),
+                    failure_hold_released_by_session_ready(h) ||
+                    failure_hold_released_by_pump_ready(h),
                 std::string(name(h)) + " has at least one release path");
   }
 
@@ -362,12 +375,14 @@ void test_the_rank_is_pinned_and_a_new_hold_cannot_skip_a_release() {
   // The rank is the declaration order, so an enumerator inserted rather than
   // appended silently demotes everything after it. Pin the order itself.
   TEST_ASSERT(static_cast<uint8_t>(FailureHold::NONE) == 0 &&
-                  static_cast<uint8_t>(FailureHold::DATA) == 1 &&
-                  static_cast<uint8_t>(FailureHold::PAIRING_STALL) == 2 &&
-                  static_cast<uint8_t>(FailureHold::SUBSCRIBE) == 3 &&
-                  static_cast<uint8_t>(FailureHold::AUTH) == 4,
-              "NONE < DATA < PAIRING_STALL < SUBSCRIBE < AUTH — the order IS "
-              "the rank, so a reorder is a behaviour change and fails here");
+                  static_cast<uint8_t>(FailureHold::READY) == 1 &&
+                  static_cast<uint8_t>(FailureHold::DATA) == 2 &&
+                  static_cast<uint8_t>(FailureHold::PAIRING_STALL) == 3 &&
+                  static_cast<uint8_t>(FailureHold::SUBSCRIBE) == 4 &&
+                  static_cast<uint8_t>(FailureHold::AUTH) == 5,
+              "NONE < READY < DATA < PAIRING_STALL < SUBSCRIBE < AUTH — the "
+              "order IS the rank, so a reorder is a behaviour change and fails "
+              "here");
 }
 
 // ── The two orderings a skeptic pass corrected ─────────────────────────────

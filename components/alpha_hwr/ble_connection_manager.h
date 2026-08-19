@@ -112,6 +112,14 @@ class BLEConnectionManager {
   /// report anything, only mask the next outage's cause.
   void on_session_ready();
 
+  /// Tell the manager the pump reached its usable state -- session ready,
+  /// initial reads landed, caches valid. Releases a readiness-watchdog hold,
+  /// which nothing else can: that hold survives inbound data (the condition it
+  /// fires under) and survives the session reaching READY (one of the states it
+  /// exists to catch a link stuck past). See failure_hold.h and
+  /// readiness_watchdog.h.
+  void on_pump_ready();
+
  private:
   /// Drop a latched pairing-stall reason once the detector stops claiming one.
   /// Called from every site that clears the stall; see pairing_stall.h.

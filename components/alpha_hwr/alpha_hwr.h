@@ -24,7 +24,8 @@
 #include "frame_builder.h"
 #include "history_service.h"
 #include "initial_read_retry.h"  // re-arm predicate for the one-shot initial read chain
-#include "link_watchdog.h"  // inbound-data watchdog predicate for a deaf-but-open link
+#include "link_watchdog.h"       // inbound-data watchdog predicate for a deaf-but-open link
+#include "readiness_watchdog.h"  // progress watchdog for a link that is open but never usable
 #include "clock_sync_gate.h"  // whether a clock sync can run, and whether to say so
 #include "publish_gate.h"  // publish-on-change gates for the YAML control entities (#127)
 #include "pump_schedule_ux.h"
@@ -312,6 +313,16 @@ public:
     // regardless of what was asked for.
     this->link_data_timeout_current_ms_ = ms;
   }
+  // Budget (ms) the readiness watchdog allows between connection-open and the
+  // pump becoming usable, before it tears the link down. 0 = disabled. See
+  // readiness_watchdog.h: this watches PROGRESS where the one above watches
+  // liveness, and the two are not interchangeable -- a session stuck with the
+  // pump still volunteering telemetry re-arms the liveness watchdog on every
+  // frame and is invisible to it (issue #211).
+  void set_ready_timeout(uint32_t ms) {
+    this->link_ready_timeout_ms_ = ms;
+    this->link_ready_timeout_current_ms_ = ms;
+  }
   // Interval (ms) for periodic control state polling to detect out-of-band pump
   // state changes (e.g., internal schedule execution, manual button press).
   // 0 = disabled (default is 30 seconds; fixes issue #54).
@@ -419,6 +430,7 @@ private:
   bool reconnect_timer_armed_{false}; // True once the settle timer has started this episode
 
   uint32_t link_data_timeout_ms_{60000};  // Inbound-data watchdog budget (ms); 0 = disabled
+  uint32_t link_ready_timeout_ms_{300000};  // Readiness watchdog budget (ms); 0 = disabled
 
   uint32_t control_state_poll_interval_ms_{30000};  // Control state poll interval (ms); default 30s (fixes #54)
   uint32_t last_control_state_poll_time_{0};        // Timestamp of last control state poll
@@ -732,6 +744,28 @@ private:
   // connection-open: a widened window governs the next connection's opening
   // too. Initialised from the configured value in setup().
   uint32_t link_data_timeout_current_ms_{60000};
+
+  // Readiness watchdog (issue #211). Its observable is progress, not data: the
+  // link has been open this long and the pump still is not usable.
+  //
+  // The arming rule is the whole design and it is one line: link_open_ms_ is
+  // stamped at connection-open and by NOTHING else. Not by data, not by a
+  // session transition, not by a cache filling partway. A check re-armed by
+  // something on the way to the state it is waiting for feeds itself and can
+  // never fire -- which is exactly what the Pump Link Status ladder did to
+  // link_last_open_ms_, documented in link_watchdog.h, and what the reporter of
+  // #211 predicted for this timer before it existed.
+  void check_link_readiness_();
+  uint32_t link_ready_since_ms_{0};
+  // Backoff, sharing the data watchdog's doubling and ceiling. Reset when the
+  // pump actually becomes ready, which is the only evidence that the previous
+  // window was merely too short rather than the link being stuck.
+  uint32_t link_ready_timeout_current_ms_{300000};
+  // Consecutive recycles that never reached readiness. Not published as its own
+  // entity: link_recycles already gives an automation a number to threshold on,
+  // and a second counter measuring a subset of the same failures would invite
+  // the two being compared as though they were independent.
+  uint32_t link_recycles_without_ready_{0};
 
   // Consecutive recycles with no data in between. Reset by a notification
   // received while the session is READY -- the same gate as the backoff window

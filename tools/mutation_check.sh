@@ -479,6 +479,34 @@ MUTATIONS=(
 "clock-gate-every-block-warns|components/alpha_hwr/clock_sync_gate.h|  return a == ClockSyncAction::WARN_NO_TIME_ID |  return a != ClockSyncAction::SYNC; //"
 "link-watchdog-never-fires|components/alpha_hwr/link_watchdog.h|return static_cast<uint32_t>(now_ms - last_inbound_ms) > timeout_ms;|return false;"
 "link-watchdog-rollover-unsafe|components/alpha_hwr/link_watchdog.h|return static_cast<uint32_t>(now_ms - last_inbound_ms) > timeout_ms;|return now_ms > last_inbound_ms + timeout_ms;"
+# Readiness (progress) watchdog, issue #211. The data watchdog above watches
+# liveness and is re-armed by every notification; this pump volunteers telemetry
+# unprompted, so a session stuck anywhere keeps re-arming it and the failure --
+# connected, streaming, never usable, automation waiting forever -- is invisible
+# to it. The first two are the ways this one can be made not to fire at all.
+"readiness-watchdog-never-fires|components/alpha_hwr/readiness_watchdog.h|  return static_cast<uint32_t>(now_ms - connected_since_ms) > timeout_ms;|  return false;"
+"readiness-watchdog-rollover-unsafe|components/alpha_hwr/readiness_watchdog.h|  return static_cast<uint32_t>(now_ms - connected_since_ms) > timeout_ms;|  return now_ms > connected_since_ms + timeout_ms;"
+# A ready pump must be exempt, or a healthy link is recycled every five minutes
+# forever -- the opposite failure, and a louder one.
+"readiness-watchdog-recycles-a-ready-pump|components/alpha_hwr/readiness_watchdog.h|  if (!connected || pump_ready || timeout_ms == 0)|  if (!connected || timeout_ms == 0)"
+# The disable, and the arming rule that is the whole design: re-arm from
+# anything on the way to readiness and the timer chases the state it waits for.
+# The mutation below simulates that by re-arming from `now`, which is what any
+# "refresh it on activity" version reduces to.
+"readiness-watchdog-cannot-be-disabled|components/alpha_hwr/readiness_watchdog.h|  if (!connected || pump_ready || timeout_ms == 0)|  if (!connected || pump_ready)"
+"readiness-watchdog-rearmed-by-activity|components/alpha_hwr/alpha_hwr.cpp|    this->link_ready_since_ms_ = this->link_last_open_ms_;|    this->link_ready_since_ms_ = millis();"
+# The wiring: never checked, never recycled, and the fault gate that decides
+# whether the diagnosis can be read at all. The last one is the defect a
+# plausible implementation ships -- latching a reason and then publishing "None"
+# over it, because session-ready is reached two seconds after subscribe and the
+# failure being reported happens on the far side of that.
+"readiness-watchdog-not-checked|components/alpha_hwr/alpha_hwr.cpp|    this->check_link_readiness_();|    (void) 0;"
+"readiness-fault-hidden-by-session-ready|components/alpha_hwr/alpha_hwr.cpp|    const std::string shown = (pump_ready || lf.empty()) ? std::string(\"None\") : lf;|    const std::string shown = (this->session_.is_ready() || lf.empty()) ? std::string(\"None\") : lf;"
+# Rank and release. Ranked above data it would displace the more specific
+# diagnosis on a link that is genuinely silent; released by data it would be
+# erased by the very telemetry that masks the problem.
+"readiness-hold-released-by-data|components/alpha_hwr/failure_hold.h|    case FailureHold::READY:\n      return false;  // data arriving is the CONDITION|    case FailureHold::READY:\n      return true;  // data arriving is the CONDITION"
+"readiness-hold-never-released|components/alpha_hwr/failure_hold.h|    case FailureHold::READY:\n      return true;|    case FailureHold::READY:\n      return false;"
 # data_timeout backoff (issue #176). Without it a deaf link is recycled ~1,300
 # times a day indefinitely, each pass re-entering the encryption-on-open window
 # where a failure can erase the bond (issue #14). The three errors: never

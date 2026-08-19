@@ -125,6 +125,12 @@ void AlphaHwrComponent::setup() {
     // subscribe paths that never call subscribed_callback_() leave the session
     // short of READY forever, and those need recycling too.
     this->link_last_inbound_ms_ = this->link_last_open_ms_;
+    // Arm the readiness watchdog from the same stamp -- and from here ONLY.
+    // Every other candidate site (a notification, a session transition, a cache
+    // filling) is something that happens on the way to readiness, so re-arming
+    // there would make the timer chase the thing it is waiting for and never
+    // expire. See readiness_watchdog.h (issue #211).
+    this->link_ready_since_ms_ = this->link_last_open_ms_;
     // ...and start the gap sampler from the same stamp, so what it reports is
     // what the watchdog acts on. The interval that ends here is not sampled:
     // the link was down for it, and the watchdog does not run on a down link.
@@ -495,6 +501,11 @@ void AlphaHwrComponent::loop() {
   if (millis() - this->link_last_eval_ms_ >= 1000) {
     this->link_last_eval_ms_ = millis();
     this->check_link_liveness_();
+    // Liveness first, deliberately. Both can be expired at once on a link that
+    // is silent AND never became ready, and the silence is the more specific
+    // diagnosis -- running it first means it claims the fault surface, which is
+    // the same answer the rank in failure_hold.h gives.
+    this->check_link_readiness_();
     this->evaluate_link_status();
     // The tick's own stamp, not a fresh millis(): the watched-time throttle
     // measures against it, and re-reading the clock after two calls that can
@@ -573,6 +584,52 @@ void AlphaHwrComponent::check_link_liveness_() {
   // threshold the statistic exists to validate (see LinkGapSampler).
   this->link_gap_.on_recycle(rearm_ms);
   this->link_last_inbound_ms_ = rearm_ms;
+  this->ble_manager_.force_disconnect(reason);
+}
+
+// Readiness watchdog. See readiness_watchdog.h for why the inbound-data
+// watchdog cannot cover this: the pump volunteers telemetry, so a session stuck
+// anywhere at all keeps re-arming that one while never becoming usable.
+void AlphaHwrComponent::check_link_readiness_() {
+  const bool pump_ready = this->ready_sensor_ != nullptr && this->ready_sensor_->state;
+  if (!link_readiness_timeout_expired(this->session_.is_connected(), pump_ready,
+                                      millis(), this->link_ready_since_ms_,
+                                      this->link_ready_timeout_current_ms_)) {
+    return;
+  }
+
+  const uint32_t expired_ms = this->link_ready_timeout_current_ms_;
+  this->link_recycles_without_ready_++;
+  this->link_ready_timeout_current_ms_ =
+      link_readiness_timeout_next(this->link_ready_timeout_current_ms_,
+                                  LINK_READY_TIMEOUT_BACKOFF_CAP_MS);
+
+  ESP_LOGE(TAG,
+           "Pump connected %" PRIu32 " ms without becoming ready while %s - "
+           "recycling the link (consecutive: %" PRIu32 ", next window %" PRIu32
+           " ms)",
+           expired_ms, this->session_.get_state_name(),
+           this->link_recycles_without_ready_,
+           this->link_ready_timeout_current_ms_);
+
+  // Same reasoning as the liveness watchdog: by this watchdog's own evidence
+  // the connection never worked, whatever the session state says.
+  this->link_reached_ready_ = false;
+
+  char reason[64];
+  if (expired_ms % 1000 == 0) {
+    snprintf(reason, sizeof(reason), "Pump never became ready (%" PRIu32 "s)",
+             expired_ms / 1000);
+  } else {
+    snprintf(reason, sizeof(reason), "Pump never became ready (%" PRIu32 "ms)",
+             expired_ms);
+  }
+
+  // Re-arm before disconnecting, for the reason the liveness watchdog does:
+  // esp_ble_gattc_close() is asynchronous, so the session stays connected for
+  // some number of loop() ticks and the window would still be expired on every
+  // one of them.
+  this->link_ready_since_ms_ = millis();
   this->ble_manager_.force_disconnect(reason);
 }
 
@@ -670,13 +727,28 @@ void AlphaHwrComponent::publish_link_diagnostics_(uint32_t now_ms) {
 //                 in-progress attempt (including the first after a clean drop).
 void AlphaHwrComponent::evaluate_link_status() {
 #ifdef USE_TEXT_SENSOR
-  // Companion sensor: show the latched failure reason only while the link is unhealthy;
-  // read "None" once it's Connected again, so a stale reason doesn't sit next to a healthy
-  // status. "None" is also the pre-failure default.
+  // Companion sensor: show the latched failure reason only while the link is
+  // unhealthy; read "None" once it is working again, so a stale reason does not
+  // sit next to a healthy status. "None" is also the pre-failure default.
+  //
+  // "Healthy" is the pump being READY, not the SESSION being ready, and the
+  // difference is the whole of issue #211. The session reaches ready a fixed
+  // two seconds after subscribe with no frame exchanged; the pump is usable
+  // only once the initial reads have landed and the caches are valid. Gating on
+  // the session meant that a link stuck in exactly the reported state -- session
+  // ready, telemetry flowing, Pump Ready off forever -- would latch the
+  // readiness fault and then blank it, publishing "None" over the one string
+  // that explained what was wrong. The diagnosis would have existed and been
+  // unreadable.
+  //
+  // The cost is that a stale reason from the previous connection is now visible
+  // for the 13-18 s between session-ready and pump-ready rather than being
+  // hidden at the two-second mark. That is the honest reading: the link is not
+  // usable yet during that window.
   if (this->pump_last_link_failure_sensor_ != nullptr) {
     const std::string &lf = this->ble_manager_.get_last_failure();
-    const std::string shown =
-        (this->session_.is_ready() || lf.empty()) ? std::string("None") : lf;
+    const bool pump_ready = this->ready_sensor_ != nullptr && this->ready_sensor_->state;
+    const std::string shown = (pump_ready || lf.empty()) ? std::string("None") : lf;
     if (shown != this->link_last_failure_published_) {
       this->link_last_failure_published_ = shown;
       this->pump_last_link_failure_sensor_->publish_state(shown);
@@ -977,6 +1049,13 @@ void AlphaHwrComponent::update() {
       if (ready_sensor_ && !ready_sensor_->state && is_state_synchronized()) {
         ESP_LOGI(TAG, "Cache synchronized: pump is fully READY for control");
         ready_sensor_->publish_state(true);
+        // The one thing that refutes a readiness fault, so the one thing that
+        // releases it. Also the only evidence that the window was merely too
+        // short rather than the link being stuck, so the backoff resets here
+        // and nowhere else (issue #211).
+        this->ble_manager_.on_pump_ready();
+        this->link_ready_timeout_current_ms_ = this->link_ready_timeout_ms_;
+        this->link_recycles_without_ready_ = 0;
       }
 
       // Publish the run state and repair a dead schedule (issue #124). Gated on

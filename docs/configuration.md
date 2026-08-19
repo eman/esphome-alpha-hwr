@@ -30,6 +30,7 @@ events fire.
 | `reconnect_settle_time` | time | `2s` | Delay after disconnect before reconnecting |
 | `control_state_poll_interval` | time | `30s` | Interval for periodic control state polling. Set to `0s` to disable. |
 | `data_timeout` | time | `60s` | Tear the BLE link down after this long with no data from the pump, so the normal reconnect runs. Set to `0s` to disable. |
+| `ready_timeout` | time | `300s` | Tear the BLE link down if the pump has not become usable this long after connecting, so the normal reconnect runs. Set to `0s` to disable. |
 
 ### `time_id`
 
@@ -208,6 +209,55 @@ failed opens are not counted as cycles at all. They surface as `Failed To
 Establish (0x3e)` and, before long, as `Unreachable` on Pump Link Status. The
 stall needs connections that open and are then dropped, which is a different
 shape. So the third cause, if there is one, is still unnamed.
+
+### `ready_timeout`
+
+`data_timeout` above watches whether anything is *arriving*. This watches
+whether the link ever becomes *usable*, and the two are not the same check.
+
+The failure it exists for was reported from a live installation (issue #211):
+connected, pairing on, telemetry updating in Home Assistant, **Pump Ready** off
+indefinitely, no fault raised and no reconnect. An automation gated on
+`Pump Ready` — which is the correct thing to gate on — waits silently forever,
+while the dashboard shows a healthy pump with live sensor values.
+
+`data_timeout` cannot catch it. The pump volunteers telemetry notifications of
+its own accord, so a session stuck anywhere at all keeps re-arming that watchdog
+on every frame. Silence never accumulates, so it never fires. As the reporter
+put it, this is the one failure shape where the diagnostics actively point away
+from the problem.
+
+`ready_timeout` is timed from connection-open and cleared only by the pump
+actually reaching its usable state — session ready, initial reads landed, caches
+valid. Nothing else resets it: not inbound data, not a session transition, not a
+cache filling partway. That is deliberate, and it is the whole design. A timer
+refreshed by anything on the way to readiness would chase the state it is
+waiting for and could never expire, which is precisely the trap already
+documented in `link_watchdog.h`, where the link-status ladder refreshed its own
+timestamp and kept a rung permanently unreachable.
+
+When it expires the link is dropped and the usual reconnect takes over — the
+same remedy as `data_timeout`, because that is what the recovery machinery
+listens to. **Pump Link Fault** then reads `Pump never became ready (300s)`,
+which is the part that turns "it has been off a while" into a diagnosis: from
+outside, *starting up* and *stuck* look identical, and naming the condition is
+the thing an automation cannot do for itself.
+
+Like `data_timeout` it backs off, doubling on each recycle that never reached
+readiness, up to an hour, and resetting when the pump does become ready. Without
+that, a pump that is merely slow would be recycled forever.
+
+> **The default is deliberately generous, and deliberately unmeasured.** On the
+> reporting installation `Pump Ready` comes up 13–18 seconds after connecting on
+> a warm reconnect. A first pairing, with the device-info reads and a schedule
+> download behind it, has never been timed by anyone. `300s` is more than an
+> order of magnitude above the only figure that exists, because a bound that is
+> too loose still converts "silent forever" into "recovers eventually" — the
+> whole win — while one that is too tight recycles a pump that was merely slow.
+> If a first pairing is ever measured, this can be tightened.
+
+Set `ready_timeout: 0s` to disable it. Note what that restores: a link that
+never becomes usable will sit there indefinitely with no fault and no recycle.
 
 ### `data_timeout`
 

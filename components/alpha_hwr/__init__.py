@@ -86,6 +86,7 @@ CONF_ENABLE_PAIRING = "enable_pairing"
 CONF_RECONNECT_SETTLE_TIME = "reconnect_settle_time"
 CONF_CONTROL_STATE_POLL_INTERVAL = "control_state_poll_interval"
 CONF_DATA_TIMEOUT = "data_timeout"
+CONF_READY_TIMEOUT = "ready_timeout"
 CONF_ALARMS = "alarms"
 CONF_WARNINGS = "warnings"
 CONF_SCHEDULE_HASH = "schedule_hash"
@@ -144,6 +145,19 @@ CONFIG_SCHEMA = (
             # so 60s is six missed poll cycles. 0 disables it. See
             # components/alpha_hwr/link_watchdog.h.
             cv.Optional(CONF_DATA_TIMEOUT, default="60s"): cv.positive_time_period_milliseconds,
+            # Readiness (progress) watchdog, issue #211. The data watchdog above
+            # watches liveness and is re-armed by every inbound notification, so
+            # a session stuck while the pump keeps volunteering telemetry is
+            # invisible to it. This one is timed from connection-open and is
+            # cleared only by the pump actually becoming usable.
+            #
+            # 5 minutes against a warm reconnect that reaches ready in 13-18s.
+            # Deliberately generous and deliberately unmeasured: a first pairing
+            # with device-info reads and a schedule download has never been
+            # timed. Too loose still turns "silent forever" into "recovers
+            # eventually"; too tight recycles a merely slow pump. 0 disables it.
+            # See components/alpha_hwr/readiness_watchdog.h.
+            cv.Optional(CONF_READY_TIMEOUT, default="300s"): cv.positive_time_period_milliseconds,
             cv.Optional(CONF_FLOW): sensor.sensor_schema(
                 unit_of_measurement="m³/h",
                 accuracy_decimals=3,
@@ -468,8 +482,10 @@ async def to_code(config):
 
     # Set pairing enabled flag
     cg.add(var.set_pairing_enabled(config[CONF_ENABLE_PAIRING]))
+
     cg.add(var.set_reconnect_settle_time(config[CONF_RECONNECT_SETTLE_TIME]))
     cg.add(var.set_data_timeout(config[CONF_DATA_TIMEOUT]))
+    cg.add(var.set_ready_timeout(config[CONF_READY_TIMEOUT]))
     if config[CONF_RECONNECT_SETTLE_TIME].total_milliseconds > 0:
         # Register as an esp32_ble_tracker listener (at codegen, so the count
         # macro that enables the listener path is defined) — this is what makes

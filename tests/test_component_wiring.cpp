@@ -952,6 +952,101 @@ void test_a_stall_does_not_bury_a_bond_erasing_pairing_failure() {
               "that code is the prevention, and it is the one that recurs");
 }
 
+
+// ── The link that is connected, streaming, and never usable ────────────────
+// Issue #211, driven through the real handlers. The pure predicate is tested
+// exhaustively in tests/test_readiness_watchdog.cpp; what these pin is the
+// wiring, and in particular the part that a plausible implementation gets
+// wrong: latching a diagnosis the user cannot see.
+// The pump's unsolicited operation-status notification -- a frame it volunteers
+// rather than one answering a read. This is what makes the reported failure the
+// shape it is: the data watchdog is re-armed by every one of these, so silence
+// never accumulates and it never fires, while nothing at all is progressing.
+static std::vector<uint8_t> volunteered_telemetry() {
+  return with_crc({0x24, 0x12, 0xF8, 0xE7, 0x0A, 0x0E, 0x00, 0x01, 0x2F, 0x01,
+                   0x00, 0x00, 0x07, 0x00, 0x01, 0x02, 0x44, 0xCE, 0x40, 0x00,
+                   0x00, 0x00});
+}
+
+// Advance time while the pump keeps volunteering telemetry, the way it does on
+// a real link. Without this the data watchdog fires at 60 s and recycles the
+// link for its own reasons -- which is a different fault, and a test that let
+// it happen would be watching the wrong watchdog while claiming to test this
+// one. (It did, in the first version of this file: disabling the readiness
+// watchdog entirely left all but one assertion green.)
+static void advance_with_telemetry(Rig &r, uint32_t ms) {
+  const uint32_t step = 5000;
+  for (uint32_t elapsed = 0; elapsed < ms; elapsed += step) {
+    r.notify(volunteered_telemetry());
+    r.advance(step, 5);
+  }
+}
+
+void test_a_link_that_never_becomes_ready_is_recycled() {
+  std::cout << "\n=== A link that never becomes ready is recycled ===" << std::endl;
+
+  Rig r;
+  r.answer_writes = false;  // the reads go out and nothing answers them
+  r.setup();
+  r.connect_and_subscribe();
+
+  // Well past session-ready and past the 60 s data budget, but the pump is
+  // streaming, so the data watchdog is satisfied and nothing recycles.
+  advance_with_telemetry(r, 90000);
+  TEST_ASSERT(!r.ready_is_on(), "Pump Ready is off, as the reported failure has it");
+  const int disconnects_before = r.client.mock_disconnect_calls();
+  TEST_ASSERT(r.link_fault.state.find("No data") == std::string::npos,
+              "and the data watchdog has NOT fired — telemetry is arriving, "
+              "which is exactly why this failure was invisible");
+
+  // Past the 300 s readiness budget, still streaming throughout.
+  advance_with_telemetry(r, 300000);
+  TEST_ASSERT(r.client.mock_disconnect_calls() > disconnects_before,
+              "The readiness watchdog tore the link down — recovery is driven "
+              "by the disconnect callback, so that is what has to happen");
+  TEST_ASSERT(r.link_fault.state.find("never became ready") != std::string::npos,
+              "...and the fault says what was wrong, in the terms an operator "
+              "can act on rather than as a BLE error code");
+}
+
+void test_the_readiness_fault_is_visible_while_the_session_is_ready() {
+  std::cout << "\n=== The readiness fault is not hidden by session-ready ==="
+            << std::endl;
+
+  // The trap. evaluate_link_status() used to blank the fault string whenever
+  // the SESSION was ready -- and session-ready is reached two seconds after
+  // subscribe with no frame exchanged, which is precisely the state issue #211
+  // describes. Latching a diagnosis and then publishing "None" over it would
+  // have shipped a fault nobody could read.
+  Rig r;
+  r.answer_writes = false;
+  r.setup();
+  r.connect_and_subscribe();
+  advance_with_telemetry(r, 360000);
+
+  TEST_ASSERT(!r.ready_is_on(), "Still not usable");
+  TEST_ASSERT(r.link_fault.state != "None",
+              "The fault surface says something. Gated on the session rather "
+              "than on the pump, this read \"None\" for the whole outage");
+}
+
+void test_a_healthy_link_never_trips_the_readiness_watchdog() {
+  std::cout << "\n=== A healthy link never trips it ===" << std::endl;
+
+  Rig r;
+  r.setup();
+  r.connect_and_subscribe();
+  TEST_ASSERT(r.run_until_ready(), "Reaches Pump Ready normally");
+
+  const int disconnects = r.client.mock_disconnect_calls();
+  r.advance(600000, 600);  // twice the budget, healthy throughout
+  TEST_ASSERT(r.client.mock_disconnect_calls() == disconnects,
+              "Ten minutes on a working link and nothing is recycled — the "
+              "watchdog waits for a state, and that state arrived");
+  TEST_ASSERT(r.link_fault.state == "None",
+              "...and no fault is latched");
+}
+
 int main() {
   std::cout << "===========================================================" << std::endl;
   std::cout << "  Component BLE Wiring Test Suite" << std::endl;
@@ -978,6 +1073,9 @@ int main() {
   test_a_radio_drop_is_never_reported_as_a_refusal();
   test_the_pump_offering_to_pair_takes_the_fault_back_off();
   test_a_stall_does_not_bury_a_bond_erasing_pairing_failure();
+  test_a_link_that_never_becomes_ready_is_recycled();
+  test_the_readiness_fault_is_visible_while_the_session_is_ready();
+  test_a_healthy_link_never_trips_the_readiness_watchdog();
 
   std::cout << "\n==========================================" << std::endl;
   std::cout << "Results: " << tests_passed << " passed, " << tests_failed

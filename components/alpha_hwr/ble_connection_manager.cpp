@@ -342,6 +342,18 @@ void BLEConnectionManager::release_pairing_stall_hold_() {
   }
 }
 
+void BLEConnectionManager::on_pump_ready() {
+  if (failure_hold_released_by_pump_ready(failure_hold_)) {
+    ESP_LOGD(TAG, "Pump ready - releasing held reason: %s", last_failure_.c_str());
+    // Cleared, not merely unheld, for the reason the pairing-stall release
+    // clears it: the string is published whenever the pump is not ready, and a
+    // reason that has been refuted should read "None" rather than wait for some
+    // later fault to overwrite it.
+    last_failure_.clear();
+    failure_hold_ = FailureHold::NONE;
+  }
+}
+
 void BLEConnectionManager::on_session_ready() {
   if (failure_hold_released_by_session_ready(failure_hold_)) {
     ESP_LOGD(TAG, "Session ready - releasing held failure reason: %s",
