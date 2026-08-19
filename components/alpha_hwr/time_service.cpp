@@ -150,7 +150,29 @@ void TimeService::send_set_clock_command(const ESPTime &local_now) {
   apdu[21] = 0x00;
 
   ESP_LOGD(TAG, "Clock SET APDU: %s", format_hex_pretty(apdu, sizeof(apdu)).c_str());
-  transport_->send_apdu_command(apdu, sizeof(apdu));
+
+  // Awaited, not fired and forgotten (issue #253).
+  //
+  // The callback exists to make the transport wait at all -- a null one means
+  // the command is popped as soon as its last chunk goes out -- and reports
+  // nothing onward: run_set_clock_() decides by reading SubID 101 back, which
+  // is the only honest verdict for this write and does not change here.
+  //
+  // What the wait buys is that this write's acknowledgement is consumed by this
+  // write. Every SET reply the pump sends is the same nine bytes whatever was
+  // written (see the short-ACK branch in transport.cpp), so a reply left
+  // unclaimed is one the next Class 10 write can be handed instead. This write
+  // is not a rare one -- the clock sync runs on a schedule -- and it is the
+  // best-attested SET in the corpus: nine instances in
+  // resources/traffic_capture, every one answered in 38-90 ms, all with the
+  // identical `24 05 F8 E7 0A 01 00 AE A2`.
+  transport_->send_apdu_command(
+      apdu, sizeof(apdu), 0, 0,
+      [](bool success, const uint8_t * /*data*/, size_t /*len*/) {
+        ESP_LOGV(TAG, "Clock write %s", success ? "acknowledged" : "unanswered");
+      },
+      core::Transport::SET_ACK_TIMEOUT_MS, /*allow_register_read=*/false,
+      /*expect_short_ack=*/true, /*quiet_timeout=*/true);
 }
 
 ESPTime TimeService::parse_clock_response(const uint8_t *data, size_t len) {

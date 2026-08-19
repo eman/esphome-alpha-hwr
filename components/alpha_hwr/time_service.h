@@ -85,15 +85,20 @@ class TimeService {
    * `[0x01][Year(2BE)][Month][Day][Hour][Minute][Second][0][0][0]`. The fields
    * are LOCAL time, matching what SubID 101 reads back.
    *
-   * Deliberately fire-and-forget, and deliberately not the verdict. Nothing in
-   * this repo records what -- if anything -- the pump answers a SubID 100 SET
-   * with, so there is no ACK shape to match: the transport's short-ACK path is
-   * an allowlist keyed on the queued OpSpec plus object bytes and this write is
-   * not on it. Passing a callback anyway would buy a 3 s wildcard window that
-   * can only ever close empty, and its `false` would be indistinguishable from
-   * a genuine send failure. So the caller confirms the only honest way, by
-   * reading SubID 101 back -- the same "the ACK is not the verdict" rule the
-   * Class 3 commands follow for the opposite reason (issue #46).
+   * Awaited, and deliberately still not the verdict. The claim that used to
+   * stand here -- that nothing records what the pump answers a SubID 100 SET
+   * with, so there is no shape to match -- was wrong, and wrong in a checkable
+   * way: resources/traffic_capture holds nine of these writes, every one
+   * answered in 38-90 ms with the ordinary short Class 10 ACK. The
+   * short-ACK path was an allowlist that this write was simply never added to;
+   * it is a caller declaration now (issue #253) and this write makes it.
+   *
+   * The wait is not for a verdict. It is so that THIS write's acknowledgement
+   * is spent on this write: every SET reply is byte-identical, so one left
+   * unclaimed is one the next Class 10 write can be handed by mistake
+   * (issue #248). The caller still confirms the only honest way, by reading
+   * SubID 101 back -- the same "the ACK is not the verdict" rule the Class 3
+   * commands follow for the opposite reason (issue #46).
    *
    * Bench-confirmed (2026-08-15): this exact APDU,
    *   0A 94 5E 00 64 01 41 02 00 00 0B 01 07 EA 08 0F 14 27 07 00 00 00

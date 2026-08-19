@@ -348,6 +348,126 @@ void test_state_change_callback_fires_only_on_change() {
               "Cached state still tracks every poll, callback or not");
 }
 
+
+// ── The layer write is answered, and always was ───────────────────────────
+// Issue #253. This write asked the transport to wait for a reply carrying type
+// 0xDE01 -- the ClockProgramLayer object -- with a 3 s window and quiet_timeout
+// set, explained in a comment as "fire-and-forget write (pump commits on
+// timeout)".
+//
+// A SET reply cannot carry a type. "The SET operation never returns anything
+// but the APDU Head" (GENIbus App. Prog. Manual fig 3.5 note 1), so the reply
+// being waited for was one the protocol forbids, and the write burned its whole
+// 3 s window every time while quiet_timeout kept the timeout at DEBUG. The
+// captures agree with the specification and disagree with the comment: 20 layer
+// writes in resources/traffic_capture, every one answered in 36-142 ms with the
+// ordinary short Class 10 ACK.
+//
+// So this asserts on the clock. The callback must fire on the acknowledgement,
+// which means promptly; restoring the 0xDE01 expectation leaves it waiting and
+// the elapsed check fails rather than the completion check, which is the
+// distinction the old test could not make.
+void test_the_layer_write_settles_on_its_ack_not_on_a_timeout() {
+  std::cout << "\n=== A layer write settles on its acknowledgement ===" << std::endl;
+
+  esphome::alpha_hwr::core::Transport transport;
+  esphome::alpha_hwr::core::Session session;
+  esphome::alpha_hwr::services::ScheduleService service(transport, session);
+
+  // Short Class 10 acknowledgements nobody claimed. A write that is not awaited
+  // leaves its reply here, in the shape the next Class 10 write's matcher
+  // accepts (issue #248).
+  int stray_acks = 0;
+  transport.set_packet_callback([&stray_acks](const uint8_t *data, size_t len) {
+    if (len >= 6 && data[4] == 0x0A && (data[5] & 0x3F) <= 1) stray_acks++;
+  });
+  transport.set_write_callback([](const uint8_t *, size_t) -> bool { return true; });
+  session.on_ready();
+
+  // Prime layer 1's cache; the anti-clobber guard refuses an unread layer.
+  service.read_entries_async(1, nullptr);
+  for (int i = 0; i < 4; i++) { mock_millis += 51; transport.loop(); }
+  std::vector<uint8_t> layer_frame = {0x24, 0x00, 0xF8, 0xE7, 0x0A, 0x13, 0x00, 0x00, 0xDE, 0x01,
+                                      0x00, 0x00, 0x2A};
+  layer_frame.insert(layer_frame.end(), 42, 0x00);
+  layer_frame.push_back(0xAA);
+  layer_frame.push_back(0xBB);
+  layer_frame[1] = static_cast<uint8_t>(layer_frame.size() - 4);
+  layer_frame = with_crc(std::move(layer_frame));
+  transport.on_notification(layer_frame.data(), layer_frame.size());
+  mock_millis += 51;
+  transport.loop();
+
+  esphome::alpha_hwr::codec::UploadRequest request;
+  request.entries.push_back({/*layer=*/1, /*day=*/0, /*bh=*/6, /*bm=*/0, /*eh=*/8, /*em=*/0});
+  uint8_t image[esphome::alpha_hwr::codec::LAYER_IMAGE_BYTES];
+  esphome::alpha_hwr::codec::build_layer_image(request, 1, image);
+
+  const uint32_t started = mock_millis;
+  int completions = 0;
+  service.write_layer_image_async(1, image, [&completions](bool) { completions++; });
+
+  // Three chunks for a 59-byte frame, at the transport's 50 ms pacing.
+  for (int i = 0; i < 3; i++) { mock_millis += 51; transport.loop(); }
+  TEST_ASSERT(completions == 0, "the write has not settled before the pump answers");
+
+  // The frame the pump actually sends, byte for byte, as captured.
+  const std::vector<uint8_t> ack = {0x24, 0x05, 0xF8, 0xE7, 0x0A, 0x01, 0x00, 0xAE, 0xA2};
+  transport.on_notification(ack.data(), ack.size());
+  transport.loop();
+
+  TEST_ASSERT(completions == 1, "the acknowledgement settles the write");
+  TEST_ASSERT(mock_millis - started < 1000,
+              "and it settles on the acknowledgement rather than three seconds later, "
+              "which is what waiting for a type a SET reply cannot carry used to cost");
+  TEST_ASSERT(stray_acks == 0,
+              "the acknowledgement was consumed by the layer write, not left for the "
+              "next Class 10 write to be handed");
+}
+
+// The ClockProgramOverview commit, the other send ScheduleService made with no
+// callback at all -- and the most frequent Class 10 write this component makes,
+// since every setpoint write, control request and layer write schedules one.
+void test_the_configuration_commit_consumes_its_own_ack() {
+  std::cout << "\n=== The configuration commit consumes its own acknowledgement ===" << std::endl;
+
+  esphome::alpha_hwr::core::Transport transport;
+  esphome::alpha_hwr::core::Session session;
+  esphome::alpha_hwr::services::ScheduleService service(transport, session);
+
+  int stray_acks = 0;
+  transport.set_packet_callback([&stray_acks](const uint8_t *data, size_t len) {
+    if (len >= 6 && data[4] == 0x0A && (data[5] & 0x3F) <= 1) stray_acks++;
+  });
+  transport.set_write_callback([](const uint8_t *, size_t) -> bool { return true; });
+  session.on_ready();
+
+  // The commit refuses to run without a cached overview rather than writing a
+  // structure it invented, so read one first.
+  service.poll_state_async(nullptr);
+  for (int i = 0; i < 4; i++) { mock_millis += 51; transport.loop(); }
+  std::vector<uint8_t> overview = {0x24, 0x00, 0xF8, 0xE7, 0x0A, 0x13, 0x00, 0x00, 0xDA, 0x01,
+                                   0x00, 0x00, 0x0A,
+                                   0x00, 0x00, 0x00, 0x00, 0x01, 0x01, 0x00, 0x00, 0x00, 0x00,
+                                   0xAA, 0xBB};
+  overview[1] = static_cast<uint8_t>(overview.size() - 4);
+  overview = with_crc(std::move(overview));
+  transport.on_notification(overview.data(), overview.size());
+  mock_millis += 51;
+  transport.loop();
+
+  TEST_ASSERT(service.send_configuration_commit(), "the commit was built and queued");
+  for (int i = 0; i < 3; i++) { mock_millis += 51; transport.loop(); }
+
+  const std::vector<uint8_t> ack = {0x24, 0x05, 0xF8, 0xE7, 0x0A, 0x01, 0x00, 0xAE, 0xA2};
+  transport.on_notification(ack.data(), ack.size());
+  transport.loop();
+
+  TEST_ASSERT(stray_acks == 0,
+              "the commit's acknowledgement was consumed by the commit rather than left "
+              "in flight with no owner");
+}
+
 int main() {
   std::cout << "===========================================================" << std::endl;
   std::cout << "  Schedule Service Test Suite" << std::endl;
@@ -357,6 +477,8 @@ int main() {
   test_single_event_tz_shift();
   test_single_event_tz_shift_across_dst();
   test_state_change_callback_fires_only_on_change();
+  test_the_layer_write_settles_on_its_ack_not_on_a_timeout();
+  test_the_configuration_commit_consumes_its_own_ack();
   
   std::cout << "\n===========================================================" << std::endl;
   std::cout << "  Test Results" << std::endl;

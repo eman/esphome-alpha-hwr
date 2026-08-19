@@ -1,6 +1,7 @@
 #include <iostream>
 #include <vector>
 #include <cstdint>
+#include <string>
 #include "fixture_crc.h"
 #include "../components/alpha_hwr/transport.h"
 #include "../components/alpha_hwr/frame_builder.h"
@@ -627,14 +628,18 @@ void test_reset_abandons_a_pending_command_without_telling_it() {
 // what regressed was the dispatch decision, not the arithmetic.
 static void queue_a_class10_temperature_write(esphome::alpha_hwr::core::Transport &t,
                                               int *cb_calls, bool *cb_success) {
-  // OpSpec 0x97 with the Obj 91 / Sub 430 address, which is one of the shapes
-  // the short-ACK branch is guarded on.
+  // OpSpec 0x97 with the Obj 91 / Sub 430 address -- the temperature-range
+  // write. `expect_short_ack` is what admits it to the short-ACK branch: since
+  // issue #253 that is the caller's declaration rather than a list of addresses
+  // the transport recognises.
   std::vector<uint8_t> req = {0x27, 0x0B, 0xE7, 0xF8, 0x0A, 0x97, 91, 0x01, 0xAE, 0x00, 0x00, 0x00};
   t.send_command(req, 0, 0,
                  [cb_calls, cb_success](bool ok, const uint8_t *, size_t) {
                    (*cb_calls)++;
                    *cb_success = ok;
-                 });
+                 },
+                 /*timeout_ms=*/3000, /*allow_register_read=*/false,
+                 /*expect_short_ack=*/true);
   mock_millis += 50;
   t.loop();
 }
@@ -739,7 +744,8 @@ void test_the_reply_debt_is_paid_down_and_expires() {
     int first = 0;
     transport.send_command(req, 0, 0,
                            [&](bool, const uint8_t *, size_t) { first++; },
-                           /*timeout_ms=*/100);
+                           /*timeout_ms=*/100, /*allow_register_read=*/false,
+                           /*expect_short_ack=*/true);
     pump(transport, 2);
     transport.on_notification(ack.data(), ack.size());
     transport.loop();
@@ -905,7 +911,7 @@ void test_the_dhw_config_write_shape_also_reports_a_refusal() {
   transport.send_command(req, 0, 0, [&](bool ok, const uint8_t *, size_t) {
     cb_calls++;
     cb_success = ok;
-  });
+  }, /*timeout_ms=*/3000, /*allow_register_read=*/false, /*expect_short_ack=*/true);
   mock_millis += 50;
   transport.loop();
 
@@ -943,6 +949,108 @@ void test_a_refused_write_still_frees_the_transport() {
               "queue advanced rather than wedging on the refusal");
 }
 
+
+// ── Every awaited Class 10 SET gets its own acknowledgement ────────────────
+// Issue #253. Until this change the short-ACK branch carried a list of five
+// address shapes, and a write not on the list could not be answered no matter
+// what it declared. That list was the reason four Class 10 sends were left
+// fire-and-forget: giving one a callback meant remembering to add a row, and a
+// row added for a send that had no callback (Obj 0601) sat unused while a row
+// for a shape nothing builds (`01 AE 00 5B`) sat dead.
+//
+// The list is gone. What admits a frame now is `expect_short_ack` -- the
+// caller's declaration that it is awaiting exactly this reply -- which is sound
+// because the reply carries no way to tell the writes apart anyway: every SET
+// this pump answers, it answers with the same nine bytes. The specification
+// says the same thing in advance, "the SET operation never returns anything but
+// the APDU Head" (App. Prog. Manual fig 3.5 note 1).
+//
+// So this walks every Class 10 SET the component sends, in its real on-the-wire
+// shape, and requires each to be matched. A frame here that stops matching is a
+// send whose acknowledgement has gone unclaimed -- which is the whole of #248.
+struct AwaitedSet {
+  const char *what;
+  std::vector<uint8_t> apdu_head_and_address;  // class, head, then the address bytes
+};
+
+void test_every_awaited_class10_set_is_answered() {
+  std::cout << "\n=== Every awaited Class 10 SET consumes its own ACK ===" << std::endl;
+
+  // Head byte and leading address bytes exactly as each service builds them.
+  const std::vector<AwaitedSet> sends = {
+      {"temperature range (Obj 91 Sub 430)",      {0x0A, 0x97, 0x5B, 0x01, 0xAE, 0x03}},
+      {"DHW config (Obj 91 Sub 421)",             {0x0A, 0x8F, 0x5B, 0x01, 0xA5, 0x03}},
+      {"mode write (Sub 5600 Obj 0A01)",          {0x0A, 0x90, 0x56, 0x00, 0x0A, 0x01}},
+      {"control request (Sub 5600 Obj 0601)",     {0x0A, 0x90, 0x56, 0x00, 0x06, 0x01}},
+      {"setpoint register write (Sub 13 Obj 86)", {0x0A, 0x88, 0x00, 0x0D, 0x00, 0x56}},
+      {"clock write (Obj 94 Sub 100)",            {0x0A, 0x94, 0x5E, 0x00, 0x64, 0x01}},
+      {"schedule commit (Obj 84 Sub 1)",          {0x0A, 0x93, 0x54, 0x00, 0x01, 0x00}},
+      {"schedule layer write (Obj 84 Sub 1000)",  {0x0A, 0xB3, 0x54, 0x03, 0xE8, 0x00}},
+  };
+
+  // The one frame the pump answers all of them with, byte for byte as captured.
+  const std::vector<uint8_t> ack = {0x24, 0x05, 0xF8, 0xE7, 0x0A, 0x01, 0x00, 0xAE, 0xA2};
+
+  for (const auto &s : sends) {
+    esphome::alpha_hwr::core::Transport transport;
+    transport.set_write_callback([](const uint8_t *, size_t) -> bool { return true; });
+
+    std::vector<uint8_t> req = {0x27, 0x0B, 0xE7, 0xF8};
+    req.insert(req.end(), s.apdu_head_and_address.begin(), s.apdu_head_and_address.end());
+    req.push_back(0x00);
+    req.push_back(0x00);
+
+    int calls = 0;
+    bool ok = false;
+    transport.send_command(req, 0, 0,
+                           [&](bool success, const uint8_t *, size_t) { calls++; ok = success; },
+                           esphome::alpha_hwr::core::Transport::SET_ACK_TIMEOUT_MS,
+                           /*allow_register_read=*/false, /*expect_short_ack=*/true,
+                           /*quiet_timeout=*/true);
+    mock_millis += 50;
+    transport.loop();
+    transport.on_notification(ack.data(), ack.size());
+    transport.loop();
+
+    TEST_ASSERT(calls == 1 && ok, std::string("answered: ") + s.what);
+  }
+}
+
+// The other half of the same rule, and the reason replacing the address list
+// with a declaration is a NARROWING rather than a loosening.
+//
+// A Class 10 SET that has not declared it is awaiting a short ACK does not get
+// handed one. Under the old address list this depended on which write it was;
+// now it depends on what the caller asked for, which is the thing the caller
+// actually knows. Without this the gate could be deleted and the suite would
+// not notice -- every other test here declares the flag.
+void test_an_undeclared_class10_set_is_not_handed_a_short_ack() {
+  std::cout << "\n=== A Class 10 SET that did not ask for a short ACK is not given one ==="
+            << std::endl;
+
+  esphome::alpha_hwr::core::Transport transport;
+  transport.set_write_callback([](const uint8_t *, size_t) -> bool { return true; });
+
+  // The temperature-range write's own shape -- one that WOULD match if it had
+  // declared -- so what separates this case is the declaration and nothing else.
+  std::vector<uint8_t> req = {0x27, 0x0B, 0xE7, 0xF8, 0x0A, 0x97, 0x5B, 0x01, 0xAE, 0x03, 0x00, 0x00};
+  int calls = 0;
+  transport.send_command(req, 0, 0,
+                         [&](bool, const uint8_t *, size_t) { calls++; },
+                         /*timeout_ms=*/3000, /*allow_register_read=*/false,
+                         /*expect_short_ack=*/false);
+  mock_millis += 50;
+  transport.loop();
+
+  const std::vector<uint8_t> ack = {0x24, 0x05, 0xF8, 0xE7, 0x0A, 0x01, 0x00, 0xAE, 0xA2};
+  transport.on_notification(ack.data(), ack.size());
+  transport.loop();
+
+  TEST_ASSERT(calls == 0,
+              "the frame fell through to the packet callback rather than settling a "
+              "command that never said it was waiting for one");
+}
+
 int main() {
   test_reassembly_continuation_0x24();
   test_reassembly_continuation_0x27();
@@ -971,6 +1079,8 @@ int main() {
   test_a_refused_class10_write_reports_failure();
   test_the_dhw_config_write_shape_also_reports_a_refusal();
   test_a_refused_write_still_frees_the_transport();
+  test_every_awaited_class10_set_is_answered();
+  test_an_undeclared_class10_set_is_not_handed_a_short_ack();
   
   std::cout << "\n===========================================================" << std::endl;
   std::cout << "  Test Results" << std::endl;
