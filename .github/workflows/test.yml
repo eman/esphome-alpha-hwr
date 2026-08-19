@@ -349,6 +349,26 @@ jobs:
       - name: mypy
         run: mypy --ignore-missing-imports tools/write_bench.py tools/link_gap_report.py
 
+      # The shell half of tools/, which had no check of any kind. Two of the
+      # three scripts here decide whether a change is allowed to merge --
+      # lint.sh IS the cppcheck job, and mutation_check.sh is the coverage
+      # gate -- so a shell bug in them does not produce a wrong answer, it
+      # produces a check that quietly stops checking. All three are clean at
+      # -S style today; this is what keeps them that way.
+      #
+      # ubuntu-latest ships shellcheck, so there is nothing to install -- but the
+      # runner image decides the version, and it is NOT the version a
+      # contributor has locally. That is not hypothetical: the first run of this
+      # step failed on an SC2015 that shellcheck 0.11.0 does not report at all,
+      # so the tree was clean on the machine it was written on and red here.
+      # Left floating on purpose, matching how ruff is installed above, but the
+      # version is printed so the next such mismatch is one line of log rather
+      # than an afternoon.
+      - name: shellcheck
+        run: |
+          shellcheck --version
+          shellcheck --severity=style tools/*.sh
+
   # ---------------------------------------------------------------------------
   # The Lovelace card. 1700+ lines that had no automated check of any kind --
   # and which shipped broken against the current service signatures.
