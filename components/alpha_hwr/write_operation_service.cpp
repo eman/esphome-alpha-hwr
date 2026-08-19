@@ -61,6 +61,19 @@ static std::string format_detail(const char *fmt, ...) {
   return std::string(buf);
 }
 
+/// Fold "the config write was never acknowledged" into a settle detail.
+///
+/// The silence is not the verdict any more (issue #234) -- the readback below
+/// decides -- but it is still the most useful thing to say about the write, so
+/// it leads the detail rather than being dropped. An ACCEPTED settle normally
+/// carries an empty detail; here it carries this, which is exactly the case
+/// worth telling apart from an ordinary success.
+static std::string unacked_detail(bool unacked, const std::string &detail) {
+  if (!unacked) return detail;
+  if (detail.empty()) return "config write not acknowledged; pump holds the requested values";
+  return "config write not acknowledged; " + detail;
+}
+
 WriteOperationService::WriteOperationService(ControlService &control, ScheduleService &schedule,
                                              TimeService &time)
     : control_(control), schedule_service_(schedule), time_service_(time) {}
@@ -202,6 +215,8 @@ void WriteOperationService::start_front_() {
   uint32_t budget = WATCHDOG_DEFAULT_MS;
   switch (op.command) {
     case WriteCommand::SET_MODE:              budget = WATCHDOG_SET_MODE_MS; break;
+    case WriteCommand::SET_TEMPERATURE_RANGE:
+    case WriteCommand::SET_CYCLE_TIMES:       budget = WATCHDOG_CONFIG_WRITE_MS; break;
     case WriteCommand::SET_SCHEDULE_ENTRY:
     case WriteCommand::CLEAR_SCHEDULE_ENTRY:  budget = WATCHDOG_SCHED_ENTRY_MS; break;
     case WriteCommand::SET_SCHEDULE_ENABLED:  budget = WATCHDOG_SCHED_ENABLED_MS; break;
@@ -1046,41 +1061,66 @@ void WriteOperationService::run_set_temperature_range_(uint32_t seq) {
     return;
   }
 
-  // Refuse before touching anything. The config write echoes the pump's own
-  // min/max on/off-time LIMITS back verbatim (issue #106), and those five
-  // bytes are only present once an Obj 91 Sub 430 read has landed. Until then
-  // the cache holds ControlService's historical constants, and sending those
-  // would overwrite the pump's real limits with a fabrication -- silently, as
-  // a side effect of setting a temperature.
+  // RESOLVING: a mandatory fresh read of Obj 91 Sub 430 before anything is
+  // written, for two things that both have to come from the pump as it is now
+  // rather than as it was at connect.
   //
-  // Reachable without any malformed frame: invalidate_cache() clears this on
-  // every disconnect, and the HA service path reaches submit_set_temperature_
-  // range() without check_ready() (the entity path is gated, api_bridge.cpp is
-  // not). A service call during the initial read chain, or in a reconnect
-  // window, or after a Sub 430 read that timed out, lands here with the limits
-  // unknown.
+  // 1. The min/max on/off-time LIMITS the config write echoes back verbatim
+  //    (issue #106). Those five bytes only exist once a Sub 430 reply has
+  //    landed; until then the cache holds ControlService's historical
+  //    constants, and sending those would overwrite the pump's real limits
+  //    with a fabrication, silently, as a side effect of setting a
+  //    temperature.
   //
-  // Checked here rather than beside the write below because a refusal must not
-  // leave the pump switched into temperature-range mode while reporting that
-  // nothing happened.
-  if (!control_.temp_limits_known()) {
-    finish_(seq, WriteStatus::REJECTED,
-            "pump on/off-time limits not read yet; refusing to write "
-            "temperature range with fabricated limits");
-    return;
-  }
+  // 2. The pre-write values the confirm compares against, which is what lets
+  //    it say "the pump kept everything it had" (REJECTED) rather than
+  //    collapsing every non-match into CLAMPED (issue #234).
+  //
+  // The cache alone could not supply either. read_obj91_config() runs once per
+  // connection, in the initial read chain -- it is not in the periodic control
+  // poll that refreshes the mode and setpoints (issue #54) -- so on a link that
+  // has been up for hours the cache is that old. A GO-app edit in between
+  // leaves the limits stale and the baseline wrong, and a write the pump then
+  // ignored would be reported CLAMPED against values nobody holds any more.
+  // SET_CYCLE_TIMES already reads its config object first for exactly this
+  // reason; this makes the two symmetric.
+  //
+  // Read before the mode change, not after: a refusal must not leave the pump
+  // switched into temperature-range mode while reporting that nothing happened.
+  op->phase = Phase::RESOLVING;
+  control_.read_obj91_config([this, seq](bool ok) {
+    Operation *op = find_(seq);
+    if (op == nullptr || op->phase == Phase::DONE) return;
+    if (!ok) {
+      finish_(seq, WriteStatus::REJECTED,
+              "could not read temperature config; write not attempted");
+      return;
+    }
+    // A reply that landed but carried no limits tail. Reachable without any
+    // malformed frame -- a firmware whose type-1012 struct is shorter than the
+    // frame it sits in -- and the write must not proceed on constants.
+    if (!control_.temp_limits_known()) {
+      finish_(seq, WriteStatus::REJECTED,
+              "pump on/off-time limits not read yet; refusing to write "
+              "temperature range with fabricated limits");
+      return;
+    }
 
-  op->phase = Phase::WRITING;
-  // Post-#98 there is no reason to touch the run state or a setpoint just to
-  // enter temperature-range mode: use the unfused mode change, then write the
-  // mode's own config object.
-  if (!control_.send_set_mode_request(ControlMode::TEMPERATURE_RANGE)) {
-    finish_(seq, WriteStatus::REJECTED, "failed to queue mode command");
-    return;
-  }
-  control_.note_mode_commanded(ControlMode::TEMPERATURE_RANGE);
+    op->pre_temp_min = control_.get_cached_temp_min();
+    op->pre_temp_max = control_.get_cached_temp_max();
+    op->pre_autoadapt = control_.get_cached_autoadapt();
 
-  schedule_([this, seq]() {
+    op->phase = Phase::WRITING;
+    // Post-#98 there is no reason to touch the run state or a setpoint just to
+    // enter temperature-range mode: use the unfused mode change, then write the
+    // mode's own config object.
+    if (!control_.send_set_mode_request(ControlMode::TEMPERATURE_RANGE)) {
+      finish_(seq, WriteStatus::REJECTED, "failed to queue mode command");
+      return;
+    }
+    control_.note_mode_commanded(ControlMode::TEMPERATURE_RANGE);
+
+    schedule_([this, seq]() {
     Operation *op = find_(seq);
     if (op == nullptr || op->phase == Phase::DONE) return;
 
@@ -1088,15 +1128,38 @@ void WriteOperationService::run_set_temperature_range_(uint32_t seq) {
       [this, seq](bool acked) {
         Operation *op = find_(seq);
         if (op == nullptr || op->phase == Phase::DONE) return;
+        // A missing ACK is not evidence that the write was refused (issue
+        // #234). It used to settle REJECTED here, without a readback -- and
+        // REJECTED asserts the pump did not take the write, which nothing at
+        // this point knows. A write that landed and whose acknowledgement was
+        // lost settled as a failure, and an automation retrying on `rejected`
+        // would rewrite values that were already correct.
+        //
+        // The ACK could not carry that weight even when it arrives: the
+        // short-ACK branch in transport.cpp matches "some queued Class 10
+        // command of this shape" -- no sequence number, no object echo -- and
+        // the fire-and-forget mode write CONFIG_STEP2_DELAY_MS earlier is on
+        // the same class, so its reply can land inside this write's window.
+        // Silence is if anything less attributable than a reply, since there
+        // is no frame to reason about at all.
+        //
+        // So the readback decides every case, and the silence is carried into
+        // the detail instead of into the status.
         if (!acked) {
-          finish_(seq, WriteStatus::REJECTED, "config write not acknowledged");
-          return;
+          ESP_LOGW(TAG, "Temperature-range config write went unacknowledged; "
+                        "deferring the verdict to the readback");
+          op->config_unacked = true;
         }
+        // Sent whether or not the write was acknowledged, and deliberately: if
+        // the values landed and only the ACK was lost, this is what persists
+        // them, and if nothing landed it re-commits the configuration the pump
+        // already holds.
         control_.send_configuration_commit();
         op->phase = Phase::CONFIRMING;
         schedule_([this, seq]() { confirm_temperature_range_(seq); }, CONFIG_CONFIRM_DELAY_MS);
       });
-  }, CONFIG_STEP2_DELAY_MS);
+    }, CONFIG_STEP2_DELAY_MS);
+  });
 }
 
 void WriteOperationService::confirm_temperature_range_(uint32_t seq) {
@@ -1113,7 +1176,8 @@ void WriteOperationService::confirm_temperature_range_(uint32_t seq) {
         schedule_([this, seq]() { confirm_temperature_range_(seq); }, CONFIG_RETRY_DELAY_MS);
         return;
       }
-      finish_(seq, WriteStatus::TIMEOUT, "config readback failed");
+      finish_(seq, WriteStatus::TIMEOUT,
+              unacked_detail(op->config_unacked, "config readback failed"));
       return;
     }
 
@@ -1124,15 +1188,28 @@ void WriteOperationService::confirm_temperature_range_(uint32_t seq) {
                  std::fabs(stored_min - op->temp_min) <= 0.1f &&
                  std::fabs(stored_max - op->temp_max) <= 0.1f &&
                  stored_aa == (op->autoadapt ? 1 : 0);
+    // "The pump kept everything it had" is a refusal; anything else that is
+    // not the requested value is a clamp. Same three-way split as
+    // confirm_setpoint_ and confirm_cycle_times_ -- it was missing here, so
+    // every non-match collapsed into CLAMPED and there was nothing to defer
+    // an unacknowledged write to (issue #234). All three fields have to have
+    // stayed put: a write that moved one of them landed.
+    const bool kept_old = !std::isnan(op->pre_temp_min) && !std::isnan(op->pre_temp_max) &&
+                          op->pre_autoadapt != -1 &&
+                          std::fabs(stored_min - op->pre_temp_min) <= 0.1f &&
+                          std::fabs(stored_max - op->pre_temp_max) <= 0.1f &&
+                          stored_aa == op->pre_autoadapt;
+    WriteStatus status = WriteStatus::ACCEPTED;
     std::string detail;
     if (!match) {
-      detail = format_detail("pump stored %.1f-%.1f °C, autoadapt %s", stored_min, stored_max,
-                             stored_aa == 1 ? "on" : "off");
+      status = kept_old ? WriteStatus::REJECTED : WriteStatus::CLAMPED;
+      detail = format_detail("pump %s %.1f-%.1f °C, autoadapt %s", kept_old ? "kept" : "stored",
+                             stored_min, stored_max, stored_aa == 1 ? "on" : "off");
     }
     op->temp_min = stored_min;
     op->temp_max = stored_max;
     op->autoadapt = stored_aa == 1;
-    finish_(seq, match ? WriteStatus::ACCEPTED : WriteStatus::CLAMPED, detail);
+    finish_(seq, status, unacked_detail(op->config_unacked, detail));
   });
 }
 
@@ -1210,9 +1287,14 @@ void WriteOperationService::run_set_cycle_times_(uint32_t seq) {
         [this, seq](bool acked) {
           Operation *op = find_(seq);
           if (op == nullptr || op->phase == Phase::DONE) return;
+          // Same as run_set_temperature_range_(): silence is not a refusal, so
+          // the readback settles it and the missing ACK survives in the detail
+          // (issue #234). The pre-write read above already gives this confirm
+          // the values to say "the pump kept what it had".
           if (!acked) {
-            finish_(seq, WriteStatus::REJECTED, "config write not acknowledged");
-            return;
+            ESP_LOGW(TAG, "DHW config write went unacknowledged; deferring the "
+                          "verdict to the readback");
+            op->config_unacked = true;
           }
           op->phase = Phase::CONFIRMING;
           schedule_([this, seq]() { confirm_cycle_times_(seq); }, CONFIG_CONFIRM_DELAY_MS);
@@ -1240,7 +1322,8 @@ void WriteOperationService::confirm_cycle_times_(uint32_t seq) {
         schedule_([this, seq]() { confirm_cycle_times_(seq); }, CONFIG_RETRY_DELAY_MS);
         return;
       }
-      finish_(seq, WriteStatus::TIMEOUT, "DHW config readback failed");
+      finish_(seq, WriteStatus::TIMEOUT,
+              unacked_detail(op->config_unacked, "DHW config readback failed"));
       return;
     }
     // Per-asserted-field comparison (issue #107): kept fields were resolved
@@ -1264,13 +1347,17 @@ void WriteOperationService::confirm_cycle_times_(uint32_t seq) {
     op->off_minutes = static_cast<uint8_t>(stored_off);
     op->flow = stored_flow;
     if (on_ok && off_ok && flow_ok) {
-      finish_(seq, WriteStatus::ACCEPTED, "");
+      finish_(seq, WriteStatus::ACCEPTED, unacked_detail(op->config_unacked, ""));
     } else if (all_kept_old) {
       finish_(seq, WriteStatus::REJECTED,
-              format_detail("pump kept on=%d off=%d flow=%.3f", stored_on, stored_off, stored_flow));
+              unacked_detail(op->config_unacked,
+                             format_detail("pump kept on=%d off=%d flow=%.3f", stored_on,
+                                           stored_off, stored_flow)));
     } else {
       finish_(seq, WriteStatus::CLAMPED,
-              format_detail("pump stored on=%d off=%d flow=%.3f", stored_on, stored_off, stored_flow));
+              unacked_detail(op->config_unacked,
+                             format_detail("pump stored on=%d off=%d flow=%.3f", stored_on,
+                                           stored_off, stored_flow)));
     }
   });
 }

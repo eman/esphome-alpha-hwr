@@ -638,6 +638,38 @@ MUTATIONS=(
 # reply leaves the cache looking valid and the limits unknown, and writing then
 # sends ControlService's historical constants as if they were the pump's.
 "temp-write-ignores-unknown-limits|components/alpha_hwr/write_operation_service.cpp|  if (!control_.temp_limits_known()) {|  if (false) {"
+# Issue #234. A config write that goes unacknowledged is settled by the pump
+# readback, not by the silence: REJECTED asserts the pump did not take the
+# write, and nothing at the ACK deadline knows that. Both entries below restore
+# the short circuit these replaced, one per config write, and both are killed by
+# the case that matters -- the pump stored the values and only the
+# acknowledgement was lost.
+"temp-range-unacked-short-circuits|components/alpha_hwr/write_operation_service.cpp|          op->config_unacked = true;\n        }|          finish_(seq, WriteStatus::REJECTED, \"config write not acknowledged\");\n          return;\n        }"
+"cycle-times-unacked-short-circuits|components/alpha_hwr/write_operation_service.cpp|            op->config_unacked = true;|            finish_(seq, WriteStatus::REJECTED, \"config write not acknowledged\");\n            return;"
+# Deferring to the readback is only worth anything because the readback can say
+# "the pump kept everything it had" -- without that the not-stored case lands on
+# CLAMPED, which claims the pump holds something it chose. Two entries: one for
+# the comparison, one for the capture that feeds it, since a capture taken after
+# the write would compare the values against themselves and survive the first.
+"temp-range-confirm-cannot-say-kept|components/alpha_hwr/write_operation_service.cpp|      status = kept_old ? WriteStatus::REJECTED : WriteStatus::CLAMPED;|      status = WriteStatus::CLAMPED;"
+"temp-range-confirm-has-no-pre-values|components/alpha_hwr/write_operation_service.cpp|    op->pre_temp_min = control_.get_cached_temp_min();|    op->pre_temp_min = NAN;"
+# The pre-write read has to be a READ. read_obj91_config() runs once per
+# connection and is not in the periodic control poll (issue #54), so a baseline
+# taken from the cache can be hours old; a GO-app edit in between makes an
+# ignored write report CLAMPED against values nobody holds. This mutation keeps
+# the callback and skips the wire read, which is precisely the cache-lookup
+# version of the code.
+"temp-range-baseline-taken-from-a-stale-cache|components/alpha_hwr/write_operation_service.cpp|  op->phase = Phase::RESOLVING;\n  control_.read_obj91_config([this, seq](bool ok) {|  op->phase = Phase::RESOLVING;\n  [](std::function<void(bool)> cb) { cb(true); }([this, seq](bool ok) {"
+# The status got coarser, so the detail has to carry what it dropped: a settle
+# that does not name the missing acknowledgement loses the only evidence that
+# the pump never answered.
+# The confirm ladder only runs if the operation is allowed to live long enough
+# for it. On the old 10 s default the watchdog fired before CONFIG_MAX_ATTEMPTS
+# could send a second readback, so a stored-but-unacknowledged write whose first
+# readback was dropped settled `timeout` -- one wrong failure traded for another.
+"config-write-budget-cannot-reach-the-retry|components/alpha_hwr/write_operation_service.h|  static constexpr uint32_t WATCHDOG_CONFIG_WRITE_MS = 26000;|  static constexpr uint32_t WATCHDOG_CONFIG_WRITE_MS = 10000;"
+"temp-range-settle-drops-the-missing-ack|components/alpha_hwr/write_operation_service.cpp|    finish_(seq, status, unacked_detail(op->config_unacked, detail));|    finish_(seq, status, detail);"
+"cycle-times-settle-drops-the-missing-ack|components/alpha_hwr/write_operation_service.cpp|      finish_(seq, WriteStatus::ACCEPTED, unacked_detail(op->config_unacked, \"\"));|      finish_(seq, WriteStatus::ACCEPTED, \"\");"
 # Pump Ready must need BOTH caches. Until tests/test_component_wiring.cpp grew a
 # case that withholds the schedule overview, every scenario filled both, so the
 # gate was only ever observed agreeing and could be reduced to `return true`
@@ -712,9 +744,15 @@ MUTATIONS=(
 # timeout. The first cut of #208 shipped exactly that; an adversarial review
 # caught it, not the suite. This entry is what makes the suite catch it.
 "short-ack-misses-the-zero-length-refusal|components/alpha_hwr/transport.cpp|protocol::apdu_payload_len(data[5]) <= 1 &&|protocol::apdu_payload_len(data[5]) == 1 &&"
-# A refusal must be reported as ANSWERED to the config-write callers, or their
-# no-readback short-circuit turns a misattributed refusal into a REJECTED
-# verdict for a write that landed.
+# A refusal must be reported as ANSWERED to the config-write callers.
+#
+# It originally guarded their no-readback short-circuit, which would have turned
+# a misattributed refusal into a REJECTED verdict for a write that landed. Issue
+# #234 removed that short-circuit, so the two no longer differ in status -- and
+# this entry survived the sweep for exactly one run, which is how the gap was
+# found. What it guards now is the settle DETAIL: reporting a refusal as silence
+# marks the operation unacknowledged, so an event about a pump that replied in
+# milliseconds would claim nothing came back.
 # NOTE the shape of this search string. The obvious one contains `success ||
 # data != nullptr`, and this file's format splits fields on `|` -- so a `||` in
 # a search silently truncates the field and the entry cannot apply. It reports
