@@ -309,6 +309,63 @@
 
 ### Changed
 
+- **A config write the pump stored but did not acknowledge no longer settles
+  `rejected`** (issue #234). `set_temperature_range` and `set_cycle_times` both
+  short-circuited to `rejected` when no acknowledgement arrived inside the
+  write's 3 s window — before any readback ran. `rejected` asserts the pump did
+  not take the write, and nothing at that point knew it: the only evidence was
+  that no frame had come back. A write that landed and whose acknowledgement was
+  lost — a dropped notification, a reassembly failure, a frame a moment late —
+  was reported as a failure while the pump held exactly what was asked for, and
+  an automation retrying on `rejected` would rewrite values that were already
+  correct.
+
+  The acknowledgement could never have carried that weight. The Class 10 short
+  ACK has no sequence number and no object echo, so the transport matches it
+  against "some queued command of this shape" — and `set_temperature_range`
+  sends a fire-and-forget mode write 400 ms ahead of the write that carries the
+  callback, on the same class, against reply latencies observed at 250–360 ms.
+  Issue #233 closed the half of this that a *reply* could cause; silence is the
+  other half, and is less attributable still, there being no frame to reason
+  about at all.
+
+  Both writes now defer to the readback that was already there, so the verdict
+  comes from what the pump reports holding: the requested values settle
+  `accepted`, different values `clamped`, and the old values `rejected` — a
+  refusal is still a refusal, and still distinct from a clamp. Reaching the
+  readback also meant giving `set_temperature_range`'s confirm the
+  kept-versus-clamped distinction that `set_setpoint` and `set_cycle_times`
+  already had; it had only two outcomes, so a pump that ignored the write
+  reported "the pump stored something else" about a pump that had stored
+  nothing.
+
+  The silence is not lost, only demoted: every settle from an unacknowledged
+  config write carries `config write not acknowledged` at the front of its
+  `detail`. That makes this the one case where an `accepted` settle has a
+  non-empty `detail`, which is documented in
+  `docs/programmatic-interface.md` along with the full mapping.
+
+  `set_temperature_range` now **reads its config object before writing it**, as
+  `set_cycle_times` already did. The values a verdict is measured against have
+  to come from the pump, and the cache could not supply them: `read_obj91_config`
+  runs once per connection, in the initial read chain, and is not in the periodic
+  control poll that refreshes the mode and setpoints (issue #54) — so on a link
+  up for hours the baseline is that old. A Grundfos GO app edit in between would
+  make a write the pump *ignored* report `clamped`, blaming the pump for a choice
+  it never made. The same read refreshes the pump's own on/off-time limits, which
+  that write echoes back verbatim (issue #106) and had previously been echoing
+  from a connect-time capture.
+
+  Both writes also get their own watchdog budget, 26 s instead of the 10 s
+  default, sized to the whole path: pre-write read, ACK window, confirm readback,
+  retry, second readback. On the old budget the watchdog fired before the
+  confirm's retry could send a second readback, so `CONFIG_MAX_ATTEMPTS` never ran
+  and the confirm's own "readback failed" verdict was unreachable. That was
+  survivable while a missing ACK settled at 3.4 s without any readback; now that
+  the readback decides, a write the pump stored but did not acknowledge — whose
+  first readback is then dropped — has to reach the retry to be reported as the
+  success it is, rather than trading one wrong failure for another.
+
 - **A mutation that hangs a test is reported instead of stalling the sweep**
   (issue #237). `tools/mutation_check.sh` had three outcomes — caught, survived,
   and did-not-compile — and a mutation that made a test loop forever produced

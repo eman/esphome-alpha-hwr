@@ -117,13 +117,28 @@ struct PumpSim {
   // Behavior switches
   bool respond_mode_reads{true};
   bool respond_obj91{true};
+  // Swallow this many Obj 91 Sub 430 replies before answering again. Puts a
+  // dropped readback in front of the confirm's retry, which is the only thing
+  // CONFIG_MAX_ATTEMPTS is for -- and, since issue #234, the only way a write
+  // the pump stored but never acknowledged still gets reported as a success.
+  int drop_obj91_reads{0};
   bool ack_temp_write{true};
   uint8_t temp_ack_head{0x01};        // 0x81/0xC1/0x40 = the pump refuses the write
+  bool honor_temp_writes{true};       // apply the Sub 430 temperature-range write
+  // >0: the pump caps the stored max at this. Its own installer limits do
+  // exactly this, and it is what tells a clamp apart from a write that never
+  // landed (issue #234) -- both leave the readback disagreeing with the
+  // request, and only the pre-write values separate them.
+  float temp_max_clamp{0};
   bool honor_mode_change{true};       // apply 0x0A01 mode changes
   bool honor_setpoint_writes{true};   // apply setpoint values from 0601/register writes
   bool obj91_includes_limits{true};   // firmware echoes the 5 limit tail bytes
   bool respond_dhw_reads{true};       // reply to Obj 91 Sub 421 reads
+  // Swallow this many Obj 91 Sub 421 replies before answering again -- the
+  // Sub 430 counterpart of drop_obj91_reads, for the same retry ladder.
+  int drop_dhw_reads{0};
   bool honor_dhw_writes{true};        // apply Sub 421 writes
+  bool ack_dhw_write{true};           // answer the Sub 421 write at all
   int dhw_min_off{0};                 // >0: pump clamps off_period to this floor
   bool honor_dhw_flow_writes{true};   // apply asserted setpoint bytes (issue #107)
   float dhw_flow_clamp_native{0};     // >0: pump caps the stored flow (m³/s)
@@ -360,11 +375,19 @@ struct Harness {
       sim.apply_setpoint(sub, protocol::decode_float_be(apdu + 6));
     } else if (opspec == 0x03 && apdu_len >= 5 && apdu[2] == 91 && apdu[3] == 0x01 && apdu[4] == 0xAE) {
       // Obj 91 Sub 430 config read
-      if (sim.respond_obj91) inject_obj91_response();
+      if (sim.drop_obj91_reads > 0) {
+        sim.drop_obj91_reads--;
+      } else if (sim.respond_obj91) {
+        inject_obj91_response();
+      }
     } else if (opspec == 0x03 && apdu_len >= 5 && apdu[2] == 91 && apdu[3] == 0x01 && apdu[4] == 0xA5) {
       // Obj 91 Sub 421 DHW config read (issue #106)
       frames_dhw_read++;
-      if (sim.respond_dhw_reads) inject_dhw_response();
+      if (sim.drop_dhw_reads > 0) {
+        sim.drop_dhw_reads--;
+      } else if (sim.respond_dhw_reads) {
+        inject_dhw_response();
+      }
     } else if (opspec == 0x97 && apdu_len >= 25) {
       // Temperature-range config write; capture the limits tail for the
       // preservation assertion (issue #106).
@@ -372,9 +395,12 @@ struct Harness {
       bool aa = apdu[11] != 0;
       float mn = protocol::decode_float_be(apdu + 12);
       float mx = protocol::decode_float_be(apdu + 16);
-      sim.autoadapt = aa;
-      sim.temp_min = mn;
-      sim.temp_max = mx;
+      if (sim.honor_temp_writes) {
+        sim.autoadapt = aa;
+        sim.temp_min = mn;
+        if (sim.temp_max_clamp > 0 && mx > sim.temp_max_clamp) mx = sim.temp_max_clamp;
+        sim.temp_max = mx;
+      }
       last_temp_write_tail.assign(apdu + 20, apdu + 25);
       if (sim.ack_temp_write) inject_short_ack(sim.temp_ack_head);
     } else if (opspec == 0x8F && apdu_len >= 17 && apdu[2] == 0x5B && apdu[3] == 0x01 && apdu[4] == 0xA5) {
@@ -394,7 +420,7 @@ struct Harness {
           protocol::encode_float_be(native, sim.dhw_setpoint_raw);
         }
       }
-      inject_short_ack();
+      if (sim.ack_dhw_write) inject_short_ack();
     } else if (opspec == 0x03 && apdu_len >= 5 && apdu[2] == 0x5E && apdu[3] == 0x00 &&
                apdu[4] == 0x65) {
       // Obj 94 Sub 101 DateTimeActual read
@@ -1306,12 +1332,18 @@ static void test_origin_and_seq_reported() {
 // occur, and the fixture that produced it contradicted its own opspec. A pump
 // that genuinely answered shorter would send a different opspec, fail the
 // match, and time out, leaving the cache invalid anyway.
+//
+// The scenario it modelled -- "the Obj 91 read simply has not happened" -- also
+// stopped being reachable once the write started with a mandatory read of its
+// own. What remains reachable is a reply that LANDS and carries no limits tail,
+// which is what obj91_includes_limits models, and the guard has to hold for it.
 static void test_temperature_range_refused_when_limits_unknown() {
-  std::cout << "\n=== set_temperature_range: refused before the pump's limits have been read ==="
+  std::cout << "\n=== set_temperature_range: refused when the reply carries no limits ==="
             << std::endl;
   Harness h;
   h.sim.mode_byte = 0x02;
-  h.prime_cache();  // deliberately NOT prime_temp_limits(): no Obj 91 read yet
+  h.sim.obj91_includes_limits = false;  // the reply lands; the tail is not in it
+  h.prime_cache();
 
   h.write_op.submit_set_temperature_range(30.0f, 50.0f, true, "tr_nolimits");
   h.advance(15000);
@@ -1327,6 +1359,29 @@ static void test_temperature_range_refused_when_limits_unknown() {
   TEST_ASSERT(h.frames_0a01 == 0,
               "and the pump was not switched into temperature-range mode either -- "
               "a refusal must not leave a side effect behind");
+}
+
+// The pre-write read is mandatory, so a pump that will not answer it stops the
+// write rather than letting it proceed on whatever the cache last held.
+static void test_temperature_range_refused_when_the_pre_read_fails() {
+  std::cout << "\n=== set_temperature_range: unreadable config -> rejected before any write ==="
+            << std::endl;
+  Harness h;
+  h.sim.mode_byte = 0x02;
+  h.prime_cache();
+  h.prime_temp_limits();     // the cache IS populated...
+  h.sim.respond_obj91 = false;  // ...and the pump stops answering afterwards
+
+  h.write_op.submit_set_temperature_range(30.0f, 50.0f, true, "tr_preread");
+  h.advance(30000);
+
+  TEST_ASSERT(h.events_for("tr_preread") == 1, "exactly one terminal event");
+  const WriteResult *r = h.result_for("tr_preread");
+  TEST_ASSERT(r && r->status == WriteStatus::REJECTED, "status is rejected");
+  TEST_ASSERT(r && r->detail.find("not attempted") != std::string::npos,
+              "detail says the write was never attempted");
+  TEST_ASSERT(h.frames_temp_write == 0 && h.frames_0a01 == 0,
+              "a populated cache is not a licence to write: nothing reached the pump");
 }
 
 static void test_temperature_range_accepted() {
@@ -1351,21 +1406,22 @@ static void test_temperature_range_accepted() {
   TEST_ASSERT(h.commit_count > commits_before, "configuration commit was sent");
 }
 
-// An ANSWERED refusal is settled by the readback, not short-circuited to
-// REJECTED (issue #208).
+// An ANSWERED refusal is settled by the readback (issue #208).
 //
-// The distinction this pins is between silence and a "no". The caller drops
-// straight to REJECTED without a readback when the write goes unanswered, which
-// is right -- nothing came back, so there is nothing to attribute. A refusal is
-// different, and cannot be attributed with confidence: transport.cpp's
+// Neither a refusal nor silence short-circuits any more (issue #234), so the
+// two no longer differ in STATUS. They still differ, and this pins where: the
+// callback reports "the pump answered", so a refusal leaves config_unacked
+// false and the settle does not claim the write went unacknowledged. Reporting
+// a refusal as silence would put that claim on an event about a pump that
+// replied in milliseconds.
+//
+// Why the readback has to be the one to decide either way: transport.cpp's
 // short-ACK branch matches "some queued write of this shape", with no sequence
 // number and no object echo, so the fire-and-forget mode write a few hundred ms
-// earlier can be answered inside this write's window.
-//
-// Making refusals visible (#208) is what created the hazard: without this, a
-// misattributed refusal would report REJECTED for a write that landed, and no
-// readback would run to catch it. The capture behind #208 is that exact shape --
-// an 0x81 mid-write, and the value landed.
+// earlier can be answered inside this write's window. Making refusals visible
+// (#208) is what surfaced this -- a misattributed refusal would otherwise
+// report failure for a write that landed. The capture behind #208 is that exact
+// shape: an 0x81 mid-write, and the value landed.
 static void test_temperature_range_refusal_is_settled_by_the_readback() {
   std::cout << "\n=== set_temperature_range: an answered refusal defers to the readback ===" << std::endl;
   Harness h;
@@ -1385,23 +1441,248 @@ static void test_temperature_range_refusal_is_settled_by_the_readback() {
               "write that landed");
   TEST_ASSERT(r && std::fabs(r->temp_min - 30.0f) < 0.2f && std::fabs(r->temp_max - 50.0f) < 0.2f,
               "and the settled values come from the pump, not from the request");
+  TEST_ASSERT(r && r->detail.find("not acknowledged") == std::string::npos,
+              "and the event does not claim the write went unacknowledged -- the pump "
+              "answered, it just answered no");
 }
 
-static void test_temperature_range_no_ack() {
-  std::cout << "\n=== set_temperature_range: no ACK -> rejected ===" << std::endl;
+// The confirm's retry ladder, which the fix now depends on.
+//
+// A dropped first readback used to be indistinguishable from a failed write:
+// the operation watchdog fired at 10 s -- before CONFIG_MAX_ATTEMPTS could send
+// a second read -- and settled `timeout`. Harmless while a missing ACK had
+// already settled REJECTED at 3.4 s without any readback; not harmless once the
+// readback is the only thing that decides, because this is a write the pump
+// stored and the settle has to say so.
+static void test_temperature_range_unacked_survives_a_dropped_readback() {
+  std::cout << "\n=== set_temperature_range: no ACK, first readback dropped -> accepted on the retry ==="
+            << std::endl;
   Harness h;
   h.sim.mode_byte = 0x02;
   h.prime_cache();
   h.prime_temp_limits();
   h.sim.ack_temp_write = false;
 
-  h.write_op.submit_set_temperature_range(30.0f, 50.0f, false, "tr2");
+  h.write_op.submit_set_temperature_range(30.0f, 50.0f, true, "tr_unacked_retry");
+  // The mandatory pre-write read has to land; only the confirm's first read is
+  // dropped. Arming the drop before submit would spend it on the pre-read, and
+  // the operation would settle REJECTED without ever reaching the ladder.
+  h.advance(1000);
+  h.sim.drop_obj91_reads = 1;
+  h.advance(40000);
+
+  TEST_ASSERT(h.events_for("tr_unacked_retry") == 1, "exactly one terminal event");
+  const WriteResult *r = h.result_for("tr_unacked_retry");
+  TEST_ASSERT(r && r->status == WriteStatus::ACCEPTED,
+              "the retry reaches the pump and reports what it holds, rather than the "
+              "operation watchdog reporting that nothing was heard");
+  TEST_ASSERT(r && std::fabs(r->temp_min - 30.0f) < 0.2f && std::fabs(r->temp_max - 50.0f) < 0.2f,
+              "settled values come from the readback");
+  TEST_ASSERT(h.sim.drop_obj91_reads == 0,
+              "the drop was spent on a CONFIRM read -- otherwise this passes without "
+              "the retry ever running");
+}
+
+// ...and the ladder still terminates. A pump that never answers the readback
+// settles once, as a failure, inside the budget -- the watchdog is what makes
+// the deferral safe to do at all.
+static void test_temperature_range_unacked_and_unreadable_still_settles() {
+  std::cout << "\n=== set_temperature_range: no ACK and no readback ever -> one timeout ==="
+            << std::endl;
+  Harness h;
+  h.sim.mode_byte = 0x02;
+  h.prime_cache();
+  h.prime_temp_limits();
+  h.sim.ack_temp_write = false;
+
+  h.write_op.submit_set_temperature_range(30.0f, 50.0f, true, "tr_unreadable");
+  // Again the pre-write read lands; it is the CONFIRM readback that never
+  // answers, which is the only way to reach the ladder's own timeout.
+  h.advance(1000);
+  h.sim.respond_obj91 = false;
+  h.advance(60000);
+
+  TEST_ASSERT(h.events_for("tr_unreadable") == 1, "exactly one terminal event");
+  const WriteResult *r = h.result_for("tr_unreadable");
+  TEST_ASSERT(r && r->status == WriteStatus::TIMEOUT,
+              "a write nobody can confirm settles timeout, not a guess at rejected");
+  TEST_ASSERT(r && r->detail.find("readback failed") != std::string::npos,
+              "and the confirm ladder is what reports it, having run to the end inside "
+              "the budget -- on the old 10 s default the watchdog got there first and "
+              "this branch could not be reached");
+  TEST_ASSERT(r && r->detail.find("not acknowledged") != std::string::npos,
+              "the missing ACK is still named");
+}
+
+// The confirm's three-way split, independent of the ACK.
+//
+// Until issue #234 this comparison had only two outcomes -- the requested
+// values or CLAMPED -- so a pump that took the mode change and then ignored
+// the config write reported "the pump stored something else" about a pump
+// that had stored nothing. confirm_setpoint_ and confirm_cycle_times_ both
+// drew the distinction already; this one did not, which is also why there was
+// nothing for an unacknowledged write to defer to.
+static void test_temperature_range_ignored_write_is_rejected() {
+  std::cout << "\n=== set_temperature_range: answered but not stored -> rejected ===" << std::endl;
+  Harness h;
+  h.sim.mode_byte = 0x02;
+  h.prime_cache();
+  h.prime_temp_limits();  // pre-write values: 25.0-55.0 °C, autoadapt off
+  h.sim.honor_temp_writes = false;
+
+  h.write_op.submit_set_temperature_range(30.0f, 50.0f, true, "tr_ignored");
   h.advance(15000);
 
-  TEST_ASSERT(h.events_for("tr2") == 1, "exactly one terminal event");
-  const WriteResult *r = h.result_for("tr2");
-  TEST_ASSERT(r && r->status == WriteStatus::REJECTED, "status is rejected");
-  TEST_ASSERT(r && r->detail.find("not acknowledged") != std::string::npos, "detail reports the missing ACK");
+  TEST_ASSERT(h.events_for("tr_ignored") == 1, "exactly one terminal event");
+  const WriteResult *r = h.result_for("tr_ignored");
+  TEST_ASSERT(r && r->status == WriteStatus::REJECTED,
+              "the pump kept every value it had, which is a refusal and not a clamp");
+  TEST_ASSERT(r && r->detail.find("pump kept") != std::string::npos,
+              "and the detail says kept, not stored");
+  TEST_ASSERT(r && std::fabs(r->temp_min - 25.0f) < 0.2f && std::fabs(r->temp_max - 55.0f) < 0.2f,
+              "settled values are the pump's, not the request's");
+}
+
+// Why the pre-write read is a READ and not a cache lookup.
+//
+// read_obj91_config() runs once per connection, in the initial read chain -- it
+// is not in the periodic control poll that refreshes the mode and setpoints
+// (issue #54). So on a link that has been up for hours the cached range is that
+// old, and the GO app can have moved it in between. Taking the baseline from
+// the cache would then compare the readback against values nobody holds any
+// more, and an ignored write -- the pump kept what it had -- would report
+// CLAMPED, which claims the pump chose something.
+//
+// The out-of-band edit here is exactly that: the sim's values move with no read
+// in between, so the cache and the pump disagree until the write reads again.
+static void test_temperature_range_baseline_is_read_not_remembered() {
+  std::cout << "\n=== set_temperature_range: an out-of-band edit does not turn a refusal into a clamp ==="
+            << std::endl;
+  Harness h;
+  h.sim.mode_byte = 0x02;
+  h.prime_cache();
+  h.prime_temp_limits();  // cache now holds the sim's 25.0-55.0, autoadapt off
+
+  // Another controller moves the range. Nothing reads it, so the cache is stale.
+  h.sim.temp_min = 28.0f;
+  h.sim.temp_max = 52.0f;
+  h.sim.autoadapt = true;
+  h.sim.honor_temp_writes = false;  // and our write is then ignored
+
+  h.write_op.submit_set_temperature_range(30.0f, 50.0f, true, "tr_stale");
+  h.advance(30000);
+
+  TEST_ASSERT(h.events_for("tr_stale") == 1, "exactly one terminal event");
+  const WriteResult *r = h.result_for("tr_stale");
+  TEST_ASSERT(r && r->status == WriteStatus::REJECTED,
+              "the pump kept what it had, so this is a refusal -- against the stale "
+              "cache it would read as CLAMPED, blaming the pump for a choice it "
+              "never made");
+  TEST_ASSERT(r && std::fabs(r->temp_min - 28.0f) < 0.2f && std::fabs(r->temp_max - 52.0f) < 0.2f,
+              "and the settled values are the pump's current ones");
+}
+
+static void test_temperature_range_clamped() {
+  std::cout << "\n=== set_temperature_range: pump caps the max -> clamped ===" << std::endl;
+  Harness h;
+  h.sim.mode_byte = 0x02;
+  h.prime_cache();
+  h.prime_temp_limits();
+  h.sim.temp_max_clamp = 45.0f;
+
+  h.write_op.submit_set_temperature_range(30.0f, 50.0f, true, "tr_clamped");
+  h.advance(15000);
+
+  TEST_ASSERT(h.events_for("tr_clamped") == 1, "exactly one terminal event");
+  const WriteResult *r = h.result_for("tr_clamped");
+  TEST_ASSERT(r && r->status == WriteStatus::CLAMPED,
+              "the write moved the min, so something landed -- clamp, not refusal");
+  TEST_ASSERT(r && r->detail.find("pump stored") != std::string::npos,
+              "and the detail says stored, not kept");
+  TEST_ASSERT(r && std::fabs(r->temp_max - 45.0f) < 0.2f, "settled max reports the cap");
+}
+
+// --- The unacknowledged config write (issue #234) -------------------------
+//
+// A missing ACK used to settle REJECTED on the spot, with no readback. REJECTED
+// asserts the pump did not take the write, and nothing at that point knew it:
+// the only evidence was that no frame arrived inside 3 s. The three tests below
+// are the three things that silence can actually mean, and the pump -- not the
+// transport -- decides which.
+//
+// Why the ACK cannot carry the verdict even when it does arrive: transport.cpp's
+// short-ACK branch matches "some queued Class 10 command of this shape", with no
+// sequence number and no object echo, and the fire-and-forget mode write a few
+// hundred ms earlier is on the same class. Silence is less attributable still --
+// there is no frame to reason about at all.
+
+static void test_temperature_range_unacked_but_stored() {
+  std::cout << "\n=== set_temperature_range: no ACK but the values landed -> accepted ==="
+            << std::endl;
+  Harness h;
+  h.sim.mode_byte = 0x02;
+  h.prime_cache();
+  h.prime_temp_limits();
+  h.sim.ack_temp_write = false;  // the pump stores it; the acknowledgement is lost
+
+  h.write_op.submit_set_temperature_range(30.0f, 50.0f, true, "tr_unacked_ok");
+  h.advance(15000);
+
+  TEST_ASSERT(h.events_for("tr_unacked_ok") == 1, "exactly one terminal event");
+  const WriteResult *r = h.result_for("tr_unacked_ok");
+  TEST_ASSERT(r && r->status == WriteStatus::ACCEPTED,
+              "the pump holds the requested values, so the write did not fail -- "
+              "an automation retrying on `rejected` here would rewrite correct values");
+  TEST_ASSERT(r && std::fabs(r->temp_min - 30.0f) < 0.2f && std::fabs(r->temp_max - 50.0f) < 0.2f,
+              "settled values come from the readback");
+  TEST_ASSERT(r && r->detail.find("not acknowledged") != std::string::npos,
+              "the silence is still reported, in the detail rather than the status");
+  TEST_ASSERT(h.commit_count > 0,
+              "the configuration commit is still sent -- it is what persists a write "
+              "whose acknowledgement was lost");
+}
+
+static void test_temperature_range_unacked_and_not_stored() {
+  std::cout << "\n=== set_temperature_range: no ACK and nothing stored -> rejected ==="
+            << std::endl;
+  Harness h;
+  h.sim.mode_byte = 0x02;
+  h.prime_cache();
+  h.prime_temp_limits();
+  h.sim.ack_temp_write = false;
+  h.sim.honor_temp_writes = false;
+
+  h.write_op.submit_set_temperature_range(30.0f, 50.0f, true, "tr_unacked_lost");
+  h.advance(15000);
+
+  TEST_ASSERT(h.events_for("tr_unacked_lost") == 1, "exactly one terminal event");
+  const WriteResult *r = h.result_for("tr_unacked_lost");
+  TEST_ASSERT(r && r->status == WriteStatus::REJECTED,
+              "a write that neither landed nor was answered still settles as a failure");
+  TEST_ASSERT(r && r->detail.find("not acknowledged") != std::string::npos &&
+              r->detail.find("pump kept") != std::string::npos,
+              "and the detail carries both halves: no ACK, and the pump kept what it had");
+}
+
+static void test_temperature_range_unacked_and_clamped() {
+  std::cout << "\n=== set_temperature_range: no ACK and the pump capped it -> clamped ==="
+            << std::endl;
+  Harness h;
+  h.sim.mode_byte = 0x02;
+  h.prime_cache();
+  h.prime_temp_limits();
+  h.sim.ack_temp_write = false;
+  h.sim.temp_max_clamp = 45.0f;
+
+  h.write_op.submit_set_temperature_range(30.0f, 50.0f, true, "tr_unacked_clamp");
+  h.advance(15000);
+
+  TEST_ASSERT(h.events_for("tr_unacked_clamp") == 1, "exactly one terminal event");
+  const WriteResult *r = h.result_for("tr_unacked_clamp");
+  TEST_ASSERT(r && r->status == WriteStatus::CLAMPED,
+              "a clamp stays distinguishable from a write that never landed, "
+              "even with no ACK to tell them apart");
+  TEST_ASSERT(r && std::fabs(r->temp_max - 45.0f) < 0.2f, "settled max reports the cap");
 }
 
 static void test_temperature_range_invalid() {
@@ -1465,6 +1746,104 @@ static void test_cycle_times_pump_clamps() {
   TEST_ASSERT(r && r->status == WriteStatus::CLAMPED, "status is clamped");
   TEST_ASSERT(r && r->on_minutes == 1 && r->off_minutes == 5, "settled values report the clamp");
   TEST_ASSERT(r && r->detail.find("off=5") != std::string::npos, "detail reports the stored value");
+}
+
+// The same three meanings of silence on the DHW config write (issue #234).
+// This confirm already told a kept value from a clamp -- the mandatory
+// pre-write read gives it the "before" values -- so all the change needed here
+// was to stop short-circuiting past it.
+static void test_cycle_times_unacked_but_stored() {
+  std::cout << "\n=== set_cycle_times: no ACK but the periods landed -> accepted ===" << std::endl;
+  Harness h;
+  h.sim.mode_byte = 0x02;
+  h.sim.cycle_on = 5;
+  h.sim.cycle_off = 15;
+  h.prime_cache();
+  h.sim.ack_dhw_write = false;
+
+  h.write_op.submit_set_cycle_times(10, 20, NAN, "ct_unacked_ok");
+  h.advance(15000);
+
+  TEST_ASSERT(h.events_for("ct_unacked_ok") == 1, "exactly one terminal event");
+  const WriteResult *r = h.result_for("ct_unacked_ok");
+  TEST_ASSERT(r && r->status == WriteStatus::ACCEPTED,
+              "the pump holds the requested periods, so the write did not fail");
+  TEST_ASSERT(r && r->on_minutes == 10 && r->off_minutes == 20, "settled periods reported");
+  TEST_ASSERT(r && r->detail.find("not acknowledged") != std::string::npos,
+              "the silence is reported in the detail rather than the status");
+}
+
+static void test_cycle_times_unacked_and_not_stored() {
+  std::cout << "\n=== set_cycle_times: no ACK and nothing stored -> rejected ===" << std::endl;
+  Harness h;
+  h.sim.mode_byte = 0x02;
+  h.sim.cycle_on = 5;
+  h.sim.cycle_off = 15;
+  h.prime_cache();
+  h.sim.ack_dhw_write = false;
+  h.sim.honor_dhw_writes = false;
+
+  h.write_op.submit_set_cycle_times(10, 20, NAN, "ct_unacked_lost");
+  h.advance(15000);
+
+  TEST_ASSERT(h.events_for("ct_unacked_lost") == 1, "exactly one terminal event");
+  const WriteResult *r = h.result_for("ct_unacked_lost");
+  TEST_ASSERT(r && r->status == WriteStatus::REJECTED,
+              "a write that neither landed nor was answered still settles as a failure");
+  TEST_ASSERT(r && r->detail.find("not acknowledged") != std::string::npos &&
+              r->detail.find("pump kept") != std::string::npos,
+              "and the detail carries both halves");
+  TEST_ASSERT(r && r->on_minutes == 5 && r->off_minutes == 15,
+              "settled values are the pump's, not the request's");
+}
+
+static void test_cycle_times_unacked_and_clamped() {
+  std::cout << "\n=== set_cycle_times: no ACK and the pump clamped -> clamped ===" << std::endl;
+  Harness h;
+  h.sim.mode_byte = 0x02;
+  h.sim.dhw_min_off = 5;
+  h.prime_cache();
+  h.sim.ack_dhw_write = false;
+
+  h.write_op.submit_set_cycle_times(1, 3, NAN, "ct_unacked_clamp");
+  h.advance(15000);
+
+  TEST_ASSERT(h.events_for("ct_unacked_clamp") == 1, "exactly one terminal event");
+  const WriteResult *r = h.result_for("ct_unacked_clamp");
+  TEST_ASSERT(r && r->status == WriteStatus::CLAMPED,
+              "a clamp stays distinguishable from a write that never landed");
+  TEST_ASSERT(r && r->off_minutes == 5, "settled values report the clamp");
+}
+
+// The DHW side of the retry ladder, measured rather than computed. Its budget
+// is the same constant, but its timeline is not: SET_CYCLE_TIMES makes a
+// mandatory pre-write read first, so the confirm starts later than the
+// temperature range's does. The drop is applied to the CONFIRM read, not the
+// pre-write one -- a pre-read that fails settles REJECTED before any write.
+static void test_cycle_times_unacked_survives_a_dropped_readback() {
+  std::cout << "\n=== set_cycle_times: no ACK, first readback dropped -> accepted on the retry ==="
+            << std::endl;
+  Harness h;
+  h.sim.mode_byte = 0x02;
+  h.sim.cycle_on = 5;
+  h.sim.cycle_off = 15;
+  h.prime_cache();
+  h.sim.ack_dhw_write = false;
+
+  h.write_op.submit_set_cycle_times(10, 20, NAN, "ct_unacked_retry");
+  // The pre-write read has to land; only the confirm's first read is dropped.
+  h.advance(1000);
+  h.sim.drop_dhw_reads = 1;
+  h.advance(30000);
+
+  TEST_ASSERT(h.events_for("ct_unacked_retry") == 1, "exactly one terminal event");
+  const WriteResult *r = h.result_for("ct_unacked_retry");
+  TEST_ASSERT(r && r->status == WriteStatus::ACCEPTED,
+              "the retry reaches the pump inside the budget and reports what it holds");
+  TEST_ASSERT(r && r->on_minutes == 10 && r->off_minutes == 20, "settled periods reported");
+  TEST_ASSERT(h.sim.drop_dhw_reads == 0 && h.frames_dhw_read >= 3,
+              "the drop was spent on a CONFIRM read, and a third read followed it -- "
+              "otherwise this passes without the retry ever running");
 }
 
 static void test_cycle_times_read_unavailable() {
@@ -3281,12 +3660,24 @@ int main() {
   test_setpoints_different_modes_both_run();
   test_origin_and_seq_reported();
   test_temperature_range_refused_when_limits_unknown();
+  test_temperature_range_refused_when_the_pre_read_fails();
   test_temperature_range_accepted();
-  test_temperature_range_no_ack();
+  test_temperature_range_ignored_write_is_rejected();
+  test_temperature_range_baseline_is_read_not_remembered();
+  test_temperature_range_clamped();
+  test_temperature_range_unacked_but_stored();
+  test_temperature_range_unacked_and_not_stored();
+  test_temperature_range_unacked_and_clamped();
+  test_temperature_range_unacked_survives_a_dropped_readback();
+  test_temperature_range_unacked_and_unreadable_still_settles();
   test_temperature_range_refusal_is_settled_by_the_readback();
   test_temperature_range_invalid();
   test_cycle_times_accepted();
   test_cycle_times_pump_clamps();
+  test_cycle_times_unacked_but_stored();
+  test_cycle_times_unacked_and_not_stored();
+  test_cycle_times_unacked_and_clamped();
+  test_cycle_times_unacked_survives_a_dropped_readback();
   test_cycle_times_read_unavailable();
   test_cycle_flow_only_accepted();
   test_cycle_combined_write();

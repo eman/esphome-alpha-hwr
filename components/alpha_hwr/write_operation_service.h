@@ -388,6 +388,24 @@ class WriteOperationService {
     // distinction for SET_CYCLE_TIMES.
     int8_t pre_on_minutes{-1}, pre_off_minutes{-1};
     float pre_flow{NAN};
+    // Temperature-range values as the cache held them before the write, for
+    // the same REJECTED-vs-CLAMPED distinction on SET_TEMPERATURE_RANGE. The
+    // gate above the write (temp_limits_known()) guarantees an Obj 91 Sub 430
+    // reply has landed, so these are the pump's own values rather than
+    // ControlService's cold-start constants -- but they are cache-fresh, not
+    // read-fresh, so a NAN here just falls through to CLAMPED, as pre_value
+    // does.
+    float pre_temp_min{NAN}, pre_temp_max{NAN};
+    int8_t pre_autoadapt{-1};
+    // The config write went out and nothing answered within its 3 s window.
+    //
+    // Not a verdict on its own (issue #234): the pump may have stored the
+    // values and lost the acknowledgement -- a dropped notification, a
+    // reassembly failure, a frame a moment late -- so the readback decides,
+    // and this only survives into the settle detail so the silence is still
+    // reported. See run_set_temperature_range_() for why the ACK cannot be
+    // attributed to a particular write in the first place.
+    bool config_unacked{false};
     // SET_REMOTE_MODE: ControlService::remote_source_observations_ as it stood
     // once the Class 3 command had been answered -- NOT when it was sent. The
     // send callback runs either on the ACK or on the ACK window closing, and
@@ -528,6 +546,28 @@ class WriteOperationService {
   static constexpr uint8_t CONFIG_MAX_ATTEMPTS = 1;
   static constexpr uint32_t WATCHDOG_SET_MODE_MS = 15000;
   static constexpr uint32_t WATCHDOG_DEFAULT_MS = 10000;
+  // The two config writes get their own budget, sized to the whole path they
+  // can legitimately take -- both now open with a mandatory read of their
+  // config object, and both settle on a confirm ladder with one retry:
+  //
+  //   5000 pre-write read + 400 step-2 delay + 3000 ACK window
+  //   + 1200 confirm delay + 5000 readback timeout + 1500 retry delay
+  //   + 5000 readback timeout = 21.1 s
+  //
+  // The 5000s are APDU timeouts, so each is a bound rather than a cost; a pump
+  // answering in the observed 250-360 ms takes well under 6 s end to end. The
+  // budget has to cover the bound anyway, because the slow cases are exactly
+  // the ones the retry exists for.
+  //
+  // On WATCHDOG_DEFAULT_MS the ladder could not finish: the watchdog fired at
+  // 10 s, so CONFIG_MAX_ATTEMPTS never ran a second readback and the confirm's
+  // own "readback failed" verdict was unreachable. That was survivable while a
+  // missing ACK settled REJECTED at 3.4 s without any readback at all, and is
+  // not now the readback decides every case (issue #234): a write the pump
+  // stored but did not acknowledge, whose first readback is dropped, has to
+  // reach the retry to be reported as the success it is -- otherwise the fix
+  // just trades one wrong failure for another.
+  static constexpr uint32_t WATCHDOG_CONFIG_WRITE_MS = 26000;
   // Schedule budgets: entry = poll + fresh layer read + write + commit +
   // settle + verify (+ retry) at 3-5 s per read; single events include a
   // possible full 35-slot cache scan when resolving a free slot.

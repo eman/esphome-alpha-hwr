@@ -66,6 +66,47 @@ they settle as `set_single_event` / `clear_single_event`.
 Setpoint units and ranges: pressure modes in meters (0.5–10.0),
 `constant_speed` in RPM (500–4500), `constant_flow` in m³/h (0.1–10.0).
 
+### `set_temperature_range` and `set_cycle_times` settle on the pump, never on the ACK
+
+Both write a configuration object and then read it back, and **the readback is
+the verdict** — including when the write went unacknowledged
+([#234](https://github.com/eman/esphome-alpha-hwr/issues/234)).
+
+That is worth stating because it used to work the other way. A config write
+with no acknowledgement inside its 3 s window settled `rejected` on the spot,
+with no readback, and `rejected` asserts the pump did not take the write.
+Nothing at that point knew it. A write that landed and whose acknowledgement
+was lost — a dropped notification, a reassembly failure, a frame arriving a
+moment late — was reported as a failure while the pump held exactly what was
+asked for, and an automation retrying on `rejected` would rewrite values that
+were already correct.
+
+The acknowledgement could not carry that weight in either direction: it is a
+bare Class 10 short ACK with no sequence number and no object echo, so it
+cannot be attributed to a particular write — and silence carries less still,
+since there is no frame to reason about at all.
+
+Both writes open by **reading their config object**, so the values the verdict
+is measured against come from the pump moments earlier rather than from a cache
+filled at connect. Without that, an out-of-band edit from the Grundfos GO app
+would make a write the pump ignored look like a write the pump adjusted. A
+config object that cannot be read settles `rejected` with `write not attempted`,
+before anything is sent.
+
+So the three outcomes are decided by what the pump reports holding:
+
+| what the pump did | status | `detail` |
+| --- | --- | --- |
+| stored the requested values | `accepted` | empty, or the missing-ACK note |
+| stored something else | `clamped` | `pump stored …` |
+| kept every value it had | `rejected` | `pump kept …` |
+| would not answer the readback | `timeout` | `config readback failed` |
+
+A write that was never acknowledged keeps its status from that table and gains
+a `config write not acknowledged; …` prefix on `detail`, so the silence is
+still reported — it just no longer decides the verdict. This is the one case
+where an `accepted` settle carries a non-empty `detail`.
+
 ### Run state and the schedule
 
 `set_pump_enabled` and `set_schedule_enabled` are **independent, uncoupled**
@@ -327,7 +368,9 @@ counter, so seq values from different nodes are not comparable across them).
 
 Statuses:
 
-- **`accepted`** — the pump confirmed the requested value.
+- **`accepted`** — the pump confirmed the requested value. `detail` is empty,
+  with one exception: a config write the pump stored but never acknowledged
+  says so there (see [above](#set_temperature_range-and-set_cycle_times-settle-on-the-pump-never-on-the-ack)).
 - **`clamped`** — the pump stored a *different* value (e.g. 1500 RPM clamped
   to 1650). The event carries the stored value. Clamping can also come from
   installer limits configured in the Grundfos GO app (pipe size, maximum
@@ -336,7 +379,9 @@ Statuses:
 - **`rejected`** — the pump or its state refused: it kept its old value,
   nacked the command, or a precondition could not be read (pump not
   synchronized, schedule overview unreadable). `detail` says why. A retry
-  may succeed once conditions change.
+  may succeed once conditions change. What it never means is "a reply failed to
+  arrive": the two config writes above settle an unacknowledged write by
+  readback like any other, so silence alone never produces it.
 - **`invalid`** — the request itself is malformed or out of range (bad
   value, unknown mode, unparsable `data` string). Decided before any wire
   write, deterministic, never worth a retry.
@@ -452,4 +497,9 @@ interleave mid-sequence, and each client matches its own results by `op_id`.
   a quiet link).
 - The pump's own protocol quirks (an ACK window that sometimes closes without
   a matchable ACK even on success) are absorbed by the verify readbacks — a
-  write is judged by what the pump reports holding, not by the ACK.
+  write is judged by what the pump reports holding, not by the ACK. The cost is
+  paid in latency: `set_temperature_range` and `set_cycle_times` each read their
+  config object before writing it and wait out the 3 s ACK window before the
+  confirm readback starts, so an unacknowledged config write settles several
+  seconds later than an acknowledged one — and up to 26 s if its first confirm
+  readback is dropped too.
