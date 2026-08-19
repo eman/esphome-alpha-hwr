@@ -1080,6 +1080,45 @@
 
 ### Fixed
 
+- **`set_single_event` and `set_vacation` rejected every input on real
+  hardware** (issue #255). Both services answered a terminal `invalid` to any
+  argument a client could send, with `seq: 0` — the request never reached the
+  write layer. On the device there was no input either service would accept, and
+  there had not been for as long as the parser has existed.
+
+  The bound that says "fits the `uint32` the wire carries" was passed as a plain
+  `long`. `long` is 32 bits on the ESP32-C3 (RISC-V, ILP32), so
+  `parse_int_field(s, 0, 4294967295L, &v)` compiled to `hi = -1` and the guard
+  became `if (v > -1) return false` — a rejection of every value at or above
+  zero. The literal itself was fine; the damage was at the call, where it
+  narrowed into the parameter.
+
+  What this broke, on a pump: the Lovelace card's **Quick Run** and **Custom
+  Run** buttons, which call `set_single_event`, and any automation or script
+  calling either service. The vacation date-pickers in
+  `packages/alpha_hwr_schedule_editor.yaml` are unaffected — they call the
+  component directly from a lambda and never pass through this parser — as are
+  `clear_single_event` and `clear_vacation`, whose bounds fit a 32-bit `long`.
+
+  Fixed by naming the parse width once and fixing it: every bound and every
+  parsed value in the bridge now travels as `long long` via a `ParseInt` alias,
+  and parsing goes through `std::strtoll`. That second half matters on its own —
+  `std::strtol` on a 32-bit `long` saturates at 2147483647 and reports `ERANGE`,
+  which this parser treats as a rejection, so correcting the bound alone would
+  have left **every timestamp after 2038-01-19 refused** while the pump holds
+  instants until 2106. Grundfos' own GENI profile for this pump, shipped inside
+  the Grundfos Home app, is what settles the ceiling: `ClockProgramSingleEvent`,
+  object type 220, fixed size 10, declares `begin` and `end` as `uint32_t`.
+
+  The host suite could not have caught this and still cannot: `long` is 64 bits
+  there, so the firmware refused inputs that this suite asserted, by name, were
+  accepted — including `0,4294967295`. It stayed green throughout. The guard is
+  therefore a `static_assert` on the parse type, written so that narrowing the
+  alias back fails the **ESP32-C3 firmware build** and passes the host build;
+  CI builds that firmware. Verified both ways: with the alias narrowed, the host
+  suite reports zero failures and the firmware build stops with `the comparison
+  reduces to '(2147483647 >= 4294967295)'`.
+
 - **The Lovelace card mangled — and could destroy — a schedule window that
   crosses midnight** (issue #174). A cell whose end is earlier than its start
   (22:00–02:00 is stored as `[1320, 120]`) reaches the card today from the

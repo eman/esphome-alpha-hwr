@@ -3,6 +3,7 @@
 
 #include <cmath>
 #include <cstdio>
+#include <limits>
 #include <map>
 #include "alpha_hwr.h"
 #include "esphome/core/application.h"
@@ -123,21 +124,41 @@ void AlphaHwrApiBridge::setup(AlphaHwrComponent *component) {
 // 8 bytes on this host and 4 on the ESP32, so a host test can never observe
 // what the firmware's sscanf would do with an out-of-range timestamp. Parsing
 // into a fixed-width type and range-checking it explicitly makes the two agree.
+//
+// That paragraph was written and then only half-applied. The parsed value was
+// narrowed to a fixed-width type at the end, but the BOUNDS travelled as plain
+// `long` -- 8 bytes on this host, 4 on the ESP32-C3 (RISC-V, ILP32). So
+// `parse_int_field(s, 0, 4294967295L, &v)` compiled to `hi = -1` on the pump,
+// `v > hi` refused every value >= 0, and `set_single_event` and `set_vacation`
+// rejected every input any client could send -- for as long as the parser has
+// existed -- while this suite asserted the opposite and stayed green (#255).
+//
+// The width is therefore named once, carried everywhere, and asserted. The
+// assertion is deliberately one the DEVICE build fails and the host build
+// passes, because that is the only place the defect can appear: narrow the
+// alias back to `long` and CI's ESP32-C3 firmware build stops, where no host
+// test could ever have noticed. `long long` is also what keeps epochs past
+// 2038 parsable -- `std::strtol` on a 32-bit `long` saturates at 2147483647
+// and sets ERANGE, which this parser treats as a rejection.
+using ParseInt = long long;
+static_assert(std::numeric_limits<ParseInt>::max() >= 4294967295LL,
+              "ParseInt must hold the wire's uint32 ceiling at every word size; "
+              "`long` does not on the ESP32-C3 (issue #255)");
 
 /// Whole-string decimal parse. Rejects an empty field, leading/trailing
 /// characters of any kind (including whitespace), and anything outside
 /// [lo, hi]. Returns false rather than a clamped value: a request the bridge
 /// cannot read exactly is one it must not guess at.
-static bool parse_int_field(const std::string &s, long lo, long hi, long *out) {
+static bool parse_int_field(const std::string &s, ParseInt lo, ParseInt hi, ParseInt *out) {
   if (s.empty()) return false;
-  // strtol skips leading whitespace and accepts '+'/'-'; the explicit check
+  // strtoll skips leading whitespace and accepts '+'/'-'; the explicit check
   // here makes both a rejection, so " 7" and "+7" are refused rather than
   // silently accepted as 7.
   const bool starts_cleanly = (s[0] == '-') || (s[0] >= '0' && s[0] <= '9');
   if (!starts_cleanly) return false;
   errno = 0;
   char *end = nullptr;
-  const long v = std::strtol(s.c_str(), &end, 10);
+  const ParseInt v = std::strtoll(s.c_str(), &end, 10);
   // Each condition is hoisted into its own name and its own statement so
   // mutation_check.sh has a pipe-free line per rule to anchor to: entries are
   // split with IFS='|', which truncates any search string containing `||`.
@@ -153,8 +174,8 @@ static bool parse_int_field(const std::string &s, long lo, long hi, long *out) {
 
 /// Split on ',' into exactly `want` fields. A missing, extra or empty field is
 /// a rejection; so is any field that is not a whole decimal number in range.
-static bool parse_int_csv(const std::string &data, size_t want, const long *lo, const long *hi,
-                          long *out) {
+static bool parse_int_csv(const std::string &data, size_t want, const ParseInt *lo,
+                          const ParseInt *hi, ParseInt *out) {
   size_t start = 0;
   for (size_t i = 0; i < want; i++) {
     const size_t comma = data.find(',', start);
@@ -171,9 +192,19 @@ static bool parse_int_csv(const std::string &data, size_t want, const long *lo, 
 /// Epoch seconds: a whole non-negative decimal that fits the 32-bit value the
 /// wire carries. The width check is explicit rather than a cast, so a value the
 /// pump cannot hold is refused instead of truncated into a different instant.
+///
+/// The ceiling is the wire's, not `time_t`'s. Grundfos' own GENI profile for
+/// this pump -- geni_profile_52_7.xml, shipped inside the Grundfos Home app --
+/// declares ClockProgramSingleEvent, object type 220, fixed size 10, with
+/// `begin` and `end` as `uint32_t`; that is exactly the layout
+/// SingleEvent::to_bytes serialises big-endian. The last instant it can hold is
+/// 2106-02-07, so a parser that stopped at 2038 would be imposing our
+/// limitation rather than the pump's.
+static constexpr ParseInt EPOCH_MAX_TS = 4294967295;
+
 static bool parse_epoch_field(const std::string &s, uint32_t *out) {
-  long v = 0;
-  if (!parse_int_field(s, 0, 4294967295L, &v)) return false;
+  ParseInt v = 0;
+  if (!parse_int_field(s, 0, EPOCH_MAX_TS, &v)) return false;
   *out = static_cast<uint32_t>(v);
   return true;
 }
@@ -461,9 +492,9 @@ void AlphaHwrApiBridge::on_upload_schedule(std::string data, std::string op_id) 
 }
 
 void AlphaHwrApiBridge::on_set_schedule_entry(std::string data, std::string op_id) {
-  static const long LO[6] = {0, 0, 0, 0, 0, 0};
-  static const long HI[6] = {4, 6, 23, 59, 23, 59};
-  long vals[6];
+  static const ParseInt LO[6] = {0, 0, 0, 0, 0, 0};
+  static const ParseInt HI[6] = {4, 6, 23, 59, 23, 59};
+  ParseInt vals[6];
   if (!parse_int_csv(data, 6, LO, HI, vals)) {
     reject_(WriteCommand::SET_SCHEDULE_ENTRY, op_id, "parse error: " + echo_arg(data));
     return;
@@ -475,9 +506,9 @@ void AlphaHwrApiBridge::on_set_schedule_entry(std::string data, std::string op_i
 }
 
 void AlphaHwrApiBridge::on_clear_schedule_entry(std::string data, std::string op_id) {
-  static const long LO[2] = {0, 0};
-  static const long HI[2] = {4, 6};
-  long v[2];
+  static const ParseInt LO[2] = {0, 0};
+  static const ParseInt HI[2] = {4, 6};
+  ParseInt v[2];
   if (!parse_int_csv(data, 2, LO, HI, v)) {
     reject_(WriteCommand::CLEAR_SCHEDULE_ENTRY, op_id, "parse error: " + echo_arg(data));
     return;
@@ -508,7 +539,7 @@ void AlphaHwrApiBridge::on_set_single_event(std::string data, std::string op_id)
 }
 
 void AlphaHwrApiBridge::on_clear_single_event(std::string data, std::string op_id) {
-  long idx = 0;
+  ParseInt idx = 0;
   if (!parse_int_field(data, 0, 99, &idx)) {
     reject_(WriteCommand::CLEAR_SINGLE_EVENT, op_id, "parse error: " + echo_arg(data));
     return;

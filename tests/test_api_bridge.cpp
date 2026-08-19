@@ -413,6 +413,17 @@ static void test_partially_numeric_arguments_are_rejected() {
 
 // The counterpart: well-formed input must still be accepted, or the strictness
 // above would be indistinguishable from rejecting everything.
+//
+// One limit worth stating rather than implying. These assertions pin the
+// contract, but they cannot catch the defect that made three of them necessary
+// (#255): `long` is 64 bits here and 32 on the ESP32-C3, so a bound that
+// narrows on the pump is exact on this host, and every case below passed while
+// the firmware refused all of them. No host test can see that -- the width is
+// the thing under test and the host has the wrong one. What catches it is a
+// static_assert in api_bridge.cpp on the parse type, written so it fails the
+// ESP32-C3 firmware build and passes here; CI builds that firmware. The cases
+// below are still worth having: they are what the assert protects, and a
+// mutation on the epoch ceiling dies against them.
 static void test_well_formed_arguments_still_reach_the_operation_layer() {
   std::cout << "\n=== well-formed arguments are still accepted ===" << std::endl;
 
@@ -428,6 +439,17 @@ static void test_well_formed_arguments_still_reach_the_operation_layer() {
       {"clear_schedule_entry", "4,6"},
       {"set_single_event", "0,4294967295"},
       {"set_vacation", "1000,2000"},
+      // Issue #255. On the device every one of these was refused, because the
+      // parser's upper bound travelled as a `long` and 4294967295 narrowed to
+      // -1 in the ESP32-C3's 32 bits, making `v > hi` reject every value >= 0.
+      // A plausible present-day window is the case a user actually hits; the
+      // two above 2147483647 are the ones a 32-bit `std::strtol` saturates on
+      // and reports as ERANGE, which this parser treats as a rejection. The
+      // wire holds a `uint32_t` (ClockProgramSingleEvent, object type 220), so
+      // its last instant is in 2106 and none of these is out of range.
+      {"set_single_event", "1798761600,1798761900"},
+      {"set_single_event", "2147483648,2147483649"},
+      {"set_vacation", "2200000000,2200086400"},
   };
 
   for (const auto &c : cases) {

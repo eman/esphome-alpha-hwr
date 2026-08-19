@@ -895,17 +895,30 @@ MUTATIONS=(
 # was wrong three ways for input any HA user can send. Each rule gets its own
 # pipe-free line in parse_int_field() so it can be anchored here.
 "bridge-parser-accepts-trailing-garbage|components/alpha_hwr/api_bridge.cpp|  if (!consumed_everything) return false;|  // mutated: ignore anything after the number"
-# Deliberately absent: a mutation on parse_int_field's ERANGE check. strtol
-# clamps to LONG_MAX/LONG_MIN on overflow, and every call site passes a range
+# Deliberately absent: a mutation on parse_int_field's ERANGE check. strtoll
+# clamps to LLONG_MAX/LLONG_MIN on overflow, and every call site passes a range
 # far inside those, so `v > hi` / `v < lo` already reject anything ERANGE could
 # flag -- an equivalent mutant no test can kill. The check stays as defence for
 # a future caller with a wider range; it is not load-bearing today, and an
 # entry claiming otherwise would be a false guarantee. Confirmed by experiment:
 # the mutation survived the full suite.
+#
+# Deliberately absent, for a harder reason: a mutation narrowing `using ParseInt
+# = long long` back to `long`, which is issue #255 exactly. It survives here and
+# always will -- `long` is 64 bits on this host, so the mutated parser behaves
+# identically and no host test can distinguish them. The guard for that one is
+# the static_assert beside the alias in api_bridge.cpp, which fails the ESP32-C3
+# firmware build and passes the host build on purpose. Confirmed by experiment:
+# the mutation survived the full suite, and `esphome compile tests/ci-compile.yaml`
+# stopped on the assert.
 "bridge-parser-accepts-leading-junk|components/alpha_hwr/api_bridge.cpp|  if (!starts_cleanly) return false;|  // mutated: let strtol skip whitespace and signs"
 # Timestamps are compared AFTER narrowing to the wire's 32 bits; comparing the
 # wider parse let an ordered pair reach the pump reversed.
-"bridge-epoch-range-not-checked|components/alpha_hwr/api_bridge.cpp|  if (!parse_int_field(s, 0, 4294967295L, &v)) return false;|  if (!parse_int_field(s, 0, 999999999999L, &v)) return false;"
+"bridge-epoch-range-not-checked|components/alpha_hwr/api_bridge.cpp|  if (!parse_int_field(s, 0, EPOCH_MAX_TS, &v)) return false;|  if (!parse_int_field(s, 0, 999999999999LL, &v)) return false;"
+# The ceiling is the wire's uint32, not time_t's int32: ClockProgramSingleEvent
+# declares `begin` and `end` as uint32_t, so the pump holds instants up to 2106.
+# Stopping at 2147483647 would refuse dates the pump accepts (issue #255).
+"bridge-epoch-ceiling-stops-at-2038|components/alpha_hwr/api_bridge.cpp|static constexpr ParseInt EPOCH_MAX_TS = 4294967295;|static constexpr ParseInt EPOCH_MAX_TS = 2147483647;"
 "bridge-epoch-order-checked-before-narrowing|components/alpha_hwr/api_bridge.cpp|  return *begin < *end;|  return true;"
 # An infinity is not a number a client can parse. The contract is a real value
 # or no key -- the same reason NaN was excluded.
