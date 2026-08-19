@@ -290,7 +290,14 @@ void BLEConnectionManager::subscribe_to_notifications() {
   }
 }
 
-void BLEConnectionManager::force_disconnect(const char *reason) {
+void BLEConnectionManager::note_failure(const char *reason, FailureHold rank) {
+  if (failure_hold_admits(failure_hold_, rank)) {
+    last_failure_ = reason;
+    failure_hold_ = rank;
+  }
+}
+
+void BLEConnectionManager::force_disconnect(const char *reason, FailureHold rank) {
   ESP_LOGW(TAG, "Forcing BLE disconnect: %s", reason);
   // Latch the real cause before tearing the link down. The DISCONNECT event we
   // are about to provoke would otherwise overwrite it with "Local Host
@@ -303,10 +310,7 @@ void BLEConnectionManager::force_disconnect(const char *reason) {
   // operator back on the generic string issue #175 exists to replace. Both
   // outrank DATA, so one rank comparison covers them (failure_hold.h) — an
   // earlier `!= SUBSCRIBE` here let the same overwrite through on AUTH.
-  if (failure_hold_admits(failure_hold_, FailureHold::DATA)) {
-    last_failure_ = reason;
-    failure_hold_ = FailureHold::DATA;
-  }
+  note_failure(reason, rank);
   // This teardown is ours, so the cycle it ends is not evidence about the
   // pump's willingness to pair. Without this, the watchdog recycling an
   // unbonded link that subscribed and went quiet would read as a pairing
@@ -342,10 +346,29 @@ void BLEConnectionManager::release_pairing_stall_hold_() {
   }
 }
 
+void BLEConnectionManager::on_pump_ready() {
+  if (failure_hold_released_by_pump_ready(failure_hold_)) {
+    ESP_LOGD(TAG, "Pump ready - releasing held reason: %s", last_failure_.c_str());
+    // Cleared, not merely unheld, for the reason the pairing-stall release
+    // clears it: the string is published whenever the pump is not ready, and a
+    // reason that has been refuted should read "None" rather than wait for some
+    // later fault to overwrite it.
+    last_failure_.clear();
+    failure_hold_ = FailureHold::NONE;
+  }
+}
+
 void BLEConnectionManager::on_session_ready() {
   if (failure_hold_released_by_session_ready(failure_hold_)) {
-    ESP_LOGD(TAG, "Session ready - releasing held failure reason: %s",
+    ESP_LOGD(TAG, "Session ready - withdrawing held failure reason: %s",
              last_failure_.c_str());
+    // Cleared, not merely unheld. This used to leave the string in place on the
+    // reasoning that nothing displayed it past session-ready -- which stopped
+    // being true when the fault surface moved to gating on the PUMP being ready
+    // (issue #211). An unheld string that is still on display is the worst of
+    // both: visible, and overwritable by the lowest-ranked reason that comes
+    // along, which is the #175 defect this file exists to prevent.
+    last_failure_.clear();
     failure_hold_ = FailureHold::NONE;
   }
 }
@@ -530,8 +553,17 @@ void BLEConnectionManager::handle_notification(const esp_ble_gattc_cb_param_t *p
     // so a watchdog hold would otherwise never be released. Scoped to the
     // watchdog's own hold: see failure_hold.h for why an auth-failure hold must
     // survive notifications.
-    if (failure_hold_released_by_data(failure_hold_))
+    if (failure_hold_released_by_data(failure_hold_)) {
+      // Cleared, not merely unheld -- the same rule the pairing-stall and
+      // session-ready releases follow. Leaving the string behind was harmless
+      // while the fault surface blanked at session-ready, because nobody saw
+      // it; moving that gate to pump-ready (issue #211) put an unheld string
+      // back on display, where the next low-ranked reason overwrites it. That
+      // is the #175 defect again. Inbound data refutes "no data from pump", so
+      // the honest reading is that no cause is currently known.
+      last_failure_.clear();
       failure_hold_ = FailureHold::NONE;
+    }
     // A link carrying data is not a link the pump refused to pair with. This is
     // what keeps the stall detector quiet on a healthy unbonded node, which is
     // a supported configuration -- enable_pairing defaults to false and passive

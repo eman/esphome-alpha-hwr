@@ -30,6 +30,8 @@ events fire.
 | `reconnect_settle_time` | time | `2s` | Delay after disconnect before reconnecting |
 | `control_state_poll_interval` | time | `30s` | Interval for periodic control state polling. Set to `0s` to disable. |
 | `data_timeout` | time | `60s` | Tear the BLE link down after this long with no data from the pump, so the normal reconnect runs. Set to `0s` to disable. |
+| `ready_timeout` | time | `300s` | Report a fault if the pump has not become usable this long after connecting. Naming only; see `ready_recycle`. `0s` disables. |
+| `ready_recycle` | boolean | `false` | Also tear the link down when `ready_timeout` expires, so the normal reconnect runs. **Opt-in** — see below. |
 
 ### `time_id`
 
@@ -209,6 +211,87 @@ Establish (0x3e)` and, before long, as `Unreachable` on Pump Link Status. The
 stall needs connections that open and are then dropped, which is a different
 shape. So the third cause, if there is one, is still unnamed.
 
+### `ready_timeout`
+
+`data_timeout` above watches whether anything is *arriving*. This watches
+whether the link ever becomes *usable*, and the two are not the same check.
+
+The failure it exists for was reported from a live installation (issue #211):
+connected, pairing on, telemetry updating in Home Assistant, **Pump Ready** off
+indefinitely, no fault raised and no reconnect. An automation gated on
+`Pump Ready` — which is the correct thing to gate on — waits silently forever,
+while the dashboard shows a healthy pump with live sensor values.
+
+`data_timeout` cannot catch it. The pump volunteers telemetry notifications of
+its own accord, so a session stuck anywhere at all keeps re-arming that watchdog
+on every frame. Silence never accumulates, so it never fires. As the reporter
+put it, this is the one failure shape where the diagnostics actively point away
+from the problem.
+
+`ready_timeout` is timed from connection-open and cleared only by the pump
+actually reaching its usable state — session ready, initial reads landed, caches
+valid. Nothing else resets it: not inbound data, not a session transition, not a
+cache filling partway. That is deliberate, and it is the whole design. A timer
+refreshed by anything on the way to readiness would chase the state it is
+waiting for and could never expire, which is precisely the trap already
+documented in `link_watchdog.h`, where the link-status ladder refreshed its own
+timestamp and kept a rung permanently unreachable.
+
+When it expires the link is dropped and the usual reconnect takes over — the
+same remedy as `data_timeout`, because that is what the recovery machinery
+listens to. **Pump Link Fault** then reads `Pump never became ready (300s)`,
+which is the part that turns "it has been off a while" into a diagnosis: from
+outside, *starting up* and *stuck* look identical, and naming the condition is
+the thing an automation cannot do for itself.
+
+Like `data_timeout` it backs off, doubling on each recycle that never reached
+readiness, up to an hour, and resetting when the pump does become ready. Without
+that, a pump that is merely slow would be recycled forever.
+
+These are two options because they carry very different costs.
+
+**`ready_timeout` names the fault, and is on.** By itself it does nothing to the
+link: it logs, and it puts `Pump never became ready (300s)` on **Pump Link
+Fault**, escalating the window each time it reports. That is free, and it is the
+part an automation cannot do for itself — from outside, *starting up* and
+*stuck* look identical.
+
+> **`ready_recycle` tears the link down, and is off.** Every forced reconnect
+> takes another run at the window where an encryption failure can erase the
+> pump's bond, and a bond erased that way needs physical access to the pump to
+> restore. On a node that never becomes ready, that would happen on an
+> escalating schedule for as long as the node is up.
+>
+> The behaviour of a node that never bonds has not been established — an attempt
+> to measure it was confounded three ways at once (a pre-release build, pairing
+> enabled rather than the default, and a signal at the noise floor), and it
+> bonded within 252 ms regardless. So nobody has yet observed the configuration
+> that risk would apply to.
+>
+> Enable it only on a node that **reliably reaches Pump Ready today**, where an
+> expired budget means something has genuinely gone wrong rather than that this
+> node never works. There
+> it does what it is for: turns "connected, telemetry flowing, silently
+> unusable" into a recycle and a named fault instead of an automation waiting
+> forever.
+>
+> **The suggested value if you enable it is `300s`, and it is measured.** Setting the
+> window deliberately short on a bench pump and watching which value fired gives
+> a bracket: a 10-second window fired, 20 fired, 40 did not. So a fresh
+> connection on a bonded pump reaches usable in roughly 22 seconds — the read
+> chain dominates, at about 175 ms per reply — and `300s` -- the suggested value, since the watchdog is off by default --
+> is around twelve times that.
+>
+> Two cautions. It is one pump, and it is a *bonded reconnect*; a first pairing,
+> with the pairing exchange in front of the same read chain, is still untimed.
+> Raise the value rather than trusting this bracket if your pump is slower.
+> The reason to err high is unchanged: too loose still converts "silent forever"
+> into "recovers eventually", while too tight recycles a pump that was merely
+> slow.
+
+Set `ready_timeout: 0s` to disable it. Note what that restores: a link that
+never becomes usable will sit there indefinitely with no fault and no recycle.
+
 ### `data_timeout`
 
 Nothing on the connect path verifies that the pump is answering. The session is
@@ -270,7 +353,7 @@ Two optional diagnostic sensors expose the state:
 
 | Entity | Reads |
 | --- | --- |
-| `link_recycles` | Consecutive recycles with no data in between. `0` on a healthy link. |
+| `link_recycles` | Consecutive recycles that did not produce a working link — no data, or (if `ready_timeout` is on) never became usable. `0` on a healthy link. |
 | `link_max_gap` | Longest quiet interval since boot, in seconds. |
 
 `link_recycles` is the one to alert on. The Pump Link Fault sensor shows the

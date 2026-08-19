@@ -44,7 +44,17 @@
 // AUTH_CMPL that clears it. The fault string is shown only while the session
 // is NOT ready (see evaluate_link_status), so a hold surviving past READY can
 // no longer inform anyone about the pairing failure -- it can only mask the
-// *next* outage's cause with a stale one. Before the rank, the watchdog broke
+// *next* outage's cause with a stale one.
+//
+// That premise moved once and the release had to move with it. The fault string
+// is now shown until the PUMP is ready, not until the session is (issue #211
+// needed that: the session is ready two seconds after subscribe, on the far
+// side of the failure it reports). So a release at session-ready would unhold a
+// string that is still on display -- visible, unheld, and overwritable by the
+// lowest-ranked reason to come along, which is the #175 defect above wearing a
+// different hat. A skeptic pass drove exactly that: a bond-erasing 0x61,
+// unheld at session-ready, clobbered 300 s later. on_session_ready() therefore
+// CLEARS the string rather than merely unholding it. Before the rank, the watchdog broke
 // such a hold within 60 s by overwriting it; that overwrite was the defect,
 // and this release is the part of it worth keeping. The pairing state itself
 // survives on its own sensor either way.
@@ -73,11 +83,30 @@ namespace core {
 enum class FailureHold : uint8_t {
   /// No hold: the next reason to arrive, however generic, may write it.
   NONE = 0,
-  /// The inbound-data watchdog's "No data from pump". Ranks lowest of the
-  /// three real faults because it is the *symptom* every other cause here
-  /// shares -- a failed subscribe and a failed pairing both surface as silence
-  /// 60 s later. Released by any received notification.
-  DATA = 1,
+  /// The readiness watchdog's "Pump never became ready" (readiness_watchdog.h,
+  /// issue #211). Ranks lowest of the real faults, below even DATA, and the
+  /// reason is worth stating because it looks backwards at first: this is the
+  /// fault that fires when data IS arriving, so it might seem the more specific
+  /// of the two.
+  ///
+  /// It is not. Both describe the same stall, and DATA describes it with more
+  /// information. If the link has gone genuinely silent, the data watchdog
+  /// fires at 60 s and names that; the readiness watchdog would fire minutes
+  /// later and say only "it never became usable", which is true, downstream and
+  /// less actionable. When data is flowing, DATA is released by every frame and
+  /// never competes at all, so this one writes freely -- which is exactly the
+  /// case it exists for.
+  ///
+  /// Released ONLY by the pump becoming ready. Not by inbound data, which is
+  /// the condition it fires under rather than a refutation of it, and not by
+  /// the GENI session reaching READY, which is one of the states it is meant to
+  /// catch a link stuck past: session ready, caches never filling, unusable.
+  READY = 1,
+  /// The inbound-data watchdog's "No data from pump". Ranks below the three
+  /// causes above it because it is the *symptom* they share -- a failed
+  /// subscribe and a failed pairing both surface as silence 60 s later.
+  /// Released by any received notification.
+  DATA = 2,
   /// A pump that keeps dropping unbonded connections without ever offering to
   /// pair (pairing_stall.h, issue #230). Outranks DATA for the same reason
   /// SUBSCRIBE does -- it names a cause where DATA names the symptom -- and is
@@ -111,17 +140,17 @@ enum class FailureHold : uint8_t {
   /// session reaching READY. Unlike AUTH it IS released by data, because data
   /// refutes it outright -- the claim is that nothing is getting through, and a
   /// notification is proof that something is.
-  PAIRING_STALL = 2,
+  PAIRING_STALL = 3,
   /// A subscribe step that failed outright (subscribe_outcome.h). Outranks
   /// DATA: it names the cause of that silence, at the moment it happened,
   /// which is what issue #175 was about. Released like DATA, by any received
   /// notification.
-  SUBSCRIBE = 3,
+  SUBSCRIBE = 4,
   /// An auth/encryption failure. Ranks highest: it is the only fault here that
   /// erases the bond, and a subscribe failure on an unauthenticated link is
   /// generally its consequence rather than a competing cause. Released by a
   /// successful AUTH_CMPL, or by the session reaching READY.
-  AUTH = 4,
+  AUTH = 5,
 };
 
 /// True when a reason arriving at rank `incoming` may overwrite what is held.
@@ -147,6 +176,11 @@ inline bool failure_hold_released_by_data(FailureHold h) {
   switch (h) {
     case FailureHold::NONE:
       return false;
+    case FailureHold::READY:
+      return false;  // data arriving is the CONDITION this fires under, not a
+                     // refutation of it -- releasing here would erase the
+                     // diagnosis on every frame of the telemetry that is
+                     // masking the problem
     case FailureHold::DATA:
       return true;
     case FailureHold::PAIRING_STALL:
@@ -166,6 +200,8 @@ inline bool failure_hold_released_by_auth(FailureHold h) {
   switch (h) {
     case FailureHold::NONE:
       return false;
+    case FailureHold::READY:
+      return false;  // nor does it prove the pump became usable
     case FailureHold::DATA:
       return false;  // a fresh bond does not prove the pump is answering
     case FailureHold::PAIRING_STALL:
@@ -174,6 +210,35 @@ inline bool failure_hold_released_by_auth(FailureHold h) {
       return false;
     case FailureHold::AUTH:
       return true;
+  }
+  return false;
+}
+
+/// True when the pump becoming READY -- the component's usable state, not the
+/// GENI session's -- releases this hold.
+///
+/// A fourth release function rather than a fourth case in an existing one,
+/// because it answers a question none of the others can. Inbound data, a
+/// successful AUTH_CMPL and a ready session are all things that happen on the
+/// way to being usable; this one is being usable. The readiness hold is the
+/// only thing it releases, and it is the only thing that releases the readiness
+/// hold -- everything else on the way there is a state that hold is meant to
+/// survive.
+inline bool failure_hold_released_by_pump_ready(FailureHold h) {
+  switch (h) {
+    case FailureHold::NONE:
+      return false;
+    case FailureHold::READY:
+      return true;
+    case FailureHold::DATA:
+      return false;  // a usable pump that then goes silent is a new fault, and
+                     // the watchdog will say so on its own schedule
+    case FailureHold::PAIRING_STALL:
+      return false;
+    case FailureHold::SUBSCRIBE:
+      return false;
+    case FailureHold::AUTH:
+      return false;
   }
   return false;
 }
@@ -193,6 +258,11 @@ inline bool failure_hold_released_by_session_ready(FailureHold h) {
   switch (h) {
     case FailureHold::NONE:
       return false;
+    case FailureHold::READY:
+      return false;  // the session reaching READY is one of the states this
+                     // hold exists to catch a link stuck PAST, so treating it
+                     // as a release would disarm the fault in its own headline
+                     // case
     case FailureHold::DATA:
       return false;  // READY does not prove the pump is answering
     case FailureHold::PAIRING_STALL:

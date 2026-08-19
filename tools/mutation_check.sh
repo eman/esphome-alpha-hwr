@@ -479,6 +479,53 @@ MUTATIONS=(
 "clock-gate-every-block-warns|components/alpha_hwr/clock_sync_gate.h|  return a == ClockSyncAction::WARN_NO_TIME_ID |  return a != ClockSyncAction::SYNC; //"
 "link-watchdog-never-fires|components/alpha_hwr/link_watchdog.h|return static_cast<uint32_t>(now_ms - last_inbound_ms) > timeout_ms;|return false;"
 "link-watchdog-rollover-unsafe|components/alpha_hwr/link_watchdog.h|return static_cast<uint32_t>(now_ms - last_inbound_ms) > timeout_ms;|return now_ms > last_inbound_ms + timeout_ms;"
+# Readiness (progress) watchdog, issue #211. The data watchdog above watches
+# liveness and is re-armed by every notification; this pump volunteers telemetry
+# unprompted, so a session stuck anywhere keeps re-arming it and the failure --
+# connected, streaming, never usable, automation waiting forever -- is invisible
+# to it.
+#
+# Note the predicate is three separate `if`s rather than one `||` chain, and
+# these entries are why: a search field is split on '|', so a guard containing
+# `||` truncates at the first one and applies an edit nobody wrote. The
+# occurrence check cannot see it -- the truncated fragment is still unique, so
+# it reports a clean match and the build fails on garbage. Two entries here were
+# written that way and both scored BUILD_BROKEN.
+"readiness-watchdog-never-fires|components/alpha_hwr/readiness_watchdog.h|  return static_cast<uint32_t>(now_ms - connected_since_ms) > timeout_ms;|  return false;"
+"readiness-watchdog-rollover-unsafe|components/alpha_hwr/readiness_watchdog.h|  return static_cast<uint32_t>(now_ms - connected_since_ms) > timeout_ms;|  return now_ms > connected_since_ms + timeout_ms;"
+# A ready pump must be exempt, or a healthy link is recycled every five minutes
+# forever -- the opposite failure, and a louder one. And the disable has to
+# disable: an opt-out that silently still fired would be worse than no option.
+"readiness-watchdog-recycles-a-ready-pump|components/alpha_hwr/readiness_watchdog.h|  if (pump_ready)\n    return false;|  if (false)\n    return false;"
+"readiness-watchdog-cannot-be-disabled|components/alpha_hwr/readiness_watchdog.h|  if (timeout_ms == 0)\n    return false;|  if (false)\n    return false;"
+# The arming rule, which is the whole design: re-arm from anything on the way to
+# readiness and the timer chases the state it waits for. Anchored on the
+# notification path, because that is what "refresh it on activity" would
+# actually look like. (An earlier version of this entry re-armed from millis()
+# at the connection-open site, which is a semantic no-op -- link_last_open_ms_
+# is assigned from millis() eleven lines above it.)
+"readiness-watchdog-rearmed-by-activity|components/alpha_hwr/alpha_hwr.cpp|        this->link_last_inbound_ms_ = inbound_now;|        this->link_last_inbound_ms_ = inbound_now;\n        this->link_ready_since_ms_ = inbound_now;"
+"readiness-watchdog-not-checked|components/alpha_hwr/alpha_hwr.cpp|    if (!this->check_link_liveness_())\n      this->check_link_readiness_();|    this->check_link_liveness_();"
+# The split (issue #211): naming ships on, recycling is opt-in. Removing the
+# gate makes every default installation start tearing its link down, which is
+# the bond-erase exposure the split exists to withhold.
+"readiness-recycles-by-default|components/alpha_hwr/alpha_hwr.cpp|  if (!this->link_ready_recycle_) {|  if (false) {"
+# The rank. Both halves of the defect that nearly shipped: taking the default at
+# the call site, and ignoring the parameter inside. force_disconnect() used to
+# hardcode DATA, so the readiness reason was held at the one rank released by
+# inbound data -- in the one failure mode defined by inbound data never stopping.
+"readiness-latched-at-data-rank|components/alpha_hwr/alpha_hwr.cpp|  this->ble_manager_.force_disconnect(reason, core::FailureHold::READY);|  this->ble_manager_.force_disconnect(reason);"
+"force-disconnect-ignores-the-rank|components/alpha_hwr/ble_connection_manager.cpp|  if (failure_hold_admits(failure_hold_, rank)) {\n    last_failure_ = reason;\n    failure_hold_ = rank;|  if (failure_hold_admits(failure_hold_, FailureHold::DATA)) {\n    last_failure_ = reason;\n    failure_hold_ = FailureHold::DATA;"
+# The other half of that defect: readiness read back off an OPTIONAL entity, so
+# a hand-written config omitting ready_status recycled a healthy pump forever.
+"readiness-reads-the-optional-sensor|components/alpha_hwr/alpha_hwr.cpp|                                      this->link_pump_ready_seen_, millis(),|                                      this->ready_sensor_ != nullptr && this->ready_sensor_->state, millis(),"
+"readiness-latch-never-set|components/alpha_hwr/alpha_hwr.cpp|        this->link_pump_ready_seen_ = true;|        (void) 0;"
+# The counter the reporter of #211 named as their signal from outside the
+# component. It stayed at zero through the failure the change exists for.
+"readiness-recycles-not-published|components/alpha_hwr/alpha_hwr.cpp|                           this->link_recycles_without_ready_));|                           0u));"
+# Rank and release of the hold itself.
+"readiness-hold-released-by-data|components/alpha_hwr/failure_hold.h|    case FailureHold::READY:\n      return false;  // data arriving is the CONDITION|    case FailureHold::READY:\n      return true;  // data arriving is the CONDITION"
+"readiness-hold-never-released|components/alpha_hwr/failure_hold.h|    case FailureHold::READY:\n      return true;|    case FailureHold::READY:\n      return false;"
 # data_timeout backoff (issue #176). Without it a deaf link is recycled ~1,300
 # times a day indefinitely, each pass re-entering the encryption-on-open window
 # where a failure can erase the bond (issue #14). The three errors: never
@@ -1041,12 +1088,28 @@ for entry in "${MUTATIONS[@]}"; do
   # such so it is not re-invented.) Nor can it be detected by counting
   # delimiters, because replacements legitimately contain them.
   #
-  # What catches it is downstream: a mangled entry produces code that does not
-  # compile, and the run below now reports that as its own outcome instead of
-  # scoring it "caught". See the note there. The rule for authors is simply:
-  # the search field must not contain a '|' -- if the line you want to anchor on
-  # has '||' in it, anchor on a neighbouring line. A '|' in the replacement is
-  # fine.
+  # It IS detectable a different way, though, and the comment above used to stop
+  # one step short of it. When the split truncates, the remainder is absorbed
+  # into `replace` -- starting with the very '|' that did the truncating. So a
+  # replacement beginning with '|' is the signature, and that is checked below.
+  # It catches the common case (a `||` inside the anchored line) at the cost of
+  # rejecting a replacement that legitimately starts with '|', which no entry
+  # here does and which can be written with a leading space if one ever needs to.
+  #
+  # Backstop for anything this misses: a mangled entry produces code that does
+  # not compile, and the run below reports that as its own outcome instead of
+  # scoring it "caught". The rule for authors is unchanged -- the search field
+  # must not contain a '|'; anchor on a neighbouring line instead.
+  case "$replace" in
+    "|"*)
+      echo -e "${RED}✗ malformed entry: the search field contains a '|'${NC}"
+      echo "    It was truncated at that character and the rest was swallowed by"
+      echo "    the replacement, so this entry would apply an edit nobody wrote."
+      echo "    Anchor on a neighbouring line that has no '|' in it."
+      SURVIVORS+=("$name (malformed: '|' in the search field)")
+      continue
+      ;;
+  esac
 
   APPLIED=$(SEARCH="$search" REPLACE="$replace" python3 - "$PROJECT_DIR/$file" <<'PY'
 import os, sys

@@ -86,6 +86,8 @@ CONF_ENABLE_PAIRING = "enable_pairing"
 CONF_RECONNECT_SETTLE_TIME = "reconnect_settle_time"
 CONF_CONTROL_STATE_POLL_INTERVAL = "control_state_poll_interval"
 CONF_DATA_TIMEOUT = "data_timeout"
+CONF_READY_TIMEOUT = "ready_timeout"
+CONF_READY_RECYCLE = "ready_recycle"
 CONF_ALARMS = "alarms"
 CONF_WARNINGS = "warnings"
 CONF_SCHEDULE_HASH = "schedule_hash"
@@ -144,6 +146,40 @@ CONFIG_SCHEMA = (
             # so 60s is six missed poll cycles. 0 disables it. See
             # components/alpha_hwr/link_watchdog.h.
             cv.Optional(CONF_DATA_TIMEOUT, default="60s"): cv.positive_time_period_milliseconds,
+            # Readiness (progress) watchdog, issue #211. The data watchdog above
+            # watches liveness and is re-armed by every inbound notification, so
+            # a session stuck while the pump keeps volunteering telemetry is
+            # invisible to it. This one is timed from connection-open and is
+            # cleared only by the pump actually becoming usable.
+            #
+            # How long a connection may go without the pump becoming usable
+            # before the component says so. Defaults ON, because saying so costs
+            # nothing: by itself this only latches a fault string and logs.
+            #
+            # 300s against a fresh connection that reaches ready in about 22s on
+            # a bonded pump -- measured by setting the window short on hardware
+            # and watching which values fired (10s fired, 20s fired, 40s did
+            # not). A first pairing is still untimed, so err high rather than
+            # low. 0 disables it.
+            cv.Optional(CONF_READY_TIMEOUT, default="300s"): cv.positive_time_period_milliseconds,
+            # ...and whether reaching that bound also tears the link down so the
+            # normal reconnect runs. Defaults OFF, and the asymmetry between
+            # these two options is the point.
+            #
+            # Naming the fault is free. Recycling is not: every forced reconnect
+            # takes another run at the encryption-on-open window that can erase
+            # the pump's bond (issue #14), and a bond erased that way needs
+            # physical access to the pump to restore (issue #230). On a node
+            # that never becomes ready it would do that on an escalating
+            # schedule indefinitely.
+            #
+            # Whether such a node exists in a supported configuration is issue
+            # #244 -- an attempt to measure it was confounded three ways at once
+            # (a pre-release build, pairing enabled rather than defaulted, and a
+            # signal at the noise floor) and it bonded within 252 ms regardless
+            # (issue #245). So the diagnosis ships on and the remedy waits for
+            # someone who wants it and can see their node reaches ready today.
+            cv.Optional(CONF_READY_RECYCLE, default=False): cv.boolean,
             cv.Optional(CONF_FLOW): sensor.sensor_schema(
                 unit_of_measurement="m³/h",
                 accuracy_decimals=3,
@@ -468,8 +504,11 @@ async def to_code(config):
 
     # Set pairing enabled flag
     cg.add(var.set_pairing_enabled(config[CONF_ENABLE_PAIRING]))
+
     cg.add(var.set_reconnect_settle_time(config[CONF_RECONNECT_SETTLE_TIME]))
     cg.add(var.set_data_timeout(config[CONF_DATA_TIMEOUT]))
+    cg.add(var.set_ready_timeout(config[CONF_READY_TIMEOUT]))
+    cg.add(var.set_ready_recycle(config[CONF_READY_RECYCLE]))
     if config[CONF_RECONNECT_SETTLE_TIME].total_milliseconds > 0:
         # Register as an esp32_ble_tracker listener (at codegen, so the count
         # macro that enables the listener path is defined) — this is what makes

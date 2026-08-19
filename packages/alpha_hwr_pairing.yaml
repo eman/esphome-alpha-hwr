@@ -168,7 +168,9 @@ alpha_hwr:
    # reconnect and clears on recovery, so repeated recycles read as a flap you
    # have to be watching to catch. This counter is a value an automation can
    # threshold on instead: it reads 0 in normal operation and only climbs while
-   # the link is failing to deliver data. The gap is what a data_timeout
+   # the link is failing -- to deliver data, or (with ready_timeout enabled,
+   # which is not the default) to become usable at all. The gap is what a
+   # data_timeout
    # default should be chosen from, since it records what this installation
    # actually does rather than what the poll interval predicts.
    link_recycles:

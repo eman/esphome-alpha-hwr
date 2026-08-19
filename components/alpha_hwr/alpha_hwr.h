@@ -24,7 +24,8 @@
 #include "frame_builder.h"
 #include "history_service.h"
 #include "initial_read_retry.h"  // re-arm predicate for the one-shot initial read chain
-#include "link_watchdog.h"  // inbound-data watchdog predicate for a deaf-but-open link
+#include "link_watchdog.h"       // inbound-data watchdog predicate for a deaf-but-open link
+#include "readiness_watchdog.h"  // progress watchdog for a link that is open but never usable
 #include "clock_sync_gate.h"  // whether a clock sync can run, and whether to say so
 #include "publish_gate.h"  // publish-on-change gates for the YAML control entities (#127)
 #include "pump_schedule_ux.h"
@@ -312,6 +313,23 @@ public:
     // regardless of what was asked for.
     this->link_data_timeout_current_ms_ = ms;
   }
+  // Budget (ms) the readiness watchdog allows between connection-open and the
+  // pump becoming usable, before it tears the link down. 0 = disabled. See
+  // readiness_watchdog.h: this watches PROGRESS where the one above watches
+  // liveness, and the two are not interchangeable -- a session stuck with the
+  // pump still volunteering telemetry re-arms the liveness watchdog on every
+  // frame and is invisible to it (issue #211).
+  // Whether an expired readiness budget also tears the link down, or only says
+  // so. Defaults to false, and the asymmetry is the whole reason the two are
+  // separate options: naming the fault costs nothing, while recycling takes
+  // another run at the encryption-on-open window that can erase a bond
+  // (issue #14) -- and on a configuration nobody has yet observed (issue #244)
+  // it may do that forever. So the diagnosis ships on and the remedy is opt-in.
+  void set_ready_recycle(bool enabled) { link_ready_recycle_ = enabled; }
+  void set_ready_timeout(uint32_t ms) {
+    this->link_ready_timeout_ms_ = ms;
+    this->link_ready_timeout_current_ms_ = ms;
+  }
   // Interval (ms) for periodic control state polling to detect out-of-band pump
   // state changes (e.g., internal schedule execution, manual button press).
   // 0 = disabled (default is 30 seconds; fixes issue #54).
@@ -419,6 +437,11 @@ private:
   bool reconnect_timer_armed_{false}; // True once the settle timer has started this episode
 
   uint32_t link_data_timeout_ms_{60000};  // Inbound-data watchdog budget (ms); 0 = disabled
+  // 300000, matching the schema default. Kept in step deliberately: while these
+  // and the schema disagreed, every host test inherited a budget no shipped
+  // config produced.
+  uint32_t link_ready_timeout_ms_{300000};  // Readiness watchdog budget (ms); 0 = disabled
+  bool link_ready_recycle_{false};          // ...and whether expiry also recycles the link
 
   uint32_t control_state_poll_interval_ms_{30000};  // Control state poll interval (ms); default 30s (fixes #54)
   uint32_t last_control_state_poll_time_{0};        // Timestamp of last control state poll
@@ -718,7 +741,9 @@ private:
   // apparently healthy but delivers no notifications. Timed from
   // connection-open and refreshed on every received notification, so it covers
   // both a connection that never produced data and a session that goes deaf.
-  void check_link_liveness_();
+  /// @return true if it tore the link down, so the caller can skip the
+  ///         readiness check rather than disconnecting twice in one tick.
+  bool check_link_liveness_();
   uint32_t link_last_inbound_ms_{0};
 
   // Backoff state for that watchdog (issue #176). link_data_timeout_ms_ is the
@@ -732,6 +757,49 @@ private:
   // connection-open: a widened window governs the next connection's opening
   // too. Initialised from the configured value in setup().
   uint32_t link_data_timeout_current_ms_{60000};
+
+  // Readiness watchdog (issue #211). Its observable is progress, not data: the
+  // link has been open this long and the pump still is not usable.
+  //
+  // The arming rule is the whole design and it is one line: link_open_ms_ is
+  // stamped at connection-open and by NOTHING else. Not by data, not by a
+  // session transition, not by a cache filling partway. A check re-armed by
+  // something on the way to the state it is waiting for feeds itself and can
+  // never fire -- which is exactly what the Pump Link Status ladder did to
+  // link_last_open_ms_, documented in link_watchdog.h, and what the reporter of
+  // #211 predicted for this timer before it existed.
+  void check_link_readiness_();
+  uint32_t link_ready_since_ms_{0};
+  // Whether THIS connection ever reached the usable state.
+  //
+  // Not read back off ready_sensor_, and that is a correctness fix rather than
+  // a style choice: `ready_status` is cv.Optional, so a hand-written config
+  // that omits the entity would leave the watchdog's notion of readiness
+  // permanently false and recycle a perfectly healthy pump every five minutes,
+  // then hourly, forever -- each recycle re-entering the encryption-on-open
+  // path that can erase the bond (issue #14). A diagnostic that depends on a
+  // diagnostic being declared is not a diagnostic.
+  //
+  // Latched rather than recomputed, because is_state_synchronized() can go
+  // false again if a cache is invalidated mid-session, and the timer must not
+  // re-arm against a connection that already proved itself. Cleared only at
+  // connection-open, with link_ready_since_ms_.
+  bool link_pump_ready_seen_{false};
+  // Backoff, sharing the data watchdog's doubling and ceiling. Reset when the
+  // pump actually becomes ready, which is the only evidence that the previous
+  // window was merely too short rather than the link being stuck.
+  uint32_t link_ready_timeout_current_ms_{300000};
+  // Consecutive recycles that never reached readiness.
+  //
+  // Added INTO the published link_recycles rather than exposed separately. The
+  // first version left it out of the published value entirely, on the theory
+  // that link_recycles already covered it -- it did not, because a readiness
+  // recycle never touches the data counter, so the one number issue #211's
+  // reporter named as their outside-the-component signal ("can see Pump Link
+  // Recycles climbing") stayed at zero through exactly the failure this change
+  // exists for. Each counter is reset by its own evidence; the sum is what an
+  // automation thresholds on, and "this link is not working" is one question.
+  uint32_t link_recycles_without_ready_{0};
 
   // Consecutive recycles with no data in between. Reset by a notification
   // received while the session is READY -- the same gate as the backoff window

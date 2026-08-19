@@ -4,6 +4,88 @@
 
 ### Added
 
+- **A watchdog for links that are connected, streaming, and never usable**
+  (`ready_timeout`, issue #211). Reported from a live installation: connected,
+  pairing on, telemetry updating in Home Assistant, `Pump Ready` off
+  indefinitely, no fault raised and no reconnect — with an automation gated on
+  `Pump Ready` waiting silently forever while the dashboard showed a healthy
+  pump. In the reporter's words, the one failure shape where the diagnostics
+  actively point away from the problem.
+
+  `data_timeout` could not catch it, and could not be tuned to. Its observable
+  is silence and it is re-armed by every inbound notification; this pump
+  volunteers telemetry unprompted, so a session stuck anywhere keeps re-arming
+  it and it never fires. Liveness was watched and progress was not.
+
+  The new watchdog is timed from connection-open and cleared **only** by the
+  pump reaching its usable state. Nothing else resets it — not data, not a
+  session transition, not a cache filling partway — and that restraint is the
+  design rather than an omission: a timer refreshed by anything on the way to
+  readiness chases the state it is waiting for and can never expire. That trap
+  is not hypothetical here; `link_watchdog.h` already documents the link-status
+  ladder refreshing its own timestamp and keeping a rung permanently
+  unreachable, and the reporter predicted this instance of it before any code
+  existed.
+
+  On expiry the link is dropped, the usual reconnect takes over, and **Pump Link
+  Fault** reads `Pump never became ready (300s)`. That string is the point of
+  the change as much as the recycle is: from outside the component, *starting
+  up* and *stuck* look identical, so naming the condition is the one thing an
+  automation cannot do for itself.
+
+  It backs off exactly as `data_timeout` does, sharing that code rather than
+  copying it, and takes its own rank on the fault surface — below `DATA`, so a
+  link that has genuinely gone silent keeps the more specific diagnosis.
+
+  Fixing this also required fixing where the answer is *shown*. The fault sensor
+  was blanked whenever the **session** was ready, and the session reaches ready
+  two seconds after subscribe with no frame exchanged — which is on the far side
+  of the reported failure. Latching this diagnosis and gating it that way would
+  have published `None` over the one string that explained what was wrong. The
+  gate is now the pump being ready, which is what "healthy" has always meant
+  here.
+
+  **It is two options, because naming a fault and reconnecting carry very
+  different costs.** `ready_timeout` (default `300s`) only says what is wrong:
+  it logs and latches `Pump never became ready (300s)`, escalating the window on
+  each report. That is free, and it is the half the reporter said he could not
+  build — an automation can see `Pump Ready` has been off a while but cannot
+  tell *starting up* from *stuck*. `ready_recycle` (default `false`) is what
+  tears the link down, opt-in because every forced reconnect takes another run
+  at the window where an encryption failure can erase the pump's bond, which
+  then needs physical access to restore.
+
+  An earlier draft bundled them and shipped the pair off, which meant nobody got
+  the diagnosis either.
+
+  **The recycle half defaults off, and that is a deliberate retreat.** An earlier
+  draft shipped it on at `300s`, reasoning that a node with no bond never gets a
+  working link anyway, so the hazard was moot. That reasoning was not tested:
+  the run meant to test it was confounded three ways — a pre-release build, with
+  pairing enabled rather than at its default, at a signal level of −96 to −101
+  dBm — and it bonded within 252 ms regardless (issue #245). So the
+  configuration the default would be reasoning about remains unobserved, which
+  is issue #244. Shipping a watchdog on, whose failure mode is a forced
+  reconnect and whose safety rests on an unobserved case, is not a trade worth
+  making; it is opt-in, for nodes that reliably reach ready today.
+
+  The suggested value when enabling is `300s`, and it is
+  bracketed on hardware by setting the window short and watching which value
+  fired: 10 s fired, 20 s fired, 40 s did not. A fresh connection on a bonded
+  pump therefore reaches usable in roughly 22 s, so the suggested value is about
+  twelve times the measured figure. That bracket is one pump and a *bonded* reconnect;
+  a first pairing is still untimed. Too loose still turns "silent forever" into
+  "recovers eventually"; too tight recycles a pump that was merely slow. `0s`
+  disables it.
+
+  The same bench run verified the whole path end to end on hardware — fire,
+  latch, count, back off, recover, clear — which no host test can: the fault
+  reached the Home Assistant entity as `Pump never became ready (10s)`, `Pump
+  Link Recycles` incremented, the window doubled, the next connection came up
+  inside the widened window, and reaching ready cleared the fault to `None` and
+  reset the counter to 0.
+
+
 - **The re-pairing procedure, written down** (follow-up to #230). The recovery
   #238 points users at was stated as "put the pump into Bluetooth pairing mode",
   as though it were one button press. It is not, and the missing steps are not

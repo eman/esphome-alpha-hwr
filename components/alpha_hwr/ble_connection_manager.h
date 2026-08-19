@@ -103,7 +103,25 @@ class BLEConnectionManager {
   /// (link_watchdog.h): recovery in this component is driven by the BLE
   /// disconnection callback, so dropping the link is how a dead-but-open
   /// connection gets recycled. No-op when no client is attached.
-  void force_disconnect(const char *reason);
+  /// @param rank Which fault this teardown is. Defaults to DATA, the
+  ///             inbound-data watchdog's, because that was the only caller for
+  ///             a long time -- and hardcoding it was a real defect: the
+  ///             readiness watchdog (issue #211) latched its reason through
+  ///             here and got DATA rank, which is released by inbound data.
+  ///             Its diagnosis was therefore erased by the very telemetry that
+  ///             makes the failure invisible, and the whole rank argument
+  ///             written around it was describing something the code did not
+  ///             do. Pass the rank; do not assume it.
+  void force_disconnect(const char *reason, FailureHold rank = FailureHold::DATA);
+
+  /// Latch a failure reason WITHOUT touching the link.
+  ///
+  /// force_disconnect() is this plus a teardown, and separating them is the
+  /// point: naming a fault is free, while tearing the link down takes another
+  /// run at the encryption-on-open window that can erase a bond (issue #14).
+  /// A caller that only wants to say what is wrong should not have to pay the
+  /// second cost to get the first (issue #211).
+  void note_failure(const char *reason, FailureHold rank);
 
   /// Tell the manager the GENI session reached READY. Releases an
   /// auth-failure hold, which nothing else can do once the pump has stopped
@@ -111,6 +129,14 @@ class BLEConnectionManager {
   /// only while the session is not ready, so past this point it can no longer
   /// report anything, only mask the next outage's cause.
   void on_session_ready();
+
+  /// Tell the manager the pump reached its usable state -- session ready,
+  /// initial reads landed, caches valid. Releases a readiness-watchdog hold,
+  /// which nothing else can: that hold survives inbound data (the condition it
+  /// fires under) and survives the session reaching READY (one of the states it
+  /// exists to catch a link stuck past). See failure_hold.h and
+  /// readiness_watchdog.h.
+  void on_pump_ready();
 
  private:
   /// Drop a latched pairing-stall reason once the detector stops claiming one.
