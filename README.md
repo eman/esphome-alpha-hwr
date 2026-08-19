@@ -382,19 +382,21 @@ first-time flow:
 
 After that, reconnects reuse the stored bond.
 
-The pump accepts **one BLE connection at a time**, which is worth knowing before
-you start: while this node is connected, the Grundfos GO app cannot be, and vice
-versa.
+The pump is understood to accept **one BLE connection at a time**, which is
+worth knowing before you start: while this node is bonded and connected, the
+Grundfos GO app cannot have the pump. Powering the node down is the way to hand
+it over — there is no suspend switch that drops the link and stops reconnecting.
+(A node that is *unbonded and failing to connect* is a different case, and has
+been observed not to get in the app's way.)
 
 > **Clearing the node's bond needs physical access to the pump to undo.**
 > `ble_client.remove_bond`, an NVS erase, or a re-flash that loses NVS leaves
 > the pump bonded to a node that is no longer bonded to it. The pump then
 > refuses the link on every attempt and never offers to pair again. Recovering
 > means standing at the pump and running the
-> [re-pairing procedure](docs/configuration.md#enable_pairing) — which needs the
-> Grundfos GO app, and needs this node stopped first so it is not holding the
-> pump's only connection. Set `enable_pairing: true` before you start, or the
-> pump's offer goes nowhere. The node reports this on **Pump Link Fault** as
+> [re-pairing procedure](docs/configuration.md#enable_pairing), which needs the
+> Grundfos GO app. Set `enable_pairing: true` before you start, or the pump's
+> offer goes nowhere. The node reports this on **Pump Link Fault** as
 > `Pump not accepting pairing` once it has happened three connections running.
 
 ## Examples in this repo

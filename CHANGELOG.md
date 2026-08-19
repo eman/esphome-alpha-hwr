@@ -11,12 +11,16 @@
   unlocked from the Grundfos GO app, and the button commonly needs several
   presses before it takes.
 
-  The step that actually traps people is earlier than any of that. **The pump
-  accepts one BLE connection at a time**, so the GO app cannot connect while
-  this node is connected — and a node in this fault state is reconnecting every
-  few seconds, which is precisely when someone is trying to run the procedure.
-  Stopping the node first is now step 2, and the log line and README both say
-  the remedy is more than a button press rather than implying it is not.
+  The log line and README both now say the remedy is more than a button press
+  rather than implying it is not.
+
+  A first version of this entry claimed the node had to be stopped before the GO
+  app could connect, on the grounds that the pump holds one BLE connection at a
+  time. That is true of a node that is *bonded and connected*, and false of the
+  case this is about: an unbonded node failing to connect has been observed, over
+  about a dozen attempts, not to get in the app's way. The correction is in the
+  page; the general constraint is recorded where it applies, along with the fact
+  that there is no way to idle the link short of powering the node down.
 
   Reported by @jfriend00 on #229, from their own re-pairing routine. Recorded as
   one owner's procedure on one pump rather than as something this project has

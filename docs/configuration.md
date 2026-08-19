@@ -134,23 +134,37 @@ this is the procedure reported by @jfriend00, who has run it repeatedly on their
 own pump (see [#229](https://github.com/eman/esphome-alpha-hwr/pull/229)):
 
 1. Go to the pump physically.
-2. **Stop this node from connecting first** — power it down, or disable the BLE
-   client. The pump accepts only one BLE connection at a time, so a node
-   reconnecting every few seconds will keep the next step from working. This is
-   exactly what a node in this fault state is doing.
-3. Connect the Grundfos GO app to the pump.
-4. Unlock the pump's front panel from the app. The panel re-locks itself on its
+2. Connect the Grundfos GO app to the pump. The node will be reconnect-looping
+   while you do this, and that does not get in the way — reported across about a
+   dozen attempts. See the note below for when it *does*.
+3. Unlock the pump's front panel from the app. The panel re-locks itself on its
    own, so do this immediately before the next steps rather than in advance.
-5. Disconnect the GO app, again because the pump holds one connection at a time.
-6. Press the pairing button on the front panel and wait about 15 seconds to see
+4. Disconnect the GO app. The pump is understood to hold one BLE connection at a
+   time, so the pairing that follows needs the slot back.
+5. Press the pairing button on the front panel and wait about 15 seconds to see
    whether a link is established.
-7. If nothing happens, press it again. It commonly takes several attempts.
+6. If nothing happens, press it again. It commonly takes several attempts.
 
 Then let the node reconnect. **Set `enable_pairing: true` before any of this**,
 or the pump's offer goes nowhere: with it false this component configures no IO
 capability, no bonding requirement and no key distribution, so nothing is set up
 to complete a bond. (ESPHome's own BLE client answers the pump's request
 regardless — this node cannot decline it — but answering is not bonding.)
+
+> **When the node does have to be stopped.** A node that is *bonded and
+> connected* holds the pump's one connection, and the GO app cannot have it at
+> the same time — power the node down, or otherwise drop its link, before
+> connecting the app. That is a different situation from the one above, where
+> the node is unbonded and failing to connect, and where it has been observed
+> across about a dozen attempts not to interfere. An earlier version of this
+> page told you to stop the node in both cases; that was an inference from the
+> one-connection constraint rather than something observed, and it was wrong for
+> the case this section is actually about.
+>
+> There is no built-in way to idle the link — no suspend switch that drops the
+> BLE connection and stops reconnecting until you release it. Powering the node
+> down is the workaround, which is easy on PoE and less so on USB beside the
+> pump.
 
 Two caveats on the procedure. It is one owner's routine on one pump, not
 something this project has verified across models, and the panel-unlock step in
@@ -185,11 +199,15 @@ signature is possible — anything that repeatedly drops an opened link before
 data flows — so read the message as "the pump is not pairing and here is what
 usually explains it", not as a positive identification.
 
-The likeliest such cause is worth naming, because it follows from the pump
-holding **one BLE connection at a time**: anything else already talking to it —
-the GO app, a phone left connected, a second node — takes the slot this one
-needs. If the fault appears while somebody is standing at the pump with the app
-open, that is the first thing to rule out.
+One candidate can be ruled out, and it is worth writing down because an earlier
+version of this page named it as the likeliest: **another client holding the
+pump's connection is not it.** The reasoning that put it there was that the pump
+holds one BLE connection at a time, so a GO app or a second node would take the
+slot this one needs — but a link that never opens produces a *failed open*, and
+failed opens are not counted as cycles at all. They surface as `Failed To
+Establish (0x3e)` and, before long, as `Unreachable` on Pump Link Status. The
+stall needs connections that open and are then dropped, which is a different
+shape. So the third cause, if there is one, is still unnamed.
 
 ### `data_timeout`
 
