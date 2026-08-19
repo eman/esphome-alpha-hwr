@@ -550,12 +550,15 @@ class WriteOperationService {
   // can legitimately take -- both now open with a mandatory read of their
   // config object, and both settle on a confirm ladder with one retry:
   //
-  //   5000 pre-write read + 400 step-2 delay + 3000 ACK window
-  //   + 1200 confirm delay + 5000 readback timeout + 1500 retry delay
-  //   + 5000 readback timeout = 21.1 s
+  //   5000 pre-write read + 400 mode-ACK wait + 400 step-2 delay
+  //   + 3000 ACK window + 1200 confirm delay + 5000 readback timeout
+  //   + 1500 retry delay + 5000 readback timeout = 21.5 s
   //
-  // The 5000s are APDU timeouts, so each is a bound rather than a cost; a pump
-  // answering in the observed 250-360 ms takes well under 6 s end to end. The
+  // The mode-ACK wait (issue #248) is in that sum but costs nothing in practice:
+  // it is equal to the step-2 delay, so an answered mode write frees the queue
+  // long before step 2 is due and an unanswered one expires just as it becomes
+  // due. The 5000s are APDU timeouts, so each is a bound rather than a cost; a
+  // pump answering in the observed p50 of 54 ms takes well under 6 s end to end. The
   // budget has to cover the bound anyway, because the slow cases are exactly
   // the ones the retry exists for.
   //

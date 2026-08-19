@@ -762,6 +762,25 @@ MUTATIONS=(
 # it replaced had in common, and as defence for the writer who adds the first
 # such GET.
 #
+# Issue #248: the mode write must be AWAITED. Its reply is byte-identical to the
+# acknowledgement the config write sent 400 ms later is waiting for, and the
+# short-ACK branch can only test the queued command's shape.
+"mode-write-fired-and-forgotten|components/alpha_hwr/control_service.cpp|      MODE_ACK_TIMEOUT_MS, false, true, /*quiet_timeout=*/true);|      0, false, true, /*quiet_timeout=*/true);"
+# The reply debt is the other half, and each of its three rules is load-bearing.
+#
+# Arming on EVERY timeout: exempting quiet ones excused the two sends most likely
+# to reply late -- the mode write, acknowledged in every captured instance, and
+# the schedule layer write, documented as replying after its window closes.
+"stale-reply-not-recorded|components/alpha_hwr/transport.cpp|        this->note_reply_owed_(cmd.suppressed_a_frame);|        // mutated: no debt recorded"
+# Paying the debt down: a frame that is merely declined leaves the debt standing,
+# so the suppressed command times out, records a SECOND debt, and one late reply
+# costs every acknowledgement after it. This is the cascade that failed 4 writes
+# out of 4 against a healthy pump.
+"stale-reply-debt-never-paid|components/alpha_hwr/transport.cpp|      if (this->owed_replies_ > 0) this->owed_replies_--;|      // mutated: leave the debt standing"
+"stale-reply-suppressed-command-rearms|components/alpha_hwr/transport.cpp|  if (already_suppressed) return;|  // mutated: count it again"
+# And the window, which bounds how long an unpaid debt lingers.
+"stale-reply-window-never-expires|components/alpha_hwr/transport.cpp|  if (millis() - this->owed_since_ms_ >= STALE_REPLY_WINDOW_MS) {|  if (false) {"
+"stale-reply-window-too-short-for-the-tail|components/alpha_hwr/transport.h|  static constexpr uint32_t STALE_REPLY_WINDOW_MS = 500;|  static constexpr uint32_t STALE_REPLY_WINDOW_MS = 60;"
 # The telegram size ceilings are the protocol's, and the buffer has to hold the
 # largest legal one: MAX_PDU_LEN yields a 257-byte telegram, which did not fit
 # the 256-byte buffers callers declared.

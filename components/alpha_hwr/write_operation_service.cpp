@@ -1138,8 +1138,10 @@ void WriteOperationService::run_set_temperature_range_(uint32_t seq) {
         // The ACK could not carry that weight even when it arrives: the
         // short-ACK branch in transport.cpp matches "some queued Class 10
         // command of this shape" -- no sequence number, no object echo -- and
-        // the fire-and-forget mode write CONFIG_STEP2_DELAY_MS earlier is on
-        // the same class, so its reply can land inside this write's window.
+        // mode write CONFIG_STEP2_DELAY_MS earlier is on the same class, so
+        // its reply can land inside this write's window. Issue #248 closes that
+        // by awaiting the mode write and by recording a reply the pump still
+        // owes; neither makes the readback below redundant.
         // Silence is if anything less attributable than a reply, since there
         // is no frame to reason about at all.
         //

@@ -639,6 +639,147 @@ static void queue_a_class10_temperature_write(esphome::alpha_hwr::core::Transpor
   t.loop();
 }
 
+// ── One late reply costs one match, and the guard converges ────────────────
+// Issue #248. Nothing cancels a request in GENIbus, so a command that timed out
+// is still owed an answer -- and that answer is byte-identical to the
+// acknowledgement the NEXT Class 10 write is waiting for. Transport records the
+// debt and lets the next ambiguous frame settle it.
+//
+// The trap this pins is what the FIRST design did instead. It suppressed on a
+// time window and let the frame fall through, so the debt was never paid: the
+// suppressed command timed out, its timeout re-armed the window, and the next
+// acknowledgement landed inside the new one. With a pump answering in ~50 ms and
+// pacing at 50, that closes on itself -- four consecutive writes failed against
+// a perfectly healthy pump in the harness that found it. A count that is paid
+// down, plus `suppressed_a_frame` so the paid command does not re-open the
+// account, is what makes the sequence terminate.
+static void pump(esphome::alpha_hwr::core::Transport &t, int iterations) {
+  for (int i = 0; i < iterations; i++) {
+    mock_millis += 20;
+    t.loop();
+  }
+}
+
+void test_a_late_reply_costs_one_match_and_no_more() {
+  std::cout << "\n=== One stale reply costs one match, then matching resumes ===" << std::endl;
+  esphome::alpha_hwr::core::Transport transport;
+  transport.set_write_callback([](const uint8_t *, size_t) -> bool { return true; });
+  const std::vector<uint8_t> ack = with_crc({0x24, 0x05, 0xF8, 0xE7, 0x0A, 0x01, 0x00, 0x00, 0x00});
+
+  // One command expects an answer and never gets one, so the pump owes a reply.
+  int lost = 0;
+  transport.send_command(std::vector<uint8_t>(10, 0xAA), 91, 430,
+                         [&](bool, const uint8_t *, size_t) { lost++; },
+                         /*timeout_ms=*/500);
+  pump(transport, 3);
+  mock_millis += 600;
+  transport.loop();
+  TEST_ASSERT(lost == 1, "the first command gave up, and is still owed a reply");
+
+  // Four writes follow, each promptly acknowledged by a healthy pump. The first
+  // pays off the debt; every one after it must be matched normally.
+  int settled = 0, succeeded = 0;
+  for (int i = 0; i < 4; i++) {
+    int calls = 0;
+    bool ok = false;
+    queue_a_class10_temperature_write(transport, &calls, &ok);
+    pump(transport, 3);
+    transport.on_notification(ack.data(), ack.size());
+    transport.loop();
+    if (calls == 0) {           // not matched -- run out its own timeout
+      mock_millis += 3100;
+      transport.loop();
+    }
+    settled++;
+    if (ok) succeeded++;
+  }
+  TEST_ASSERT(settled == 4, "all four writes reached a terminal state");
+  TEST_ASSERT(succeeded == 3,
+              "exactly one write pays the debt and three are acknowledged normally -- "
+              "under the window design all four failed, each timeout re-arming the "
+              "suppression for the next");
+}
+
+// ── The debt's arithmetic: paid down, and expiring unpaid ──────────────────
+// Two rules that the cascade test above cannot reach, because it lets each
+// command run out its own 3 s timeout and so never puts two candidate frames
+// inside one window.
+//
+// PAID DOWN: one owed reply costs exactly one frame. The second frame in the
+// same window is this command's own answer and must be matched. Without the
+// decrement the debt stands until the window lapses and eats that one too.
+//
+// EXPIRES UNPAID: a debt the pump never settles must not outlive its window.
+// Nothing obliges the pump to send the reply it owes -- it may simply never
+// answer -- and a debt kept forever would spend the next acknowledgement, then
+// the next.
+void test_the_reply_debt_is_paid_down_and_expires() {
+  const std::vector<uint8_t> ack = with_crc({0x24, 0x05, 0xF8, 0xE7, 0x0A, 0x01, 0x00, 0x00, 0x00});
+
+  auto owe_one_reply = [&](esphome::alpha_hwr::core::Transport &t) {
+    int lost = 0;
+    t.send_command(std::vector<uint8_t>(10, 0xAA), 91, 430,
+                   [&](bool, const uint8_t *, size_t) { lost++; }, /*timeout_ms=*/200);
+    pump(t, 3);
+    mock_millis += 300;
+    t.loop();
+    TEST_ASSERT(lost == 1, "a command gave up, so the pump owes a reply");
+  };
+
+  {
+    std::cout << "\n=== The reply debt is paid down, not left standing ===" << std::endl;
+    esphome::alpha_hwr::core::Transport transport;
+    transport.set_write_callback([](const uint8_t *, size_t) -> bool { return true; });
+    owe_one_reply(transport);
+
+    // Both writes have to sit inside ONE window, or the debt expires by time and
+    // the decrement is never what let the second through. So this one is queued
+    // with a short timeout: it gives up while the window is still open.
+    std::vector<uint8_t> req = {0x27, 0x0B, 0xE7, 0xF8, 0x0A, 0x97, 91, 0x01, 0xAE, 0x00, 0x00, 0x00};
+    int first = 0;
+    transport.send_command(req, 0, 0,
+                           [&](bool, const uint8_t *, size_t) { first++; },
+                           /*timeout_ms=*/100);
+    pump(transport, 2);
+    transport.on_notification(ack.data(), ack.size());
+    transport.loop();
+    TEST_ASSERT(first == 0, "the first frame pays the debt rather than answering this write");
+    mock_millis += 150;                  // let it give up, still inside the window
+    transport.loop();
+
+    // Second write, still well inside the original window. The debt is settled,
+    // so this one gets its own answer.
+    int second = 0; bool second_ok = false;
+    queue_a_class10_temperature_write(transport, &second, &second_ok);
+    pump(transport, 2);
+    transport.on_notification(ack.data(), ack.size());
+    transport.loop();
+    TEST_ASSERT(second == 1 && second_ok,
+                "and the next write is answered normally -- one owed reply costs one "
+                "frame, not every frame until the window lapses");
+  }
+
+  {
+    std::cout << "\n=== A debt the pump never settles expires ===" << std::endl;
+    esphome::alpha_hwr::core::Transport transport;
+    transport.set_write_callback([](const uint8_t *, size_t) -> bool { return true; });
+    owe_one_reply(transport);
+
+    // The owed reply simply never comes. Wait the window out with the link idle.
+    mock_millis += esphome::alpha_hwr::core::Transport::STALE_REPLY_WINDOW_MS + 100;
+    transport.loop();
+
+    int calls = 0; bool ok = false;
+    queue_a_class10_temperature_write(transport, &calls, &ok);
+    pump(transport, 2);
+    transport.on_notification(ack.data(), ack.size());
+    transport.loop();
+    TEST_ASSERT(calls == 1 && ok,
+                "once the window has passed the debt is written off, and the next "
+                "write is answered rather than paying for a reply that never came");
+  }
+}
+
 // ── An APDU larger than a telegram is refused, not built past the buffer ────
 // The size ceilings are the protocol's: a telegram is at most 259 bytes and its
 // PDU at most 253 (App. Prog. Manual, "Short form technical specification").
@@ -824,6 +965,8 @@ int main() {
   test_missing_write_callback_drops_the_command();
   test_a_command_honours_its_own_timeout_not_the_default();
   test_reset_abandons_a_pending_command_without_telling_it();
+  test_a_late_reply_costs_one_match_and_no_more();
+  test_the_reply_debt_is_paid_down_and_expires();
   test_an_oversize_apdu_is_refused();
   test_a_refused_class10_write_reports_failure();
   test_the_dhw_config_write_shape_also_reports_a_refusal();

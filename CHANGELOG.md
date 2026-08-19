@@ -309,6 +309,52 @@
 
 ### Changed
 
+- **A reply is no longer given to whichever write happens to be waiting**
+  (issue #248). GENIbus replies carry no sequence number and no object echo, and
+  the specification is explicit about the consequence: *"the Data Reply is not
+  self contained, meaning that the Data Request is necessary to process it"*
+  (Application Programmers Manual, fig 3.5). Correlation is positional, and it
+  works only because the bus is interlocked — the reply follows within 50 ms and
+  the master idles before the next request. Two requests are never outstanding,
+  which is why no identifier exists.
+
+  `run_set_temperature_range_` broke that. It sent the unfused mode write with no
+  callback, so nothing waited for its reply, and 400 ms later sent the config
+  write that *does* wait — same class, and the earlier reply is byte-identical to
+  the acknowledgement the later write expects.
+
+  Two guards now compose. **The mode write is awaited**, with a wait equal to the
+  step-2 delay so an answered write frees the queue at the observed p50 of 54 ms
+  and an unanswered one expires exactly when step 2 was due — it costs nothing in
+  either direction. And **the transport records a reply the pump still owes**:
+  any command that gives up leaves a debt, the next ambiguous frame settles it
+  rather than being taken for an answer, and the debt expires if never paid.
+
+  The debt is a *count*, not a deadline, and that is the design rather than an
+  implementation detail. A first attempt suppressed on a time window alone and
+  cascaded: a suppressed frame left its command to time out, that timeout re-armed
+  the window, and the next acknowledgement landed inside the new one — four
+  consecutive writes failing against a perfectly healthy pump. Paying the debt
+  down, and not letting an already-suppressed command open a fresh one, is what
+  makes it terminate. Damage is bounded at one lost acknowledgement per genuinely
+  late reply.
+
+  Coverage has a stated bound: a mode reply is attributable out to 900 ms, the two
+  guards composed. That is three times the slowest reply the captures contain
+  (295 ms across ~12,000 pairs; nothing exceeds 400), so the uncovered band is
+  populated by no observation. Widening is nearly free under a debt — it is spent
+  once, not per frame — so a pump seen replying later wants a larger window, not a
+  redesign.
+
+  Not fixed: `send_control_request`, `set_class10_setpoint` and the schedule layer
+  writes still fire and forget. The captures say what they should do — every
+  Class 10 write is acknowledged, 420 of 420 — but each carries timing
+  assumptions worth changing on their own evidence. Notably the schedule writes
+  are documented as committing *on* their timeout with the acknowledgement
+  arriving outside the response window, and the captures show them acknowledged
+  at 36–143 ms. #248 stays open for them.
+
+
 - **A Class 10 reply carries two acknowledgements, and both are now read.** The
   APDU head says whether the request was understood; Class 10 then adds a status
   byte of its own — `OK` / `BUSY` / `OPERATION_FAILED`. Only the head was being
