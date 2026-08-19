@@ -361,11 +361,21 @@
 
   Each of those writes now settles in tens of milliseconds instead of three
   seconds. A five-layer schedule upload was spending fifteen seconds waiting for
-  replies it had already been sent, and a single-event sweep across 35 slots
-  rather more. Worse than the delay, since #248 each bogus timeout was recording
-  a reply debt, so a write that had been answered promptly was also, on paper,
-  owed a reply — and the next Class 10 write within the stale-reply window paid
-  for it.
+  replies it had already been sent. Worse than the delay, since #248 each bogus
+  timeout was recording a reply debt, so a write that had been answered promptly
+  was also, on paper, owed a reply — and the next Class 10 write within the
+  stale-reply window paid for it.
+
+  **The settle delays were raised to keep the timing that shipped.** Those
+  confirm readbacks are scheduled *from the write's callback*, so the 3 s
+  timeout had been silently acting as part of the settle window — the real
+  interval between a schedule write and its readback has always been 4500 ms,
+  not the 1500 ms written down. Collapsing the timeout without saying so would
+  have shortened an unmeasured settle window in the direction issue #250
+  suspects is already too short, so `SCHED_SETTLE_DELAY_MS` is now 4500 and says
+  why. The saving is therefore real on a multi-write operation and nil on a
+  single one, which is the honest version of the claim; #250 is where the number
+  gets measured rather than preserved.
 
   The test simulator was modelling the same false belief: it echoed the object
   back after these writes, because that is what the firmware asked for. It now

@@ -1680,7 +1680,11 @@ void WriteOperationService::run_schedule_enabled_(uint32_t seq) {
         return;
       }
       op->phase = Phase::CONFIRMING;
-      schedule_([this, seq]() { confirm_schedule_enabled_(seq); }, 1000);
+      // 4000 for the same reason SCHED_SETTLE_DELAY_MS is 4500: this was
+      // scheduled from a callback that fired on a 3 s timeout until issue #253,
+      // so the interval that shipped is 1000 + 3000. Preserved rather than
+      // re-chosen; see the note on that constant.
+      schedule_([this, seq]() { confirm_schedule_enabled_(seq); }, 4000);
     });
   });
 }

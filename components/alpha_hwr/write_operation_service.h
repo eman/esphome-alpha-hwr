@@ -574,7 +574,24 @@ class WriteOperationService {
   // Schedule budgets: entry = poll + fresh layer read + write + commit +
   // settle + verify (+ retry) at 3-5 s per read; single events include a
   // possible full 35-slot cache scan when resolving a free slot.
-  static constexpr uint32_t SCHED_SETTLE_DELAY_MS = 1500;  // flash two-phase commit; bench-tune
+  // How long after a schedule write before the confirm read is taken.
+  //
+  // 4500, not 1500, and the number is deliberately the one that SHIPPED rather
+  // than the one that was written down. Until issue #253 every Object 84 write
+  // waited out a full 3 s timeout for a reply the protocol cannot produce, and
+  // this delay was scheduled from that callback -- so the real interval between
+  // a schedule write and its readback has always been 1500 + 3000. Awaiting the
+  // acknowledgement collapses the 3000 to about 50 ms, and leaving this at 1500
+  // would have shortened a settle window nobody has measured, in the direction
+  // issue #250 suspects is already too short (the Grundfos GO app holds the bus
+  // quiet for 2500 ms after any SET before reading).
+  //
+  // So this restores the timing exactly and changes one thing at a time. What
+  // #253 buys is the 3 s of dead wait per write, which is real on a multi-write
+  // operation -- a five-layer upload loses fifteen seconds of it -- and nothing
+  // on a single write. #250 is where this number gets measured rather than
+  // preserved.
+  static constexpr uint32_t SCHED_SETTLE_DELAY_MS = 4500;
   static constexpr uint32_t SCHED_RETRY_DELAY_MS = 2000;
   static constexpr uint8_t SCHED_MAX_ATTEMPTS = 1;
   static constexpr uint32_t WATCHDOG_SCHED_ENTRY_MS = 20000;
