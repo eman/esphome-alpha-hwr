@@ -44,7 +44,17 @@
 // AUTH_CMPL that clears it. The fault string is shown only while the session
 // is NOT ready (see evaluate_link_status), so a hold surviving past READY can
 // no longer inform anyone about the pairing failure -- it can only mask the
-// *next* outage's cause with a stale one. Before the rank, the watchdog broke
+// *next* outage's cause with a stale one.
+//
+// That premise moved once and the release had to move with it. The fault string
+// is now shown until the PUMP is ready, not until the session is (issue #211
+// needed that: the session is ready two seconds after subscribe, on the far
+// side of the failure it reports). So a release at session-ready would unhold a
+// string that is still on display -- visible, unheld, and overwritable by the
+// lowest-ranked reason to come along, which is the #175 defect above wearing a
+// different hat. A skeptic pass drove exactly that: a bond-erasing 0x61,
+// unheld at session-ready, clobbered 300 s later. on_session_ready() therefore
+// CLEARS the string rather than merely unholding it. Before the rank, the watchdog broke
 // such a hold within 60 s by overwriting it; that overwrite was the defect,
 // and this release is the part of it worth keeping. The pairing state itself
 // survives on its own sensor either way.

@@ -730,7 +730,9 @@ private:
   // apparently healthy but delivers no notifications. Timed from
   // connection-open and refreshed on every received notification, so it covers
   // both a connection that never produced data and a session that goes deaf.
-  void check_link_liveness_();
+  /// @return true if it tore the link down, so the caller can skip the
+  ///         readiness check rather than disconnecting twice in one tick.
+  bool check_link_liveness_();
   uint32_t link_last_inbound_ms_{0};
 
   // Backoff state for that watchdog (issue #176). link_data_timeout_ms_ is the
@@ -757,14 +759,35 @@ private:
   // #211 predicted for this timer before it existed.
   void check_link_readiness_();
   uint32_t link_ready_since_ms_{0};
+  // Whether THIS connection ever reached the usable state.
+  //
+  // Not read back off ready_sensor_, and that is a correctness fix rather than
+  // a style choice: `ready_status` is cv.Optional, so a hand-written config
+  // that omits the entity would leave the watchdog's notion of readiness
+  // permanently false and recycle a perfectly healthy pump every five minutes,
+  // then hourly, forever -- each recycle re-entering the encryption-on-open
+  // path that can erase the bond (issue #14). A diagnostic that depends on a
+  // diagnostic being declared is not a diagnostic.
+  //
+  // Latched rather than recomputed, because is_state_synchronized() can go
+  // false again if a cache is invalidated mid-session, and the timer must not
+  // re-arm against a connection that already proved itself. Cleared only at
+  // connection-open, with link_ready_since_ms_.
+  bool link_pump_ready_seen_{false};
   // Backoff, sharing the data watchdog's doubling and ceiling. Reset when the
   // pump actually becomes ready, which is the only evidence that the previous
   // window was merely too short rather than the link being stuck.
   uint32_t link_ready_timeout_current_ms_{300000};
-  // Consecutive recycles that never reached readiness. Not published as its own
-  // entity: link_recycles already gives an automation a number to threshold on,
-  // and a second counter measuring a subset of the same failures would invite
-  // the two being compared as though they were independent.
+  // Consecutive recycles that never reached readiness.
+  //
+  // Added INTO the published link_recycles rather than exposed separately. The
+  // first version left it out of the published value entirely, on the theory
+  // that link_recycles already covered it -- it did not, because a readiness
+  // recycle never touches the data counter, so the one number issue #211's
+  // reporter named as their outside-the-component signal ("can see Pump Link
+  // Recycles climbing") stayed at zero through exactly the failure this change
+  // exists for. Each counter is reset by its own evidence; the sum is what an
+  // automation thresholds on, and "this link is not working" is one question.
   uint32_t link_recycles_without_ready_{0};
 
   // Consecutive recycles with no data in between. Reset by a notification
