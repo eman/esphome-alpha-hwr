@@ -1680,11 +1680,12 @@ void WriteOperationService::run_schedule_enabled_(uint32_t seq) {
         return;
       }
       op->phase = Phase::CONFIRMING;
-      // 4000 for the same reason SCHED_SETTLE_DELAY_MS is 4500: this was
-      // scheduled from a callback that fired on a 3 s timeout until issue #253,
-      // so the interval that shipped is 1000 + 3000. Preserved rather than
-      // re-chosen; see the note on that constant.
-      schedule_([this, seq]() { confirm_schedule_enabled_(seq); }, 4000);
+      // The same settle the entry path uses, rather than a literal of its own.
+      // This used to be a bare 1000 that, like the entry path's, was really
+      // 1000 + the 3 s timeout the write burned before issue #253. Sharing the
+      // constant means the measurement behind it applies here too -- and the
+      // note on it is explicit that this path was inferred rather than probed.
+      schedule_([this, seq]() { confirm_schedule_enabled_(seq); }, SCHED_SETTLE_DELAY_MS);
     });
   });
 }

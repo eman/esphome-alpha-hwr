@@ -576,22 +576,31 @@ class WriteOperationService {
   // possible full 35-slot cache scan when resolving a free slot.
   // How long after a schedule write before the confirm read is taken.
   //
-  // 4500, not 1500, and the number is deliberately the one that SHIPPED rather
-  // than the one that was written down. Until issue #253 every Object 84 write
+  // MEASURED, on the pump, 2026-08-19. Until issue #253 every Object 84 write
   // waited out a full 3 s timeout for a reply the protocol cannot produce, and
-  // this delay was scheduled from that callback -- so the real interval between
-  // a schedule write and its readback has always been 1500 + 3000. Awaiting the
-  // acknowledgement collapses the 3000 to about 50 ms, and leaving this at 1500
-  // would have shortened a settle window nobody has measured, in the direction
-  // issue #250 suspects is already too short (the Grundfos GO app holds the bus
-  // quiet for 2500 ms after any SET before reading).
+  // this delay is scheduled from that callback -- so the interval that actually
+  // shipped was 1500 + 3000, and nobody had established which part of it the
+  // pump needed.
   //
-  // So this restores the timing exactly and changes one thing at a time. What
-  // #253 buys is the 3 s of dead wait per write, which is real on a multi-write
-  // operation -- a five-layer upload loses fifteen seconds of it -- and nothing
-  // on a single write. #250 is where this number gets measured rather than
-  // preserved.
-  static constexpr uint32_t SCHED_SETTLE_DELAY_MS = 4500;
+  // A probe build set this to 100 ms with a 200 ms retry ladder and wrote to a
+  // spare schedule layer. Four writes, set and clear, in both directions: the
+  // FIRST confirm read matched every time. The pump makes an Object 84 write
+  // visible to a read within 100 ms of acknowledging it -- write to settle was
+  // 350-515 ms end to end.
+  //
+  // So 1500 is 15x a delay demonstrated to be sufficient, and it restores the
+  // number this constant always claimed rather than the 4500 the broken timeout
+  // was silently adding. With SCHED_RETRY_DELAY_MS behind it the ladder covers
+  // 3500 ms before any REJECTED verdict, which is comfortably past the 2500 ms
+  // the Grundfos GO app holds the bus quiet after a SET (issue #250).
+  //
+  // Scope of the measurement: taken on the layer image (Sub 1000+). The
+  // overview/enable path (Sub 1) is the same object and a smaller write and is
+  // assumed to behave the same -- assumed, not measured, which is why both
+  // paths use this one constant rather than the overview getting a tighter one.
+  // It says NOTHING about the Obj 91 config writes, whose own interval is
+  // CONFIG_CONFIRM_DELAY_MS and is what #250 is actually about.
+  static constexpr uint32_t SCHED_SETTLE_DELAY_MS = 1500;
   static constexpr uint32_t SCHED_RETRY_DELAY_MS = 2000;
   static constexpr uint8_t SCHED_MAX_ATTEMPTS = 1;
   static constexpr uint32_t WATCHDOG_SCHED_ENTRY_MS = 20000;

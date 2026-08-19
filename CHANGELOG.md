@@ -374,16 +374,26 @@
   was also, on paper, owed a reply — and the next Class 10 write within the
   stale-reply window paid for it.
 
-  **The settle delays were raised to keep the timing that shipped.** Those
-  confirm readbacks are scheduled *from the write's callback*, so the 3 s
-  timeout had been silently acting as part of the settle window — the real
-  interval between a schedule write and its readback has always been 4500 ms,
-  not the 1500 ms written down. Collapsing the timeout without saying so would
-  have shortened an unmeasured settle window in the direction issue #250
-  suspects is already too short, so `SCHED_SETTLE_DELAY_MS` is now 4500 and says
-  why. The saving is therefore real on a multi-write operation and nil on a
-  single one, which is the honest version of the claim; #250 is where the number
-  gets measured rather than preserved.
+  **The settle window is now measured rather than inherited.** Those confirm
+  readbacks are scheduled *from the write's callback*, so the 3 s timeout had
+  been silently acting as part of the settle window — the real interval between
+  a schedule write and its readback has always been 4500 ms, not the 1500 ms
+  written down. Rather than guess which part of that the pump needed, a probe
+  build set the settle to 100 ms with a 200 ms retry ladder and wrote to a spare
+  schedule layer: **four writes, set and clear, and the first confirm read
+  matched every time.** The pump makes an Object 84 write visible to a read
+  within 100 ms of acknowledging it.
+
+  So `SCHED_SETTLE_DELAY_MS` stays at the 1500 ms it always claimed — now 15×
+  a delay shown to be sufficient — and the schedule-enable confirm shares that
+  constant instead of carrying a literal of its own. With the retry behind it
+  the ladder covers 3500 ms before any `rejected` verdict, comfortably past the
+  2500 ms the Grundfos GO app holds the bus quiet after a SET.
+
+  The measurement is scoped, and the constant says so: it was taken on the layer
+  image, applied to the overview path by inference, and says nothing about the
+  Obj 91 config writes — `CONFIG_CONFIRM_DELAY_MS` is what issue #250 is about
+  and is untouched here.
 
   The test simulator was modelling the same false belief: it echoed the object
   back after these writes, because that is what the firmware asked for. It now
