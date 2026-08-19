@@ -691,7 +691,7 @@ bool ControlService::send_control_request(ControlMode mode, bool start_pump, flo
   return true;
 }
 
-bool ControlService::send_set_mode_request(ControlMode mode) {
+bool ControlService::send_set_mode_request(ControlMode mode, std::function<void(bool)> on_ack) {
   // Change the control mode WITHOUT touching the mode's stored setpoint.
   //
   // Writes GENI Class 10 object 86 / sub-id 10 = overall_control_mode_local_request_obj,
@@ -743,7 +743,44 @@ bool ControlService::send_set_mode_request(ControlMode mode) {
   apdu[5] = 0x01;  // Obj ID low
   memcpy(&apdu[6], payload, 12);
 
-  this->transport_.send_apdu_command(apdu, 18);
+  // Await the pump's short ACK rather than firing and forgetting (issue #248).
+  //
+  // GENIbus is interlocked: the reply follows its request within 50 ms and the
+  // master idles before sending the next one (App. Prog. Manual fig 1), which is
+  // why a reply carries no sequence number and no object echo -- "the Data Reply
+  // is not self contained, meaning that the Data Request is necessary to process
+  // it" (fig 3.5 note 3). A send nobody waits on breaks that: its reply arrives
+  // with no owner, and the next command's matcher, which can only test the
+  // frame's SHAPE, takes it for its own answer.
+  //
+  // That is not hypothetical for this write. It is the Class 10 frame sent
+  // CONFIG_STEP2_DELAY_MS before the temperature-range and DHW config writes,
+  // on the same class, and its reply is the exact shape their matcher accepts.
+  //
+  // Waiting costs nothing: the transport runs one command at a time, so the
+  // config write cannot go out until this settles, and MODE_ACK_TIMEOUT_MS is
+  // the same 400 ms the callers already wait.
+  //
+  // The pump does answer this write: the reference captures contain 15 of them
+  // and all 15 are acknowledged, at 38-85 ms. Every Class 10 write in that
+  // corpus is acknowledged, in fact -- control requests, both config writes, the
+  // clock, the schedule layers -- with a tail of 193 ms across all of them.
+  //
+  // Worth knowing how nearly that evidence was missed, because the same trap
+  // catches anyone re-checking it: a mode write is a 22-byte frame and the BLE
+  // MTU is 20, so it spans two ATT packets. A scanner that looks for whole
+  // frames inside individual packets finds every read -- reads are 11 bytes and
+  // fit -- and not one write, which reads exactly like a pump that is never
+  // written to.
+  //
+  // The wait is still quiet, since a timeout here is not an error worth logging
+  // at warning: the caller's step 2 runs either way.
+  this->transport_.send_apdu_command(
+      apdu, 18, 0, 0,
+      [on_ack](bool success, const uint8_t * /*data*/, size_t /*len*/) {
+        if (on_ack) on_ack(success);
+      },
+      MODE_ACK_TIMEOUT_MS, false, true, /*quiet_timeout=*/true);
 
   // Intentionally NO configuration commit here. send_configuration_commit()
   // commits the ClockProgramOverview (the schedule), which is unrelated to the

@@ -457,6 +457,32 @@ class ControlService {
     bool temp_limits_known() const { return temp_limits_tail_valid_; }
 
    private:
+  /// How long send_set_mode_request() waits for the pump's short ACK before
+  /// giving up on it (issue #248).
+  ///
+  /// Set from the measured reply distribution, not from convenience. Across the
+  /// request/reply pairs in resources/traffic_capture the reply arrives at p50
+  /// 54 ms, p99 145, max 994; narrowed to WRITES specifically -- 195 of them,
+  /// every one acknowledged -- it is p50 ~54 and max 193. 1000 ms is past both,
+  /// so a reply that has not arrived by then is one the corpus has no example
+  /// of. (The protocol's own bound is 50 ms -- App. Prog. Manual fig 1 -- so the
+  /// pump is within spec at the median and the tail is the BLE tunnel.)
+  ///
+  /// Waiting this long is what actually closes issue #248, and a shorter wait
+  /// does not. The hazard is the mode write's reply landing inside the window of
+  /// the config write sent CONFIG_STEP2_DELAY_MS (400 ms) later, where it is
+  /// byte-identical to that write's own acknowledgement. A wait of 400 ms would
+  /// consume only the replies that were already harmless -- they arrive while
+  /// the transport is idle and are discarded -- and would still hand over the
+  /// late ones, which are the whole problem. One reply in 4039 exceeded 400 ms.
+  ///
+  /// The cost lands only when the pump does not answer: the transport runs one
+  /// command at a time, so the config write is queued at 400 ms and sent as soon
+  /// as this settles. An answered mode write frees the queue at ~54 ms and step 2
+  /// still runs at 400 ms, exactly as before; an unanswered one delays step 2 to
+  /// 1000 ms. 600 ms on two commands, against a 26 s operation budget.
+  static constexpr uint32_t MODE_ACK_TIMEOUT_MS = 1000;
+
   // Sub-ID constants for setpoint registers (Reference: control.py lines 137-141)
   static constexpr uint16_t SUB_SPEED_SETPOINT = 13;
   static constexpr uint16_t SUB_PRESSURE_SETPOINT = 15;
@@ -569,10 +595,23 @@ class ControlService {
    * (Sub=0x5600, Obj=0x0601), this never overwrites the pump's setpoint
    * (issue #97/#83) and never force-enables the pump (issue #45).
    *
+   * The write is ACKed by the pump with a bare Class 10 short frame, and this
+   * AWAITS that acknowledgement rather than firing and forgetting (issue #248).
+   * GENIbus is an interlocked request/reply protocol -- App. Prog. Manual fig 1:
+   * a reply arrives 3-50 ms after the request and the master leaves the bus idle
+   * before the next one -- so a reply carries no identifier and can only be read
+   * as "the answer to the one request outstanding". A send nobody waits on leaves
+   * a reply in flight that the NEXT command's matcher can claim as its own.
+   *
+   * `on_ack` fires on the acknowledgement or on the wait expiring, whichever
+   * comes first; the wait is bounded by MODE_ACK_TIMEOUT_MS so the caller's own
+   * step-2 timing is unchanged either way.
+   *
    * @param mode Control mode to switch to
+   * @param on_ack Optional; called with whether the pump acknowledged
    * @return True if the command was queued
    */
-  bool send_set_mode_request(ControlMode mode);
+  bool send_set_mode_request(ControlMode mode, std::function<void(bool)> on_ack = nullptr);
 
   /**
    * Record a just-sent mode command as "commanded but unconfirmed" (issue #91):

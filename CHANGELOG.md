@@ -309,6 +309,88 @@
 
 ### Changed
 
+- **A reply is no longer given to whichever write happens to be waiting**
+  (issue #248). GENIbus replies carry no sequence number and no object echo, and
+  the specification is explicit about the consequence: *"the Data Reply is not
+  self contained, meaning that the Data Request is necessary to process it"*
+  (GENIbus Application Programmers Manual, fig 3.5). Correlation is positional —
+  reply telegram to request telegram — and it works only because the bus is
+  interlocked: the reply follows within 50 ms and the master idles before the
+  next request. Two requests are never outstanding, which is why no identifier
+  exists.
+
+  `run_set_temperature_range_` broke that interlock. It sent the unfused mode
+  write with no callback, so nothing waited for its reply, and 400 ms later sent
+  the config write that *does* wait — same class, and the earlier reply is
+  byte-identical to the acknowledgement the later write is waiting for.
+  `transport.cpp`'s short-ACK branch tests only the queued command's shape,
+  because the frame offers nothing else to test.
+
+  The shape is genuinely ambiguous, which the captures settle rather than argue:
+  every Class 10 request is acknowledged with it, reads as much as writes. Of the
+  136 in `resources/traffic_capture`, only 12 answer a write — so a reply owed to
+  an earlier *read* is byte-identical to the acknowledgement a config write is
+  waiting for.
+
+  The mode write is now awaited, so its reply is consumed by the command that
+  earned it — and the pump does answer it: the captures contain 15 mode writes
+  and all 15 are acknowledged, at 38–85 ms. Every Class 10 write in that corpus
+  is acknowledged, in fact, with a tail of 193 ms across all 195 of them. The
+  wait is 1000 ms, set from the measured distribution rather than from
+  convenience: p50 54 ms, p99 145, max 994 across all request types. A shorter wait would not have worked — at 400 ms it consumes only the
+  replies that were already harmless (they arrive while the transport is idle and
+  are discarded) and still hands over the late ones, which are the entire
+  problem. Timing is unchanged when the pump answers: the transport runs one
+  command at a time, so an ACK at ~54 ms frees the queue and the config write
+  still goes out at 400 ms. Only an unanswered mode write delays it, to 1000 ms.
+
+  A second guard covers what awaiting cannot. Nothing cancels a request in
+  GENIbus, so a command that *timed out* is still owed an answer that will arrive
+  with no owner. The transport now remembers that for 1000 ms and declines
+  shape-only matching inside the window; replies carrying Obj/Sub identify
+  themselves and are matched throughout. It deliberately does not arm on a quiet
+  timeout — those are sends whose silence is the expected outcome, and assuming a
+  reply for them would suppress the next match on every one.
+
+  Not fixed: three other sends still fire and forget (`send_control_request`,
+  `set_class10_setpoint`, the schedule layer writes). The captures say what they
+  should do — the pump acknowledges *every* Class 10 write, so all of them can be
+  awaited the same way — but each carries downstream timing assumptions worth
+  changing on their own evidence. Notably the schedule writes are documented as
+  committing *on* their timeout, with the acknowledgement arriving outside the
+  response window; the captures show those writes acknowledged at ~53 ms, so that
+  note is likely wrong too. #248 tracks them.
+
+- **A Class 10 reply carries two acknowledgements, and both are now read.** The
+  APDU head says whether the request was understood; Class 10 then adds a status
+  byte of its own — `OK` / `BUSY` / `OPERATION_FAILED`. Only the head was being
+  read, so a pump answering "busy" or "that failed" was reported as a successful
+  write. This is issue #208's defect one layer further down, and the same
+  evidence pattern: the Grundfos GO app's own decoder names all three values
+  (`GeniAPDU.CLASS10_ACK_*`, read from the byte after the head), and the captures
+  contain those three and nothing else — 136 short Class 10 replies, 100 `OK`,
+  24 `BUSY`, 12 `OPERATION_FAILED`, every one with head acknowledge `OK`. It is
+  request-consistent in a way coincidence would not be: Obj 202 Sub 100 answers
+  busy 24 times out of 24, Obj 202 Sub 200 answers operation-failed 12 out of 12,
+  and every other object answers ok. So 36 of 136 acknowledgements were being
+  read as success.
+
+  Consequences are bounded by the write contract: a non-OK reply now reports
+  "the pump answered", which defers to the confirm readback exactly as a refusal
+  does (issue #234), so a status is decided by what the pump holds rather than by
+  the byte. What changes is that the log names the condition instead of
+  announcing a successful write.
+
+- **`build_geni_packet` could write past its caller's buffer.** GENIbus caps a
+  telegram at 259 bytes and its PDU at 253; the guard tested `length > 255` — the
+  widest value the length byte can hold — and a frame is `length + 4` bytes, so
+  an accepted length of 255 wrote 259 bytes into the 256-byte buffer
+  `send_apdu_command` declared. Latent, because the largest APDU anything builds
+  is the 53-byte schedule write, and found by reading the specification's size
+  table rather than by hitting it. The cap is now the protocol's `MAX_PDU_LEN`
+  and the buffers are `MAX_TELEGRAM_LEN`, since even a legal maximum telegram did
+  not fit in 256 bytes.
+
 - **A config write the pump stored but did not acknowledge no longer settles
   `rejected`** (issue #234). `set_temperature_range` and `set_cycle_times` both
   short-circuited to `rejected` when no acknowledgement arrived inside the

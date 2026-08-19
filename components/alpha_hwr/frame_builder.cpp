@@ -153,12 +153,28 @@ size_t build_command_info(uint8_t class_byte, uint32_t register_addr,
 size_t build_geni_packet(uint8_t service_id, uint8_t source,
                           const uint8_t *apdu, size_t apdu_len,
                           uint8_t *packet_out) {
-  // Calculate frame length: ServiceID (1) + Source (1) + APDU
+  // Calculate frame length: DA (1) + SA (1) + APDU
   size_t length = 1 + 1 + apdu_len;
 
-  // Validate: length field must fit in a single byte (max 255)
-  if (length > 255) {
-    return 0;  // APDU too large for single GENI frame
+  // The bound is the PROTOCOL's, and it is smaller than the length byte allows.
+  //
+  // GENIbus caps a telegram at 259 bytes and its PDU at 253 (App. Prog. Manual,
+  // "Short form technical specification"), which is what MAX_PDU_LEN encodes.
+  // The old test was `length > 255` -- the widest value the length byte can
+  // hold -- and that admitted telegrams this function then wrote past the end
+  // of: a frame is `length + 4` bytes on the wire, so an accepted length of 255
+  // wrote 259 bytes, and every caller passes a 256-byte buffer.
+  //
+  // Latent rather than live: the largest APDU anything here builds is the
+  // 53-byte schedule write, so no call has ever come close. It is fixed because
+  // the ceiling being above the buffer is not a property anyone should have to
+  // re-derive, and because the protocol's own number is the correct one.
+  //
+  // The cap alone was not the whole repair. MAX_PDU_LEN still yields a 257-byte
+  // telegram, so the callers' buffers had to grow to MAX_TELEGRAM_LEN as well --
+  // a legal frame simply did not fit in the 256 bytes they were declaring.
+  if (length > protocol::MAX_PDU_LEN) {
+    return 0;  // APDU too large for a single GENI telegram
   }
   
   // Build frame header

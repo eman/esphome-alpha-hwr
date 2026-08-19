@@ -36,8 +36,25 @@ namespace protocol {
 
 // GENI Protocol Constants
 static const uint8_t FRAME_START = 0x27;
+/// Telegram destination and source addresses (GENIbus `DA` and `SA`, the two
+/// bytes after the start delimiter and the length).
+///
+/// SERVICE_ID_HIGH is a misnomer kept for now because it is spelled out at
+/// every call site: byte 2 is the DESTINATION ADDRESS, the pump's unit address
+/// (0xE7 = 231), and byte 3 is ours (0xF8 = 248). There is no "service ID" in
+/// the telegram format. Both values are what the Grundfos GO app uses, taken
+/// from the captures.
 static const uint8_t SERVICE_ID_HIGH = 0xE7;
 static const uint8_t SOURCE_ADDRESS = 0xF8;
+
+/// The protocol's own size ceilings (App. Prog. Manual, "Short form technical
+/// specification"). A telegram is at most 259 bytes on the wire and its PDU --
+/// DA + SA + APDUs -- at most 253. build_geni_packet() refuses anything larger;
+/// note that MAX_TELEGRAM_LEN exceeds the 256-byte buffers callers declare,
+/// which is why the refusal is on the PDU bound and not on what the length byte
+/// can hold.
+static const size_t MAX_TELEGRAM_LEN = 259;
+static const size_t MAX_PDU_LEN = 253;
 static const uint8_t CLASS_10 = 0x0A;
 
 /**

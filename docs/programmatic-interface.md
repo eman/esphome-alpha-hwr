@@ -497,7 +497,10 @@ interleave mid-sequence, and each client matches its own results by `op_id`.
   a quiet link).
 - The pump's own protocol quirks (an ACK window that sometimes closes without
   a matchable ACK even on success) are absorbed by the verify readbacks — a
-  write is judged by what the pump reports holding, not by the ACK. The cost is
+  write is judged by what the pump reports holding, not by the ACK — and since
+  the acknowledgement carries no identity at all (GENIbus replies have no
+  sequence number and no object echo), that is the only sound way to judge one.
+  The cost is
   paid in latency: `set_temperature_range` and `set_cycle_times` each read their
   config object before writing it and wait out the 3 s ACK window before the
   confirm readback starts, so an unacknowledged config write settles several

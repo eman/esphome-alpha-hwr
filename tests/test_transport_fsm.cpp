@@ -3,6 +3,7 @@
 #include <cstdint>
 #include "fixture_crc.h"
 #include "../components/alpha_hwr/transport.h"
+#include "../components/alpha_hwr/frame_builder.h"
 
 uint32_t mock_millis = 0;
 int tests_passed = 0;
@@ -638,6 +639,130 @@ static void queue_a_class10_temperature_write(esphome::alpha_hwr::core::Transpor
   t.loop();
 }
 
+// ── A reply owed to a command that gave up is not the next command's ────────
+// Issue #248. GENIbus has no cancel: a request that timed out is still owed an
+// answer, and that answer carries nothing to identify it -- no sequence number,
+// no object echo, and "the Data Reply is not self contained, meaning that the
+// Data Request is necessary to process it" (App. Prog. Manual fig 3.5 note 3).
+// So a late reply is byte-identical to the acknowledgement the NEXT Class 10
+// write is waiting for, and the short-ACK branch, which can only test the queued
+// command's shape, would hand it over.
+//
+// Transport arms a window on a timeout and declines shape-only matching inside
+// it. 1000 ms, just past the 994 ms slowest reply in resources/traffic_capture.
+// Replies carrying Obj/Sub identify themselves and are matched throughout; the
+// suppression is for the one path with nothing to check.
+//
+// Run as an A/B on the same sequence, because "the callback did not fire" is
+// also what a command that was never awaiting looks like. The control half is
+// what makes the suppression half mean anything.
+static void pump(esphome::alpha_hwr::core::Transport &t, int iterations) {
+  for (int i = 0; i < iterations; i++) {
+    mock_millis += 20;
+    t.loop();
+  }
+}
+
+void test_a_reply_owed_to_a_timed_out_command_is_not_reused() {
+  std::cout << "\n=== A late reply is not given to the next command ===" << std::endl;
+  // Acknowledge OK, one payload byte -- the shape a Class 10 SET is answered
+  // with, and, as resources/traffic_capture shows, also the shape of a one-byte
+  // DATA reply to a read. That ambiguity is the issue.
+  const std::vector<uint8_t> ack = with_crc({0x24, 0x05, 0xF8, 0xE7, 0x0A, 0x01, 0x00, 0x00, 0x00});
+
+  // A: nothing was abandoned, so the write matches its acknowledgement.
+  {
+    esphome::alpha_hwr::core::Transport transport;
+    transport.set_write_callback([](const uint8_t *, size_t) -> bool { return true; });
+    int cb_calls = 0;
+    bool cb_success = false;
+    queue_a_class10_temperature_write(transport, &cb_calls, &cb_success);
+    pump(transport, 5);
+    transport.on_notification(ack.data(), ack.size());
+    transport.loop();
+    TEST_ASSERT(cb_calls == 1 && cb_success,
+                "control: with no abandoned command, this frame is this write's ACK");
+  }
+
+  // B: the same frame, with a reply outstanding from a command that gave up.
+  {
+    esphome::alpha_hwr::core::Transport transport;
+    transport.set_write_callback([](const uint8_t *, size_t) -> bool { return true; });
+
+    // Expects an answer and does not get one. Deliberately not a quiet timeout:
+    // those are sends whose silence is the expected outcome, and assuming a
+    // reply for them would suppress the next match on every one.
+    int lost_calls = 0;
+    transport.send_command(std::vector<uint8_t>(10, 0xAA), 91, 430,
+                           [&](bool, const uint8_t *, size_t) { lost_calls++; },
+                           /*timeout_ms=*/500);
+    pump(transport, 3);
+    mock_millis += 600;
+    transport.loop();
+    TEST_ASSERT(lost_calls == 1, "the first command gave up");
+
+    int cb_calls = 0;
+    bool cb_success = false;
+    queue_a_class10_temperature_write(transport, &cb_calls, &cb_success);
+    pump(transport, 5);
+    transport.on_notification(ack.data(), ack.size());
+    transport.loop();
+    TEST_ASSERT(cb_calls == 0,
+                "the write does not claim it: inside the window the frame cannot be "
+                "told from the reply the abandoned command is still owed");
+
+    // And the suppression lifts, so a write is never permanently unable to see
+    // its own acknowledgement.
+    mock_millis += 1100;
+    transport.loop();
+    transport.on_notification(ack.data(), ack.size());
+    transport.loop();
+    TEST_ASSERT(cb_calls == 1 && cb_success,
+                "once the window has passed the same frame is matched normally");
+  }
+}
+
+// ── An APDU larger than a telegram is refused, not built past the buffer ────
+// The size ceilings are the protocol's: a telegram is at most 259 bytes and its
+// PDU at most 253 (App. Prog. Manual, "Short form technical specification").
+// build_geni_packet used to test `length > 255` instead -- the widest value the
+// length byte can hold -- and a frame is `length + 4` bytes, so an accepted
+// length of 255 wrote 259 bytes into the 256-byte buffer send_apdu_command
+// declared. Nothing built an APDU that large, which is why it survived; the
+// ceiling sitting above the buffer is the defect either way.
+//
+// Driven through send_apdu_command because that is where the buffer lives. ASan
+// is what makes the oversize case an assertion about memory and not just about
+// a return value -- the suite runs under it in CI.
+void test_an_oversize_apdu_is_refused() {
+  std::cout << "\n=== An APDU too large for a telegram is refused ===" << std::endl;
+  esphome::alpha_hwr::core::Transport transport;
+  int writes = 0;
+  transport.set_write_callback([&](const uint8_t *, size_t) -> bool { writes++; return true; });
+
+  // One byte past what a PDU may carry: DA + SA + APDU must fit MAX_PDU_LEN.
+  std::vector<uint8_t> too_big(esphome::alpha_hwr::protocol::MAX_PDU_LEN - 1, 0xAA);
+  int cb_calls = 0;
+  bool cb_success = true;
+  transport.send_apdu_command(too_big.data(), too_big.size(), 0, 0,
+                              [&](bool ok, const uint8_t *, size_t) { cb_calls++; cb_success = ok; });
+  TEST_ASSERT(cb_calls == 1 && !cb_success,
+              "the caller is told immediately rather than waiting out a timeout for a "
+              "command that was never queued");
+  transport.loop();
+  TEST_ASSERT(writes == 0, "and nothing reached the wire");
+
+  // The largest APDU that IS legal still builds, and its telegram is longer than
+  // the 256 bytes the buffer used to be -- which is the case that overflowed.
+  std::vector<uint8_t> biggest(esphome::alpha_hwr::protocol::MAX_PDU_LEN - 2, 0xBB);
+  cb_calls = 0;
+  transport.send_apdu_command(biggest.data(), biggest.size(), 0, 0,
+                              [&](bool, const uint8_t *, size_t) { cb_calls++; });
+  TEST_ASSERT(cb_calls == 0, "the largest legal APDU is accepted, not refused");
+  for (int i = 0; i < 40; i++) { mock_millis += 20; transport.loop(); }
+  TEST_ASSERT(writes > 0, "and it is sent");
+}
+
 void test_a_refused_class10_write_reports_failure() {
   std::cout << "\n=== A refused Class 10 write reports failure ===" << std::endl;
 
@@ -649,7 +774,21 @@ void test_a_refused_class10_write_reports_failure() {
     const char *what;
   };
   const Case cases[] = {
-      {0x01, 0x00, true, true, "0x01 (ack ok) is still accepted"},
+      {0x01, 0x00, true, true, "0x01 (ack ok) with Class 10 ack OK is accepted"},
+      // The SECOND acknowledge. A Class 10 reply carries its own status byte
+      // after the head, and the head can say ok while it does not. Named by the
+      // GO app's decoder (GeniAPDU.CLASS10_ACK_BUSY / _OPERATION_FAILED) and
+      // present in the captures with exactly those values: of 136 short Class 10
+      // replies, 24 are busy and 12 are operation-failed, all with head ack ok.
+      // Reading the head alone called every one of them a successful write.
+      {0x01, 0x02, true, false,
+       "Class 10 busy is not success, though the APDU head says ok"},
+      {0x01, 0x04, true, false,
+       "Class 10 operation-failed is not success, though the APDU head says ok"},
+      {0x01, 0x07, true, false,
+       "and an unknown Class 10 status is not success either -- only 0 is"},
+      // No payload, so no Class 10 status byte: the head is the whole answer.
+      {0x00, 0x00, false, true, "a zero-length Class 10 reply with ack ok is accepted"},
       {0x81, 0x00, true, false,
        "0x81 with a following 0x00 -- the exact frame captured on hardware -- is a "
        "refusal, where the old reading called it accepted"},
@@ -761,6 +900,8 @@ int main() {
   test_missing_write_callback_drops_the_command();
   test_a_command_honours_its_own_timeout_not_the_default();
   test_reset_abandons_a_pending_command_without_telling_it();
+  test_an_oversize_apdu_is_refused();
+  test_a_reply_owed_to_a_timed_out_command_is_not_reused();
   test_a_refused_class10_write_reports_failure();
   test_the_dhw_config_write_shape_also_reports_a_refusal();
   test_a_refused_write_still_frees_the_transport();

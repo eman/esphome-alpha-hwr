@@ -145,6 +145,24 @@ void Transport::loop() {
           ESP_LOGW(TAG, "Command timeout waiting for Obj %d Sub %d (now=%" PRIu32 ", timestamp=%" PRIu32 ", timeout=%" PRIu32 ")",
                    cmd.expect_type_low_ver, cmd.expect_type_high, now, cmd.timestamp_ms, cmd.timeout_ms);
         }
+        // A command that gave up is not a command whose reply cannot arrive
+        // (issue #248). Nothing cancels a request in GENIbus; the pump answers
+        // when it answers, and the corpus in resources/traffic_capture has a
+        // reply at 994 ms against a p99 of 145. That frame arrives with no owner
+        // and is exactly the shape the short-ACK branch accepts, so remember
+        // that one may still be in flight and decline shape-only matching until
+        // it cannot be.
+        //
+        // Not armed for a quiet timeout, and the asymmetry is the point. A quiet
+        // timeout is a send whose silence is the expected outcome -- there is no
+        // evidence a reply is coming, and assuming one would suppress the NEXT
+        // command's match on every such send. That would be a regression paid by
+        // every temperature-range write, whose mode step is exactly this shape:
+        // the config write behind it would settle by readback reporting "not
+        // acknowledged" about a pump that had acknowledged it.
+        if (!cmd.quiet_timeout) {
+          this->stale_reply_until_ms_ = now + STALE_REPLY_WINDOW_MS;
+        }
         if (cmd.callback) {
           cmd.callback(false, nullptr, 0);
         }
@@ -180,8 +198,15 @@ void Transport::send_apdu_command(const uint8_t* apdu, size_t apdu_len,
                                   CommandCallback callback, uint32_t timeout_ms,
                                   bool allow_register_read, bool expect_short_ack,
                                   bool quiet_timeout) {
-  uint8_t packet_raw[256];
-  // build_geni_packet uses SERVICE_ID_HIGH (0xE7) and SOURCE_ADDRESS (0xF8) automatically
+  // Sized to the protocol's maximum telegram, not to a round number. A GENIbus
+  // telegram is at most 259 bytes (App. Prog. Manual, "Short form technical
+  // specification"): start delimiter, length, DA, SA, up to MAX_PDU_LEN of PDU,
+  // and two CRC bytes. This was 256, three short of a legal frame, and
+  // build_geni_packet's guard was on what the length byte could hold rather
+  // than on what the protocol allows -- so between them a large APDU would have
+  // been built past the end of this array.
+  uint8_t packet_raw[protocol::MAX_TELEGRAM_LEN];
+  // build_geni_packet fills in the destination and source addresses (0xE7/0xF8)
   size_t packet_len = protocol::build_geni_packet(
       protocol::SERVICE_ID_HIGH, protocol::SOURCE_ADDRESS,
       apdu, apdu_len, packet_raw);
@@ -200,6 +225,12 @@ void Transport::send_apdu_command(const uint8_t* apdu, size_t apdu_len,
   std::vector<uint8_t> packet(packet_raw, packet_raw + packet_len);
   
   this->send_command(packet, expect_type_low_ver, expect_type_high, callback, timeout_ms, allow_register_read, expect_short_ack, quiet_timeout);
+}
+
+bool Transport::stale_reply_possible_() const {
+  if (this->stale_reply_until_ms_ == 0) return false;
+  // Unsigned wrap is the comparison, not a hazard: both are millis().
+  return (int32_t) (this->stale_reply_until_ms_ - millis()) > 0;
 }
 
 bool Transport::is_frame_start(uint8_t byte) {
@@ -466,29 +497,54 @@ bool Transport::try_dispatch_response(const uint8_t* data, size_t len) {
       return false;
     }
 
-    // Some ALPHA HWR Class 10 SET commands (notably Object 91/Sub 430
-    // temperature-range writes using OpSpec 0x97, 0x96, 0x95, or 0x91, and
-    // Object 0601/Sub 5600 mode writes using OpSpec 0x90) are ACKed with a short
-    // Class 10 OpSpec 0x01 frame that does not carry Obj/Sub fields.
-    // Handle that before the generic len>=12 DataObject parser below.
+    // Some ALPHA HWR Class 10 SET commands are ACKed with a short Class 10 frame
+    // that carries no Obj/Sub fields. Handle that before the generic len>=12
+    // DataObject parser below.
+    //
+    // KNOW WHAT THIS BRANCH CAN AND CANNOT DECIDE (issue #248). Every term below
+    // inspects the QUEUED COMMAND. None inspects the reply, because there is
+    // nothing in the reply to inspect: GENIbus replies carry no sequence number
+    // and no object echo, and the specification is explicit that "the Data Reply
+    // is not self contained, meaning that the Data Request is necessary to
+    // process it" (App. Prog. Manual fig 3.5 note 3). Correlation in this
+    // protocol is positional -- reply telegram to request telegram, reply APDU i
+    // to request APDU i -- and it works only because the bus is interlocked: the
+    // reply follows within 50 ms and the master idles before the next request
+    // (fig 1). So this branch is sound exactly while one request is outstanding,
+    // and unsound the moment two are.
+    //
+    // The shape is genuinely ambiguous on its own, and not in the way it first
+    // looks. Every Class 10 request is acknowledged with it, GET as much as SET:
+    // of the 136 in resources/traffic_capture only 12 answer a write. So a reply
+    // owed to an earlier READ is byte-identical to the acknowledgement a config
+    // write is waiting for, which is why the queued command's operation cannot
+    // rescue this and only the interlock can.
+    //
+    // What keeps it honest is therefore not the test below but the rule that
+    // every Class 10 write is awaited (see send_set_mode_request) and that a
+    // command which TIMED OUT suppresses this branch until its reply can no
+    // longer be in flight (see stale_reply_possible_).
+    //
+    // The queued-command test is "is this a SET": the operation is the top two
+    // bits of the APDU head, 10 = SET (fig C.2), and the low six are its payload
+    // length. The seven values this used to list -- 0x97 0x96 0xB3 0x95 0x91 0x90
+    // 0x8F -- are all SET with different lengths, so naming the operation says
+    // what was meant and does not admit a GET the way a longer list eventually
+    // would.
     if (queued_class == 0x0A && len >= 6 && data[4] == 0x0A && protocol::apdu_payload_len(data[5]) <= 1 &&
         cmd.expect_type_low_ver == 0x0000 && cmd.expect_type_high == 0x0000 &&
-        cmd.packet.size() > 9 &&
-        (cmd.packet[5] == 0x97 || cmd.packet[5] == 0x96 || cmd.packet[5] == 0xB3 ||
-         cmd.packet[5] == 0x95 || cmd.packet[5] == 0x91 || cmd.packet[5] == 0x90 ||
-         cmd.packet[5] == 0x8F) &&  // queued OpSpec (0x8F: DHW config write, #106)
-        // Of the four address shapes below, only the first two are reachable:
-        // 0x97 temperature-range and 0x8F DHW config, both of which queue a
-        // callback. The Sub 5600 / Obj 0601 shape is emitted only by
-        // send_control_request(), which sends without one and so never enters
-        // AWAITING_RESPONSE; send_set_mode_request() carries Obj high 0x0A and
-        // matches no alternative at all. Left in place rather than pruned --
-        // the cost is two comparisons and the next writer to add a callback to
-        // either would need them back.
-        ((cmd.packet[6] == 91 && cmd.packet[7] == 0x01 && cmd.packet[8] == 0xAE) || // old format
+        cmd.packet.size() > 9 && !this->stale_reply_possible_() &&
+        protocol::apdu_is_set(cmd.packet[5]) &&
+        // The address shapes that reach here. The Sub 5600 / Obj 0601 shape is
+        // emitted only by send_control_request(), which still sends without a
+        // callback and so never enters AWAITING_RESPONSE -- it is kept because a
+        // writer giving it one would need it back, and issue #248 lists it among
+        // the sends still to be closed.
+        ((cmd.packet[6] == 91 && cmd.packet[7] == 0x01 && cmd.packet[8] == 0xAE) || // Obj 91 Sub 430 temperature range
          (cmd.packet[6] == 91 && cmd.packet[7] == 0x01 && cmd.packet[8] == 0xA5) || // Obj 91 Sub 421 DHW config (#106)
          (cmd.packet[6] == 0x01 && cmd.packet[7] == 0xAE && cmd.packet[8] == 0x00 && cmd.packet[9] == 91) || // new format SubID 430 Obj 91
-         (cmd.packet[6] == 0x56 && cmd.packet[7] == 0x00 && cmd.packet[8] == 0x06 && cmd.packet[9] == 0x01))) {  // Sub 5600 Obj 0601 (mode write)
+         (cmd.packet[6] == 0x56 && cmd.packet[7] == 0x00 && cmd.packet[8] == 0x06 && cmd.packet[9] == 0x01) || // Sub 5600 Obj 0601 (control request)
+         (cmd.packet[6] == 0x56 && cmd.packet[7] == 0x00 && cmd.packet[8] == 0x0A && cmd.packet[9] == 0x01))) {  // Sub 5600 Obj 0A01 (mode write, #248)
       // The acknowledge is the top two bits of the APDU head, not the byte
       // after it (issue #208). What follows an error reply is the ID of the
       // offending Data Item; this used to be read as an error code, so an
@@ -497,9 +553,24 @@ bool Transport::try_dispatch_response(const uint8_t* data, size_t len) {
       // reason. See response_match.h for the encoding and the two captured
       // frames behind it.
       const protocol::ApduAck ack = protocol::apdu_ack(data[5]);
-      const bool success = protocol::apdu_ack_is_ok(data[5]);
+      // BOTH acknowledges, not just the head's. A Class 10 reply carries a
+      // second status byte in its payload -- OK / BUSY / OPERATION_FAILED, named
+      // by the Grundfos GO app's own decoder (GeniAPDU.CLASS10_ACK_*, read from
+      // the byte after the head) and present with exactly those three values in
+      // 136 captured replies. Reading only the head reported success for 36 of
+      // them: every "busy" and every "operation failed" the pump has ever sent
+      // us. Issue #208's defect, one layer further down.
+      const bool has_payload = protocol::apdu_payload_len(data[5]) == 1 && len >= 7;
+      const uint8_t class10_ack = has_payload ? data[6] : 0;
+      const bool success = protocol::class10_reply_is_ok(data[5], has_payload, class10_ack);
       if (success) {
         ESP_LOGI(TAG, "Matched short Class 10 ACK (head 0x%02X, ok) for Class 10 SET write", data[5]);
+      } else if (protocol::apdu_ack_is_ok(data[5])) {
+        // The head said ok and Class 10 did not. Reported at warning for the
+        // same reason a refusal is: nothing else surfaces it, and before this it
+        // was reported as a successful write.
+        ESP_LOGW(TAG, "Class 10 SET not accepted: %s (code 0x%02X)",
+                 protocol::class10_ack_name(class10_ack), class10_ack);
       } else {
         // Reported at warning level because it is the pump refusing the write,
         // which nothing else in this path would surface: before #208 a refusal

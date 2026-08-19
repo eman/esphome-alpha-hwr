@@ -131,6 +131,19 @@ struct PumpSim {
   // request, and only the pre-write values separate them.
   float temp_max_clamp{0};
   bool honor_mode_change{true};       // apply 0x0A01 mode changes
+  // Answer the unfused 0x0A01 mode write with a short ACK, and how late.
+  //
+  // Default ON because the pump does it: the reference captures contain 15 mode
+  // writes and all 15 are acknowledged, at 38-85 ms. (They only appear once the
+  // capture is reassembled -- a mode write is a 22-byte frame and the BLE MTU is
+  // 20, so it spans two ATT packets and a scanner that reads packets
+  // individually sees every read and no write at all.)
+  //
+  // The delay is the point of issue #248: a mode reply that arrives after
+  // CONFIG_STEP2_DELAY_MS lands inside the config write's window and is
+  // byte-identical to that write's own acknowledgement.
+  bool ack_mode_write{true};
+  uint32_t mode_ack_delay_ms{0};
   bool honor_setpoint_writes{true};   // apply setpoint values from 0601/register writes
   bool obj91_includes_limits{true};   // firmware echoes the 5 limit tail bytes
   bool respond_dhw_reads{true};       // reply to Obj 91 Sub 421 reads
@@ -368,6 +381,14 @@ struct Harness {
       // Unfused mode change (0x0A01, PR #98)
       frames_0a01++;
       if (sim.honor_mode_change) sim.mode_byte = apdu[13];
+      if (sim.ack_mode_write) {
+        if (sim.mode_ack_delay_ms == 0) {
+          inject_short_ack();
+        } else {
+          tasks.push_back({mock_millis + sim.mode_ack_delay_ms,
+                           [this]() { inject_short_ack(); }});
+        }
+      }
     } else if (opspec == 0x88 && apdu_len >= 10) {
       // Setpoint register write
       frames_register++;
@@ -1580,6 +1601,77 @@ static void test_temperature_range_baseline_is_read_not_remembered() {
               "never made");
   TEST_ASSERT(r && std::fabs(r->temp_min - 28.0f) < 0.2f && std::fabs(r->temp_max - 52.0f) < 0.2f,
               "and the settled values are the pump's current ones");
+}
+
+// Issue #248: the mode write's reply must not be taken for the config write's.
+//
+// run_set_temperature_range_ sends two Class 10 writes CONFIG_STEP2_DELAY_MS
+// apart. Only the second carries a callback, so the first used to be fired and
+// forgotten -- and its reply, arriving with no owner, is byte-identical to the
+// acknowledgement the second one is waiting for. transport.cpp's short-ACK
+// branch tests only the QUEUED command's shape, because a GENIbus reply carries
+// nothing to test: no sequence number, no object echo, and the specification is
+// explicit that "the Data Reply is not self contained" (App. Prog. Manual fig
+// 3.5 note 3).
+//
+// Every Class 10 request is acknowledged with this shape, reads as much as
+// writes -- of the 136 in resources/traffic_capture only 12 answer a write --
+// so the queued command's operation cannot rescue the match either.
+//
+// The delay here is what makes the theft possible. A prompt reply lands while
+// the transport is idle and is discarded harmlessly; only one later than the
+// 400 ms step-2 delay reaches the second write's window. The corpus has one such
+// reply in 4039 (994 ms against a p99 of 145), which is why MODE_ACK_TIMEOUT_MS
+// is 1000 and not 400: the mode command has to still be waiting when it lands.
+//
+// The scenario is chosen so the two verdicts differ. The pump stores the values
+// but never answers the config write, so the truthful settle is "accepted, and
+// nobody acknowledged the write". If the mode reply is stolen, the config write
+// looks acknowledged and the note disappears -- a settle that reports the pump
+// answered a frame it never answered.
+static void test_temperature_range_mode_ack_is_not_stolen() {
+  std::cout << "\n=== set_temperature_range: a late mode ACK is not read as the config write's ==="
+            << std::endl;
+  Harness h;
+  h.sim.mode_byte = 0x02;
+  h.prime_cache();
+  h.prime_temp_limits();
+  h.sim.ack_mode_write = true;
+  h.sim.mode_ack_delay_ms = 500;   // past CONFIG_STEP2_DELAY_MS (400)
+  h.sim.ack_temp_write = false;    // the config write itself is never answered
+
+  h.write_op.submit_set_temperature_range(30.0f, 50.0f, true, "tr_steal");
+  h.advance(30000);
+
+  TEST_ASSERT(h.events_for("tr_steal") == 1, "exactly one terminal event");
+  const WriteResult *r = h.result_for("tr_steal");
+  TEST_ASSERT(r && r->status == WriteStatus::ACCEPTED,
+              "the pump holds the requested values, so the write landed");
+  TEST_ASSERT(r && r->detail.find("not acknowledged") != std::string::npos,
+              "and the settle still says nobody acknowledged the config write -- "
+              "the mode write's reply belongs to the mode write");
+}
+
+static void test_temperature_range_prompt_mode_ack_costs_nothing() {
+  std::cout << "\n=== set_temperature_range: an answered mode write does not delay step 2 ==="
+            << std::endl;
+  Harness h;
+  h.sim.mode_byte = 0x02;
+  h.prime_cache();
+  h.prime_temp_limits();
+  h.sim.ack_mode_write = true;
+  h.sim.mode_ack_delay_ms = 54;  // the corpus p50
+
+  h.write_op.submit_set_temperature_range(30.0f, 50.0f, true, "tr_prompt");
+  h.advance(30000);
+
+  TEST_ASSERT(h.events_for("tr_prompt") == 1, "exactly one terminal event");
+  const WriteResult *r = h.result_for("tr_prompt");
+  TEST_ASSERT(r && r->status == WriteStatus::ACCEPTED, "status is accepted");
+  TEST_ASSERT(r && r->detail.empty(),
+              "and the config write's OWN ack is what settled it -- an empty detail, "
+              "not the missing-ACK note");
+  TEST_ASSERT(h.frames_temp_write == 1, "one config write reached the pump");
 }
 
 static void test_temperature_range_clamped() {
@@ -3664,6 +3756,8 @@ int main() {
   test_temperature_range_accepted();
   test_temperature_range_ignored_write_is_rejected();
   test_temperature_range_baseline_is_read_not_remembered();
+  test_temperature_range_mode_ack_is_not_stolen();
+  test_temperature_range_prompt_mode_ack_costs_nothing();
   test_temperature_range_clamped();
   test_temperature_range_unacked_but_stored();
   test_temperature_range_unacked_and_not_stored();

@@ -345,6 +345,27 @@ class Transport {
    */
   static bool is_frame_start(uint8_t byte);
 
+  /// How long after a command gives up its reply may still turn up, during
+  /// which the short-ACK branch declines to match on shape alone (issue #248).
+  ///
+  /// 1000 ms, set just above the slowest reply in resources/traffic_capture
+  /// (994 ms across 4039 pairs; p50 54, p99 145). It bounds a window that the
+  /// protocol itself does not: GENIbus has no cancel, so a request that timed
+  /// out is still owed an answer, and its answer is byte-identical to the next
+  /// command's.
+  ///
+  /// This suppresses ONLY the shape-only match. A reply carrying Obj/Sub
+  /// identifies itself and is matched throughout -- the window exists for the
+  /// one path that has nothing to check.
+  static constexpr uint32_t STALE_REPLY_WINDOW_MS = 1000;
+
+  /// millis() until which a reply to an abandoned command may still arrive.
+  /// Zero means none is outstanding; see stale_reply_possible_().
+  uint32_t stale_reply_until_ms_{0};
+
+  /// Could a reply to a command that already timed out still be in flight?
+  bool stale_reply_possible_() const;
+
   /**
    * Extract expected packet length from buffer.
    * 

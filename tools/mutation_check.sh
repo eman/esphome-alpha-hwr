@@ -735,6 +735,49 @@ MUTATIONS=(
 "parser-payload-runs-past-the-first-apdu|components/alpha_hwr/frame_parser.cpp|    const size_t bounded = apdu1_end - offset;\n    result.payload = data + offset;\n    result.payload_len = (naive_len < bounded) ? naive_len : bounded;|    result.payload = data + offset;\n    result.payload_len = naive_len;"
 "parser-never-flags-a-multi-apdu-telegram|components/alpha_hwr/frame_parser.cpp|  result.multi_apdu = (apdu1_end < body_limit);|  result.multi_apdu = false;"
 "apdu-length-includes-the-ack-bits|components/alpha_hwr/response_match.h|inline uint8_t apdu_payload_len(uint8_t apdu_head) { return apdu_head & 0x3F; }|inline uint8_t apdu_payload_len(uint8_t apdu_head) { return apdu_head; }"
+# A Class 10 reply carries TWO acknowledges and both decide. The head's says
+# whether the APDU was understood; the byte after it is Class 10's own status,
+# OK / BUSY / OPERATION_FAILED per the GO app decoder. Reading only the head
+# reported success for 36 of the 136 acknowledgements in the captures.
+"class10-ack-byte-ignored|components/alpha_hwr/transport.cpp|      const bool success = protocol::class10_reply_is_ok(data[5], has_payload, class10_ack);|      const bool success = protocol::apdu_ack_is_ok(data[5]);"
+"class10-ack-only-busy-rejected|components/alpha_hwr/response_match.h|  return first_payload == static_cast<uint8_t>(Class10Ack::OK);|  return first_payload != static_cast<uint8_t>(Class10Ack::BUSY);"
+# Deliberately absent: a mutation on class10_reply_is_ok()'s `!has_payload`
+# early return. Its only caller passes 0 for the status byte when there is none,
+# so dropping the guard still compares 0 == OK and every outcome is unchanged --
+# an equivalent mutant, confirmed by experiment (it survived the suite). The
+# guard stays because the function's contract is "the byte may not exist" and a
+# caller that passed the raw frame byte instead would otherwise read the CRC as
+# a status code. Same reasoning as the parse_int_field ERANGE note below.
+# Issue #248: the mode write must be AWAITED, not fired and forgotten. Its reply
+# is byte-identical to the acknowledgement the config write sent 400 ms later is
+# waiting for, and the short-ACK branch can only test the queued command's shape
+# -- a GENIbus reply carries no sequence number and no object echo.
+# The telegram size ceilings are the protocol's, and the buffer has to hold the
+# largest legal one: MAX_PDU_LEN yields a 257-byte telegram, which did not fit
+# the 256-byte buffers callers declared.
+"builder-cap-is-the-length-byte-not-the-pdu|components/alpha_hwr/frame_builder.cpp|  if (length > protocol::MAX_PDU_LEN) {|  if (length > 255) {"
+"mode-write-fired-and-forgotten|components/alpha_hwr/control_service.cpp|      MODE_ACK_TIMEOUT_MS, false, true, /*quiet_timeout=*/true);|      0, false, true, /*quiet_timeout=*/true);"
+# ...and the wait has to outlast the reply, which is the whole reason it is not
+# simply CONFIG_STEP2_DELAY_MS. At 400 ms it consumes only the replies that were
+# already harmless -- they land while the transport is idle -- and still hands
+# over the late ones. One reply in the 4039-pair corpus exceeded 400 ms.
+"mode-ack-wait-shorter-than-the-reply-tail|components/alpha_hwr/control_service.h|  static constexpr uint32_t MODE_ACK_TIMEOUT_MS = 1000;|  static constexpr uint32_t MODE_ACK_TIMEOUT_MS = 400;"
+# A command that gave up is still owed a reply -- GENIbus has no cancel -- and
+# that reply is the next write's ACK shape. Both directions are pinned: not
+# arming the window at all, and arming it on quiet timeouts, where the silence
+# is the expected outcome and suppressing the next match would cost every
+# temperature-range write its acknowledgement.
+"stale-reply-window-never-arms|components/alpha_hwr/transport.cpp|        if (!cmd.quiet_timeout) {\n          this->stale_reply_until_ms_ = now + STALE_REPLY_WINDOW_MS;\n        }|        if (false) {\n          this->stale_reply_until_ms_ = now + STALE_REPLY_WINDOW_MS;\n        }"
+"stale-reply-window-arms-on-quiet-timeouts|components/alpha_hwr/transport.cpp|        if (!cmd.quiet_timeout) {\n          this->stale_reply_until_ms_ = now + STALE_REPLY_WINDOW_MS;\n        }|        if (true) {\n          this->stale_reply_until_ms_ = now + STALE_REPLY_WINDOW_MS;\n        }"
+"stale-reply-window-not-consulted|components/alpha_hwr/transport.cpp|        cmd.packet.size() > 9 && !this->stale_reply_possible_() &&|        cmd.packet.size() > 9 &&"
+# Deliberately absent: a mutation on the apdu_is_set() term in the same
+# condition. Every command that reaches this branch is already a wildcard match
+# (expect_type 0/0), and no GET in the tree is sent that way with an address
+# matching one of the arms -- so dropping the term changes no outcome today and
+# any entry would be an equivalent mutant. It stays as defence for the writer who
+# adds the first such GET, and as the spec-correct way to say what the seven
+# OpSpec constants it replaced actually had in common. Same reasoning as the
+# parse_int_field ERANGE note below.
 # The pre-#208 match condition. A 0xC1 or 0x41 refusal fails this test, falls
 # past the len >= 11 floor, and dies by 3 s timeout instead of being reported.
 "short-ack-matches-only-the-two-known-heads|components/alpha_hwr/transport.cpp|protocol::apdu_payload_len(data[5]) <= 1 &&|(data[5] == 0x01 || data[5] == 0x81) &&"
