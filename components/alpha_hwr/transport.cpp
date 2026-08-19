@@ -145,6 +145,21 @@ void Transport::loop() {
           ESP_LOGW(TAG, "Command timeout waiting for Obj %d Sub %d (now=%" PRIu32 ", timestamp=%" PRIu32 ", timeout=%" PRIu32 ")",
                    cmd.expect_type_low_ver, cmd.expect_type_high, now, cmd.timestamp_ms, cmd.timeout_ms);
         }
+        // A command that gave up is not a command whose reply cannot arrive
+        // (issue #248). Nothing cancels a request in GENIbus, so the pump still
+        // owes an answer -- and that answer arrives with no owner, in exactly
+        // the shape the short-ACK branch accepts.
+        //
+        // Every timeout counts, quiet ones included. An earlier cut exempted
+        // them, reasoning that a quiet timeout means silence is expected. The
+        // two sends that set the flag say otherwise in their own comments: the
+        // mode write is acknowledged in every captured instance, and the
+        // schedule layer write is documented as having its acknowledgement
+        // arrive AFTER the window closes. Those are the likeliest sources of a
+        // late reply, not the least, and exempting them left this issue's hole
+        // open from 1.1 s to 4 s. `quiet_timeout` means "do not log this at
+        // warning" and nothing else.
+        this->note_reply_owed_(cmd.suppressed_a_frame);
         if (cmd.callback) {
           cmd.callback(false, nullptr, 0);
         }
@@ -207,6 +222,30 @@ void Transport::send_apdu_command(const uint8_t* apdu, size_t apdu_len,
   std::vector<uint8_t> packet(packet_raw, packet_raw + packet_len);
   
   this->send_command(packet, expect_type_low_ver, expect_type_high, callback, timeout_ms, allow_register_read, expect_short_ack, quiet_timeout);
+}
+
+void Transport::note_reply_owed_(bool already_suppressed) {
+  // A command that had a frame withheld has already been paid what it was owed
+  // -- by the suppression itself. Counting it again is what turns one late
+  // reply into an unbounded chain of them.
+  if (already_suppressed) return;
+  if (this->owed_replies_ < 0xFF) this->owed_replies_++;
+  this->owed_pending_ = true;
+  this->owed_since_ms_ = millis();
+}
+
+bool Transport::stale_reply_possible_() {
+  if (!this->owed_pending_) return false;
+  // Elapsed-since, never a stored deadline: the flag bounds the read, so the
+  // subtraction is never evaluated outside the window it belongs to.
+  if (millis() - this->owed_since_ms_ >= STALE_REPLY_WINDOW_MS) {
+    ESP_LOGV(TAG, "Stale-reply window elapsed with %u still owed; clearing",
+             (unsigned) this->owed_replies_);
+    this->owed_pending_ = false;
+    this->owed_replies_ = 0;
+    return false;
+  }
+  return this->owed_replies_ > 0;
 }
 
 bool Transport::is_frame_start(uint8_t byte) {
@@ -364,6 +403,16 @@ void Transport::reset() {
   // it is NOT true -- that call site saves and restores the hold itself rather
   // than relying on this.
   peer_resync_pending_ = false;
+  // Same reasoning for the reply debt (issue #248): a reply owed by a command on
+  // the connection that just died is not coming, and carrying the debt across
+  // would spend the next connection's first acknowledgement paying it off.
+  //
+  // The live-link overflow caller is the awkward case here as well: on that path
+  // a reply genuinely may still arrive. Clearing is the safer of the two errors
+  // -- it costs at most one misattributed frame, where keeping it costs a real
+  // acknowledgement -- and the overflow path has already lost frame sync anyway.
+  owed_pending_ = false;
+  owed_replies_ = 0;
   state_ = State::IDLE;
 }
 
@@ -491,7 +540,8 @@ bool Transport::try_dispatch_response(const uint8_t* data, size_t len) {
     // 0x8F -- are all SET with different lengths, so naming the operation says
     // what was meant and does not admit a GET the way a longer list eventually
     // would.
-    if (queued_class == 0x0A && len >= 6 && data[4] == 0x0A && protocol::apdu_payload_len(data[5]) <= 1 &&
+    const bool short_ack_shape =
+        queued_class == 0x0A && len >= 6 && data[4] == 0x0A && protocol::apdu_payload_len(data[5]) <= 1 &&
         cmd.expect_type_low_ver == 0x0000 && cmd.expect_type_high == 0x0000 &&
         cmd.packet.size() > 9 && protocol::apdu_is_set(cmd.packet[5]) &&
         // The address shapes that reach here. The Sub 5600 / Obj 0601 shape is
@@ -502,7 +552,31 @@ bool Transport::try_dispatch_response(const uint8_t* data, size_t len) {
         ((cmd.packet[6] == 91 && cmd.packet[7] == 0x01 && cmd.packet[8] == 0xAE) || // Obj 91 Sub 430 temperature range
          (cmd.packet[6] == 91 && cmd.packet[7] == 0x01 && cmd.packet[8] == 0xA5) || // Obj 91 Sub 421 DHW config (#106)
          (cmd.packet[6] == 0x01 && cmd.packet[7] == 0xAE && cmd.packet[8] == 0x00 && cmd.packet[9] == 91) || // new format SubID 430 Obj 91
-         (cmd.packet[6] == 0x56 && cmd.packet[7] == 0x00 && cmd.packet[8] == 0x06 && cmd.packet[9] == 0x01))) {  // Sub 5600 Obj 0601 (control request)
+         (cmd.packet[6] == 0x56 && cmd.packet[7] == 0x00 && cmd.packet[8] == 0x06 && cmd.packet[9] == 0x01) || // Sub 5600 Obj 0601 (control request)
+         (cmd.packet[6] == 0x56 && cmd.packet[7] == 0x00 && cmd.packet[8] == 0x0A && cmd.packet[9] == 0x01));  // Sub 5600 Obj 0A01 (mode write, #248)
+
+    // The frame has the right shape -- but shape is all we can test, so before
+    // treating it as THIS command's answer, settle any debt owed to a command
+    // that already gave up (issue #248).
+    //
+    // Paying the debt here rather than declining inside the condition above is
+    // what makes the guard terminate. A frame that merely falls through leaves
+    // the debt standing, this command times out, and the timeout records a
+    // second debt -- one late reply then costs every acknowledgement that
+    // follows it. Consuming the frame closes the account: at most one match is
+    // lost per late reply, and `suppressed_a_frame` stops this command's own
+    // timeout from opening a new one.
+    if (short_ack_shape && this->stale_reply_possible_()) {
+      ESP_LOGD(TAG, "Short Class 10 frame consumed as the reply owed to an "
+                    "abandoned command (%u still owed)",
+               (unsigned) this->owed_replies_);
+      if (this->owed_replies_ > 0) this->owed_replies_--;
+      if (this->owed_replies_ == 0) this->owed_pending_ = false;
+      cmd.suppressed_a_frame = true;
+      return false;
+    }
+
+    if (short_ack_shape) {
       // The acknowledge is the top two bits of the APDU head, not the byte
       // after it (issue #208). What follows an error reply is the ID of the
       // offending Data Item; this used to be read as an error code, so an
@@ -702,9 +776,12 @@ bool Transport::try_dispatch_response(const uint8_t* data, size_t len) {
     // Two notes on the condition below. It deliberately omits the
     // `!cmd.expect_short_ack` term that the wildcard MATCH further down
     // carries, so a 0/0 command with expect_short_ack set would be guarded as a
-    // wildcard without matching as one. That combination has no caller, and
-    // adding the term would change untested behaviour, so it is recorded rather
-    // than "fixed". And with the event-log workaround gone, nothing passes
+    // wildcard without matching as one. send_set_mode_request() is exactly
+    // that caller since issue #248 -- 0/0 with expect_short_ack -- and the
+    // behaviour is what it wants: a Class 10 telemetry frame arriving while it
+    // waits is guarded here and falls through to the packet callback rather than
+    // being taken for its acknowledgement. Adding the term would change that, so
+    // it stays recorded rather than "fixed". And with the event-log workaround gone, nothing passes
     // allow_register_read=true any more -- the parameter and its Command field
     // are vestigial, kept because removing them is a separate change.
     bool wildcard_command = (cmd.expect_type_low_ver == 0x0000 && cmd.expect_type_high == 0x0000);

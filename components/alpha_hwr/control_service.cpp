@@ -743,7 +743,31 @@ bool ControlService::send_set_mode_request(ControlMode mode) {
   apdu[5] = 0x01;  // Obj ID low
   memcpy(&apdu[6], payload, 12);
 
-  this->transport_.send_apdu_command(apdu, 18);
+  // Await the pump's short ACK rather than firing and forgetting (issue #248).
+  //
+  // GENIbus is interlocked: the reply follows its request within 50 ms and the
+  // master idles before the next one (App. Prog. Manual fig 1), which is why a
+  // reply carries no sequence number and no object echo -- "the Data Reply is
+  // not self contained, meaning that the Data Request is necessary to process
+  // it" (fig 3.5 note 3). A send nobody waits on breaks that: its reply arrives
+  // with no owner, and the next command's matcher, which can only test the
+  // frame's SHAPE, takes it for its own answer.
+  //
+  // Not hypothetical for this write. It is the Class 10 frame sent
+  // CONFIG_STEP2_DELAY_MS before the temperature-range and DHW config writes, on
+  // the same class, and its reply is the exact shape their matcher accepts.
+  //
+  // The callback exists to make the transport wait at all -- a null one means
+  // fire-and-forget -- and deliberately reports nothing onward. An earlier
+  // revision exposed it as an `on_ack` parameter that no caller ever passed,
+  // promising a contract reset() does not honour: it clears the queue without
+  // invoking callbacks, so the first caller to rely on it would wait forever.
+  this->transport_.send_apdu_command(
+      apdu, 18, 0, 0,
+      [](bool success, const uint8_t * /*data*/, size_t /*len*/) {
+        ESP_LOGV(TAG, "Mode write %s", success ? "acknowledged" : "unanswered");
+      },
+      MODE_ACK_TIMEOUT_MS, false, true, /*quiet_timeout=*/true);
 
   // Intentionally NO configuration commit here. send_configuration_commit()
   // commits the ClockProgramOverview (the schedule), which is unrelated to the
@@ -847,8 +871,11 @@ void ControlService::write_temp_range_config(float min_temp, float max_temp, boo
         // silence, and worse, it cannot be attributed with confidence: the
         // short-ACK branch in transport.cpp matches on "some queued write of
         // this shape", carrying no sequence number and no object echo, so the
-        // fire-and-forget mode write sent a few hundred ms earlier can be
-        // answered inside this write's window. Reporting a refusal as silence
+        // mode write sent a few hundred ms earlier can be answered inside
+        // this write's window. (That write is awaited since issue #248, so its
+        // reply is normally consumed before this one is sent -- but "normally"
+        // is a timing property, not a guarantee, which is why this callback
+        // still does not treat a refusal as silence.) Reporting a refusal as silence
         // would turn that misattribution into a REJECTED verdict for a write
         // that landed, with no readback to catch it.
         //

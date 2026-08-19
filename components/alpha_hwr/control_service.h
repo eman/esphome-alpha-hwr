@@ -457,6 +457,26 @@ class ControlService {
     bool temp_limits_known() const { return temp_limits_tail_valid_; }
 
    private:
+  /// How long send_set_mode_request() waits for the pump's short ACK (issue #248).
+  ///
+  /// Equal to WriteOperationService::CONFIG_STEP2_DELAY_MS, the delay its callers
+  /// already leave between the mode write and the config write behind it, so an
+  /// unanswered mode write costs NOTHING: the transport runs one command at a
+  /// time, the config write is queued at 400 ms, and this expires exactly when
+  /// that was due to go out anyway. An answered one frees the queue at the
+  /// observed p50 of 54 ms, long before either.
+  ///
+  /// It deliberately does not try to cover a late reply on its own. That is what
+  /// Transport::STALE_REPLY_WINDOW_MS is for, and splitting the two is what lets
+  /// this one be free: a wait long enough to outlast the tail would have to
+  /// exceed the step-2 delay, and would then be paid on every unanswered write.
+  ///
+  /// The pump does answer this write -- 31 mode writes in the captures, every one
+  /// acknowledged, 38-113 ms. Every Class 10 write in that corpus is
+  /// acknowledged, 420 of 420. See resources/traffic_capture/README.md, including
+  /// why an earlier revision concluded the opposite.
+  static constexpr uint32_t MODE_ACK_TIMEOUT_MS = 400;
+
   // Sub-ID constants for setpoint registers (Reference: control.py lines 137-141)
   static constexpr uint16_t SUB_SPEED_SETPOINT = 13;
   static constexpr uint16_t SUB_PRESSURE_SETPOINT = 15;
@@ -569,10 +589,24 @@ class ControlService {
    * (Sub=0x5600, Obj=0x0601), this never overwrites the pump's setpoint
    * (issue #97/#83) and never force-enables the pump (issue #45).
    *
+   * The pump acknowledges this write with a bare Class 10 short frame, and this
+   * WAITS for it rather than firing and forgetting (issue #248). GENIbus is an
+   * interlocked request/reply protocol -- a reply arrives 3-50 ms after its
+   * request and the master idles before the next one (App. Prog. Manual fig 1) --
+   * so a reply carries no identifier and can only be read as "the answer to the
+   * one request outstanding". A send nobody waits on leaves a reply in flight
+   * that the NEXT command's matcher will claim as its own, and this frame is
+   * sent on the same class CONFIG_STEP2_DELAY_MS before the config writes.
+   *
+   * The wait is quiet and bounded by MODE_ACK_TIMEOUT_MS. Nothing is reported
+   * back: the acknowledgement's job is to be consumed here, and the caller's
+   * verdict comes from its own readback.
+   *
    * @param mode Control mode to switch to
    * @return True if the command was queued
    */
   bool send_set_mode_request(ControlMode mode);
+
 
   /**
    * Record a just-sent mode command as "commanded but unconfirmed" (issue #91):
