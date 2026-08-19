@@ -77,6 +77,7 @@ struct Rig {
   // here exercises the publish path, and because the frame-budget assertions
   // below are only meaningful against a rig that has them on.
   esphome::sensor::Sensor gaps_over[6];
+  esphome::sensor::Sensor recycles;
   esphome::sensor::Sensor gaps_truncated;
   esphome::sensor::Sensor watch_time;
   AlphaHwrComponent component{&client};
@@ -97,6 +98,7 @@ struct Rig {
     component.set_link_gaps_over_45s_sensor(&gaps_over[3]);
     component.set_link_gaps_over_60s_sensor(&gaps_over[4]);
     component.set_link_gaps_over_90s_sensor(&gaps_over[5]);
+    component.set_link_recycles_sensor(&recycles);
     component.set_link_gaps_truncated_sensor(&gaps_truncated);
     component.set_link_watch_time_sensor(&watch_time);
   }
@@ -1025,9 +1027,10 @@ void test_the_readiness_fault_is_visible_while_the_session_is_ready() {
   advance_with_telemetry(r, 360000);
 
   TEST_ASSERT(!r.ready_is_on(), "Still not usable");
-  TEST_ASSERT(r.link_fault.state != "None",
-              "The fault surface says something. Gated on the session rather "
-              "than on the pump, this read \"None\" for the whole outage");
+  TEST_ASSERT(r.link_fault.state.find("never became ready") != std::string::npos,
+              "The fault surface names THIS fault. Asserting merely that it is "
+              "not \"None\" passed on the data watchdog's string with the "
+              "readiness watchdog switched off entirely");
 }
 
 void test_a_healthy_link_never_trips_the_readiness_watchdog() {
@@ -1045,6 +1048,80 @@ void test_a_healthy_link_never_trips_the_readiness_watchdog() {
               "watchdog waits for a state, and that state arrived");
   TEST_ASSERT(r.link_fault.state == "None",
               "...and no fault is latched");
+}
+
+
+// ── The two defects that nearly shipped ────────────────────────────────────
+// Both were found by a skeptic pass, both were fixed, and neither was pinned by
+// anything: a second pass reverted each fix in turn and the whole suite stayed
+// green. These are the tests that make the fixes stick.
+void test_the_readiness_fault_survives_the_telemetry_that_masks_it() {
+  std::cout << "\n=== The readiness fault is not erased by telemetry ===" << std::endl;
+
+  // force_disconnect() used to hardcode FailureHold::DATA for every caller, so
+  // the readiness reason was latched at the one rank whose defining property is
+  // "released by inbound data" -- in the one failure mode defined by inbound
+  // data never stopping. One volunteered frame during the async-close window
+  // unheld it, and the next generic disconnect reason took the surface.
+  Rig r;
+  r.answer_writes = false;
+  r.setup();
+  r.connect_and_subscribe();
+  advance_with_telemetry(r, 400000);
+  TEST_ASSERT(r.link_fault.state.find("never became ready") != std::string::npos,
+              "Latched at the recycle");
+
+  // Exactly the sequence that erased it: one more volunteered frame, then the
+  // link dropping for an ordinary reason.
+  r.notify(volunteered_telemetry());
+  r.advance(1000, 5);
+  r.disconnect(ESP_GATT_CONN_TIMEOUT);
+  r.advance(1000, 5);
+  TEST_ASSERT(r.link_fault.state.find("never became ready") != std::string::npos,
+              "...and still latched afterwards. Held at DATA rank this read "
+              "\"Connection Timeout (0x08)\" -- the generic string the hold "
+              "exists to keep out");
+}
+
+void test_a_node_without_the_ready_entity_is_not_recycled_forever() {
+  std::cout << "\n=== No ready_status entity is not a permanent fault ===" << std::endl;
+
+  // `ready_status` is cv.Optional. Reading readiness back off that entity meant
+  // a hand-written config omitting it had pump_ready permanently false, so a
+  // perfectly healthy pump was torn down every 5 minutes, then 10, then 20,
+  // settling hourly -- each recycle re-entering the encryption-on-open path
+  // that can erase the bond. A diagnostic must not depend on a diagnostic
+  // being declared.
+  Rig r;
+  r.component.set_ready_binary_sensor(nullptr);
+  r.setup();
+  r.connect_and_subscribe();
+  // Long enough for the read chain to complete and the caches to fill. There is
+  // no entity to observe that through, which is the entire point -- the
+  // component's own latch is what has to notice.
+  r.advance(120000, 120);
+  const int disconnects = r.client.mock_disconnect_calls();
+  r.advance(700000, 700);  // past the budget, and past the doubled one
+  TEST_ASSERT(r.client.mock_disconnect_calls() == disconnects,
+              "A healthy pump is not recycled just because nobody declared the "
+              "Pump Ready entity");
+  TEST_ASSERT(r.link_fault.state == "None", "...and no fault is asserted");
+}
+
+void test_readiness_recycles_reach_the_counter_an_automation_watches() {
+  std::cout << "\n=== Readiness recycles count on Pump Link Recycles ===" << std::endl;
+
+  // The reporter of issue #211 named this as their signal from outside the
+  // component. It stayed at zero through the failure the change exists for,
+  // because a readiness recycle never touches the data counter.
+  Rig r;
+  r.answer_writes = false;
+  r.setup();
+  r.connect_and_subscribe();
+  advance_with_telemetry(r, 400000);
+  TEST_ASSERT(r.recycles.state >= 1.0f,
+              "The recycle is visible on Pump Link Recycles, not only in a log "
+              "line nobody kept");
 }
 
 int main() {
@@ -1076,6 +1153,9 @@ int main() {
   test_a_link_that_never_becomes_ready_is_recycled();
   test_the_readiness_fault_is_visible_while_the_session_is_ready();
   test_a_healthy_link_never_trips_the_readiness_watchdog();
+  test_the_readiness_fault_survives_the_telemetry_that_masks_it();
+  test_a_node_without_the_ready_entity_is_not_recycled_forever();
+  test_readiness_recycles_reach_the_counter_an_automation_watches();
 
   std::cout << "\n==========================================" << std::endl;
   std::cout << "Results: " << tests_passed << " passed, " << tests_failed

@@ -587,6 +587,14 @@ bool AlphaHwrComponent::check_link_liveness_() {
   // threshold the statistic exists to validate (see LinkGapSampler).
   this->link_gap_.on_recycle(rearm_ms);
   this->link_last_inbound_ms_ = rearm_ms;
+  // The readiness window is re-armed here too, and skipping it left the guard
+  // in loop() a half fix. That guard stops both watchdogs firing in the SAME
+  // tick; without this the readiness window is still expired on the NEXT one,
+  // so a silent link produced two teardowns a second apart and counted two
+  // recycles for one outage -- on the very counter this change added because
+  // the reporter of issue #211 watches it. A link the liveness watchdog just
+  // tore down has not had its readiness window fairly consumed either.
+  this->link_ready_since_ms_ = rearm_ms;
   this->ble_manager_.force_disconnect(reason);
   return true;
 }

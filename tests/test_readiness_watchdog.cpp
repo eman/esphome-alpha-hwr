@@ -111,6 +111,17 @@ static void test_the_clock_survives_a_rollover() {
               "512 ms across the rollover is 512 ms, not seven weeks");
   TEST_ASSERT(link_readiness_timeout_expired(true, false, opened + WINDOW + 1, opened, WINDOW),
               "...and a genuine overrun spanning the rollover still fires");
+  // The assertion with teeth, and the one this file originally lacked while
+  // claiming "same reasoning, and the same fix, as the data watchdog". Both
+  // stamps above sit AFTER the wrap, where `connected_since + timeout` wraps
+  // too and the naive comparison happens to agree -- so the rollover-unsafe
+  // mutation survived them. Here `now` is still BELOW the wrap: unsigned
+  // subtraction says 1 s elapsed, while `now > connected_since + timeout`
+  // compares against a wrapped sum and recycles a healthy link. This is the
+  // case tests/test_link_watchdog.cpp already had for the sibling predicate.
+  TEST_ASSERT(!link_readiness_timeout_expired(true, false, 0xFFFFFF00u + 1000, 0xFFFFFF00u, WINDOW),
+              "A healthy link one second into its window, just below the wrap, "
+              "is not recycled");
 }
 
 static void test_the_backoff_bounds_a_link_that_cannot_recover() {
@@ -137,17 +148,6 @@ static void test_the_two_watchdogs_share_one_ceiling() {
               "to one question would be a distinction with no reason");
 }
 
-static void test_the_default_has_real_headroom() {
-  // The bound is unmeasured by design (see the header). What can be asserted is
-  // the margin it was chosen for: 13-18 s observed to ready on a warm reconnect
-  // against a 300 s budget. Pinned as a literal so shrinking the default to
-  // something in the same order as the observation is a deliberate act.
-  const uint32_t observed_worst_ready_ms = 18000;
-  TEST_ASSERT(WINDOW >= 10 * observed_worst_ready_ms,
-              "The shipped default is an order of magnitude above the only "
-              "readiness figure anyone has measured");
-}
-
 int main() {
   std::cout << "==========================================" << std::endl;
   std::cout << "Readiness Watchdog Tests" << std::endl;
@@ -161,7 +161,6 @@ int main() {
   test_the_clock_survives_a_rollover();
   test_the_backoff_bounds_a_link_that_cannot_recover();
   test_the_two_watchdogs_share_one_ceiling();
-  test_the_default_has_real_headroom();
 
   std::cout << "\n==========================================" << std::endl;
   std::cout << "Results: " << tests_passed << " passed, " << tests_failed

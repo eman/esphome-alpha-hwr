@@ -85,7 +85,18 @@ namespace alpha_hwr {
 inline bool link_readiness_timeout_expired(bool connected, bool pump_ready,
                                            uint32_t now_ms, uint32_t connected_since_ms,
                                            uint32_t timeout_ms) {
-  if (!connected || pump_ready || timeout_ms == 0)
+  // Three statements rather than one `||` chain, and not for readability: a
+  // mutation entry's search field is split on '|', so a guard containing `||`
+  // truncates silently at the first one and applies an edit nobody wrote. The
+  // occurrence check cannot catch it either -- the truncated fragment is still
+  // unique, so it reports a clean match and the build then fails on garbage.
+  // Two entries for this function were written that way and both scored
+  // BUILD_BROKEN. Split, each clause is anchorable on its own.
+  if (!connected)
+    return false;
+  if (pump_ready)
+    return false;
+  if (timeout_ms == 0)
     return false;
   return static_cast<uint32_t>(now_ms - connected_since_ms) > timeout_ms;
 }
