@@ -30,7 +30,7 @@ events fire.
 | `reconnect_settle_time` | time | `2s` | Delay after disconnect before reconnecting |
 | `control_state_poll_interval` | time | `30s` | Interval for periodic control state polling. Set to `0s` to disable. |
 | `data_timeout` | time | `60s` | Tear the BLE link down after this long with no data from the pump, so the normal reconnect runs. Set to `0s` to disable. |
-| `ready_timeout` | time | `300s` | Tear the BLE link down if the pump has not become usable this long after connecting, so the normal reconnect runs. Set to `0s` to disable. |
+| `ready_timeout` | time | `0s` (off) | Tear the BLE link down if the pump has not become usable this long after connecting, so the normal reconnect runs. **Opt-in** — see below before enabling. |
 
 ### `time_id`
 
@@ -247,14 +247,33 @@ Like `data_timeout` it backs off, doubling on each recycle that never reached
 readiness, up to an hour, and resetting when the pump does become ready. Without
 that, a pump that is merely slow would be recycled forever.
 
-> **The default is deliberately generous, and deliberately unmeasured.** On the
-> reporting installation `Pump Ready` comes up 13–18 seconds after connecting on
-> a warm reconnect. A first pairing, with the device-info reads and a schedule
-> download behind it, has never been timed by anyone. `300s` is more than an
-> order of magnitude above the only figure that exists, because a bound that is
-> too loose still converts "silent forever" into "recovers eventually" — the
-> whole win — while one that is too tight recycles a pump that was merely slow.
-> If a first pairing is ever measured, this can be tightened.
+> **This defaults to `0s`, meaning off, and enabling it needs one check first.**
+> A node that connects to the pump *without a bond* connects normally and then
+> never reaches its usable state — observed on hardware: the link opens, pairing
+> fails with `0x52`, discovery runs, the link drops, and it repeats, with
+> **Pump Ready** off the whole time. On a node like that any nonzero budget here
+> recycles a link that was never going to become ready, every five minutes and
+> then hourly, forever — and each recycle takes another run at the window where
+> an encryption failure can erase a bond.
+>
+> So enable it only on a node that **reliably reaches Pump Ready today**. There
+> it does what it is for: turns "connected, telemetry flowing, silently
+> unusable" into a recycle and a named fault instead of an automation waiting
+> forever.
+>
+> **The suggested value if you enable it is `300s`, and it is measured.** Setting the
+> window deliberately short on a bench pump and watching which value fired gives
+> a bracket: a 10-second window fired, 20 fired, 40 did not. So a fresh
+> connection on a bonded pump reaches usable in roughly 24 seconds — the read
+> chain dominates, at about 175 ms per reply — and the `300s` default is around
+> twelve times that.
+>
+> Two cautions. It is one pump, and it is a *bonded reconnect*; a first pairing,
+> with the pairing exchange in front of the same read chain, is still untimed.
+> Raise the default rather than trusting this bracket if your pump is slower.
+> The reason to err high is unchanged: too loose still converts "silent forever"
+> into "recovers eventually", while too tight recycles a pump that was merely
+> slow.
 
 Set `ready_timeout: 0s` to disable it. Note what that restores: a link that
 never becomes usable will sit there indefinitely with no fault and no recycle.

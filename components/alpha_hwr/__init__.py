@@ -151,13 +151,27 @@ CONFIG_SCHEMA = (
             # invisible to it. This one is timed from connection-open and is
             # cleared only by the pump actually becoming usable.
             #
-            # 5 minutes against a warm reconnect that reaches ready in 13-18s.
-            # Deliberately generous and deliberately unmeasured: a first pairing
-            # with device-info reads and a schedule download has never been
-            # timed. Too loose still turns "silent forever" into "recovers
-            # eventually"; too tight recycles a merely slow pump. 0 disables it.
-            # See components/alpha_hwr/readiness_watchdog.h.
-            cv.Optional(CONF_READY_TIMEOUT, default="300s"): cv.positive_time_period_milliseconds,
+            # DEFAULTS OFF, and that is a deliberate retreat from an earlier
+            # default of 300s. A node that connects to the pump WITHOUT a bond
+            # connects fine and then never reaches its usable state: observed on
+            # hardware, an unbonded node opens the link, fails pairing with
+            # 0x52, runs discovery, drops, and repeats, with Pump Ready off
+            # throughout. On such a node any nonzero budget here recycles a link
+            # that was never going to become ready -- every five minutes, then
+            # hourly, forever -- and each recycle takes another run at the
+            # encryption-on-open window that can erase a bond (issue #14).
+            #
+            # Whether that state is reachable from a supported configuration is
+            # issue #244. Until it is settled, the watchdog is opt-in: set it on
+            # a node that reliably reaches Pump Ready today, where it turns
+            # "connected, streaming, silently unusable" into a recycle and a
+            # named fault (issue #211).
+            #
+            # 300s is the suggested value if you do enable it, measured on
+            # hardware: a fresh connection on a bonded pump reaches ready in
+            # about 22s, bracketed by a 20s window that fired and a 40s window
+            # that did not. See components/alpha_hwr/readiness_watchdog.h.
+            cv.Optional(CONF_READY_TIMEOUT, default="0s"): cv.positive_time_period_milliseconds,
             cv.Optional(CONF_FLOW): sensor.sensor_schema(
                 unit_of_measurement="m³/h",
                 accuracy_decimals=3,

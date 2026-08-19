@@ -44,17 +44,33 @@
 // any other backstop since the opening sequence's went away with the sequence
 // (issue #174).
 //
-// **The bound is deliberately generous and deliberately unmeasured.** On the
-// reporter's pump `Pump Ready` comes up 13-18 s after connect on a warm
-// reconnect. A first pairing, with the device-info reads and a schedule
-// download behind it, has never been measured by anyone -- and waiting for that
-// measurement before shipping anything would leave the failure in place
-// indefinitely, which is the trade issue #176 already made once and regretted.
-// So the default is minutes against a worst case in seconds. A bound that is
-// too loose still converts "silent forever" into "recovers eventually", which
-// is the entire win; a bound that is too tight recycles a merely slow pump,
-// which is the failure worth avoiding. Tighten it if a first pairing is ever
-// timed.
+// **The bound is deliberately generous, and now partly measured.** It was
+// shipped unmeasured on purpose -- waiting for a number before shipping
+// anything would have left the failure in place indefinitely, which is the
+// trade issue #176 made once and regretted -- and then measured on a second
+// specimen by setting the window deliberately short and watching which value
+// fired:
+//
+//   * 10 s window: fired. 20 s window: fired. 40 s window: did not.
+//
+// So a fresh connection on a bonded pump reaches usable somewhere between 20
+// and 40 s -- about 24 s from the recycle stamp, with the read chain (device
+// info, statistics, control mode, twenty event-log entries, alarms, warnings,
+// four trend channels, ten cycle timestamps) dominating at roughly 175 ms per
+// reply. The 300 s default is therefore around twelve times the measured
+// figure.
+//
+// Two cautions on that number. It is one pump, and it is a BONDED reconnect: a
+// first pairing, with the SMP exchange in front of the same chain, is still
+// unmeasured. And an earlier figure of 15.45 s from this same specimen was
+// misleading -- it was taken from a reboot where the BLE link survived, so it
+// timed the read chain alone and none of the connect. If a first pairing is
+// ever timed and comes in far above this, raise the default rather than
+// trusting the bracket above.
+//
+// The asymmetry that justifies erring high is unchanged: a bound that is too
+// loose still converts "silent forever" into "recovers eventually", which is
+// the entire win, while one that is too tight recycles a merely slow pump.
 //
 // The recycle count and the backoff are shared with the data watchdog rather
 // than reinvented: link_data_timeout_next() is the same doubling with the same

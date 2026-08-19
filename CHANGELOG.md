@@ -45,10 +45,32 @@
   gate is now the pump being ready, which is what "healthy" has always meant
   here.
 
-  The default is deliberately generous and deliberately unmeasured: `300s`
-  against a warm reconnect that reaches ready in 13–18 s. A first pairing has
-  never been timed. Too loose still turns "silent forever" into "recovers
-  eventually"; too tight recycles a pump that was merely slow. `0s` disables it.
+  **It defaults to `0s` — off — and that is a deliberate retreat.** An earlier
+  draft shipped it on at `300s`, on the reasoning that a node with no bond never
+  gets a working link anyway so the hazard was moot. Hardware says otherwise: an
+  unbonded node connects fine, fails pairing with `0x52`, runs discovery, drops
+  and repeats, with `Pump Ready` off throughout. Any nonzero budget would
+  therefore recycle such a node every five minutes and then hourly, forever,
+  each recycle taking another run at the window where an encryption failure can
+  erase a bond. Whether that state is reachable from a supported configuration
+  is issue #244; until that is settled the watchdog is opt-in, for nodes that
+  reliably reach ready today.
+
+  The suggested value when enabling is `300s`, and it is
+  bracketed on hardware by setting the window short and watching which value
+  fired: 10 s fired, 20 s fired, 40 s did not. A fresh connection on a bonded
+  pump therefore reaches usable in roughly 24 s, so the default is about twelve
+  times the measured figure. That bracket is one pump and a *bonded* reconnect;
+  a first pairing is still untimed. Too loose still turns "silent forever" into
+  "recovers eventually"; too tight recycles a pump that was merely slow. `0s`
+  disables it.
+
+  The same bench run verified the whole path end to end on hardware — fire,
+  latch, count, back off, recover, clear — which no host test can: the fault
+  reached the Home Assistant entity as `Pump never became ready (10s)`, `Pump
+  Link Recycles` incremented, the window doubled, the next connection came up
+  inside the widened window, and reaching ready cleared the fault to `None` and
+  reset the counter to 0.
 
 
 - **The re-pairing procedure, written down** (follow-up to #230). The recovery

@@ -119,9 +119,17 @@ static void test_the_clock_survives_a_rollover() {
   // subtraction says 1 s elapsed, while `now > connected_since + timeout`
   // compares against a wrapped sum and recycles a healthy link. This is the
   // case tests/test_link_watchdog.cpp already had for the sibling predicate.
-  TEST_ASSERT(!link_readiness_timeout_expired(true, false, 0xFFFFFF00u + 1000, 0xFFFFFF00u, WINDOW),
-              "A healthy link one second into its window, just below the wrap, "
-              "is not recycled");
+  //
+  // `now` must sit BELOW the wrap for this to bite, which is the detail that
+  // makes the case easy to write uselessly. A first attempt used
+  // `0xFFFFFF00 + 1000`, which itself wraps to 744 -- and there the naive
+  // comparison agrees with the correct one, so the mutation survived it. With
+  // `now` just short of the boundary the sum `connected_since + timeout` wraps
+  // while `now` does not, and the naive form declares a 240 ms old link
+  // expired.
+  TEST_ASSERT(!link_readiness_timeout_expired(true, false, 0xFFFFFFF0u, 0xFFFFFF00u, WINDOW),
+              "A healthy link 240 ms into its window, just below the wrap, is "
+              "not recycled");
 }
 
 static void test_the_backoff_bounds_a_link_that_cannot_recover() {
