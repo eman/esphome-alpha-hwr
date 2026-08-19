@@ -1197,7 +1197,14 @@ done
 # unmutated sources and is what makes the next run's baseline a few seconds
 # rather than a full rebuild, and a full clean would also throw away a
 # developer's -O2 objects, which this run never touched.
-cd "$TESTS_DIR" && make clean-bin >/dev/null 2>&1 || true
+if cd "$TESTS_DIR"; then
+  # Best effort: a failure here leaves stale binaries, and the next run's
+  # baseline rebuild clears them anyway. Written as an `if` rather than
+  # `cd && make || true`, which reads as if-then-else and is not -- the `|| true`
+  # in that form also swallows a failed `cd`, and would then have run `make` in
+  # whatever directory the script happened to be in.
+  make clean-bin >/dev/null 2>&1 || true
+fi
 for f in "${MUTATED_FILES[@]}"; do purge_objects_for "$f"; done
 
 echo ""
