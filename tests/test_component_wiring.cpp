@@ -1042,6 +1042,9 @@ void test_a_healthy_link_never_trips_the_readiness_watchdog() {
   std::cout << "\n=== A healthy link never trips it ===" << std::endl;
 
   Rig r;
+  // Recycling ON for the same reason: a healthy link not being torn down is
+  // only evidence when a teardown was possible.
+  r.component.set_ready_recycle(true);
   r.setup();
   r.connect_and_subscribe();
   TEST_ASSERT(r.run_until_ready(), "Reaches Pump Ready normally");
@@ -1099,6 +1102,10 @@ void test_a_node_without_the_ready_entity_is_not_recycled_forever() {
   // being declared.
   Rig r;
   r.component.set_ready_binary_sensor(nullptr);
+  // Recycling ON, because that is what makes this test mean anything: with
+  // it off "was not recycled" is trivially true and the mutation that reads
+  // readiness back off the absent entity survives unnoticed.
+  r.component.set_ready_recycle(true);
   r.setup();
   r.connect_and_subscribe();
   // Long enough for the read chain to complete and the caches to fill. There is
