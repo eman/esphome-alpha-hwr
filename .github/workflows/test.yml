@@ -390,6 +390,15 @@ jobs:
       - name: mypy
         run: mypy --ignore-missing-imports tools/write_bench.py tools/link_gap_report.py
 
+      # The capture scanner's own assertions. Its output is quoted as fact in a
+      # dozen protocol comments, so a parser regression silently rewrites the
+      # evidence for several design decisions -- and it has already shipped one
+      # such defect, an endianness heuristic that discarded 40% of a capture in
+      # silence. The corpus half of the check is skipped here: resources/ is
+      # gitignored, so only the pure-function half runs on CI.
+      - name: capture scanner selftest
+        run: python tools/geni_capture_scan.py selftest
+
       # The shell half of tools/, which had no check of any kind. Two of the
       # three scripts here decide whether a change is allowed to merge --
       # lint.sh IS the cppcheck job, and mutation_check.sh is the coverage

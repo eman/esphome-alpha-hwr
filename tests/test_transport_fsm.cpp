@@ -842,8 +842,8 @@ void test_a_refused_class10_write_reports_failure() {
       // The SECOND acknowledge. A Class 10 reply carries its own status byte
       // after the head, and the head can say ok while it does not. Named by the
       // GO app's decoder (GeniAPDU.CLASS10_ACK_BUSY / _OPERATION_FAILED) and
-      // present in the captures with exactly those values: of 136 short Class 10
-      // replies, 24 are busy and 12 are operation-failed, all with head ack ok.
+      // present in the captures with exactly those values: of 459 short Class 10
+      // replies, 26 are busy and 13 are operation-failed, all with head ack ok.
       // Reading the head alone called every one of them a successful write.
       {0x01, 0x02, true, false,
        "Class 10 busy is not success, though the APDU head says ok"},

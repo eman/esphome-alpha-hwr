@@ -180,6 +180,29 @@ MUTATIONS=(
 # public surfaces. It went unnoticed for as long as it did precisely because no
 # test asserted either spelling.
 "command-string-service-name-drift|components/alpha_hwr/write_operation_service.cpp|    case WriteCommand::SET_PUMP_STATE:        return \"set_pump_state\";|    case WriteCommand::SET_PUMP_STATE:        return \"pump_set_state\";"
+# A Class 10 request is addressed OBJECT FIRST -- [Obj][SubH][SubL] -- in all 20
+# distinct address shapes across the 420 SETs in resources/traffic_capture. Lay
+# it out sub-first and the pump answers Unknown Data Item, quoting the first
+# payload byte back. That is not hypothetical: a "dedicated" setpoint write did
+# exactly this for as long as it existed, and nobody noticed because the send was
+# fire-and-forget so the refusal was never read (issue #258).
+#
+# The simulator used to accept any address it recognised the OpSpec for, which is
+# why the old write looked healthy from the host suite. It now answers an
+# unrecognised Class 10 SET the way the pump does, and main() fails the run if
+# any test provoked one. This entry is the proof that net works: reversing the
+# fused control request's address turns it red.
+"control-request-addressed-sub-first|components/alpha_hwr/control_service.cpp|  apdu[2] = 0x56;  // Object id 86, the start/stop request\n  apdu[3] = 0x00;  // Sub-id high\n  apdu[4] = 0x06;  // Sub-id low -- 86/6, overall_operation_local_request_obj|  apdu[2] = 0x00;  // mutated: the sub-first layout the deleted write used\n  apdu[3] = 0x06;\n  apdu[4] = 0x00;"
+# The setpoint readback waits SETPOINT_CONFIRM_DELAY_MS after the write so the
+# pump has time to store the value (#82/#85). That delay used to be unfalsifiable:
+# the simulator applied a setpoint the instant the frame arrived, so a confirm at
+# 1600 ms, at 1200 or at 0 all passed, and the whole rationale survived only as a
+# comment. PumpSim::setpoint_apply_delay_ms models a pump that needs a moment,
+# which is what turns the delay into a claim. Two ways to break it: read back too
+# early by the amount the deleted step-2 write used to cost, and read back
+# immediately.
+"setpoint-confirm-does-not-wait|components/alpha_hwr/write_operation_service.cpp|    schedule_([this, seq]() { confirm_setpoint_(seq); }, SETPOINT_CONFIRM_DELAY_MS);|    schedule_([this, seq]() { confirm_setpoint_(seq); }, 0);"
+"setpoint-confirm-loses-the-step2-lead|components/alpha_hwr/write_operation_service.h|  static constexpr uint32_t SETPOINT_CONFIRM_DELAY_MS = 1600;|  static constexpr uint32_t SETPOINT_CONFIRM_DELAY_MS = 1200;"
 # The single-event slot bound is the last stop before a caller's index becomes
 # SubID 900+idx on the wire. Two ways to get it wrong, and the pair is the point:
 # hardcoding 35 still rejects absurd values while quietly accepting slot 10 on a
@@ -711,15 +734,19 @@ MUTATIONS=(
 "session-is-connected-always-true|components/alpha_hwr/session.cpp|bool Session::is_connected() const { return state_ != SessionState::IDLE; }|bool Session::is_connected() const { return true; }"
 "session-ready-transition-does-not-reach-ready|components/alpha_hwr/session.cpp|  transition_to(SessionState::READY,|  transition_to(SessionState::STABILIZING,"
 "session-disconnect-does-not-reach-idle|components/alpha_hwr/session.cpp|  transition_to(SessionState::IDLE,|  transition_to(SessionState::READY,"
-# Both halves of the APDU length invariant (issue #174). Byte 1 declares the
-# payload byte count in bits 5-0, and two frames shipped declaring a count they
-# did not carry: the single-event write borrowed the layer write's 0xB3 (51)
-# for a 19-byte payload, and the Class 10 setpoint write counted only its float
-# and not the four ID bytes before it. This pump accepts either, so neither was
-# a visible failure -- tests/test_write_operations.cpp now checks every frame
-# any test sends against its own declared length.
+# The APDU length invariant (issue #174). Byte 1 declares the payload byte count
+# in bits 5-0, and two frames shipped declaring a count they did not carry: the
+# single-event write borrowed the layer write's 0xB3 (51) for a 19-byte payload,
+# and the Class 10 setpoint write counted only its float and not the four ID
+# bytes before it. This pump accepts either, so neither was a visible failure --
+# tests/test_write_operations.cpp now checks every frame any test sends against
+# its own declared length.
+#
+# Only one entry remains: the setpoint write is gone (issue #258), and with it
+# `class10-setpoint-opspec-length`. The invariant it covered did not go with it
+# -- the check in the harness is unconditional, and the single-event entry below
+# still exercises it.
 "single-event-opspec-length|components/alpha_hwr/schedule_service.cpp|  // never a visible failure; see the header note.\n  apdu[1] = 0x93;|  // never a visible failure; see the header note.\n  apdu[1] = 0xB3;"
-"class10-setpoint-opspec-length|components/alpha_hwr/control_service.cpp|  apdu[1] = 0x88;  // OpSpec: SET + 8 payload bytes (2 sub + 2 obj + 4 float)|  apdu[1] = 0x84;"
 # The APDU acknowledge field (issue #208). transport.cpp read a Class 10 0x81
 # reply as a short ACK carrying an error code and called the write successful
 # when that byte was zero -- so an Unknown Data Item error whose unknown ID
@@ -797,8 +824,11 @@ MUTATIONS=(
 # returns anything but the APDU Head", App. Prog. Manual fig 3.5 note 1), so it
 # burned a full 3 s window on every layer of every schedule write while
 # quiet_timeout kept the timeout at DEBUG.
+#
+# One fewer than there were converted sends: the setpoint register write is gone
+# (issue #258), so `setpoint-write-not-declared-as-awaiting-an-ack` went with it.
+# Its sibling below covers the same declaration on the write that remains.
 "control-request-not-declared-as-awaiting-an-ack|components/alpha_hwr/control_service.cpp|      /*expect_short_ack=*/true, /*quiet_timeout=*/true);\n\n  if (queue_commit && schedule_callback_) {|      /*expect_short_ack=*/false, /*quiet_timeout=*/true);\n\n  if (queue_commit && schedule_callback_) {"
-"setpoint-write-not-declared-as-awaiting-an-ack|components/alpha_hwr/control_service.cpp|      /*expect_short_ack=*/true, /*quiet_timeout=*/true);\n\n  // Schedule configuration commit after setpoint write|      /*expect_short_ack=*/false, /*quiet_timeout=*/true);\n\n  // Schedule configuration commit after setpoint write"
 "clock-write-expects-a-type-a-set-cannot-return|components/alpha_hwr/time_service.cpp|      apdu, sizeof(apdu), 0, 0,|      apdu, sizeof(apdu), 0x0141, 0,"
 "commit-write-expects-a-type-a-set-cannot-return|components/alpha_hwr/schedule_service.cpp|      apdu, apdu_len, 0, 0,|      apdu, apdu_len, 0xDA01, 0,"
 # Three Object 84 writes made the same mistake, so each gets its own entry: the
