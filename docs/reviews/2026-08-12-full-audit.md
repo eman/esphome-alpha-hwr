@@ -1021,6 +1021,10 @@ doc recipes with it.
 - `callback()` before `pop_front()` — no callback can reach `Transport::reset()`, and
   `std::deque::push_back` preserves element references. 40 chained re-entrant completions,
   sanitizer-clean.
+  **Superseded 2026-08-20 (issue #259):** the premise no longer holds. `reset()` now invokes the
+  queued callbacks rather than dropping them, so a callback that reaches `reset()` would have found
+  its own entry still at the head and been re-entered from inside itself. The order is inverted —
+  `fail_front_command_()` takes the command off the queue first — and the lead is live, not refuted.
 - `control_service` unguarded commit timers — all terminate in a session-ready or cache-valid guard.
 - `flow_buf_` uninitialised (cppcheck) — `setup()` seeds all 30 slots to NaN, every read
   `isnan`-guarded.
