@@ -1098,7 +1098,8 @@
   calling either service. The vacation date-pickers in
   `packages/alpha_hwr_schedule_editor.yaml` are unaffected — they call the
   component directly from a lambda and never pass through this parser — as are
-  `clear_single_event` and `clear_vacation`, whose bounds fit a 32-bit `long`.
+  `clear_single_event`, whose 0–99 bound fits a 32-bit `long`, and
+  `clear_vacation`, which takes no data argument and parses nothing.
 
   Fixed by naming the parse width once and fixing it: every bound and every
   parsed value in the bridge now travels as `long long` via a `ParseInt` alias,
@@ -1110,17 +1111,37 @@
   the Grundfos Home app, is what settles the ceiling: `ClockProgramSingleEvent`,
   object type 220, fixed size 10, declares `begin` and `end` as `uint32_t`.
 
-  No *runtime* test can catch this class, and it is worth being exact about why:
-  the host's `long` is 64 bits, so the firmware refused inputs this suite
-  asserted by name were accepted — `0,4294967295` among them — and it stayed
-  green throughout. A test binary cannot observe a bound narrowing on a word
-  size it does not have. The guard is therefore two `static_assert`s on the
-  parse type, chosen so that between them every build catches the regression:
-  one reduces to `2147483647 >= 4294967295` and fails **only** on the ESP32-C3,
-  reproducing the defect exactly; the other refuses any bound type of
-  implementation-defined width and so fails the host unit-test build as well.
-  Verified by narrowing the alias back and building both: `make -C tests test`
-  stops on the second, `esphome compile` stops on the first.
+  The suite could not see any of this, and the reason is the interesting part:
+  `long` is 64 bits on every host anyone runs these tests on, so the firmware
+  refused inputs this file listed **by name** as accepted — `0,4294967295` among
+  them — and both compiler legs stayed green. The bug was not uncovered. It was
+  covered by an assertion that could not fail.
+
+  So the suite now runs at the target's word size instead of arguing around it.
+  A new CI job, **Unit tests (32-bit long)**, rebuilds `test_api_bridge` with
+  `-m32` on `gcc-multilib` — same file, same assertions, `long` at 32 bits. It
+  needs no new test cases to catch #255: the `0,4294967295` case that was
+  already there fails against the code that shipped the bug. It also catches any
+  future 32-bit narrowing anywhere in that file, which a check aimed at one
+  constant cannot.
+
+  Two `static_assert`s back it up at compile time. One reduces to
+  `2147483647 >= 4294967295` and fails only on an ILP32 target, reproducing the
+  defect exactly. The other ties the bound type to the parse — `long` and
+  `long long` are distinct types even where both are 64 bits wide, so narrowing
+  *either* the alias or `strtoll` back to `strtol` fails on every platform. That
+  second one matters more than it looks: the `strtol` half is a separate
+  regression with the same symptom, and asserting only the alias would have left
+  it bare.
+
+  An earlier version of that assert is worth recording, because it verified
+  clean and was wrong. It allowed any bound type spelled `long long` **or**
+  `int64_t`, reasoning that both are of guaranteed width. On glibc LP64 —
+  which is what CI runs the unit tests on — `int64_t` *is* `long`, so
+  `ParseInt = long` satisfied the allowlist and the assert passed. It fired only
+  on hosts where `int64_t` is `long long`, and the author's machine is one of
+  those. A check that depends on which spelling a platform picked for a typedef
+  is not a check.
 
   Verified on the pump. `set_single_event` with a near-future window settles
   `accepted` at `seq: 2` where it previously answered `invalid` at `seq: 0`; a

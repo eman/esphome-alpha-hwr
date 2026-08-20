@@ -414,20 +414,32 @@ static void test_partially_numeric_arguments_are_rejected() {
 // The counterpart: well-formed input must still be accepted, or the strictness
 // above would be indistinguishable from rejecting everything.
 //
-// One limit worth stating rather than implying. These assertions pin the
-// contract, but no runtime assertion here could have caught the defect that
-// made three of them necessary (#255): `long` is 64 bits on this host and 32 on
-// the ESP32-C3, so a bound that narrows on the pump is exact in this binary.
-// Every case below passed while the firmware refused all of them, this file
-// included `0,4294967295` in the accepted list the whole time, and the suite
-// stayed green. The width is the thing under test and the host has the wrong
-// one.
+// Read the epoch cases below in the light of HOW this file is built, because on
+// a 64-bit host most of them are documentation and it took issue #255 to notice.
 //
-// What catches it is a pair of static_asserts on the parse type in
-// api_bridge.cpp -- which this build compiles, so the second of them fails
-// HERE, not only in CI's firmware build. That is the honest division: the
-// compile-time check owns the width, and the cases below own the boundaries,
-// where a mutation on the epoch ceiling dies against them.
+// `long` is 64 bits here and 32 on the ESP32-C3. The bound that broke #255
+// narrowed only at the target's width, so every case below passed while the
+// firmware refused all of them -- `0,4294967295` sat in this accepted list the
+// whole time, both compiler legs green. The bug was not uncovered. It was
+// covered by an assertion that could not fail.
+//
+// `make test-ilp32` is the answer to that, and CI runs it as "Unit tests
+// (32-bit long)": this same file rebuilt with -m32, so `long` is 32 bits and
+// these assertions mean at the target's width what they claim at the host's.
+// Nothing here is written twice and nothing is a replica.
+//
+// Which leg earns which case is worth being exact about:
+//
+//   - At 64 bits, the three epoch cases added with #255 are documentation.
+//     They pass identically against the broken code -- verified by restoring it
+//     and running them. They are kept for what they say, not for what they
+//     catch, and the pre-existing `0,4294967295` is what kills a mutation on
+//     the epoch ceiling.
+//   - At 32 bits they are load-bearing, and they divide the defect in two:
+//     `0,4294967295` fails on the narrowed BOUND, and `2147483648,2147483649`
+//     fails on the narrowed PARSE, where a 32-bit std::strtol saturates at
+//     2147483647 and reports ERANGE. Both halves shipped; each needs its own
+//     case.
 static void test_well_formed_arguments_still_reach_the_operation_layer() {
   std::cout << "\n=== well-formed arguments are still accepted ===" << std::endl;
 

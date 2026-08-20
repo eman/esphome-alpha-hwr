@@ -1,9 +1,11 @@
 #include "api_bridge.h"
 #ifdef ALPHA_HWR_HAS_API_BRIDGE
 
+#include <cerrno>
 #include <cmath>
 #include <cstdint>
 #include <cstdio>
+#include <cstdlib>
 #include <limits>
 #include <map>
 #include <type_traits>
@@ -153,18 +155,21 @@ static_assert(std::numeric_limits<ParseInt>::max() >= 4294967295LL,
               "ParseInt must hold the wire's uint32 ceiling at every word size; "
               "`long` does not on the ESP32-C3 (issue #255)");
 
-// (2) Structural, and the one the HOST can make. No runtime test can catch a
-// bound that narrows on a word size the test binary does not have -- so the
-// check the host is capable of is that bounds are never carried in a type whose
-// width is implementation-defined. `long long` and `int64_t` both promise at
-// least the 64 bits this parser needs; `long` promises 32. Where a platform
-// makes `int64_t` an alias of `long`, `long` is 64 bits there and admitting it
-// is correct. Narrow the alias back and the unit-test build fails too, not just
-// the firmware build.
-static_assert(std::is_same<ParseInt, long long>::value ||
-                  std::is_same<ParseInt, int64_t>::value,
-              "bounds must travel in a type of guaranteed width; `long` is 32 bits on "
-              "the ESP32-C3 and 64 here, and that difference is issue #255");
+// (2) is not here. It is beside the parse itself, a few lines down, because the
+// width story has two halves and asserting only this one leaves the other bare:
+// `std::strtol` saturates at 2147483647 on a 32-bit `long` and reports ERANGE,
+// which this function treats as a rejection, so a parse narrowed back to
+// `strtol` refuses every post-2038 epoch even with the alias left wide. Tying
+// the alias TO the parse covers both halves at once, and does it on every
+// platform -- see the assert in parse_int_field().
+//
+// An earlier attempt asserted the alias against an allowlist of
+// guaranteed-width spellings, `long long` or `int64_t`. That is wrong in a way
+// worth recording, because it verified clean on the author's machine: on glibc
+// LP64 -- which is what CI runs the unit tests on -- `int64_t` IS `long`, so
+// `ParseInt = long` satisfies the allowlist and the assert passes. It fired only
+// on hosts where `int64_t` is `long long`, and the author's is one. A check that
+// depends on which spelling a platform picked for a typedef is not a check.
 
 /// Whole-string decimal parse. Rejects an empty field, leading/trailing
 /// characters of any kind (including whitespace), and anything outside
@@ -179,7 +184,17 @@ static bool parse_int_field(const std::string &s, ParseInt lo, ParseInt hi, Pars
   if (!starts_cleanly) return false;
   errno = 0;
   char *end = nullptr;
-  const ParseInt v = std::strtoll(s.c_str(), &end, 10);
+  const auto v = std::strtoll(s.c_str(), &end, 10);
+  // (2) Structural, and the one every build can make -- host and firmware
+  // alike, whatever a platform calls its 64-bit types. It ties the alias to the
+  // parse: narrow either one and `long` meets `long long`, which are distinct
+  // types even where both are 64 bits wide, so this fails everywhere rather
+  // than only where the widths differ. Assert (1) is what reproduces #255 on
+  // the target; this is what stops it reaching the target at all.
+  static_assert(std::is_same<decltype(v), const ParseInt>::value,
+                "the bound type and the parse must be the same wide type: a `long` bound "
+                "narrows to -1 on the ESP32-C3, and a `strtol` parse saturates at "
+                "2147483647 and reports ERANGE, which this function rejects (issue #255)");
   // Each condition is hoisted into its own name and its own statement so
   // mutation_check.sh has a pipe-free line per rule to anchor to: entries are
   // split with IFS='|', which truncates any search string containing `||`.

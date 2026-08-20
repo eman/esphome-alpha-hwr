@@ -80,6 +80,47 @@ jobs:
           fi
 
   # ---------------------------------------------------------------------------
+  # The same tests at the target's word size. Issue #255: an epoch bound of
+  # 4294967295 was passed as a `long` parameter, narrowed to -1 on the ESP32-C3
+  # (RISC-V, ILP32), and made `set_single_event` and `set_vacation` refuse every
+  # input on real hardware -- while this suite listed `0,4294967295` among the
+  # ACCEPTED inputs and stayed green on both compilers, because `long` is 64
+  # bits on every host that runs them.
+  #
+  # This job removes that asymmetry instead of arguing around it: same test
+  # file, same assertions, `long` at 32 bits. It needs no new test cases -- the
+  # assertion that was already there fails here against the code that shipped
+  # the bug.
+  #
+  # Separate from unit-tests rather than a third matrix leg: it builds one
+  # binary, not the suite, and a failure should read as "the parser is not
+  # word-size clean" rather than as a compiler leg breaking.
+  # ---------------------------------------------------------------------------
+  unit-tests-ilp32:
+    name: Unit tests (32-bit long)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install 32-bit toolchain
+        run: sudo apt-get update && sudo apt-get install -y gcc-multilib g++-multilib
+
+      # The Makefile target SKIPS when -m32 is unavailable, which is right for a
+      # developer checkout and wrong here: a job that silently skips is a job
+      # that proves nothing. Fail loudly on a missing multilib instead.
+      - name: Confirm -m32 is actually available
+        run: |
+          printf 'int main(){return 0;}' > probe.c
+          if ! g++ -m32 probe.c -o probe; then
+            echo "::error::-m32 unavailable, so the ILP32 leg would skip rather than run"
+            exit 1
+          fi
+
+      - name: Run the bridge tests with a 32-bit long
+        run: make test-ilp32
+        working-directory: tests
+
+  # ---------------------------------------------------------------------------
   # Host unit tests, on both compilers. clang and gcc disagree often enough
   # about warnings and about UB in constant expressions to be worth both.
   # ---------------------------------------------------------------------------
