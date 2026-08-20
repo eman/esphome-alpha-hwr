@@ -853,6 +853,39 @@ MUTATIONS=(
 # And the window, which bounds how long an unpaid debt lingers.
 "stale-reply-window-never-expires|components/alpha_hwr/transport.cpp|  if (millis() - this->owed_since_ms_ >= STALE_REPLY_WINDOW_MS) {|  if (false) {"
 "stale-reply-window-too-short-for-the-tail|components/alpha_hwr/transport.h|  static constexpr uint32_t STALE_REPLY_WINDOW_MS = 500;|  static constexpr uint32_t STALE_REPLY_WINDOW_MS = 60;"
+# Issue #259: what happens to a command nobody will ever answer.
+#
+# reset() used to clear the queue in silence, so a service with a read in flight
+# heard nothing again -- no reply, no failure, and no timeout either, because the
+# timeout lived in the queue entry that was just discarded. The suite pinned that
+# as a hazard rather than testing against it. These four say the repair holds.
+"reset-drops-callbacks-silently|components/alpha_hwr/transport.cpp|  abandon_queue_();|  command_queue_.clear();"
+"reset-reports-success-to-what-it-abandons|components/alpha_hwr/transport.cpp|    if (cmd.callback) {\n      cmd.callback(false, nullptr, 0);|    if (cmd.callback) {\n      cmd.callback(true, nullptr, 0);"
+# A read chain continues past a failed step by sending the next read from inside
+# the callback. Those land back in the queue the drain just emptied; without this
+# loop the chain stops half-unwound and its caller's on_complete is never
+# reached -- the original hang, moved one command along.
+"reset-leaves-half-unwound-chains-queued|components/alpha_hwr/transport.cpp|    while (!this->command_queue_.empty()) {|    while (false) {"
+# And the drain is bounded, because a chain that re-sends on every failure would
+# otherwise spin until the task watchdog fires. Mutated to a cap of zero rather
+# than to no cap at all: removing it entirely makes the suite HANG, which this
+# script reports as its own outcome and which would cost every full sweep the
+# whole test timeout.
+"abandon-drain-cap-stops-it-dead|components/alpha_hwr/transport.h|  static constexpr size_t MAX_ABANDON_STEPS = 512;|  static constexpr size_t MAX_ABANDON_STEPS = 0;"
+# The inbound overflow is the other half. It runs on a LIVE link -- a corrupt
+# fragment declaring a long frame is enough -- and it used to reach reset(), so
+# one bad fragment cancelled every read in flight with nothing telling any
+# caller. Two entries: the guard has to fire, and firing it must not cancel
+# commands the pump may still answer.
+"inbound-overflow-never-drops-the-partial|components/alpha_hwr/transport.cpp|  if (reassembly_buffer_.size() > MAX_PACKET_SIZE) {|  if (false) {"
+"inbound-overflow-cancels-the-queue|components/alpha_hwr/transport.cpp|  if (reassembly_buffer_.size() > MAX_PACKET_SIZE) {|  if (reassembly_buffer_.size() > MAX_PACKET_SIZE) { reset(); return; } if (false) {"
+# Deliberate absence: abandon_queue_()'s `if (this->abandoning_) return;` guard.
+# Confirmed by experiment to be an equivalent mutant -- the nested call finds the
+# queue already swapped out and returns at the emptiness check one line above, so
+# no observable behaviour changes. It is kept because without it a callback that
+# queues a command AND calls reset() recurses one drain deep per nesting, and
+# unbounded recursion on a part with ~8 KB of stack is not a risk worth taking
+# for a line that costs nothing.
 # Issue #253: the other four Class 10 sends, and the gate that lets any of them
 # be answered.
 #

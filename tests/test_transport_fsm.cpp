@@ -2,6 +2,7 @@
 #include <vector>
 #include <cstdint>
 #include <string>
+#include <functional>
 #include "fixture_crc.h"
 #include "../components/alpha_hwr/transport.h"
 #include "../components/alpha_hwr/frame_builder.h"
@@ -572,26 +573,119 @@ void test_a_command_honours_its_own_timeout_not_the_default() {
               "shows the caller's value was the one in force");
 }
 
-// ── reset() drops queued callbacks without invoking them ────────────────────
-// Not a desirable property -- a hazard, pinned so it stays visible. reset() is
-// reachable on a live link from one corrupt inbound fragment, and any service
-// with a read in flight when it happens waits forever: DeviceInfoService,
-// ScheduleService and TelemetryService all queue commands with callbacks.
-//
-// The opening sequence carried a whole-sequence backstop for exactly this, and
-// tests/test_auth.cpp was the only place the hazard was demonstrated. Both are
-// gone (issue #174), so this case exists to keep the hazard in the tree.
-//
-// The better repair is to fire each queued callback with failure from reset()
-// itself, which would let this assertion be inverted. Nobody has done it.
-void test_reset_abandons_a_pending_command_without_telling_it() {
-  std::cout << "\n=== reset() abandons a pending command silently ===" << std::endl;
+// ── An inbound overflow is a loss of frame sync, not a disconnect ───────────
+// on_notification() gives up on a partial frame once it passes MAX_PACKET_SIZE.
+// That call used to be reset(), which cancels the command queue -- so a single
+// corrupt fragment declaring a long frame could strand every read in flight on
+// a LIVE link, with nothing telling any caller. That is the reachability issue
+// #259 named, and these pin the two paths apart: the commands are still
+// outstanding, the pump may still answer them, and if it does not, each one's
+// own timeout says so.
+
+/// Feed a partial frame that declares 259 bytes and never ends, until the
+/// reassembly buffer passes its cap. No time passes, so the staleness guard
+/// cannot be what ends it.
+static void overflow_the_reassembly_buffer(
+    esphome::alpha_hwr::core::Transport &transport) {
+  std::vector<uint8_t> head(20, 0x11);
+  head[0] = 0x24;
+  head[1] = 0xFF;   // 255 + 4 = a 259-byte frame, longer than the buffer allows
+  transport.on_notification(head.data(), head.size());
+  const std::vector<uint8_t> more(20, 0x22);
+  for (int i = 0; i < 13; i++) {
+    transport.on_notification(more.data(), more.size());
+  }
+}
+
+void test_an_inbound_overflow_does_not_cancel_a_command_in_flight() {
+  std::cout << "\n=== an inbound overflow leaves the queue alone ===" << std::endl;
   esphome::alpha_hwr::core::Transport transport;
   transport.set_write_callback([](const uint8_t *, size_t) -> bool { return true; });
 
   int cb_calls = 0;
+  bool ok_reported = true;
   transport.send_command(std::vector<uint8_t>(10, 0xAA), 0, 0,
-                         [&](bool, const uint8_t *, size_t) { cb_calls++; },
+                         [&](bool ok, const uint8_t *, size_t) {
+                           cb_calls++;
+                           ok_reported = ok;
+                         },
+                         /*timeout_ms=*/1000);
+  mock_millis += 50;
+  transport.loop();   // on the wire, awaiting a response
+
+  overflow_the_reassembly_buffer(transport);
+  transport.loop();
+
+  TEST_ASSERT(cb_calls == 0,
+              "the command is still outstanding -- losing inbound frame sync "
+              "says nothing about whether the pump will answer it");
+  TEST_ASSERT(!transport.is_reassembling(),
+              "  ...and the partial frame itself is gone, which is the part "
+              "that had to happen");
+
+  // And it still has the timeout it always had, which is how its caller finds
+  // out if the frame that overflowed WAS the reply it was waiting for.
+  mock_millis += 1100;
+  transport.loop();
+  TEST_ASSERT(cb_calls == 1 && !ok_reported,
+              "  ...and it reports failure on its own timeout, through the path "
+              "every caller already handles");
+}
+
+void test_an_inbound_overflow_keeps_the_peer_resync_hold() {
+  std::cout << "\n=== an inbound overflow does not release the resync hold ==="
+            << std::endl;
+  esphome::alpha_hwr::core::Transport transport;
+
+  int chunks = 0;
+  std::vector<uint8_t> first_bytes;
+  transport.set_write_callback([&](const uint8_t *data, size_t len) -> bool {
+    chunks++;
+    if (len > 0) first_bytes.push_back(data[0]);
+    return chunks != 2;  // chunk 1 lands, chunk 2 fails: a partial at the peer
+  });
+
+  transport.send_command(std::vector<uint8_t>(53, 0xAA), 0, 0, nullptr);
+  transport.send_command(std::vector<uint8_t>(10, 0xBB), 0, 0, nullptr);
+  for (int i = 0; i < 2; i++) { mock_millis += 51; transport.loop(); }
+  TEST_ASSERT(chunks == 2, "the second chunk failed, so the hold is armed");
+
+  overflow_the_reassembly_buffer(transport);
+
+  // Same boundary as test_partial_write_holds_off_so_the_peer_can_resync(), for
+  // the same reason. The old code reached this through reset(), which clears the
+  // hold, and had to save and restore it by hand around the call.
+  for (uint32_t t = 0; t < 950; t++) { mock_millis += 1; transport.loop(); }
+  bool sent_during_hold = false;
+  for (uint8_t b : first_bytes) if (b == 0xBB) sent_during_hold = true;
+  TEST_ASSERT(!sent_during_hold,
+              "the next command is still withheld -- an inbound overflow does "
+              "not tell us the peer stopped holding our partial frame");
+
+  for (uint32_t t = 0; t < 400; t++) { mock_millis += 1; transport.loop(); }
+  for (uint8_t b : first_bytes) if (b == 0xBB) sent_during_hold = true;
+  TEST_ASSERT(sent_during_hold, "  ...and it goes out once the hold elapses");
+}
+
+// ── reset() fails what it abandons, rather than dropping it ─────────────────
+// This block used to pin the opposite -- a hazard, asserted so it stayed
+// visible: reset() cleared the queue silently, so a service with a read in
+// flight heard nothing ever again, no success, no failure, and no timeout
+// because the timeout went with the queue entry. The opening sequence carried a
+// whole-sequence backstop for exactly that, and it went away with the sequence
+// (issue #174), leaving nothing (issue #259).
+void test_reset_fails_a_pending_command_instead_of_dropping_it() {
+  std::cout << "\n=== reset() fails a pending command ===" << std::endl;
+  esphome::alpha_hwr::core::Transport transport;
+  transport.set_write_callback([](const uint8_t *, size_t) -> bool { return true; });
+
+  int cb_calls = 0;
+  bool reported_success = true;
+  transport.send_command(std::vector<uint8_t>(10, 0xAA), 0, 0,
+                         [&](bool ok, const uint8_t *, size_t) {
+                           cb_calls++;
+                           reported_success = ok;
+                         },
                          /*timeout_ms=*/1000);
 
   mock_millis += 50;
@@ -599,13 +693,151 @@ void test_reset_abandons_a_pending_command_without_telling_it() {
 
   transport.reset();
 
+  TEST_ASSERT(cb_calls == 1,
+              "the abandoned command's callback fires, so the caller learns the "
+              "read is over instead of waiting for a reply the link can no "
+              "longer carry");
+  TEST_ASSERT(!reported_success,
+              "  ...and it fires with failure, the same verdict a timeout gives");
+
   mock_millis += 10000;   // ten times the command's own window
   transport.loop();
+  TEST_ASSERT(cb_calls == 1, "  ...exactly once; nothing fires it again later");
+}
 
-  TEST_ASSERT(cb_calls == 0,
-              "The callback never fires -- reset() dropped the command, and the "
-              "timeout that would have failed it went with the queue entry. A "
-              "caller waiting on this reply waits forever.");
+// A command that has not been sent yet is owed the same answer as one in
+// flight. It never reached AWAITING_RESPONSE, so it never had a timeout of its
+// own to fall back on -- it is the case with no other way out at all.
+void test_reset_fails_a_command_that_never_went_out() {
+  std::cout << "\n=== reset() fails an unsent command too ===" << std::endl;
+  esphome::alpha_hwr::core::Transport transport;
+  transport.set_write_callback([](const uint8_t *, size_t) -> bool { return true; });
+
+  int first = 0, second = 0;
+  transport.send_command(std::vector<uint8_t>(10, 0xAA), 0, 0,
+                         [&](bool, const uint8_t *, size_t) { first++; }, 1000);
+  transport.send_command(std::vector<uint8_t>(10, 0xBB), 0, 0,
+                         [&](bool, const uint8_t *, size_t) { second++; }, 1000);
+
+  mock_millis += 50;
+  transport.loop();   // only the first one is on the wire
+
+  transport.reset();
+
+  TEST_ASSERT(first == 1 && second == 1,
+              "both the in-flight command and the one still queued behind it "
+              "report failure");
+}
+
+// The reason the drain exists rather than a plain loop over the queue: a read
+// chain continues past a failed step by sending the next read from inside the
+// callback. Those land in the queue reset() has just emptied, and if they are
+// left there they are precisely the thing clearing the queue was meant to
+// prevent -- a write from the dead connection running on the next one.
+void test_reset_takes_the_commands_its_own_callbacks_queue() {
+  std::cout << "\n=== reset() unwinds a chain that re-sends on failure ==="
+            << std::endl;
+  esphome::alpha_hwr::core::Transport transport;
+  std::vector<std::vector<uint8_t>> writes;
+  transport.set_write_callback([&writes](const uint8_t *d, size_t n) -> bool {
+    writes.push_back(std::vector<uint8_t>(d, d + n));
+    return true;
+  });
+
+  // A four-step chain, shaped like HistoryService's: each failure sends the
+  // next read, and the last step reports the whole read complete.
+  int steps = 0;
+  bool chain_finished = false;
+  std::function<void(int)> read_next = [&](int idx) {
+    if (idx >= 4) {
+      chain_finished = true;
+      return;
+    }
+    steps++;
+    transport.send_command(std::vector<uint8_t>(10, (uint8_t) idx), 0, 0,
+                           [&, idx](bool, const uint8_t *, size_t) {
+                             read_next(idx + 1);
+                           },
+                           1000);
+  };
+  read_next(0);
+
+  mock_millis += 50;
+  transport.loop();
+  const size_t writes_before = writes.size();
+
+  transport.reset();
+
+  TEST_ASSERT(steps == 4,
+              "the chain walked all four steps rather than stalling on the one "
+              "that was in flight");
+  TEST_ASSERT(chain_finished,
+              "  ...and reached its terminal branch, which is where a caller's "
+              "on_complete lives");
+
+  // Nothing the unwind queued may still be sitting there waiting for a link.
+  mock_millis += 5000;
+  for (int i = 0; i < 20; i++) {
+    mock_millis += 51;
+    transport.loop();
+  }
+  TEST_ASSERT(writes.size() == writes_before,
+              "  ...and not one of the commands it queued while unwinding was "
+              "sent afterwards");
+}
+
+// A callback that resets the transport it is being reset by. The guard makes the
+// nested call a no-op over a queue the outer drain already owns; without it the
+// same commands are drained twice and each callback fires twice.
+void test_reset_from_inside_an_abandoned_callback_does_not_double_fire() {
+  std::cout << "\n=== reset() re-entered from a callback ===" << std::endl;
+  esphome::alpha_hwr::core::Transport transport;
+  transport.set_write_callback([](const uint8_t *, size_t) -> bool { return true; });
+
+  int a = 0, b = 0;
+  transport.send_command(std::vector<uint8_t>(10, 0xAA), 0, 0,
+                         [&](bool, const uint8_t *, size_t) {
+                           a++;
+                           transport.reset();   // re-entrant
+                         },
+                         1000);
+  transport.send_command(std::vector<uint8_t>(10, 0xBB), 0, 0,
+                         [&](bool, const uint8_t *, size_t) { b++; }, 1000);
+
+  mock_millis += 50;
+  transport.loop();
+
+  transport.reset();
+
+  TEST_ASSERT(a == 1 && b == 1,
+              "each abandoned callback fires exactly once even though one of "
+              "them called reset() again");
+}
+
+// The drain is bounded. A chain that answers every failure with another send
+// would otherwise spin here until the task watchdog fires -- a panic in place of
+// a stranded read, which is the worse of the two.
+void test_a_chain_that_never_stops_re_sending_hits_the_cap() {
+  std::cout << "\n=== an endless re-send chain is capped, not spun ==="
+            << std::endl;
+  esphome::alpha_hwr::core::Transport transport;
+  transport.set_write_callback([](const uint8_t *, size_t) -> bool { return true; });
+
+  int steps = 0;
+  std::function<void()> again = [&]() {
+    steps++;
+    transport.send_command(std::vector<uint8_t>(10, 0xAA), 0, 0,
+                           [&](bool, const uint8_t *, size_t) { again(); }, 1000);
+  };
+  again();
+
+  mock_millis += 50;
+  transport.loop();
+
+  transport.reset();   // must return, and must not recurse into the stack
+
+  TEST_ASSERT(steps > 1 && steps <= 600,
+              "the drain stopped at its cap instead of running forever");
 }
 
 // ── A refused Class 10 write reports failure, not success or silence ────────
@@ -1072,7 +1304,13 @@ int main() {
   test_first_chunk_failure_does_not_hold_off();
   test_missing_write_callback_drops_the_command();
   test_a_command_honours_its_own_timeout_not_the_default();
-  test_reset_abandons_a_pending_command_without_telling_it();
+  test_an_inbound_overflow_does_not_cancel_a_command_in_flight();
+  test_an_inbound_overflow_keeps_the_peer_resync_hold();
+  test_reset_fails_a_pending_command_instead_of_dropping_it();
+  test_reset_fails_a_command_that_never_went_out();
+  test_reset_takes_the_commands_its_own_callbacks_queue();
+  test_reset_from_inside_an_abandoned_callback_does_not_double_fire();
+  test_a_chain_that_never_stops_re_sending_hits_the_cap();
   test_a_late_reply_costs_one_match_and_no_more();
   test_the_reply_debt_is_paid_down_and_expires();
   test_an_oversize_apdu_is_refused();

@@ -320,18 +320,30 @@ void Transport::on_notification(const uint8_t* data, size_t len) {
 
   // Safety: Check buffer overflow
   if (reassembly_buffer_.size() > MAX_PACKET_SIZE) {
-    ESP_LOGW(TAG, "Reassembly buffer overflow (%d bytes), clearing", 
-             reassembly_buffer_.size());
-    // reset() clears the peer-resync hold, which is right on a disconnect and
-    // wrong here: this path runs on a LIVE link, so a partial frame we left at
-    // the pump is still sitting there. Preserve the hold across it rather than
-    // letting an inbound overflow hand the next command straight back into the
-    // wreckage.
-    const bool hold = peer_resync_pending_;
-    const uint32_t hold_started = peer_resync_started_ms_;
-    reset();
-    peer_resync_pending_ = hold;
-    peer_resync_started_ms_ = hold_started;
+    ESP_LOGW(TAG, "Reassembly buffer overflow (%d bytes); dropping the partial frame",
+             (int) reassembly_buffer_.size());
+    // Inbound frame sync, and nothing else. This used to call reset(), which
+    // cancels the command queue -- so one corrupt fragment on a LIVE link could
+    // strand every read in flight, which is issue #259's whole subject. The two
+    // paths are not the same event:
+    //
+    //   - reset() is the disconnect. The commands cannot be answered because
+    //     there is no link, and the component terminal-events every consumer in
+    //     the same breath (invalidate_cache, write_op_service.on_disconnect,
+    //     the read-chain generation bump).
+    //   - This is a live link that has lost track of where a frame begins. The
+    //     commands are still outstanding and the pump may well still answer
+    //     them. Nothing here tells any consumer that anything happened, and
+    //     nothing needs to: if the frame we lost was a reply someone was
+    //     waiting for, that command's own timeout reports the failure, which is
+    //     the path every caller already handles.
+    //
+    // Leaving the queue alone also means the peer-resync hold and the reply
+    // debt survive on their own, instead of being saved and restored around a
+    // call that should never have been made here.
+    reassembling_ = false;
+    reassembly_buffer_.clear();
+    expected_packet_length_ = 0;
     return;
   }
 
@@ -395,29 +407,71 @@ void Transport::reset() {
   reassembling_ = false;
   reassembly_buffer_.clear();
   expected_packet_length_ = 0;
-  // Discard any queued commands and pending response handlers so stale BLE
-  // writes from the previous connection do not execute on the next connect.
-  command_queue_.clear();
   pending_handlers_.clear();
   // The peer's partial frame died with the link, so a hold armed before the
-  // drop would stall the first second of the next connection for nothing.
-  //
-  // True of the disconnect caller, which is what this is for. reset() is also
-  // reached from on_notification()'s buffer-overflow path on a LIVE link, where
-  // it is NOT true -- that call site saves and restores the hold itself rather
-  // than relying on this.
+  // drop would stall the first second of the next connection for nothing. This
+  // is the disconnect path and only the disconnect path; the inbound overflow
+  // in on_notification() no longer comes through here, so it no longer has to
+  // save and restore this around the call.
   peer_resync_pending_ = false;
   // Same reasoning for the reply debt (issue #248): a reply owed by a command on
   // the connection that just died is not coming, and carrying the debt across
   // would spend the next connection's first acknowledgement paying it off.
-  //
-  // The live-link overflow caller is the awkward case here as well: on that path
-  // a reply genuinely may still arrive. Clearing is the safer of the two errors
-  // -- it costs at most one misattributed frame, where keeping it costs a real
-  // acknowledgement -- and the overflow path has already lost frame sync anyway.
   owed_pending_ = false;
   owed_replies_ = 0;
   state_ = State::IDLE;
+  // Last, because the callbacks it invokes run service code, and that code must
+  // see a transport that is already down rather than one still holding the
+  // wreckage of the connection it is being told about.
+  abandon_queue_();
+}
+
+void Transport::abandon_queue_() {
+  if (this->command_queue_.empty()) return;
+  // Reached from a callback this drain is already running. The outer loop still
+  // owns the queue and will collect whatever that callback left in it.
+  if (this->abandoning_) return;
+
+  this->abandoning_ = true;
+  std::deque<Command> abandoned;
+  abandoned.swap(this->command_queue_);
+
+  size_t steps = 0;
+  while (!abandoned.empty()) {
+    if (steps >= MAX_ABANDON_STEPS) {
+      // Never silent. Reaching this means a chain is answering every failure
+      // with another send, and the caller it belongs to is about to be stranded
+      // the way every caller used to be -- worth a line in the log saying so.
+      ESP_LOGE(TAG,
+               "Abandon drain hit its %zu-step cap with %zu command(s) still queued; "
+               "dropping them without telling their callers",
+               (size_t) MAX_ABANDON_STEPS, abandoned.size());
+      break;
+    }
+    steps++;
+
+    Command cmd = std::move(abandoned.front());
+    abandoned.pop_front();
+    if (cmd.callback) {
+      cmd.callback(false, nullptr, 0);
+    }
+
+    // A chain that continues past a failed step sends its next read from inside
+    // that callback. Take those too: the point of clearing the queue was that a
+    // write from the dead connection must not run on the next one, and a
+    // half-unwound chain left sitting in the queue is exactly that write.
+    while (!this->command_queue_.empty()) {
+      abandoned.push_back(std::move(this->command_queue_.front()));
+      this->command_queue_.pop_front();
+    }
+  }
+
+  this->abandoning_ = false;
+  // The drain leaves nothing behind, including anything a callback queued on the
+  // last step before the cap.
+  this->command_queue_.clear();
+  this->state_ = State::IDLE;
+  ESP_LOGD(TAG, "Abandoned %zu queued command(s)", steps);
 }
 
 void Transport::register_response_handler(uint16_t object_id, uint16_t sub_id, ResponseCallback callback) {

@@ -1080,6 +1080,45 @@
 
 ### Fixed
 
+- **A read in flight when the link dropped was never told, and one corrupt
+  inbound fragment could do the same thing to a live link** (issue #259).
+  `Transport::reset()` cleared the command queue without invoking the queued
+  commands' callbacks. A service waiting on a reply therefore heard nothing ever
+  again — no reply, no failure, and no timeout either, because the timeout lived
+  in the queue entry that had just been discarded.
+
+  Every consumer that survives this today survives it because somebody wired it
+  a *separate* hook for the same event: `WriteOperationService::on_disconnect()`
+  (issue #92), the read-chain generation counter (issue #18),
+  `ControlService::invalidate_cache()`. That is three hand-written compensations
+  for one missing contract, and a fourth caller — the next `*_async` read anyone
+  adds — gets none of them. The opening sequence used to carry a whole-sequence
+  backstop for exactly this and it went away with the sequence (issue #174),
+  which is what the reporter noticed.
+
+  `reset()` now fails what it abandons: each queued callback is invoked with
+  `(false, nullptr, 0)`, the same verdict a timeout delivers, so a multi-command
+  read unwinds through the failure branch it already has and reaches its
+  caller's `on_complete`. A chain that continues past a failed step sends its
+  next read from inside that callback, so those are taken into the same drain —
+  otherwise the unwind stops half-done and the hang has only moved one command
+  along. The drain is a loop rather than a recursion because the longest chain
+  in the tree is as long as the pump says it is (`EventLogService` reads
+  `min(available_entries, max_entries)`, both straight off the wire), and it is
+  capped so that a chain re-sending on every failure cannot spin the task
+  watchdog into a panic.
+
+  The second half is the live-link path the reporter supplied evidence for. When
+  the reassembly buffer overflows, `on_notification()` used to call `reset()` —
+  so one corrupt fragment declaring a long frame cancelled every read in flight,
+  with nothing telling any caller, on a link that was still up. It now drops the
+  partial frame and nothing else. Losing track of where a frame begins says
+  nothing about whether the pump will answer the commands we already sent; if
+  the frame that overflowed *was* someone's reply, that command's own timeout
+  reports it, through the path every caller already handles. The peer-resync
+  hold and the reply debt now survive that path on their own, instead of being
+  saved and restored by hand around a call that should not have been there.
+
 - **Setpoint validation used hardcoded ranges; the pump publishes its own, per
   mode, and they are much narrower** (issue #273). `run_set_setpoint_` bounded a
   requested setpoint against constants inherited from the legacy setters. They
