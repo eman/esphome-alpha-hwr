@@ -123,6 +123,23 @@ class TimeService {
    */
   bool current_time(ESPTime &out) const;
 
+  /**
+   * @brief The node's wall clock as a Unix timestamp, or 0 when there is none.
+   *
+   * The same test current_time() applies, reduced to the one number a caller
+   * comparing against pump timestamps actually wants. **0 is not a time**: it
+   * is "this node cannot tell you what time it is", and a caller that treats it
+   * as an instant has silently claimed 1970.
+   *
+   * That distinction is the whole of issue #262 on the other side. The
+   * single-event slot picker decides which stored events have expired by
+   * comparing them against a reference timestamp; handed a wrong one it
+   * overwrites live events. It reads 0 as "expire nothing", which is the safe
+   * direction -- a picker that cannot tell the time should refuse to reuse
+   * anything rather than reuse everything.
+   */
+  uint32_t now_unix() const;
+
   /// True when a configured time source has produced a plausible wall clock.
   ///
   /// The same test current_time() applies, without the logging or the out

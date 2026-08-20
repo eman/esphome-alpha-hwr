@@ -236,6 +236,17 @@ struct PumpSim {
 static int g_apdu_length_violations = 0;
 static std::vector<std::string> g_apdu_length_violation_detail;
 
+/// What the node's wall clock reads the instant a Harness is built:
+/// 2026-08-07 12:00:00 UTC. `PumpSim::clock_epoch` happens to carry the same
+/// literal, and the two are unrelated -- nothing below reads the pump's clock,
+/// verified by driving the sim's to 2000 and to 2040 without moving a single
+/// assertion. Change one and the other does not follow. Named because the single-event tests express their
+/// fixtures relative to it -- which slots the picker may recycle is a question
+/// about NOW, not about the event being written (issue #262), so a fixture
+/// whose timestamps sit in 1970 says something different from what it looks
+/// like it says.
+static constexpr time_t NODE_EPOCH_AT_BOOT = 1786104000;
+
 struct Harness {
   Transport transport;
   Session session;
@@ -248,7 +259,7 @@ struct Harness {
   TimeService time_service{&transport};
   // Epoch the node clock reads at node_clock_base_ms; advance() carries it
   // forward with mock time so the confirm sees two clocks that both run.
-  time_t node_epoch{1786104000};
+  time_t node_epoch{NODE_EPOCH_AT_BOOT};
   uint32_t node_clock_base_ms{0};
   WriteOperationService write_op{control, schedule, time_service};
   PumpSim sim;
@@ -788,6 +799,34 @@ struct Harness {
   // It does not reach the Obj 91 read: get_mode_async() does not chain into it,
   // and temp_limits_known() is false after this returns. Use prime_temp_limits()
   // when a test needs the pump's on/off-time limits.
+  /// Seed one slot on the simulated pump with an enabled event.
+  ///
+  /// The ten bytes are the wire layout -- enabled, action, begin BE32, end
+  /// BE32 -- and writing them by hand is how a fixture ends up claiming a
+  /// "live" event whose timestamps are in 1970. Which slots the picker may
+  /// recycle is now judged against the node's wall clock (issue #262), so a
+  /// fixture's timestamps have to mean what the test says they mean.
+  void seed_single_event(uint8_t slot, uint8_t action, uint32_t begin, uint32_t end) {
+    uint8_t *s = sim.single_events[slot];
+    s[0] = 0x01;
+    s[1] = action;
+    s[2] = static_cast<uint8_t>(begin >> 24);
+    s[3] = static_cast<uint8_t>(begin >> 16);
+    s[4] = static_cast<uint8_t>(begin >> 8);
+    s[5] = static_cast<uint8_t>(begin);
+    s[6] = static_cast<uint8_t>(end >> 24);
+    s[7] = static_cast<uint8_t>(end >> 16);
+    s[8] = static_cast<uint8_t>(end >> 8);
+    s[9] = static_cast<uint8_t>(end);
+  }
+
+  /// The begin timestamp the pump holds for @p slot, as the sim stored it.
+  uint32_t sim_single_event_begin(uint8_t slot) const {
+    const uint8_t *s = sim.single_events[slot];
+    return (static_cast<uint32_t>(s[2]) << 24) | (static_cast<uint32_t>(s[3]) << 16) |
+           (static_cast<uint32_t>(s[4]) << 8) | s[5];
+  }
+
   void prime_cache() {
     control.get_mode_async(nullptr);
     advance(100);
@@ -2521,57 +2560,337 @@ static void test_schedule_enabled_pump_keeps_its_flag() {
   TEST_ASSERT(!h.sim.sched_enabled, "pump schedule stayed disabled");
 }
 
+// ---------------------------------------------------------------------------
+// Auto-slot resolution (issue #262)
+//
+// The resolver picks a slot by asking which stored events have expired, and it
+// used to ask that question against the NEW EVENT'S BEGIN rather than against
+// the clock. For an event a few minutes out the two agree, which is what the
+// Lovelace card's Quick Run presets produce. For an event years out they do
+// not: a 2040 event makes everything in the next thirteen-odd years look
+// expired, so the picker hands back a slot holding a live event and the write
+// destroys it -- observed on the bench, with four slots free.
+//
+// Every fixture below therefore states its timestamps relative to
+// NODE_EPOCH_AT_BOOT, and that is not cosmetic. Written as bare small integers
+// they land in 1970, and then a fixture says something other than what it looks
+// like it says: test_single_event_auto_slot's "live" event ended at 3000000, so
+// it was live only relative to the new event's begin and expired against any
+// real clock. Its slot-1 assertion held under the old comparison and failed
+// under the fixed one -- the fixture, not the code, was what had to change.
+// ---------------------------------------------------------------------------
+
+// Windows used by the single-event slot tests, all relative to the node clock.
+static constexpr uint32_t EVENT_ENDED_BEGIN = NODE_EPOCH_AT_BOOT - 7200;   // ended 1 h ago
+static constexpr uint32_t EVENT_ENDED_END = NODE_EPOCH_AT_BOOT - 3600;
+static constexpr uint32_t EVENT_TOMORROW_BEGIN = NODE_EPOCH_AT_BOOT + 86400;
+static constexpr uint32_t EVENT_TOMORROW_END = NODE_EPOCH_AT_BOOT + 86400 + 3600;
+static constexpr uint32_t EVENT_NEXT_WEEK_BEGIN = NODE_EPOCH_AT_BOOT + 7 * 86400;
+static constexpr uint32_t EVENT_NEXT_WEEK_END = NODE_EPOCH_AT_BOOT + 7 * 86400 + 3600;
+// The pair from the bench transcript in issue #262: 2040-06-01 10:00-10:05 UTC.
+static constexpr uint32_t EVENT_2040_BEGIN = 2222157600;
+static constexpr uint32_t EVENT_2040_END = 2222157900;
+
 static void test_single_event_auto_slot() {
   std::cout << "\n=== set_single_event: auto slot skips occupied slot 0 ===" << std::endl;
   Harness h;
   h.prime_cache();
-  // Slot 0 holds a LIVE event (ends after the new event begins); the cache
-  // is cold, so the op must read the slots first instead of blindly picking
-  // slot 0.
-  h.sim.single_events[0][0] = 1;
-  h.sim.single_events[0][1] = 0x02;
-  // end_ts = 3000000 (BE) — still in the future relative to begin 1000000
-  h.sim.single_events[0][6] = 0x00;
-  h.sim.single_events[0][7] = 0x2D;
-  h.sim.single_events[0][8] = 0xC6;
-  h.sim.single_events[0][9] = 0xC0;
+  // Slot 0 holds a LIVE event -- it has not begun yet, let alone ended. The
+  // cache is cold, so the op must read the slots first instead of blindly
+  // picking slot 0.
+  h.seed_single_event(0, 0x02, EVENT_TOMORROW_BEGIN, EVENT_TOMORROW_END);
 
-  h.write_op.submit_set_single_event(1000000, 2000000, "ev1");
+  h.write_op.submit_set_single_event(EVENT_NEXT_WEEK_BEGIN, EVENT_NEXT_WEEK_END, "ev1");
   h.advance(60000);
 
   TEST_ASSERT(h.events_for("ev1") == 1, "exactly one terminal event");
   const WriteResult *r = h.result_for("ev1");
   TEST_ASSERT(r && r->status == WriteStatus::ACCEPTED, "status is accepted");
   TEST_ASSERT(r && r->slot == 1, "auto-resolved slot 1 (slot 0 occupied) echoed");
-  TEST_ASSERT(r && r->begin_ts == 1000000 && r->end_ts == 2000000, "settled timestamps reported");
+  TEST_ASSERT(r && r->begin_ts == EVENT_NEXT_WEEK_BEGIN && r->end_ts == EVENT_NEXT_WEEK_END,
+              "settled timestamps reported");
   TEST_ASSERT(h.sim.single_events[1][0] == 1, "pump slot 1 holds the enabled event");
   TEST_ASSERT(h.sim.single_events[0][0] == 1, "slot 0 was not overwritten");
+  TEST_ASSERT(h.sim_single_event_begin(0) == EVENT_TOMORROW_BEGIN,
+              "and still holds its own window, not the new one");
 }
 
-
+// The counterpart: an event that really is over does not hold its slot, so the
+// pool cannot fill up with history. Every other slot here holds a LIVE event,
+// which is what forces the recycle -- an empty slot would be taken first.
 static void test_single_event_reuses_expired_slot() {
   std::cout << "\n=== set_single_event: expired slot is reused, pool never exhausts ===" << std::endl;
   Harness h;
   h.prime_cache();
-  // Slot 0 holds an ENABLED but EXPIRED event (ended at 500000, before the
-  // new event's begin 1000000). It must not count as occupied.
-  h.sim.single_events[0][0] = 1;
-  h.sim.single_events[0][1] = 0x02;
-  h.sim.single_events[0][6] = 0x00;
-  h.sim.single_events[0][7] = 0x07;
-  h.sim.single_events[0][8] = 0xA1;
-  h.sim.single_events[0][9] = 0x20;  // 500000 BE
+  h.sim.max_single_events = 5;
+  for (uint8_t i = 0; i < 4; i++)
+    h.seed_single_event(i, 0x02, EVENT_TOMORROW_BEGIN, EVENT_TOMORROW_END);
+  h.seed_single_event(4, 0x02, EVENT_ENDED_BEGIN, EVENT_ENDED_END);
 
-  h.write_op.submit_set_single_event(1000000, 2000000, "ev3");
+  h.write_op.submit_set_single_event(EVENT_NEXT_WEEK_BEGIN, EVENT_NEXT_WEEK_END, "ev3");
   h.advance(60000);
 
   TEST_ASSERT(h.events_for("ev3") == 1, "exactly one terminal event");
   const WriteResult *r = h.result_for("ev3");
+  TEST_ASSERT(r && r->status == WriteStatus::ACCEPTED,
+              "a pool whose only spare slot has expired is not a full pool");
+  TEST_ASSERT(r && r->slot == 4, "the expired slot was reused");
+  TEST_ASSERT(h.sim_single_event_begin(4) == EVENT_NEXT_WEEK_BEGIN,
+              "pump slot 4 now holds the new event");
+  TEST_ASSERT(h.sim_single_event_begin(0) == EVENT_TOMORROW_BEGIN,
+              "and the four live events are untouched");
+  // Recycling a slot destroys what was in it. That is legitimate here, and it
+  // used to be silent: the operation settles ACCEPTED because the write did
+  // land, and nothing said the slot had been occupied. Diagnosing #262 cost
+  // hours for exactly that reason, so the settle event says so.
+  TEST_ASSERT(r && r->detail.find("reused slot 4") != std::string::npos,
+              "the settle detail states that a slot was recycled");
+  TEST_ASSERT(r && r->detail.find(std::to_string(EVENT_ENDED_END)) != std::string::npos,
+              "and names the window it replaced");
+}
+
+// ...but only when it has to. Recycling costs the stored record of an event
+// that ran, and the picker used to spend it while four slots sat empty: it took
+// the first index no LIVE event held, which is slot 0 whenever slot 0 has
+// expired. On a five-slot pump that meant repeated one-time runs cycled through
+// slot 0 forever and never touched slots 1-4, and every one of them carried the
+// "this slot was recycled" warning, which is how a warning stops meaning
+// anything.
+static void test_single_event_prefers_an_empty_slot_to_an_expired_one() {
+  std::cout << "\n=== set_single_event: an empty slot beats an expired one ===" << std::endl;
+  Harness h;
+  h.prime_cache();
+  h.sim.max_single_events = 5;
+  h.seed_single_event(0, 0x02, EVENT_ENDED_BEGIN, EVENT_ENDED_END);
+
+  h.write_op.submit_set_single_event(EVENT_NEXT_WEEK_BEGIN, EVENT_NEXT_WEEK_END, "prefer");
+  h.advance(60000);
+
+  const WriteResult *r = h.result_for("prefer");
+  TEST_ASSERT(h.events_for("prefer") == 1, "exactly one terminal event");
   TEST_ASSERT(r && r->status == WriteStatus::ACCEPTED, "status is accepted");
-  TEST_ASSERT(r && r->slot == 0, "expired slot 0 was reused");
+  TEST_ASSERT(r && r->slot == 1, "the empty slot 1 was taken, not the expired slot 0");
+  TEST_ASSERT(h.sim_single_event_begin(0) == EVENT_ENDED_BEGIN,
+              "the expired event is still on the pump, since nothing needed its slot");
+  TEST_ASSERT(r && r->detail.empty(),
+              "and nothing was recycled, so nothing is reported as recycled");
+}
+
+// A pool that really is full: five LIVE events and a working clock. The refusal
+// must be the plain one -- naming the clock here would send the reader after a
+// problem the node does not have.
+static void test_a_pool_of_live_events_is_a_full_pool() {
+  std::cout << "\n=== set_single_event: five live events -> plainly full ===" << std::endl;
+  Harness h;
+  h.prime_cache();
+  h.sim.max_single_events = 5;
+  for (uint8_t i = 0; i < 5; i++)
+    h.seed_single_event(i, 0x02, EVENT_TOMORROW_BEGIN, EVENT_TOMORROW_END);
+
+  h.write_op.submit_set_single_event(EVENT_NEXT_WEEK_BEGIN, EVENT_NEXT_WEEK_END, "full");
+  h.advance(60000);
+
+  const WriteResult *r = h.result_for("full");
+  TEST_ASSERT(h.events_for("full") == 1, "exactly one terminal event");
+  TEST_ASSERT(r && r->status == WriteStatus::REJECTED, "status is rejected");
+  TEST_ASSERT(r && r->detail == "no free single event slots",
+              "the plain refusal, with no clock excuse attached to it");
+  TEST_ASSERT(h.sim_single_event_begin(0) == EVENT_TOMORROW_BEGIN,
+              "and no live event was overwritten");
+}
+
+// The #262 regression itself. Two events fifteen seconds apart on a pump with
+// five free slots: one tomorrow, then one in 2040. Against the old comparison
+// the 2040 write resolved to slot 0 -- the tomorrow event's slot -- and wiped
+// it, reporting `accepted`.
+static void test_a_far_future_event_does_not_evict_a_live_one() {
+  std::cout << "\n=== set_single_event: an event years out must not evict a live one (issue #262) ==="
+            << std::endl;
+  Harness h;
+  h.prime_cache();
+  h.sim.max_single_events = 5;  // the bench pump's real slot count
+  h.seed_single_event(0, 0x02, EVENT_TOMORROW_BEGIN, EVENT_TOMORROW_END);
+
+  h.write_op.submit_set_single_event(EVENT_2040_BEGIN, EVENT_2040_END, "ev2040");
+  h.advance(60000);
+
+  TEST_ASSERT(h.events_for("ev2040") == 1, "exactly one terminal event");
+  const WriteResult *r = h.result_for("ev2040");
+  TEST_ASSERT(r && r->status == WriteStatus::ACCEPTED, "status is accepted");
+  TEST_ASSERT(r && r->slot != 0, "the 2040 event did not take the occupied slot");
   TEST_ASSERT(h.sim.single_events[0][0] == 1 &&
-                  h.sim.single_events[0][9] == (2000000 & 0xFF),
-              "pump slot 0 now holds the new event");
+                  h.sim_single_event_begin(0) == EVENT_TOMORROW_BEGIN,
+              "tomorrow's event is still in slot 0, untouched");
+  TEST_ASSERT(r && r->slot >= 0 && h.sim_single_event_begin(static_cast<uint8_t>(r->slot)) ==
+                                       EVENT_2040_BEGIN,
+              "and the 2040 event landed in the free slot it was given");
+  // Nothing was recycled, so nothing is claimed to have been.
+  TEST_ASSERT(r && r->detail.empty(), "a write to a genuinely free slot settles with no note");
+}
+
+// The same defect on the surface most likely to hit it. A vacation is months
+// out by nature, and submit_set_vacation resolves through the same picker, so
+// booking next summer would have cleared every single event before it.
+static void test_a_far_future_vacation_does_not_evict_a_live_event() {
+  std::cout << "\n=== set_vacation: a vacation months out must not evict a live event (issue #262) ==="
+            << std::endl;
+  Harness h;
+  h.prime_cache();
+  h.sim.max_single_events = 5;
+  h.seed_single_event(0, 0x02, EVENT_TOMORROW_BEGIN, EVENT_TOMORROW_END);
+
+  h.write_op.submit_set_vacation(EVENT_2040_BEGIN, EVENT_2040_END, "vac2040");
+  h.advance(60000);
+
+  const WriteResult *r = h.result_for("vac2040");
+  TEST_ASSERT(h.events_for("vac2040") == 1, "exactly one terminal event");
+  TEST_ASSERT(r && r->status == WriteStatus::ACCEPTED, "status is accepted");
+  TEST_ASSERT(r && r->slot != 0, "the vacation did not take the occupied slot");
+  TEST_ASSERT(h.sim.single_events[0][0] == 1 && h.sim.single_events[0][1] == 0x02 &&
+                  h.sim_single_event_begin(0) == EVENT_TOMORROW_BEGIN,
+              "the live run event survives the vacation write");
+}
+
+// With no synced wall clock there is no honest answer to "has this expired", so
+// the picker treats every enabled event as holding its slot. The pool looks
+// full rather than empty -- the conservative direction, since the other one
+// overwrites live events -- and the refusal has to say which of the two
+// problems it is, or a node that never synced looks like a full pump.
+static void test_without_a_clock_no_slot_is_treated_as_expired() {
+  std::cout << "\n=== set_single_event: no node clock -> nothing is expired (issue #262) ==="
+            << std::endl;
+  Harness h;
+  h.prime_cache();
+  h.sim.max_single_events = 5;
+  h.set_node_time(0);  // never synced: the clock reads 1970
+  // All five slots hold events that ended long before the new one begins. With
+  // a real clock every one of them is reusable; with no clock, none is.
+  for (uint8_t i = 0; i < 5; i++)
+    h.seed_single_event(i, 0x02, EVENT_ENDED_BEGIN, EVENT_ENDED_END);
+
+  h.write_op.submit_set_single_event(EVENT_NEXT_WEEK_BEGIN, EVENT_NEXT_WEEK_END, "noclock");
+  h.advance(60000);
+
+  TEST_ASSERT(h.events_for("noclock") == 1, "exactly one terminal event");
+  const WriteResult *r = h.result_for("noclock");
+  TEST_ASSERT(r && r->status == WriteStatus::REJECTED, "the write is refused, not guessed at");
+  TEST_ASSERT(r && r->detail.find("node clock not set") != std::string::npos,
+              "the refusal names the clock, not just a full pool");
+  TEST_ASSERT(h.sim_single_event_begin(0) == EVENT_ENDED_BEGIN,
+              "and no slot was overwritten");
+}
+
+// The same pump with a clock: the five expired events are all reusable, so the
+// write lands. Without this the test above passes against a picker that refuses
+// everything, clock or no clock.
+//
+// The five ended at different times, and the STALEST goes. Recycling by lowest
+// index instead would throw away the most recent record and keep the oldest,
+// which is backwards, and slot 0 as the answer is also what a picker that had
+// simply stopped thinking would return.
+static void test_with_a_clock_the_same_expired_slots_are_reusable() {
+  std::cout << "\n=== set_single_event: with a clock, the stalest expired slot is reused ===" << std::endl;
+  Harness h;
+  h.prime_cache();
+  h.sim.max_single_events = 5;
+  // Slot 3 ended first, so slot 3 is the one to lose. Deliberately neither the
+  // lowest nor the highest index.
+  const uint32_t ENDS[5] = {EVENT_ENDED_END, EVENT_ENDED_END - 600, EVENT_ENDED_END - 300,
+                            EVENT_ENDED_END - 3600, EVENT_ENDED_END - 900};
+  for (uint8_t i = 0; i < 5; i++)
+    h.seed_single_event(i, 0x02, ENDS[i] - 60, ENDS[i]);
+
+  h.write_op.submit_set_single_event(EVENT_NEXT_WEEK_BEGIN, EVENT_NEXT_WEEK_END, "clock_ok");
+  h.advance(60000);
+
+  const WriteResult *r = h.result_for("clock_ok");
+  TEST_ASSERT(h.events_for("clock_ok") == 1, "exactly one terminal event");
+  TEST_ASSERT(r && r->status == WriteStatus::ACCEPTED,
+              "a pool of expired events is not a full pool");
+  TEST_ASSERT(r && r->slot == 3, "the event that ended first is the one recycled");
+  TEST_ASSERT(r && r->detail.find(std::to_string(ENDS[3])) != std::string::npos,
+              "and the settle detail names the window it replaced");
+}
+
+// ---------------------------------------------------------------------------
+// find_free_single_event_slot() directly (issue #262)
+//
+// Everything above reaches the picker through a whole write operation, at
+// whatever "now" the harness happens to be at. That is the right shape for the
+// eviction tests and the wrong shape for the picker's own decision table: the
+// reference timestamp is the harness's, not the test's, so the interesting
+// values -- 0, one second either side of an event's end -- cannot be asked for.
+// These call it with the cache warmed through the real read path and the
+// reference chosen by hand.
+// ---------------------------------------------------------------------------
+
+/// Warm the overview and single-event caches from the sim, the way the boot
+/// chain does, so the picker has something real to answer from.
+static void warm_single_event_cache(Harness &h) {
+  h.schedule.poll_state_async(nullptr);
+  h.advance(300);
+  h.schedule.read_single_events_async(nullptr);
+  h.advance(5000);
+}
+
+static void test_slot_picker_decision_table() {
+  std::cout << "\n=== find_free_single_event_slot: the decision table, called directly ===" << std::endl;
+  const uint32_t T = NODE_EPOCH_AT_BOOT;
+
+  {
+    Harness h;
+    h.sim.max_single_events = 5;
+    TEST_ASSERT(h.schedule.find_free_single_event_slot(T) == -1,
+                "a cold cache answers -1 rather than handing out slot 0 (issue #92)");
+  }
+  {
+    // Two expired slots, one live, one empty.
+    Harness h;
+    h.sim.max_single_events = 5;
+    h.seed_single_event(0, 0x02, T - 7200, T - 3600);
+    h.seed_single_event(1, 0x02, T - 60, T);
+    h.seed_single_event(2, 0x02, T + 3600, T + 7200);
+    h.seed_single_event(4, 0x02, T - 10800, T - 7200);
+    warm_single_event_cache(h);
+    TEST_ASSERT(h.schedule.find_free_single_event_slot(T) == 3,
+                "the empty slot is taken while two expired ones sit there");
+    TEST_ASSERT(h.schedule.find_free_single_event_slot(0) == 3,
+                "and with no clock the empty slot is still the answer");
+  }
+  {
+    // Every slot occupied: two expired, three live.
+    Harness h;
+    h.sim.max_single_events = 5;
+    h.seed_single_event(0, 0x02, T - 7200, T - 3600);
+    h.seed_single_event(1, 0x02, T - 60, T);
+    h.seed_single_event(2, 0x02, T + 3600, T + 7200);
+    h.seed_single_event(3, 0x02, T + 7200, T + 10800);
+    h.seed_single_event(4, 0x02, T - 10800, T - 7200);
+    warm_single_event_cache(h);
+    TEST_ASSERT(h.schedule.find_free_single_event_slot(T) == 4,
+                "with nothing empty, the event that ended FIRST is recycled, not the lowest index");
+    TEST_ASSERT(h.schedule.find_free_single_event_slot(0) == -1,
+                "with no clock nothing has expired, so a full pool it is");
+    TEST_ASSERT(h.schedule.find_free_single_event_slot(T - 100000) == -1,
+                "and at a reference before any of them ended, likewise");
+  }
+  {
+    // The boundary. Slot 2 ends exactly at the reference instant; everything
+    // else is live. "Expired" means ended BEFORE now, so at T it is not yet
+    // recyclable and one second later it is. Nothing recorded which way this
+    // went, and a `<` that drifted to `<=` would recycle an event in the second
+    // it is still running.
+    Harness h;
+    h.sim.max_single_events = 5;
+    for (uint8_t i = 0; i < 5; i++)
+      h.seed_single_event(i, 0x02, T + 3600, T + 7200);
+    h.seed_single_event(2, 0x02, T - 60, T);
+    warm_single_event_cache(h);
+    TEST_ASSERT(h.schedule.find_free_single_event_slot(T) == -1,
+                "an event ending exactly now has not ended before now, so it keeps its slot");
+    TEST_ASSERT(h.schedule.find_free_single_event_slot(T + 1) == 2,
+                "one second later it has");
+  }
 }
 
 static void test_clear_single_event() {
@@ -3485,16 +3804,16 @@ static void test_single_event_read_failure_blocks_slot_allocation() {
   // answered. The old code cached an empty vector and set the cached flag, so
   // find_free_single_event_slot() returned slot 0 and the write clobbered a
   // live event. That is the class issue #92 exists to prevent.
-  h.sim.single_events[0][0] = 1;
-  h.sim.single_events[0][1] = 0x02;
-  h.sim.single_events[0][6] = 0x00;
-  h.sim.single_events[0][7] = 0x2D;
-  h.sim.single_events[0][8] = 0xC6;
-  h.sim.single_events[0][9] = 0xC0;  // ends 3000000, after the new begin
+  //
+  // The event is live against the node's CLOCK, which is what decides expiry
+  // (issue #262). It used to end in 1970, so it was live only relative to the
+  // new event's begin -- fine for the branch this test is on, and meaningless
+  // once the picker started asking the right question.
+  h.seed_single_event(0, 0x02, EVENT_TOMORROW_BEGIN, EVENT_TOMORROW_END);
   h.sim.max_single_events = 5;  // stay inside the 60 s operation watchdog
   h.sim.respond_single_event_reads = false;
 
-  h.write_op.submit_set_single_event(1000000, 2000000, "ev_fail");
+  h.write_op.submit_set_single_event(EVENT_NEXT_WEEK_BEGIN, EVENT_NEXT_WEEK_END, "ev_fail");
   h.advance(45000);
 
   TEST_ASSERT(h.events_for("ev_fail") == 1, "exactly one terminal event");
@@ -3503,7 +3822,7 @@ static void test_single_event_read_failure_blocks_slot_allocation() {
               "the write is rejected rather than attempted blind");
   TEST_ASSERT(r && r->detail == "could not read single events; write not attempted",
               "settled on the read result, not the operation watchdog");
-  TEST_ASSERT(h.sim.single_events[0][9] == 0xC0,
+  TEST_ASSERT(h.sim_single_event_begin(0) == EVENT_TOMORROW_BEGIN,
               "the live event in slot 0 was not clobbered");
   TEST_ASSERT(!h.schedule.is_single_events_cached(),
               "the single-event cache is still not valid");
@@ -3973,6 +4292,13 @@ int main() {
   test_schedule_enabled_pump_keeps_its_flag();
   test_single_event_auto_slot();
   test_single_event_reuses_expired_slot();
+  test_a_far_future_event_does_not_evict_a_live_one();
+  test_a_far_future_vacation_does_not_evict_a_live_event();
+  test_without_a_clock_no_slot_is_treated_as_expired();
+  test_with_a_clock_the_same_expired_slots_are_reusable();
+  test_single_event_prefers_an_empty_slot_to_an_expired_one();
+  test_a_pool_of_live_events_is_a_full_pool();
+  test_slot_picker_decision_table();
   test_set_vacation_writes_stop_event();
   test_a_vacation_stored_as_a_run_event_is_rejected();
   test_a_run_event_stored_as_a_stop_is_rejected();

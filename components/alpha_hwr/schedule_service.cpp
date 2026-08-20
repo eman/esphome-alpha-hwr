@@ -945,8 +945,7 @@ void ScheduleService::write_single_event_async(
       /*expect_short_ack=*/true, /*quiet_timeout=*/true);
 }
 
-int ScheduleService::find_free_single_event_slot(
-    uint32_t reusable_before_ts) const {
+int ScheduleService::find_free_single_event_slot(uint32_t now_ts) const {
   uint8_t max_events = overview_cached_ ? overview_structure_[1] : 35;
   // A cold cache means every slot "looks free", so answering 0 here hands the
   // caller a live slot to overwrite -- the clobber class issue #92 exists to
@@ -955,19 +954,49 @@ int ScheduleService::find_free_single_event_slot(
   if (!single_events_cached_)
     return -1;
 
-  std::set<uint8_t> used;
+  std::set<uint8_t> cached;
+  // The recyclable slot that has been dead longest, and when it ended. Only
+  // consulted once every slot turns out to be spoken for.
+  int stalest = -1;
+  uint32_t stalest_end = 0;
   for (const auto &ev : cached_single_events_) {
-    if (reusable_before_ts > 0 &&
-        (!ev.enabled || ev.end_timestamp < reusable_before_ts)) {
-      continue;  // disabled or expired — reusable
+    cached.insert(ev.index);
+    // now_ts == 0 is "the caller has no clock", not "the epoch": with no
+    // reference time nothing is known to have expired, so every enabled event
+    // keeps its slot. Reading it as a timestamp would expire nothing either
+    // (no event ends before 1970), but only by accident -- the guard is what
+    // makes the safe answer the deliberate one.
+    const bool expired = now_ts > 0 && ev.end_timestamp < now_ts;
+    if (ev.enabled && !expired)
+      continue;  // live: this slot is not available at any price
+    // Recyclable. A DISABLED entry cannot occur today -- read_single_events_async()
+    // and the write cache update both keep only enabled events -- but if one
+    // ever did, it holds nothing, so it is the stalest thing here.
+    const uint32_t ended = ev.enabled ? ev.end_timestamp : 0;
+    // Split in two, and spelled without a '||', so mutation_check.sh has a
+    // pipe-free line to anchor to -- its entries are split on that character.
+    const bool first_candidate = stalest < 0;
+    const bool ended_earlier = ended < stalest_end;
+    if (first_candidate || ended_earlier) {
+      stalest = ev.index;
+      stalest_end = ended;
     }
-    used.insert(ev.index);
   }
+
+  // An EMPTY slot first, always. Recycling costs the stored record of an event
+  // that ran, and there is no reason to pay that while the pump has a slot
+  // nobody is using -- but the old loop took the first index not held by a LIVE
+  // event, so an expired slot 0 went ahead of four empty ones every time. On a
+  // five-slot pump that meant repeated one-time runs recycled slot 0 over and
+  // over while slots 1-4 stayed empty, and it made the "this slot was recycled"
+  // warning fire on writes that destroyed nothing anyone would miss.
   for (uint8_t i = 0; i < max_events; i++) {
-    if (used.find(i) == used.end())
+    if (cached.find(i) == cached.end())
       return i;
   }
-  return -1;
+  // Nothing empty. Recycle what has been over the longest rather than the
+  // lowest index: if a record has to go, lose the stalest one.
+  return stalest;
 }
 
 std::string ScheduleService::format_single_events_display() const {

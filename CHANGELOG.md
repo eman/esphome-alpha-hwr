@@ -1080,6 +1080,96 @@
 
 ### Fixed
 
+- **A single event scheduled far ahead evicted a live nearer one** (issue #262).
+  Bench-observed, not inferred: two writes fifteen seconds apart on a pump with
+  five empty slots, one for tomorrow and one for 2040. Both settled `accepted`,
+  both took slot 0, and the readback showed only the 2040 event. The nearer one
+  was destroyed with four slots free, and nothing anywhere said so.
+
+  The auto-slot resolver decides which slots are recyclable by asking which
+  stored events have expired, and it asked that against **the new event's own
+  begin timestamp** instead of against the clock. For an event a few minutes out
+  the two questions have the same answer, which is what the Lovelace card's Quick
+  Run *presets* produce. For an event years out they do not: a 2040 event makes
+  everything in the next thirteen-odd years look expired, so the picker returned
+  a slot holding a live event and the write overwrote it. `set_vacation` resolves
+  through the same line, and a vacation is months out by nature — one booked for
+  next summer would have cleared every single event before it.
+
+  Under-reached before now, not unreachable. Every path through the Home
+  Assistant services was blocked at the parser until #255, so no service call
+  arrived. Two surfaces were never behind that parser, though: the schedule
+  editor's **Set Vacation** button calls `submit_set_vacation()` on the component
+  directly, and `build_event_window()` anchors it to the current calendar year,
+  so it could place a vacation up to eleven months out — far enough to expire
+  every live event in the pool. The card's **Custom Run** date pickers take an
+  arbitrary date too, but they go through the service, so #255 held them off.
+
+  Fixed by measuring expiry against the node's wall clock. The reference
+  timestamp is no longer optional — a caller with no clock has to say so, by
+  passing 0, and 0 means **expire nothing** rather than expire everything: a
+  picker that cannot tell the time refuses to recycle rather than guessing which
+  events are over. The refusal names the clock (`"no free single event slots
+  (node clock not set, so expired events cannot be reused)"`) so a node that has
+  simply never synced does not read as a pump with a full slot pool.
+
+  The eviction was also silent by construction, which is most of what made it
+  expensive to diagnose: the operation settles `accepted` because it did write
+  successfully, to a slot it was entitled to choose, and nothing compared the
+  slot's previous contents against what replaced them. Recycling a slot now logs
+  a WARN and carries the same sentence into the settle event's `detail`, naming
+  the slot and the window it replaced.
+
+  Two more things the picker was getting wrong, both found by the adversarial
+  review rather than by the bug report:
+
+  - **An empty slot now always beats a recyclable one.** The loop took the first
+    index no *live* event held, so an expired slot 0 went ahead of four empty
+    ones every time. On a five-slot pump repeated one-time runs cycled through
+    slot 0 forever while slots 1–4 stayed empty — destroying a stored record on
+    every write, and firing the new "this slot was recycled" warning on writes
+    that cost nothing, which is how a warning stops meaning anything.
+  - **When there is nothing empty, the stalest record goes.** Recycling by
+    lowest index kept the oldest event and threw away the most recently
+    finished one.
+
+  The **Add Single Event** editor button no longer picks a slot at all. It used
+  to call the picker and then write to the returned index, with nothing closing
+  the gap between the two: a service call resolving in that gap takes the same
+  slot, writes a live event to it, and the button's write overwrites it. It now
+  submits with no slot and lets the write-operation layer resolve one at the
+  moment it writes — which is what AGENTS §6 asks for anyway, and which also
+  gives that button the recycling warning and the settle detail that a write by
+  index skips. The free-slot accessor it used is gone with it, so the
+  pick-then-write shape is no longer reachable from a lambda. "No free single
+  event slots" now arrives as a `rejected` settle event rather than a log line.
+
+  Seven new host tests — the reported case (a 2040 event and a live one
+  tomorrow, five slots, the live one must survive), the vacation variant, both
+  directions of the no-clock rule, the empty-slot preference, a pool genuinely
+  full of live events, and the picker's decision table called directly at
+  hand-chosen reference times, including the boundary where an event ends
+  exactly *at* the reference (it keeps its slot; one second later it does not).
+  The existing reuse test is retargeted at the clock and now asserts the recycle
+  note. The single-event fixtures anchor their windows to the node clock, which
+  is not cosmetic: `test_single_event_auto_slot`'s "live" event ended in 1970,
+  so it was live only relative to the new event's begin, and its slot assertion
+  held under the old comparison and failed under the fixed one. Seven mutation
+  entries, including the reported line itself, all verified caught.
+
+  Verified on the bench: the issue's own two writes, on a pump with five empty
+  slots, land in slots 0 and 1 with both events surviving, and a vacation booked
+  for July 2027 takes slot 2 and evicts neither. Recycling a slot that really
+  had ended reports `reused slot N, which held an event that ended (…)` in the
+  settle event; a write into an empty slot reports nothing.
+
+  Four follow-ups came out of the review, all pre-existing: #267 (a finished
+  vacation is still "the" vacation, so `clear_vacation` can clear the wrong
+  slot), #268 (the write-op suite pins `TZ=UTC`, so the cache's UTC invariant is
+  invisible to it), #269 (a wholly-past event is written and settles accepted),
+  #270 (four independent answers to "what time is it", with three sanity floors).
+
+
 - **`set_single_event` and `set_vacation` rejected every input on real
   hardware** (issue #255). Both services answered a terminal `invalid` to any
   argument a client could send, with `seq: 0` — the request never reached the

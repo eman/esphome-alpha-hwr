@@ -412,16 +412,34 @@ public:
                                std::function<void(bool, const SingleEvent &)> on_complete);
 
   /**
-   * Find the first free (disabled) single event slot.
-   * @return Index of free slot, or -1 if all slots are full
+   * Find a free single-event slot. A slot is free when it is absent from the
+   * cache, disabled, or holds an event that had already ENDED at @p now_ts
+   * (expired events do not exhaust the pool; writing a new event over one both
+   * reuses and clears it).
+   *
+   * @param now_ts The current time as a Unix timestamp, and nothing else. 0
+   *   means "the caller cannot tell the time", and then nothing counts as
+   *   expired: every enabled event keeps its slot.
+   *
+   *   This parameter used to default to 0, and one caller passed the *new
+   *   event's* begin timestamp instead, on the reasoning that "ended before my
+   *   begin" and "ended before now" are the same set. They are, for an event a
+   *   few minutes out. For an event years out they are not: every event
+   *   between now and then looks expired, so this function hands back a slot
+   *   holding a live event and the caller's write destroys it. Bench-observed
+   *   -- a 2040 event evicted a 2026 one with four slots free (issue #262),
+   *   and a vacation booked for next summer would have cleared every event
+   *   before it. Hence no default: a caller with no clock has to say so.
+   *
+   * A genuinely EMPTY slot is always preferred to a recyclable one: recycling
+   * costs the stored record of an event that ran, and there is no reason to pay
+   * that while the pump has a slot nobody is using. When nothing is empty, the
+   * event that has been over the longest is the one that goes.
+   *
+   * @return Index of a usable slot, or -1 when there is none -- including
+   *   when the single-event cache is cold (see is_single_events_cached()).
    */
-  /**
-   * Find a free single-event slot. A slot is free when it is absent from
-   * the cache, disabled, or — when reusable_before_ts > 0 — holds an event
-   * that ended before that timestamp (expired events do not exhaust the
-   * 35-slot pool; writing a new event over one both reuses and clears it).
-   */
-  int find_free_single_event_slot(uint32_t reusable_before_ts = 0) const;
+  int find_free_single_event_slot(uint32_t now_ts) const;
 
   /**
    * Slot index of the active vacation — the first enabled single-event whose
@@ -611,6 +629,7 @@ protected:
   // -------------------------------------------------------------------------
 
   void write_class10_command(const uint8_t *apdu, size_t apdu_len);
+
 
   /**
    * Write a full layer from cached data and call config commit.

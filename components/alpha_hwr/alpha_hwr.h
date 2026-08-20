@@ -1278,9 +1278,16 @@ public:
     write_op_service_.submit_clear_single_event(index, "", on_complete,
                                                 services::WriteOrigin::ENTITY);
   }
-  int find_free_single_event_slot() const {
-    return schedule_service_.find_free_single_event_slot();
-  }
+  // A free-slot accessor used to live here, and the schedule editor's "Add
+  // Single Event" button called it and then wrote to the slot it returned by
+  // index. Nothing closed the gap between the two: a service call resolving in
+  // that gap takes the same slot, writes a live event to it, and the button's
+  // write then overwrites it. The picker is not the problem -- picking and
+  // writing as separate steps is -- so the accessor is gone and the button
+  // submits with no slot, letting the write-operation layer resolve one at the
+  // moment it writes (issue #262). Callers that genuinely know their slot use
+  // write_single_event() above; callers that do not use
+  // submit_set_single_event() and read the slot off the settle event.
 
   /**
    * Build a begin/end Unix-timestamp pair from wall-clock month/day/hour/minute

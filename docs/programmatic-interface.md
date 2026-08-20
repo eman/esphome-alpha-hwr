@@ -104,8 +104,9 @@ So the three outcomes are decided by what the pump reports holding:
 
 A write that was never acknowledged keeps its status from that table and gains
 a `config write not acknowledged; …` prefix on `detail`, so the silence is
-still reported — it just no longer decides the verdict. This is the one case
-where an `accepted` settle carries a non-empty `detail`.
+still reported — it just no longer decides the verdict. It is one of several
+cases where an `accepted` settle carries a non-empty `detail` — see the
+[`write_settled` statuses](#the-write_settled-event) for the rest.
 
 ### Run state and the schedule
 
@@ -368,9 +369,15 @@ counter, so seq values from different nodes are not comparable across them).
 
 Statuses:
 
-- **`accepted`** — the pump confirmed the requested value. `detail` is empty,
-  with one exception: a config write the pump stored but never acknowledged
-  says so there (see [above](#set_temperature_range-and-set_cycle_times-settle-on-the-pump-never-on-the-ack)).
+- **`accepted`** — the pump confirmed the requested value. `detail` is usually
+  empty. It is not when:
+  - a config write the pump stored but never acknowledged says so there (see
+    [above](#set_temperature_range-and-set_cycle_times-settle-on-the-pump-never-on-the-ack))
+  - `set_single_event` / `set_vacation` reused a slot holding an already-ended
+    event — it names the slot and the window it replaced
+  - `clear_vacation` found no active vacation (`no active vacation`)
+  - `refresh_schedule` reports how many entries it cached (`N entries cached`)
+  - `upload_schedule` skipped every layer (`no-op`)
 - **`clamped`** — the pump stored a *different* value (e.g. 1500 RPM clamped
   to 1650). The event carries the stored value. Clamping can also come from
   installer limits configured in the Grundfos GO app (pipe size, maximum
