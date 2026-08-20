@@ -1078,6 +1078,17 @@
   `on_authenticated()` after a disconnect would drive the session to READY. That
   safety lives in the callers, not in the FSM, and the test now says so.
 
+### Changed
+
+- `tools/mutation_check.sh` checks every entry's search string before it builds
+  anything, and grew a `--verify` flag that does only that. An entry pointing at
+  code that has moved is scored `(not applied)` and turns the sweep red — which
+  is correct, but only after the better part of an hour, and only for the
+  entries a filter happened to select. The static check answers the same
+  question for all 259 in about a second. Retargeting the three entries issue
+  #259 invalidated is what prompted it: one was noticed while writing the
+  change, two were found by the sweep.
+
 ### Fixed
 
 - **A read in flight when the link dropped was never told, and one corrupt

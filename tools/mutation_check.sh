@@ -18,6 +18,7 @@
 # Usage:
 #   ./tools/mutation_check.sh              # run every mutation
 #   ./tools/mutation_check.sh --list       # just show them
+#   ./tools/mutation_check.sh --verify     # do they all still point at real code?
 #   ./tools/mutation_check.sh continuation # only names containing "continuation"
 #   JOBS=8 ./tools/mutation_check.sh       # more parallel build jobs (default 4)
 #   SCOPED=0 ./tools/mutation_check.sh     # rebuild/run everything per mutation
@@ -1127,6 +1128,54 @@ MUTATIONS=(
 if [[ "${1:-}" == "--list" ]]; then
   echo "Mutations:"
   for m in "${MUTATIONS[@]}"; do echo "  - ${m%%|*}"; done
+  exit 0
+fi
+
+# Does every entry still point at code that exists? An entry whose search string
+# stopped matching is scored "(not applied)" and turns the sweep red -- correctly,
+# but only after the better part of an hour, and only for the entries a filter
+# happened to select. This answers the same question in about a second, for all
+# of them, without building anything.
+#
+# It exists because retargeting entries after a refactor is easy to half-do:
+# issue #259 moved three failure paths behind one helper and left three entries
+# anchored on the code it replaced. One was noticed, and two were found by the
+# sweep rather than by anyone reading the diff.
+#
+# Run always, not just under --verify: a filtered run is exactly where a stale
+# entry hides, because the filter selects around it.
+verify_entries() {
+  local rc=0 m name file search count
+  for m in "${MUTATIONS[@]}"; do
+    IFS='|' read -r name file search _ <<< "$m"
+    if [ ! -f "$PROJECT_DIR/$file" ]; then
+      echo -e "${RED}✗ $name: no such file: $file${NC}" >&2
+      rc=1
+      continue
+    fi
+    count=$(SEARCH="$search" python3 - "$PROJECT_DIR/$file" <<'PY'
+import os, sys
+print(open(sys.argv[1]).read().count(os.environ["SEARCH"].replace("\\n", "\n")))
+PY
+)
+    if [ "$count" != "1" ]; then
+      echo -e "${RED}✗ $name: search string matches $count times in $file (need exactly 1)${NC}" >&2
+      rc=1
+    fi
+  done
+  return "$rc"
+}
+
+# Note this checks EVERY entry, before any filter is applied.
+if ! verify_entries; then
+  echo "" >&2
+  echo "The code these mutations target moved or changed. Retarget them rather" >&2
+  echo "than deleting them -- the coverage they prove is real." >&2
+  exit 2
+fi
+
+if [[ "${1:-}" == "--verify" ]]; then
+  echo "All ${#MUTATIONS[@]} mutations still point at code that exists."
   exit 0
 fi
 
