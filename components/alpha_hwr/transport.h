@@ -587,7 +587,18 @@ class Transport {
 
   // Constants
   static constexpr size_t MAX_PACKET_SIZE = 256;  ///< Maximum GENI packet size (safety limit)
-  static constexpr size_t BLE_MTU_LIMIT = 20;     ///< BLE write size limit (MTU - headers)
+  /// How much of a frame goes into one GATT write. NOT a ceiling imposed by the
+  /// negotiated MTU, whatever the name suggests, and the difference is the point:
+  /// **this pump ignores a frame that is not split into 20-byte writes**,
+  /// however large the MTU has been negotiated to be. Reported from the Python
+  /// client on a link with a 65-byte MTU, where a 27-byte frame fits inside one
+  /// ATT write and the pump does nothing with it at all -- no reply, no refusal.
+  ///
+  /// So raising this after an MTU negotiation, which is exactly the shape of a
+  /// plausible optimisation, silently stops every write from working while
+  /// leaving reads intact. It is a protocol requirement of the peer, not a
+  /// transport limit of ours.
+  static constexpr size_t BLE_MTU_LIMIT = 20;
   static constexpr uint8_t FRAME_START_RESPONSE = 0x24;  ///< Response frame start byte
   static constexpr uint8_t FRAME_START_REQUEST = 0x27;   ///< Request frame start byte (echo)
   static constexpr size_t MAX_PENDING_HANDLERS = 10;     ///< Maximum pending response handlers
