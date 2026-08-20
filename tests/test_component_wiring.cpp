@@ -1227,7 +1227,7 @@ void test_a_disconnect_does_not_publish_a_drift_reading() {
   // Far enough in for the chain to be running and the clock read to be queued,
   // but not so far that it has been answered and published legitimately.
   r.advance(4000);
-  const uint32_t published_before = r.clock_drift.publish_count;
+  const int published_before = r.clock_drift.publish_count;
 
   r.disconnect(ESP_GATT_CONN_TIMEOUT);
   r.advance(1000);
