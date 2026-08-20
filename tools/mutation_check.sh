@@ -734,15 +734,19 @@ MUTATIONS=(
 "session-is-connected-always-true|components/alpha_hwr/session.cpp|bool Session::is_connected() const { return state_ != SessionState::IDLE; }|bool Session::is_connected() const { return true; }"
 "session-ready-transition-does-not-reach-ready|components/alpha_hwr/session.cpp|  transition_to(SessionState::READY,|  transition_to(SessionState::STABILIZING,"
 "session-disconnect-does-not-reach-idle|components/alpha_hwr/session.cpp|  transition_to(SessionState::IDLE,|  transition_to(SessionState::READY,"
-# Both halves of the APDU length invariant (issue #174). Byte 1 declares the
-# payload byte count in bits 5-0, and two frames shipped declaring a count they
-# did not carry: the single-event write borrowed the layer write's 0xB3 (51)
-# for a 19-byte payload, and the Class 10 setpoint write counted only its float
-# and not the four ID bytes before it. This pump accepts either, so neither was
-# a visible failure -- tests/test_write_operations.cpp now checks every frame
-# any test sends against its own declared length.
+# The APDU length invariant (issue #174). Byte 1 declares the payload byte count
+# in bits 5-0, and two frames shipped declaring a count they did not carry: the
+# single-event write borrowed the layer write's 0xB3 (51) for a 19-byte payload,
+# and the Class 10 setpoint write counted only its float and not the four ID
+# bytes before it. This pump accepts either, so neither was a visible failure --
+# tests/test_write_operations.cpp now checks every frame any test sends against
+# its own declared length.
+#
+# Only one entry remains: the setpoint write is gone (issue #258), and with it
+# `class10-setpoint-opspec-length`. The invariant it covered did not go with it
+# -- the check in the harness is unconditional, and the single-event entry below
+# still exercises it.
 "single-event-opspec-length|components/alpha_hwr/schedule_service.cpp|  // never a visible failure; see the header note.\n  apdu[1] = 0x93;|  // never a visible failure; see the header note.\n  apdu[1] = 0xB3;"
-"class10-setpoint-opspec-length|components/alpha_hwr/control_service.cpp|  apdu[1] = 0x88;  // OpSpec: SET + 8 payload bytes (2 sub + 2 obj + 4 float)|  apdu[1] = 0x84;"
 # The APDU acknowledge field (issue #208). transport.cpp read a Class 10 0x81
 # reply as a short ACK carrying an error code and called the write successful
 # when that byte was zero -- so an Unknown Data Item error whose unknown ID
@@ -820,8 +824,11 @@ MUTATIONS=(
 # returns anything but the APDU Head", App. Prog. Manual fig 3.5 note 1), so it
 # burned a full 3 s window on every layer of every schedule write while
 # quiet_timeout kept the timeout at DEBUG.
+#
+# One fewer than there were converted sends: the setpoint register write is gone
+# (issue #258), so `setpoint-write-not-declared-as-awaiting-an-ack` went with it.
+# Its sibling below covers the same declaration on the write that remains.
 "control-request-not-declared-as-awaiting-an-ack|components/alpha_hwr/control_service.cpp|      /*expect_short_ack=*/true, /*quiet_timeout=*/true);\n\n  if (queue_commit && schedule_callback_) {|      /*expect_short_ack=*/false, /*quiet_timeout=*/true);\n\n  if (queue_commit && schedule_callback_) {"
-"setpoint-write-not-declared-as-awaiting-an-ack|components/alpha_hwr/control_service.cpp|      /*expect_short_ack=*/true, /*quiet_timeout=*/true);\n\n  // Schedule configuration commit after setpoint write|      /*expect_short_ack=*/false, /*quiet_timeout=*/true);\n\n  // Schedule configuration commit after setpoint write"
 "clock-write-expects-a-type-a-set-cannot-return|components/alpha_hwr/time_service.cpp|      apdu, sizeof(apdu), 0, 0,|      apdu, sizeof(apdu), 0x0141, 0,"
 "commit-write-expects-a-type-a-set-cannot-return|components/alpha_hwr/schedule_service.cpp|      apdu, apdu_len, 0, 0,|      apdu, apdu_len, 0xDA01, 0,"
 # Three Object 84 writes made the same mistake, so each gets its own entry: the
