@@ -1127,6 +1127,15 @@
   readiness check; they now apply the same check at the far end, so a read cut
   short keeps the previous data instead of publishing a truncated one.
 
+  A command being failed is now taken off the queue *before* its callback runs,
+  which the old order got away with only because `reset()` did not invoke
+  anything. `cmd` in `Transport::loop()` is a reference into the deque, and a
+  callback is service code: it queues the next read of a chain, and it can reach
+  `reset()`. With the new contract a callback that resets would have found its
+  own entry still at the head of the queue and been invoked a second time from
+  inside itself — and the `pop_front()` that used to follow it was already
+  running on a deque a callback could have emptied.
+
 - **Setpoint validation used hardcoded ranges; the pump publishes its own, per
   mode, and they are much narrower** (issue #273). `run_set_setpoint_` bounded a
   requested setpoint against constants inherited from the legacy setters. They

@@ -825,6 +825,40 @@ void test_reset_from_inside_an_abandoned_callback_does_not_double_fire() {
               "them called reset() again");
 }
 
+// The same re-entrancy from the other direction, and the one that actually
+// changed with issue #259. A callback invoked by loop() -- on a timeout, or on a
+// write failure -- may reach reset(). Before, that just cleared the queue out
+// from under loop(), which then ran pop_front() on it. Now reset() FAILS the
+// queue, so if loop() still had this command at the front, reset() would invoke
+// the very callback it was called from, a second time and re-entrantly.
+void test_a_timeout_callback_that_resets_does_not_re_enter_itself() {
+  std::cout << "\n=== a timeout callback calls reset() ===" << std::endl;
+  esphome::alpha_hwr::core::Transport transport;
+  transport.set_write_callback([](const uint8_t *, size_t) -> bool { return true; });
+
+  int a = 0, b = 0;
+  transport.send_command(std::vector<uint8_t>(10, 0xAA), 0, 0,
+                         [&](bool, const uint8_t *, size_t) {
+                           a++;
+                           transport.reset();
+                         },
+                         /*timeout_ms=*/500);
+  transport.send_command(std::vector<uint8_t>(10, 0xBB), 0, 0,
+                         [&](bool, const uint8_t *, size_t) { b++; }, 500);
+
+  mock_millis += 50;
+  transport.loop();     // the first is on the wire
+  mock_millis += 600;
+  transport.loop();     // ...and times out, and its callback resets
+
+  TEST_ASSERT(a == 1,
+              "the timing-out command's callback runs once, not once from the "
+              "timeout and again from the reset it called");
+  TEST_ASSERT(b == 1,
+              "  ...and the command queued behind it is failed by that reset, "
+              "which is the whole point of it");
+}
+
 // The drain is bounded. A chain that answers every failure with another send
 // would otherwise spin here until the task watchdog fires -- a panic in place of
 // a stranded read, which is the worse of the two.
@@ -1321,6 +1355,7 @@ int main() {
   test_reset_fails_a_command_that_never_went_out();
   test_reset_takes_the_commands_its_own_callbacks_queue();
   test_reset_from_inside_an_abandoned_callback_does_not_double_fire();
+  test_a_timeout_callback_that_resets_does_not_re_enter_itself();
   test_a_chain_that_never_stops_re_sending_hits_the_cap();
   test_a_late_reply_costs_one_match_and_no_more();
   test_the_reply_debt_is_paid_down_and_expires();

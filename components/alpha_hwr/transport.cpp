@@ -76,10 +76,7 @@ void Transport::loop() {
 
       if (!this->write_callback_) {
         ESP_LOGW(TAG, "Write callback not set, dropping command");
-        if (cmd.callback) {
-          cmd.callback(false, nullptr, 0);
-        }
-        this->command_queue_.pop_front();
+        this->fail_front_command_();
         this->state_ = State::IDLE;
         break;
       }
@@ -113,10 +110,7 @@ void Transport::loop() {
           this->peer_resync_pending_ = true;
           this->peer_resync_started_ms_ = now;
         }
-        if (cmd.callback) {
-          cmd.callback(false, nullptr, 0);
-        }
-        this->command_queue_.pop_front();
+        this->fail_front_command_();
         this->state_ = State::IDLE;
       }
       break;
@@ -164,10 +158,7 @@ void Transport::loop() {
         // open from 1.1 s to 4 s. `quiet_timeout` means "do not log this at
         // warning" and nothing else.
         this->note_reply_owed_(cmd.suppressed_a_frame);
-        if (cmd.callback) {
-          cmd.callback(false, nullptr, 0);
-        }
-        this->command_queue_.pop_front();
+        this->fail_front_command_();
         this->state_ = State::IDLE;
       }
       break;
@@ -424,6 +415,29 @@ void Transport::reset() {
   // see a transport that is already down rather than one still holding the
   // wreckage of the connection it is being told about.
   abandon_queue_();
+}
+
+void Transport::fail_front_command_() {
+  if (this->command_queue_.empty()) return;
+  // Off the queue BEFORE the callback runs, which is the opposite of the order
+  // this used to be in, and the order matters for two reasons.
+  //
+  // `cmd` in loop() is a REFERENCE into the deque. A callback is service code
+  // and service code touches the transport: it queues the next read of a chain,
+  // and it may reach reset(). Either way the reference is dangling by the time
+  // the old `pop_front()` two lines later ran -- and if the queue had been
+  // emptied, that pop ran on an empty deque.
+  //
+  // The second reason arrived with issue #259. reset() now FAILS the queue
+  // rather than clearing it, so a reset() reached from this callback would find
+  // this very command still sitting at the front and invoke its callback a
+  // second time, re-entrantly, from inside itself. Taking it off the queue first
+  // removes it from anything the callback can reach.
+  Command cmd = std::move(this->command_queue_.front());
+  this->command_queue_.pop_front();
+  if (cmd.callback) {
+    cmd.callback(false, nullptr, 0);
+  }
 }
 
 void Transport::abandon_queue_() {

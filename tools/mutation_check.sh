@@ -871,6 +871,11 @@ MUTATIONS=(
 # than to no cap at all: removing it entirely makes the suite HANG, which this
 # script reports as its own outcome and which would cost every full sweep the
 # whole test timeout.
+# And the command being failed must be off the queue BEFORE its callback runs.
+# `cmd` in loop() is a reference into the deque; a callback that reaches reset()
+# would otherwise find its own entry still at the head and be invoked a second
+# time from inside itself. This mutation restores the old order exactly.
+"failed-command-still-on-the-queue-during-its-callback|components/alpha_hwr/transport.cpp|  Command cmd = std::move(this->command_queue_.front());\n  this->command_queue_.pop_front();\n  if (cmd.callback) {\n    cmd.callback(false, nullptr, 0);\n  }|  Command &cmd = this->command_queue_.front();\n  if (cmd.callback) {\n    cmd.callback(false, nullptr, 0);\n  }\n  this->command_queue_.pop_front();"
 "abandon-drain-cap-stops-it-dead|components/alpha_hwr/transport.h|  static constexpr size_t MAX_ABANDON_STEPS = 512;|  static constexpr size_t MAX_ABANDON_STEPS = 0;"
 # The inbound overflow is the other half. It runs on a LIVE link -- a corrupt
 # fragment declaring a long frame is enough -- and it used to reach reset(), so
