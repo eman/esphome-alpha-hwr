@@ -1278,23 +1278,16 @@ public:
     write_op_service_.submit_clear_single_event(index, "", on_complete,
                                                 services::WriteOrigin::ENTITY);
   }
-  /// Free single-event slot, expiry judged against the node's own clock.
-  ///
-  /// The picker used to be called here with no reference time at all, which
-  /// reads as "expire nothing": a pump whose five slots all held events that
-  /// ended months ago reported a full pool and the editor refused to add one.
-  /// Passing the real clock is what makes "expired events do not exhaust the
-  /// pool" true on this surface too, and now_unix() answers 0 when there is no
-  /// synced clock -- which the picker reads as "expire nothing", the same
-  /// conservative answer this call site used to get by default (issue #262).
-  /// The one formal difference, a DISABLED cached event, cannot arise: the
-  /// cache only ever holds enabled ones (see read_single_events_async() and
-  /// the cache update in write_single_event_async()). The case is moot from
-  /// here in any event -- both editor buttons run build_event_window() first,
-  /// which refuses outright without a synced clock.
-  int find_free_single_event_slot() const {
-    return schedule_service_.find_free_single_event_slot(time_service_.now_unix());
-  }
+  // A free-slot accessor used to live here, and the schedule editor's "Add
+  // Single Event" button called it and then wrote to the slot it returned by
+  // index. Nothing closed the gap between the two: a service call resolving in
+  // that gap takes the same slot, writes a live event to it, and the button's
+  // write then overwrites it. The picker is not the problem -- picking and
+  // writing as separate steps is -- so the accessor is gone and the button
+  // submits with no slot, letting the write-operation layer resolve one at the
+  // moment it writes (issue #262). Callers that genuinely know their slot use
+  // write_single_event() above; callers that do not use
+  // submit_set_single_event() and read the slot off the settle event.
 
   /**
    * Build a begin/end Unix-timestamp pair from wall-clock month/day/hour/minute

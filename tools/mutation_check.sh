@@ -876,6 +876,18 @@ MUTATIONS=(
 # live only relative to the new event's begin and stops meaning anything the
 # moment the right question is asked.
 "single-event-expiry-measured-from-the-new-event|components/alpha_hwr/write_operation_service.cpp|      const uint32_t now_ts = time_service_.now_unix();|      const uint32_t now_ts = op->begin_ts;"
+# ...but only when it has to. An EMPTY slot beats a recyclable one, always:
+# recycling costs the stored record of an event that ran, and the picker used to
+# spend it while four slots sat unused, because it took the first index no LIVE
+# event held. On a five-slot pump that meant repeated one-time runs cycled
+# through slot 0 forever, each carrying a "this slot was recycled" warning about
+# nothing anyone would miss -- which is how a warning stops meaning anything.
+"single-event-recycles-while-a-slot-sits-empty|components/alpha_hwr/schedule_service.cpp|    if (cached.find(i) == cached.end())|    if (false)"
+# ...and when it does have to recycle, the stalest record is the one to lose.
+# Flipping the comparison keeps the oldest event and throws away the most
+# recently finished one, which is backwards, and no status assertion notices:
+# the write still lands, still confirms, still settles ACCEPTED.
+"single-event-recycles-the-freshest-not-the-stalest|components/alpha_hwr/schedule_service.cpp|    const bool ended_earlier = ended < stalest_end;|    const bool ended_earlier = ended > stalest_end;"
 # Recycling a slot destroys what was in it. Legitimate -- the event had ended --
 # and it used to be silent, which is most of why #262 was expensive to diagnose:
 # the operation settles ACCEPTED because the write really did land, and nothing
@@ -892,6 +904,10 @@ MUTATIONS=(
 # safe direction, but it makes a node that has simply never synced look like a
 # pump with five live events -- unless the refusal says which of the two it is.
 "single-event-full-pool-hides-a-missing-clock|components/alpha_hwr/write_operation_service.cpp|                now_ts == 0|                false"
+# The mirror. Blaming the clock for a pool that is genuinely full of LIVE events
+# sends the reader after a problem the node does not have -- the same defect as
+# the entry above, pointing the other way.
+"single-event-clock-blamed-for-a-full-pool|components/alpha_hwr/write_operation_service.cpp|                now_ts == 0|                true"
 # event_type is the only thing distinguishing a vacation from a one-time run in
 # the settle event -- they share a command string. Without it the two API
 # handlers are interchangeable and nothing notices.

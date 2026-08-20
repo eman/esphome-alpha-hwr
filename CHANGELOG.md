@@ -1120,27 +1120,54 @@
   a WARN and carries the same sentence into the settle event's `detail`, naming
   the slot and the window it replaced.
 
-  The **Add Single Event** editor button gets the fix from the other side: it
-  called the picker with no reference time at all, which reads as "expire
-  nothing", so a pump whose five slots all held events from months ago reported
-  a full pool and the button refused. It now passes the node's clock like every
-  other caller.
+  Two more things the picker was getting wrong, both found by the adversarial
+  review rather than by the bug report:
 
-  Four new host tests — the reported case (a 2040 event and a live one tomorrow,
-  five slots, the live one must survive), the vacation variant, and the pair that
-  pins both directions of the no-clock rule — plus the existing reuse test
-  retargeted at the clock and now asserting the recycle note. The single-event
-  fixtures now anchor their windows to the node clock, which is not cosmetic:
-  `test_single_event_auto_slot`'s "live" event ended in 1970, so it was live only
-  relative to the new event's begin, and its slot assertion held under the old
-  comparison and failed under the fixed one. Four mutation entries, including the
-  reported line itself.
+  - **An empty slot now always beats a recyclable one.** The loop took the first
+    index no *live* event held, so an expired slot 0 went ahead of four empty
+    ones every time. On a five-slot pump repeated one-time runs cycled through
+    slot 0 forever while slots 1–4 stayed empty — destroying a stored record on
+    every write, and firing the new "this slot was recycled" warning on writes
+    that cost nothing, which is how a warning stops meaning anything.
+  - **When there is nothing empty, the stalest record goes.** Recycling by
+    lowest index kept the oldest event and threw away the most recently
+    finished one.
+
+  The **Add Single Event** editor button no longer picks a slot at all. It used
+  to call the picker and then write to the returned index, with nothing closing
+  the gap between the two: a service call resolving in that gap takes the same
+  slot, writes a live event to it, and the button's write overwrites it. It now
+  submits with no slot and lets the write-operation layer resolve one at the
+  moment it writes — which is what AGENTS §6 asks for anyway, and which also
+  gives that button the recycling warning and the settle detail that a write by
+  index skips. The free-slot accessor it used is gone with it, so the
+  pick-then-write shape is no longer reachable from a lambda. "No free single
+  event slots" now arrives as a `rejected` settle event rather than a log line.
+
+  Seven new host tests — the reported case (a 2040 event and a live one
+  tomorrow, five slots, the live one must survive), the vacation variant, both
+  directions of the no-clock rule, the empty-slot preference, a pool genuinely
+  full of live events, and the picker's decision table called directly at
+  hand-chosen reference times, including the boundary where an event ends
+  exactly *at* the reference (it keeps its slot; one second later it does not).
+  The existing reuse test is retargeted at the clock and now asserts the recycle
+  note. The single-event fixtures anchor their windows to the node clock, which
+  is not cosmetic: `test_single_event_auto_slot`'s "live" event ended in 1970,
+  so it was live only relative to the new event's begin, and its slot assertion
+  held under the old comparison and failed under the fixed one. Seven mutation
+  entries, including the reported line itself, all verified caught.
 
   Verified on the bench: the issue's own two writes, on a pump with five empty
-  slots, now land in slots 0 and 1 with both events surviving, and a vacation
-  booked for July 2027 takes slot 2 and evicts neither. Recycling a slot that
-  really had ended reports `reused slot 3, which held an event that ended (…)`
-  in the settle event; the write into the empty slot beside it reports nothing.
+  slots, land in slots 0 and 1 with both events surviving, and a vacation booked
+  for July 2027 takes slot 2 and evicts neither. Recycling a slot that really
+  had ended reports `reused slot N, which held an event that ended (…)` in the
+  settle event; a write into an empty slot reports nothing.
+
+  Four follow-ups came out of the review, all pre-existing: #267 (a finished
+  vacation is still "the" vacation, so `clear_vacation` can clear the wrong
+  slot), #268 (the write-op suite pins `TZ=UTC`, so the cache's UTC invariant is
+  invisible to it), #269 (a wholly-past event is written and settles accepted),
+  #270 (four independent answers to "what time is it", with three sanity floors).
 
 
 - **`set_single_event` and `set_vacation` rejected every input on real

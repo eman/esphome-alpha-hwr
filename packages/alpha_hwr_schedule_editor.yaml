@@ -377,31 +377,23 @@ button:
             return;
           }
 
-          // Find a free slot
-          int slot = id(pump).find_free_single_event_slot();
-          if (slot < 0) {
-            ESP_LOGW("single_event", "No free single event slots");
-            return;
-          }
-          
-          esphome::alpha_hwr::services::SingleEvent event;
-          event.index = (uint8_t)slot;
-          event.enabled = true;
-          event.action = 0x02;  // RUN
-          event.begin_timestamp = (uint32_t)begin_ts;
-          event.end_timestamp = (uint32_t)end_ts;
-          
-          ESP_LOGI("single_event", "Adding event slot %d: %02d/%02d %02d:%02d - %02d/%02d %02d:%02d",
-                   slot, start_month, start_day_val, start_hour, start_minute,
+          ESP_LOGI("single_event", "Adding event %02d/%02d %02d:%02d - %02d/%02d %02d:%02d",
+                   start_month, start_day_val, start_hour, start_minute,
                    end_month, end_day_val, end_hour, end_minute);
-          
-          id(pump).write_single_event(event, [](bool success) {
-            if (success) {
-              ESP_LOGI("single_event", "✓ Single event saved");
-            } else {
-              ESP_LOGW("single_event", "✗ Failed to save single event");
-            }
-          });
+
+          // No slot is chosen here, deliberately. This used to pick one with
+          // find_free_single_event_slot() and then write to it by index, which
+          // put a gap between the pick and the write that nothing closed: a
+          // service call resolving in that gap takes the same slot, writes a
+          // live event to it, and this write then overwrites it. Letting the
+          // write-operation layer resolve the slot makes the two one step, and
+          // is what AGENTS section 6 asks for anyway -- it also means this
+          // button gets the recycling WARN and the settle detail that the
+          // service path has (issue #262), which a write by index skips.
+          //
+          // "no free single event slots" now arrives as a rejected settle event
+          // rather than a log line here.
+          id(pump).submit_set_single_event((uint32_t)begin_ts, (uint32_t)end_ts, "");
 
   - platform: template
     name: "Clear Single Event"

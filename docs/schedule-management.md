@@ -51,11 +51,13 @@ strings, unreadable schedule state) now settle as `rejected` with a reason.
 - `set_single_event` picks the first free slot and echoes it in the settle
   event (`slot` field); `rejected` with `"no free single event slots"` when
   full
-- a slot whose event has already **ended** counts as free and is recycled, so
-  past events do not fill the pool. "Ended" is measured against the node's
-  wall clock, and the settle event's `detail` says which slot was recycled and
-  what window it held. A node with no synced clock cannot tell what has
-  expired, so it recycles nothing and the refusal says so
+- a slot whose event has already **ended** counts as free and can be recycled,
+  so past events do not fill the pool. "Ended" is measured against the node's
+  wall clock. An empty slot is always taken first; a stored event is only
+  overwritten when nothing is empty, and then it is the one that ended longest
+  ago. The settle event's `detail` says which slot was recycled and what window
+  it held. A node with no synced clock cannot tell what has expired, so it
+  recycles nothing and the refusal says so
 - a one-time event runs the pump (`Auto` action); it and the weekly windows are
   what "run" means. A vacation is the same object with a `Stop` action — see below
 

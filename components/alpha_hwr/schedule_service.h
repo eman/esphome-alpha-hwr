@@ -431,6 +431,11 @@ public:
    *   and a vacation booked for next summer would have cleared every event
    *   before it. Hence no default: a caller with no clock has to say so.
    *
+   * A genuinely EMPTY slot is always preferred to a recyclable one: recycling
+   * costs the stored record of an event that ran, and there is no reason to pay
+   * that while the pump has a slot nobody is using. When nothing is empty, the
+   * event that has been over the longest is the one that goes.
+   *
    * @return Index of a usable slot, or -1 when there is none -- including
    *   when the single-event cache is cold (see is_single_events_cached()).
    */
@@ -624,6 +629,7 @@ protected:
   // -------------------------------------------------------------------------
 
   void write_class10_command(const uint8_t *apdu, size_t apdu_len);
+
 
   /**
    * Write a full layer from cached data and call config commit.
