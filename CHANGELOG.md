@@ -1080,6 +1080,71 @@
 
 ### Fixed
 
+- **The "dedicated" setpoint write was addressed backwards, and the pump had
+  been refusing it since the day it was written** (issue #258). It is gone
+  rather than corrected, and the reasoning is worth recording because the
+  obvious repair would have been worse than the defect.
+
+  `ControlService::set_class10_setpoint()` laid its address out sub-id first,
+  `[SubH][SubL][ObjH][ObjL]`. Every Class 10 SET this pump accepts is object
+  first, `[Obj][SubH][SubL]` — all twenty distinct address shapes across the 420
+  SETs in the captures, and all nine shapes this component sends. For the speed
+  setpoint the frame therefore said object `0x00`, and the pump answered
+  `Unknown Data Item`, quoting our own first payload byte back at us. Bench-seen
+  during #256's verification, which is what made these replies visible at all;
+  before that the send was fire-and-forget and nothing ever read the answer.
+
+  Correcting the byte order would have produced a *worse* frame. Sub-ids 13, 15
+  and 39 are not setpoint registers: the GENI profile shipped inside the
+  Grundfos Home APK names them
+  `control_mode_cs/cp/cf_factory_config_obj`, object type 301
+  `ControlModeFactoryConfiguration` — a 28-byte struct of seven floats beginning
+  with `default_set_point`. The per-mode *user* setpoints are sub-ids 14, 16 and
+  40, type 302, 18 bytes including three PID terms. So the write would have put
+  four bytes of float into the factory defaults, with no type, version or size
+  header, and no payload for the other 24 bytes.
+
+  Nothing needed it. The fused object 86 sub-id 6 request already carries
+  `set_point` as one of its four fields, which is how the Grundfos app sets one:
+  25 such writes in the captures, each with a real value, each acknowledged. The
+  operation's verdict has always come from the readback, so the refusal changed
+  no outcome — which is exactly why it survived. What the deleted write *did* do
+  was schedule the configuration commit, and that commit is real: every one of
+  those 25 fused writes is followed immediately by an object 84 sub-id 1
+  overview write. `send_control_request()` issues it now via its own
+  `queue_commit`, so a setpoint write still commits, 200 ms after the frame
+  instead of 600 ms. The confirm readback lands where it always did.
+
+  The mislabelled comments that made this easy to write are corrected too.
+  `send_control_request()` and `send_set_mode_request()` both annotated their
+  address bytes `Sub ID high` / `Obj ID high`, which is backwards; they were
+  right only by coincidence, because object 86 is `0x56` and a sub-id under 256
+  fits the low byte either way round. The deleted write took those labels at
+  their word. The `Sub 0x5600 / Obj 0x0601` spelling used throughout the file is
+  named for what it is — two-byte slices taken at the wrong boundary, entrenched
+  nicknames rather than addresses — so nothing is inferred from it again.
+
+  **The simulator now refuses what the pump refuses.** It used to accept an
+  OpSpec `0x88` SET at any address, which is why the host suite showed this
+  write working for as long as it did. It answers an unrecognised Class 10 SET
+  with `Unknown Data Item` and the offending item id, exactly as the pump does,
+  and the suite fails if any test provoked one — a net over every Class 10 SET
+  the component sends, not just this one. A mutation entry reverses the fused
+  control request's address to prove the net catches it.
+
+  **New tool: `tools/geni_capture_scan.py`.** The capture corpus has a trap its
+  README has documented since #248 — writes exceed the 20-byte ATT payload and
+  fragment, so a scanner reading packets individually finds every read and not
+  one write — and the project has fallen into it twice. The scanner reassembles
+  ATT value streams before scanning, drops the three duplicate sessions, and
+  reports SET/GET/reply censuses; reassembly is self-checking at ~100% coverage
+  with nothing left over. Several counts in the protocol comments were
+  pre-reassembly artifacts and are corrected against it: **420** Class 10 SETs
+  (was 195), **459** short replies split 420 OK / 26 BUSY / 13 OPERATION_FAILED
+  (was 136 / 100 / 24 / 12), 25 fused control-request writes (was 16), 40 layer
+  writes (was 20). None of the conclusions those numbers supported changes.
+
+
 - **A single event scheduled far ahead evicted a live nearer one** (issue #262).
   Bench-observed, not inferred: two writes fifteen seconds apart on a pump with
   five empty slots, one for tomorrow and one for 2040. Both settled `accepted`,

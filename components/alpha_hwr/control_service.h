@@ -83,8 +83,19 @@ enum class OperationMode : uint8_t {
  *   control.stop();
  * 
  * Protocol Reference:
- * - Control commands use Class 10 Sub 0x5600, Obj 0x0601
+ * - Control commands are a Class 10 SET on object 86, sub-id 6
+ *   (overall_operation_local_request_obj), object type 303.
  * - Payload format: [Header][Flag][Mode][Suffix]
+ *
+ * A note on the "Sub 0x5600 / Obj 0x0601" spelling that appears throughout this
+ * file, the tests (`frames_0601`, `frames_0a01`) and the changelog. A Class 10
+ * request is addressed OBJECT FIRST -- [Obj][SubH][SubL][TypeH][TypeL][Ver] --
+ * so on the wire this write begins `56 00 06 01 2F`. `0x5600` and `0x0601` are
+ * two-byte slices of that taken at the wrong boundary: 0x5600 straddles the
+ * object and the sub-id high byte, 0x0601 straddles the sub-id low byte and the
+ * type high byte. They are entrenched nicknames, not addresses, and nothing
+ * should be inferred from them -- an inference from exactly this is how the
+ * deleted setpoint register write came to be addressed backwards (issue #258).
  * - Flag: 0x00 = Start/Run, 0x01 = Stop
  * - Configuration commit required after state changes
  * 
@@ -473,15 +484,11 @@ class ControlService {
   ///
   /// The pump does answer this write -- 12 mode writes in the de-duplicated
   /// captures, every one acknowledged, 38-85 ms. Every Class 10 SET in that
-  /// corpus is acknowledged, 195 of 195. See resources/traffic_capture/README.md,
+  /// corpus is acknowledged, 420 of 420. See resources/traffic_capture/README.md,
   /// including why an earlier revision concluded the opposite, and why the count
   /// there was once given as 420.
   static constexpr uint32_t MODE_ACK_TIMEOUT_MS = 400;
 
-  // Sub-ID constants for setpoint registers (Reference: control.py lines 137-141)
-  static constexpr uint16_t SUB_SPEED_SETPOINT = 13;
-  static constexpr uint16_t SUB_PRESSURE_SETPOINT = 15;
-  static constexpr uint16_t SUB_FLOW_SETPOINT = 39;
     /**
     * Get the cached setpoint for a specific mode.
     * Used internally for callbacks and log messages (issue #51).
@@ -580,15 +587,15 @@ class ControlService {
 
   /**
    * Change the control mode without altering the mode's stored setpoint or the
-   * pump's enabled state. Sends a Class 10 SET with APDU Sub=0x5600, Obj=0x0A01
-   * (this is the GENI overall_control_mode_local_request object -- id 86,
-   * sub-id 10 -- addressed with sub-id 10 in the high byte of the Obj field).
+   * pump's enabled state. Sends a Class 10 SET on GENI object 86, sub-id 10
+   * (overall_control_mode_local_request_obj), object type 303 -- on the wire
+   * `56 00 0A 01 2F 01 ...`, which older comments here called "Obj 0x0A01".
    * Per its GENI profile that object ignores control_source, operation_mode and
    * set_point, so the payload fills those with no-op sentinels
    * (Undefined / NoCmd / NaN) and only control_mode is applied -- matching the
    * Grundfos GO app. Unlike send_control_request()'s start/stop object
-   * (Sub=0x5600, Obj=0x0601), this never overwrites the pump's setpoint
-   * (issue #97/#83) and never force-enables the pump (issue #45).
+   * (86 sub-id 6), this never overwrites the pump's setpoint (issue #97/#83)
+   * and never force-enables the pump (issue #45).
    *
    * The pump acknowledges this write with a bare Class 10 short frame, and this
    * WAITS for it rather than firing and forgetting (issue #248). GENIbus is an
@@ -679,20 +686,35 @@ class ControlService {
    */
   void cache_setpoint_for_mode(ControlMode mode, float raw_setpoint);
 
-  /**
-   * Set a Class 10 setpoint value (OpSpec 0x84 = SET + 4 bytes).
-   * 
-   * APDU: [0x0A][0x84][SubH][SubL][ObjH][ObjL][Float32BE]
-   * Sends configuration commit after success.
-   * 
-   * @param value Float value to write
-   * @param sub_id Sub-ID to write to
-   * @param obj_id Object ID (default 86)
-   * 
-   * Reference: control.py::_set_class10_setpoint() lines 1100-1132
-   */
-  void set_class10_setpoint(float value, uint16_t sub_id, uint16_t obj_id = 86);
-  
+  // A set_class10_setpoint() lived here, writing a bare float to object 86
+  // sub-id 13 / 15 / 39 as a second, "dedicated" setpoint write after the fused
+  // control request. It is gone, and the reasons are worth keeping because the
+  // obvious repair -- swap the address bytes -- would have made it worse
+  // (issue #258).
+  //
+  //  - It was addressed sub-id first, `[SubH][SubL][ObjH][ObjL]`. Every Class 10
+  //    SET this pump accepts is object first, `[Obj][SubH][SubL]`: all 20
+  //    distinct address shapes across 420 SETs in resources/traffic_capture, and
+  //    all nine shapes this component sends. So the frame said object 0x00 and
+  //    the pump answered Unknown Data Item, quoting that 0x00 straight back --
+  //    bench-observed, and true for every setpoint since the method existed.
+  //  - Sub-ids 13, 15 and 39 are not setpoint registers. The GENI profile shipped
+  //    inside the Grundfos Home APK names them control_mode_cs/cp/cf_factory_config_obj,
+  //    type 301 ControlModeFactoryConfiguration -- a 28-byte struct of seven
+  //    floats beginning with default_set_point. The per-mode USER setpoints are
+  //    sub 14 / 16 / 40, type 302, 18 bytes including three PID terms. So a
+  //    corrected frame would have written four bytes into the factory defaults.
+  //  - Nothing needed it. The fused object 86 sub-id 6 request carries set_point
+  //    as one of its four fields, which is how the app sets a setpoint: 25 such
+  //    writes in the corpus, each carrying a real value, each acknowledged.
+  //
+  // The one thing that write did do was schedule the configuration commit, and
+  // the commit is real -- every one of those 25 sub-6 writes is followed
+  // immediately by an object 84 sub-id 1 overview write. send_control_request()
+  // issues it now, via its own queue_commit.
+  //
+  // Verify any of this with `tools/geni_capture_scan.py`.
+
   /**
    * Class 10 Control Mode Mapping.
    * 

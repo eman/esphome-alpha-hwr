@@ -180,6 +180,19 @@ MUTATIONS=(
 # public surfaces. It went unnoticed for as long as it did precisely because no
 # test asserted either spelling.
 "command-string-service-name-drift|components/alpha_hwr/write_operation_service.cpp|    case WriteCommand::SET_PUMP_STATE:        return \"set_pump_state\";|    case WriteCommand::SET_PUMP_STATE:        return \"pump_set_state\";"
+# A Class 10 request is addressed OBJECT FIRST -- [Obj][SubH][SubL] -- in all 20
+# distinct address shapes across the 420 SETs in resources/traffic_capture. Lay
+# it out sub-first and the pump answers Unknown Data Item, quoting the first
+# payload byte back. That is not hypothetical: a "dedicated" setpoint write did
+# exactly this for as long as it existed, and nobody noticed because the send was
+# fire-and-forget so the refusal was never read (issue #258).
+#
+# The simulator used to accept any address it recognised the OpSpec for, which is
+# why the old write looked healthy from the host suite. It now answers an
+# unrecognised Class 10 SET the way the pump does, and main() fails the run if
+# any test provoked one. This entry is the proof that net works: reversing the
+# fused control request's address turns it red.
+"control-request-addressed-sub-first|components/alpha_hwr/control_service.cpp|  apdu[2] = 0x56;  // Object id 86, the start/stop request|  apdu[2] = 0x00;  // mutated: sub-id high, as the deleted register write had it"
 # The single-event slot bound is the last stop before a caller's index becomes
 # SubID 900+idx on the wire. Two ways to get it wrong, and the pair is the point:
 # hardcoding 35 still rejects absurd values while quietly accepting slot 10 on a

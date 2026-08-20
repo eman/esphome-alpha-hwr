@@ -153,13 +153,12 @@ struct PumpSim {
   uint32_t mode_ack_delay_ms{0};
   // The other Class 10 SETs this harness sees, answered for exactly the same
   // reason and defaulted ON for exactly the same reason (issue #253). Every
-  // Class 10 SET in resources/traffic_capture is acknowledged -- 195 writes
+  // Class 10 SET in resources/traffic_capture is acknowledged -- 420 writes
   // across 20 distinct address shapes, all with the identical nine bytes
-  // `24 05 F8 E7 0A 01 00 AE A2`, 36-193 ms. A simulator that stayed silent
+  // `24 05 F8 E7 0A 01 00 AE A2`. A simulator that stayed silent
   // would make each of these writes time out, and each timeout records a reply
   // debt that costs the NEXT write its acknowledgement.
   bool ack_control_write{true};       // the fused Obj 0601 write
-  bool ack_setpoint_write{true};      // the OpSpec 0x88 register write
   bool ack_clock_write{true};         // Obj 94 Sub 100
   // The Object 84 writes -- schedule layer, single event, overview/commit. All
   // three asked the transport for a reply carrying a type, which a SET reply
@@ -235,6 +234,8 @@ struct PumpSim {
 // every write any test in it performs rather than one representative case.
 static int g_apdu_length_violations = 0;
 static std::vector<std::string> g_apdu_length_violation_detail;
+static int g_unknown_class10_addresses = 0;
+static std::vector<std::string> g_unknown_class10_address_detail;
 
 /// What the node's wall clock reads the instant a Harness is built:
 /// 2026-08-07 12:00:00 UTC. `PumpSim::clock_epoch` happens to carry the same
@@ -273,7 +274,6 @@ struct Harness {
   int frames_0601{0};       // fused control writes
   int frames_layer_write{0};  // whole-layer 42-byte schedule writes
   int frames_0a01{0};       // unfused mode changes
-  int frames_register{0};   // 0x84 setpoint register writes
   int frames_class3_run{0}; // Class 3 START/STOP commands
   int frames_class3_remote{0}; // Class 3 remote enable/disable commands
   int frames_dhw_read{0};   // Obj 91 Sub 421 reads
@@ -285,7 +285,6 @@ struct Harness {
   // cannot check it.
   uint64_t last_0a01_ms{0};
   uint64_t last_temp_write_ms{0};
-  uint64_t last_register_write_ms{0};
   uint64_t last_clock_write_ms{0};
   int frames_clock_read{0};   // Obj 94 Sub 101 reads
   int frames_clock_write{0};  // Obj 94 Sub 100 writes
@@ -382,11 +381,69 @@ struct Harness {
     g_apdu_length_violation_detail.push_back(entry);
   }
 
+  /// Every Class 10 SET must address a data item the pump actually has.
+  ///
+  /// A Class 10 request addresses `[Obj][SubH][SubL]`, object first. That is
+  /// how all 20 distinct address shapes across the 420 SETs in
+  /// resources/traffic_capture are laid out, and it is what the GENI profile
+  /// shipped inside the Grundfos Home APK describes. Get it backwards and the
+  /// first byte is a sub-id fragment rather than an object, so the pump answers
+  /// Unknown Data Item -- which is precisely what it had been doing to the
+  /// "dedicated" setpoint write for as long as that write existed, unnoticed
+  /// because the send was fire-and-forget and nothing read the reply
+  /// (issue #258).
+  ///
+  /// The list is what THIS COMPONENT is known to write, not everything the pump
+  /// accepts, so a new write has to be added here deliberately. That friction is
+  /// the point: adding an address to this list is the moment to check it against
+  /// the profile and the captures, which is the check that was never made.
+  ///
+  /// Unrecognised addresses are answered the way the pump answers them --
+  /// APDU head 0x81, Unknown Data Item, one payload byte carrying the offending
+  /// item id -- so a test that provokes one sees a refusal rather than silence.
+  bool class10_address_is_known(const uint8_t *apdu, size_t apdu_len) {
+    if (apdu_len < 5) return true;             // not addressed; nothing to check
+    const uint8_t obj = apdu[2];
+    const uint16_t sub = static_cast<uint16_t>((apdu[3] << 8) | apdu[4]);
+    switch (obj) {
+      case 84:   // ClockProgram: overview, single events, weekly layers
+        return sub == 1 || (sub >= 900 && sub < 935) || (sub >= 1000 && sub <= 1004);
+      case 86:   // overall_operation_local_request / overall_control_mode_local_request
+        return sub == 6 || sub == 10;
+      case 91:   // DHW on/off config, temperature-range config
+        return sub == 421 || sub == 430;
+      case 94:   // DateTimeConfig
+        return sub == 100;
+      default:
+        return false;
+    }
+  }
+
+  void check_class10_set_address(const uint8_t *apdu, size_t apdu_len) {
+    if (apdu_len < 2 || apdu[0] != 0x0A) return;
+    if (((apdu[1] >> 6) & 0x03) != 0x02) return;   // SET only; GETs go elsewhere
+    if (class10_address_is_known(apdu, apdu_len)) return;
+    g_unknown_class10_addresses++;
+    // Answer as the pump does: Unknown Data Item, offending item id.
+    inject({0x24, 0x06, 0xF8, 0xE7, 0x0A, 0x81, apdu_len >= 3 ? apdu[2] : uint8_t{0},
+            0x00, 0xAA, 0xBB});
+    char buf[160];
+    snprintf(buf, sizeof(buf),
+             "class 10 SET opspec 0x%02X addresses obj %u sub %u -- the pump has no such item",
+             apdu[1], apdu_len >= 3 ? apdu[2] : 0,
+             apdu_len >= 5 ? static_cast<unsigned>((apdu[3] << 8) | apdu[4]) : 0u);
+    const std::string entry(buf);
+    for (const auto &seen : g_unknown_class10_address_detail)
+      if (seen == entry) return;
+    g_unknown_class10_address_detail.push_back(entry);
+  }
+
   void handle_frame(const std::vector<uint8_t> &frame) {
     if (frame.size() < 6) return;
     const uint8_t *apdu = frame.data() + 4;
     size_t apdu_len = frame.size() - 6;
     check_apdu_length(apdu, apdu_len);
+    check_class10_set_address(apdu, apdu_len);
 
     // Class 3 run-state commands: [0x03, 0x81, 0x06 START | 0x05 STOP].
     if (apdu_len >= 3 && apdu[0] == 0x03 && apdu[1] == 0x81 &&
@@ -446,13 +503,6 @@ struct Harness {
                            [this]() { inject_short_ack(); }});
         }
       }
-    } else if (opspec == 0x88 && apdu_len >= 10) {
-      // Setpoint register write
-      frames_register++;
-      last_register_write_ms = mock_millis;
-      int sub = (apdu[2] << 8) | apdu[3];
-      sim.apply_setpoint(sub, protocol::decode_float_be(apdu + 6));
-      if (sim.ack_setpoint_write) inject_short_ack();
     } else if (opspec == 0x03 && apdu_len >= 5 && apdu[2] == 91 && apdu[3] == 0x01 && apdu[4] == 0xAE) {
       // Obj 91 Sub 430 config read
       if (sim.drop_obj91_reads > 0) {
@@ -586,7 +636,7 @@ struct Harness {
         // A short ACK, not the object back. Every SET this pump answers, it
         // answers with the same nine bytes: "the SET operation never returns
         // anything but the APDU Head" (App. Prog. Manual fig 3.5 note 1), and
-        // resources/traffic_capture has 20 layer writes, all answered that way
+        // resources/traffic_capture has 40 layer writes, all answered that way
         // in 36-142 ms. This simulator used to echo the layer object back,
         // because the firmware asked for type 0xDE01 -- which is how a write
         // that timed out on every attempt looked healthy from here (issue #253).
@@ -911,7 +961,6 @@ static void test_set_mode_accepted() {
   TEST_ASSERT(r && r->mode == ControlMode::CONSTANT_SPEED, "settled mode is constant_speed");
   TEST_ASSERT(h.frames_0a01 == 1, "mode change used the unfused 0x0A01 object");
   TEST_ASSERT(h.frames_0601 == 0, "no fused 0x0601 write was sent");
-  TEST_ASSERT(h.frames_register == 0, "no setpoint register write was sent");
   TEST_ASSERT(h.control.get_current_mode() == ControlMode::CONSTANT_SPEED, "cache adopted the new mode");
 }
 
@@ -949,7 +998,8 @@ static void test_set_setpoint_accepted() {
   TEST_ASSERT(r && r->status == WriteStatus::ACCEPTED, "status is accepted");
   TEST_ASSERT(r && std::fabs(r->value - 2000.0f) < 0.5f, "settled value is 2000 RPM");
   TEST_ASSERT(r && r->enabled == 1, "settled enabled state reported");
-  TEST_ASSERT(h.frames_register == 1, "one setpoint register write was sent");
+  TEST_ASSERT(h.frames_0601 == 1, "one fused control request carried the setpoint");
+  TEST_ASSERT(h.commit_count == 1, "and one configuration commit followed it");
 }
 
 static void test_set_setpoint_clamped() {
@@ -999,7 +1049,7 @@ static void test_set_setpoint_resolve_abort() {
   const WriteResult *r = h.result_for("s4");
   TEST_ASSERT(r && r->status == WriteStatus::REJECTED, "status is rejected");
   TEST_ASSERT(r && r->detail.find("enabled state") != std::string::npos, "detail explains the #45 abort");
-  TEST_ASSERT(h.frames_0601 == 0 && h.frames_register == 0, "no write frames were sent");
+  TEST_ASSERT(h.frames_0601 == 0, "no write frames were sent");
 }
 
 static void test_set_enabled_unfused_class3() {
@@ -1021,7 +1071,6 @@ static void test_set_enabled_unfused_class3() {
   TEST_ASSERT(r && r->enabled == 0, "settled enabled state is off");
   TEST_ASSERT(h.frames_class3_run == 1, "one Class 3 STOP was sent");
   TEST_ASSERT(h.frames_0601 == 0, "no fused 0x0601 write was sent (nothing to clobber)");
-  TEST_ASSERT(h.frames_register == 0, "no setpoint register write was sent");
 }
 
 static void test_set_enabled_class3_nack() {
@@ -1375,7 +1424,7 @@ static void test_validation_invalid() {
   TEST_ASSERT(r1 && std::fabs(r1->requested_value - 9999.0f) < 0.5f,
               "event echoes the requested value");
   TEST_ASSERT(r2 && r2->status == WriteStatus::INVALID, "non-scalar mode settles invalid");
-  TEST_ASSERT(h.frames_0601 == 0 && h.frames_register == 0, "no write frames were sent");
+  TEST_ASSERT(h.frames_0601 == 0, "no write frames were sent");
 }
 
 static void test_setpoints_different_modes_both_run() {
@@ -3347,11 +3396,12 @@ static void test_set_clock_accepted() {
 // ── No Class 10 write leaves its acknowledgement lying about ──────────────
 // Issue #253. Four Class 10 sends used to go out with no callback, so the
 // transport never entered AWAITING_RESPONSE for them and nothing consumed their
-// replies. Three of the four are reachable from here: the fused Obj 0601
-// control request and the OpSpec 0x88 register write, both inside SET_SETPOINT,
-// and the Obj 94 Sub 100 clock write inside SET_CLOCK. (The ClockProgram commit
-// and the layer write are ScheduleService's, and test_schedule_service.cpp
-// covers those.)
+// replies. Two of the four are reachable from here: the fused Obj 0601 control
+// request inside SET_SETPOINT and the Obj 94 Sub 100 clock write inside
+// SET_CLOCK. (The ClockProgram commit and the layer write are ScheduleService's,
+// and test_schedule_service.cpp covers those. The third, a "dedicated" setpoint
+// register write, is gone -- the pump had been refusing it since the day it was
+// written; see issue #258.)
 //
 // The assertion is deliberately not "the operation still works" -- it did
 // before, which is why this went unnoticed for so long. It is that the
@@ -3360,8 +3410,8 @@ static void test_set_clock_accepted() {
 // claimed it. Reverting any of these call sites to a null callback puts its
 // reply there and turns this red.
 //
-// The simulator answers all three because the pump does: 195 Class 10 SETs in
-// resources/traffic_capture, every one acknowledged, none of them
+// The simulator answers both because the pump does: 420 Class 10 SETs in the
+// de-duplicated resources/traffic_capture, every one acknowledged, none of them
 // distinguishable from another.
 static void test_no_class10_write_leaves_an_unclaimed_ack() {
   std::cout << "\n=== Every Class 10 write consumes its own acknowledgement ===" << std::endl;
@@ -3372,11 +3422,9 @@ static void test_no_class10_write_leaves_an_unclaimed_ack() {
     h.write_op.submit_set_setpoint(ControlMode::CONSTANT_SPEED, 2000.0f, "ff1");
     h.advance(10000);
     TEST_ASSERT(h.events_for("ff1") == 1, "set_setpoint settled");
-    TEST_ASSERT(h.frames_0601 == 1 && h.frames_register == 1,
-                "both of its Class 10 writes went out -- the fused control request "
-                "and the register write");
+    TEST_ASSERT(h.frames_0601 == 1, "its Class 10 write went out -- the fused control request");
     TEST_ASSERT(h.stray_short_acks == 0,
-                "and neither left an acknowledgement for the next write to be handed");
+                "and it left no acknowledgement for the next write to be handed");
   }
 
   {
@@ -4354,6 +4402,14 @@ int main() {
     std::cout << "  " << d << std::endl;
   TEST_ASSERT(g_apdu_length_violations == 0,
               "No frame declares a payload length it does not carry");
+
+  // ...and addresses an item the pump has. See check_class10_set_address().
+  std::cout << "\n=== Every Class 10 SET addresses a real data item (issue #258) ==="
+            << std::endl;
+  for (const auto &d : g_unknown_class10_address_detail)
+    std::cout << "  " << d << std::endl;
+  TEST_ASSERT(g_unknown_class10_addresses == 0,
+              "No Class 10 SET is addressed at an item this pump would refuse");
 
   std::cout << "\n===========================================================" << std::endl;
   std::cout << "  Test Results" << std::endl;

@@ -669,14 +669,26 @@ bool ControlService::send_control_request(ControlMode mode, bool start_pump, flo
     memcpy(&payload[8], mapping.suffix, 4);
   }
 
-  // OpSpec 0x90 = SET + 16 bytes (4 IDs + 12 payload)
+  // OpSpec 0x90 = SET + 16 bytes (3 address + 3 type/version + 10 struct)
+  //
+  // A Class 10 request is addressed OBJECT FIRST: [Obj][SubH][SubL], then
+  // [TypeH][TypeL][Ver] and the object's own body. So these bytes are object 86
+  // (0x56), sub-id 6, type 0x012F = 303 (OperationStatusRequest) -- the first
+  // two bytes of `payload` finish that type word.
+  //
+  // They used to be labelled "Sub ID high" / "Obj ID high", which is backwards.
+  // The bytes were right by coincidence: object 86 is 0x56 and sub-id 6 fits the
+  // low byte either way round, so nothing came of it here. Something did come of
+  // it elsewhere -- the deleted setpoint register write took the labels at their
+  // word, laid its address out sub-first, and the pump refused it every single
+  // time (issue #258).
   uint8_t apdu[18];
   apdu[0] = 0x0A;  // Class 10
   apdu[1] = 0x90;  // OpSpec: SET with length 16
-  apdu[2] = 0x56;  // Sub ID high (SUB_CONTROL = 0x5600)
-  apdu[3] = 0x00;  // Sub ID low
-  apdu[4] = 0x06;  // Obj ID high (OBJ_CONTROL = 0x0601)
-  apdu[5] = 0x01;  // Obj ID low
+  apdu[2] = 0x56;  // Object id 86, the start/stop request
+  apdu[3] = 0x00;  // Sub-id high
+  apdu[4] = 0x06;  // Sub-id low -- 86/6, overall_operation_local_request_obj
+  apdu[5] = 0x01;  // Type high; payload[0..1] are 0x2F 0x01, completing type 303
   memcpy(&apdu[6], payload, 12);
 
   // Awaited (issue #253). Same arrangement as the mode write above: the
@@ -684,8 +696,12 @@ bool ControlService::send_control_request(ControlMode mode, bool start_pump, flo
   // the callers of this send confirm by reading the run state and setpoint back.
   //
   // This is the fused Obj 0601 write, and it is the one the Grundfos GO app uses
-  // for start/stop and for setting a setpoint: 16 instances in
-  // resources/traffic_capture, every one answered in 49-88 ms. Its address shape
+  // for start/stop and for setting a setpoint -- there is no separate setpoint
+  // write, which is why there is no longer one here either (issue #258):
+  // 25 instances in resources/traffic_capture
+  // (`tools/geni_capture_scan.py sets`), each carrying a real set_point value,
+  // each answered, and each followed immediately by an object 84 sub-id 1
+  // overview commit (`... order`). Its address shape
   // was already listed in the short-ACK branch before anything could use it,
   // added on the reasoning that a writer giving it a callback would want it
   // back. That list is gone; the declaration below is what replaces it.
@@ -712,10 +728,10 @@ bool ControlService::send_set_mode_request(ControlMode mode) {
   //
   // Writes GENI Class 10 object 86 / sub-id 10 = overall_control_mode_local_request_obj,
   // whose profile definition states it "only targets the control mode
-  // (control_source, operation_mode and set_point are all ignored)". Addressed on
-  // the wire as Obj 0x0A01 / Sub 0x5600 (the 0x0A high byte is sub-id 10), versus
-  // the start/stop object 86 / sub-id 6 = overall_operation_local_request_obj
-  // (Obj 0x0601), which DOES write set_point.
+  // (control_source, operation_mode and set_point are all ignored)". On the wire
+  // that is `56 00 0A 01 2F 01 ...` -- object, sub-id, type -- versus the
+  // start/stop object 86 / sub-id 6 = overall_operation_local_request_obj,
+  // `56 00 06 01 2F ...`, which DOES write set_point.
   //
   // The 12-byte payload is a type-303 OperationStatusRequest struct:
   //   [2F 01][00 00][07] = type 303 + 7-byte struct length, then the struct:
@@ -753,10 +769,14 @@ bool ControlService::send_set_mode_request(ControlMode mode) {
   uint8_t apdu[18];
   apdu[0] = 0x0A;  // Class 10
   apdu[1] = 0x90;  // OpSpec: SET with length 16
-  apdu[2] = 0x56;  // Sub ID high (SUB_CONTROL = 0x5600)
-  apdu[3] = 0x00;  // Sub ID low
-  apdu[4] = 0x0A;  // Obj ID high (0x0A = sub-id 10 -> overall_control_mode_local_request_obj)
-  apdu[5] = 0x01;  // Obj ID low
+  // Object first, as every accepted Class 10 SET is: [Obj][SubH][SubL], then
+  // the type word. The old "Sub ID high / Obj ID high" labels here were
+  // backwards and right only by coincidence -- see send_control_request() and
+  // issue #258.
+  apdu[2] = 0x56;  // Object id 86, the mode request
+  apdu[3] = 0x00;  // Sub-id high
+  apdu[4] = 0x0A;  // Sub-id low -- 86/10, overall_control_mode_local_request_obj
+  apdu[5] = 0x01;  // Type high; payload[0..1] are 0x2F 0x01, completing type 303
   memcpy(&apdu[6], payload, 12);
 
   // Await the pump's short ACK rather than firing and forgetting (issue #248).
@@ -794,51 +814,6 @@ bool ControlService::send_set_mode_request(ControlMode mode) {
   // survives a reconnect without any commit. Adding one would just re-commit the
   // schedule on every mode switch.
   return true;
-}
-
-void ControlService::set_class10_setpoint(float value, uint16_t sub_id, uint16_t obj_id) {
-  // Reference: control.py::_set_class10_setpoint() lines 1100-1132
-  // APDU: [0x0A][0x88][SubH][SubL][ObjH][ObjL][Float32BE]
-  //
-  // OpSpec 0x88 = SET (bits 7-6 = 0b10) + 8 payload bytes. The payload is
-  // everything after the OpSpec, which is the two ID pairs plus the float, not
-  // the float alone -- this said 0x84 ("SET + 4 bytes") for a long time,
-  // counting only the value and declaring half the frame. Bench-verified that
-  // both are accepted by this pump, so it was never a visible failure; see the
-  // header note.
-  uint8_t apdu[10];
-  apdu[0] = 0x0A;  // Class 10
-  apdu[1] = 0x88;  // OpSpec: SET + 8 payload bytes (2 sub + 2 obj + 4 float)
-  apdu[2] = (sub_id >> 8) & 0xFF;
-  apdu[3] = sub_id & 0xFF;
-  apdu[4] = (obj_id >> 8) & 0xFF;
-  apdu[5] = obj_id & 0xFF;
-  protocol::encode_float_be(value, &apdu[6]);
-
-  // Awaited (issue #253). The callback exists to make the transport wait and
-  // reports nothing onward -- run_set_setpoint_() decides by reading the value
-  // back at SETPOINT_CONFIRM_DELAY_MS, and that is unchanged.
-  //
-  // This is the one converted send whose exact frame the capture corpus does
-  // NOT contain: the Grundfos GO app sets a setpoint through the fused Obj 0601
-  // control request, so no `0A 88` SET was ever recorded. What the corpus does
-  // establish is the class-wide rule -- 195 SETs, 20 distinct address shapes,
-  // every one answered with the same nine bytes -- and the specification states
-  // it without reference to any address: "the SET operation never returns
-  // anything but the APDU Head" (App. Prog. Manual fig 3.5 note 1). Bench
-  // verification is what closes the gap for this one, not the captures.
-  this->transport_.send_apdu_command(
-      apdu, 10, 0, 0,
-      [](bool success, const uint8_t * /*data*/, size_t /*len*/) {
-        ESP_LOGV(TAG, "Setpoint write %s", success ? "acknowledged" : "unanswered");
-      },
-      core::Transport::SET_ACK_TIMEOUT_MS, /*allow_register_read=*/false,
-      /*expect_short_ack=*/true, /*quiet_timeout=*/true);
-
-  // Schedule configuration commit after setpoint write
-  if (schedule_callback_) {
-    schedule_callback_([this]() { this->send_configuration_commit(); }, 200);
-  }
 }
 
 bool ControlService::get_class10_mapping(ControlMode mode, ControlModeMapping &mapping) {

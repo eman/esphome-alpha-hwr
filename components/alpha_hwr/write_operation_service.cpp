@@ -573,14 +573,6 @@ float WriteOperationService::setpoint_epsilon_(ControlMode mode) {
   }
 }
 
-uint16_t WriteOperationService::setpoint_sub_id_(ControlMode mode) {
-  switch (mode) {
-    case ControlMode::CONSTANT_SPEED: return ControlService::SUB_SPEED_SETPOINT;
-    case ControlMode::CONSTANT_FLOW:  return ControlService::SUB_FLOW_SETPOINT;
-    default:                          return ControlService::SUB_PRESSURE_SETPOINT;
-  }
-}
-
 // ---------------------------------------------------------------------------
 // SET_PUMP_ENABLED
 // ---------------------------------------------------------------------------
@@ -985,20 +977,32 @@ void WriteOperationService::run_set_setpoint_(uint32_t seq) {
     op->phase = Phase::WRITING;
     op->enabled = enabled;
     float native = to_native_units_(op->mode, op->value);
-    if (!control_.send_control_request(op->mode, enabled, native, false)) {
+    // One write, and the fused one is it. A second "dedicated" register write
+    // used to follow SETPOINT_STEP2_DELAY_MS later; it was addressed backwards,
+    // the pump refused it every time, and the sub-ids it aimed at are the
+    // per-mode FACTORY configuration objects rather than setpoint registers --
+    // see the note where ControlService::set_class10_setpoint() used to be
+    // (issue #258). The fused request already carries set_point, which is how
+    // the Grundfos app sets one.
+    //
+    // queue_commit is true now because that deleted write was what scheduled
+    // the commit. The commit itself is not redundant: in the captures every one
+    // of the 25 fused sub-6 writes is followed immediately by an object 84
+    // sub-id 1 overview write.
+    if (!control_.send_control_request(op->mode, enabled, native, /*queue_commit=*/true)) {
       finish_(seq, WriteStatus::REJECTED, "failed to queue control request");
       return;
     }
     control_.note_mode_commanded(op->mode);
+    control_.cache_setpoint_for_mode(op->mode, native);
 
-    schedule_([this, seq, native]() {
-      Operation *op = find_(seq);
-      if (op == nullptr || op->phase == Phase::DONE) return;
-      control_.set_class10_setpoint(native, setpoint_sub_id_(op->mode));
-      control_.cache_setpoint_for_mode(op->mode, native);
-      op->phase = Phase::CONFIRMING;
-      schedule_([this, seq]() { confirm_setpoint_(seq); }, SETPOINT_CONFIRM_DELAY_MS);
-    }, SETPOINT_STEP2_DELAY_MS);
+    // The readback still lands where it did: the step-2 delay is now dead time
+    // rather than a second write, and folding it into one timer keeps the
+    // confirm at the same 1600 ms after the write that #82/#85 settled on.
+    // Issue #250 tracks whether 1200 ms is the right confirm interval at all.
+    op->phase = Phase::CONFIRMING;
+    schedule_([this, seq]() { confirm_setpoint_(seq); },
+              SETPOINT_STEP2_DELAY_MS + SETPOINT_CONFIRM_DELAY_MS);
   });
 }
 

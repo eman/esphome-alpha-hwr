@@ -521,7 +521,6 @@ class WriteOperationService {
   static float to_native_units_(ControlMode mode, float display_value);
   static float setpoint_epsilon_(ControlMode mode);
   static bool is_scalar_mode_(ControlMode mode);
-  static uint16_t setpoint_sub_id_(ControlMode mode);
 
   ControlService &control_;
   ScheduleService &schedule_service_;

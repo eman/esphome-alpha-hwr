@@ -139,7 +139,7 @@ void Transport::loop() {
           // verdict -- it confirms by reading the value back -- so silence here
           // is not an error to report, only a fact to record. It is NOT
           // "expected": every Class 10 SET in resources/traffic_capture is
-          // answered, 195 of 195. The flag used to be explained as "the pump
+          // answered, 420 of 420. The flag used to be explained as "the pump
           // commits on timeout and its ACK arrives outside the response
           // window", which was a story told about a schedule layer write that
           // was waiting for a reply the protocol forbids (issue #253).
@@ -159,7 +159,7 @@ void Transport::loop() {
         // them, reasoning that a quiet timeout means silence is expected. It is
         // not: the flag is set by the Class 10 writes whose verdict comes from a
         // readback, and every one of those is acknowledged in every captured
-        // instance -- 195 SETs, no exceptions. They are the likeliest sources of
+        // instance -- 420 SETs, no exceptions. They are the likeliest sources of
         // a late reply, not the least, and exempting them left this issue's hole
         // open from 1.1 s to 4 s. `quiet_timeout` means "do not log this at
         // warning" and nothing else.
@@ -533,7 +533,7 @@ bool Transport::try_dispatch_response(const uint8_t* data, size_t len) {
     // Every term below inspects the QUEUED COMMAND. None inspects the reply,
     // because there is nothing in the reply to inspect. That is not a shortcut:
     // every SET reply this pump has ever been captured sending is the SAME NINE
-    // BYTES, `24 05 F8 E7 0A 01 00 AE A2`, across 195 writes in 20 distinct
+    // BYTES, `24 05 F8 E7 0A 01 00 AE A2`, across 420 writes in 20 distinct
     // address shapes -- the clock, the schedule layers, the overview commit, the
     // control request, the mode write, the temperature range, the DHW config.
     // Not one bit distinguishes which write is being acknowledged. The
@@ -600,7 +600,7 @@ bool Transport::try_dispatch_response(const uint8_t* data, size_t len) {
       // second status byte in its payload -- OK / BUSY / OPERATION_FAILED, named
       // by the Grundfos GO app's own decoder (GeniAPDU.CLASS10_ACK_*, read from
       // the byte after the head) and present with exactly those three values in
-      // 136 captured replies. Reading only the head reported success for 36 of
+      // 459 captured replies. Reading only the head reported success for 39 of
       // them: every "busy" and every "operation failed" the pump has ever sent
       // us. Issue #208's defect, one layer further down.
       // len >= 9, not 7. A real short ACK is `24 05 F8 E7 0A 01 PL CRC CRC` --

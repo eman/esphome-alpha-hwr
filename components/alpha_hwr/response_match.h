@@ -148,8 +148,12 @@ inline bool apdu_ack_is_ok(uint8_t apdu_head) { return apdu_ack(apdu_head) == Ap
 /// three (`GeniAPDU.CLASS10_ACK_OK/_BUSY/_OPERATION_FAILED`, read from
 /// `raw[apdu_offset + 2]` by `getAcknowledgeCodeForClass10()`), and the captures
 /// contain exactly those three values and no others: across
-/// resources/traffic_capture, 136 short Class 10 replies split 100 OK, 24 BUSY,
-/// 12 OPERATION_FAILED, and every one of them has head acknowledge OK.
+/// resources/traffic_capture, 459 short Class 10 replies split 420 OK, 26 BUSY,
+/// 13 OPERATION_FAILED, and every one of them has head acknowledge OK.
+/// (`tools/geni_capture_scan.py acks`. An earlier revision of this note said
+/// 136/100/24/12 -- a pre-reassembly count, the trap the corpus README
+/// documents: writes exceed the 20-byte ATT payload and fragment, so a scanner
+/// reading packets individually sees only part of the traffic.)
 ///
 /// It is request-consistent in a way that rules out coincidence: Obj 202 Sub 100
 /// answers BUSY every time (24/24) and Obj 202 Sub 200 answers OPERATION_FAILED
@@ -157,7 +161,7 @@ inline bool apdu_ack_is_ok(uint8_t apdu_head) { return apdu_ack(apdu_head) == Ap
 ///
 /// Reading only the head's acknowledge therefore reports success for a pump that
 /// said "busy" or "that failed" -- the same defect issue #208 fixed one layer up,
-/// one layer further down. 36 of those 136 replies are not OK.
+/// one layer further down. 39 of those 459 replies are not OK.
 ///
 /// Only meaningful when the head's acknowledge IS OK. A refusal (Unknown Data
 /// Item, Illegal Operation) puts the offending item's ID in that byte instead,
