@@ -1149,7 +1149,11 @@
   constant speed's 1650–3671 read as Pascals, refusing an ordinary 1.5 m setpoint
   as `invalid` and blaming the pump for the rest of the connection. And a second
   chain cannot start while one is in flight, which would otherwise put eight
-  reads on the wire and let the older one publish the completeness flag.
+  reads on the wire and let the older one publish the completeness flag — with
+  that guard released on disconnect as well as on completion, since
+  `Transport::reset()` drops a queued command without invoking its callback, so
+  a drop mid-chain would otherwise leave it latched and the ranges never read
+  again for the life of the node.
 
   Seven host tests, the load-bearing one being a simulated pump whose range is
   *wider* than the constants — accepting 5000 RPM is possible only by using the

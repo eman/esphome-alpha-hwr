@@ -230,6 +230,13 @@ MUTATIONS=(
 # refuses every realistic setpoint -- a total loss of the mode, and one that
 # nothing in the suite could see until constant flow got a range assertion of
 # its own. The pressure conversion was covered from the start; this one was not.
+# The in-flight guard must be released on disconnect, not only on completion.
+# Transport::reset() drops a queued command WITHOUT invoking its callback, so a
+# link drop mid-chain kills the chain silently: the guard stays set, every later
+# read answers "already in flight", and every setpoint write is permanently back
+# on the fallback constants for the life of the node -- visible only as a DEBUG
+# line. One ordinary BLE drop inside a ~200 ms window does it.
+"setpoint-range-guard-is-a-one-way-latch|components/alpha_hwr/control_service.h|     setpoint_ranges_reading_ = false;\n     // Drop any in-flight mode command|     // Drop any in-flight mode command"
 "setpoint-range-flow-conversion-dropped|components/alpha_hwr/control_service.cpp|      return native * 3600.0f;   // m³/s -> m³/h|      return native;"
 "setpoint-range-chain-continues-past-a-failure|components/alpha_hwr/control_service.cpp|    if (!a) { finish(false); return; }|    (void) a;"
 # The setpoint readback waits SETPOINT_CONFIRM_DELAY_MS after the write so the

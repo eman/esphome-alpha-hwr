@@ -410,6 +410,9 @@ void ControlService::read_setpoint_ranges(std::function<void(bool)> callback) {
   // starts failing pending callbacks instead of dropping them, this chain would
   // run its remaining reads against the next connection and would need a
   // generation counter like the one in alpha_hwr.cpp.
+  // Released by invalidate_cache() as well as by `finish`, because a disconnect
+  // mid-chain drops the pending callback without invoking it -- see the note
+  // there. Without that release this guard is a one-way latch.
   if (setpoint_ranges_reading_) {
     ESP_LOGD(TAG, "Setpoint range read already in flight; not starting a second");
     if (callback) callback(false);

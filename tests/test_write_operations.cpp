@@ -1360,6 +1360,46 @@ static void test_a_mode_that_does_not_answer_does_not_shift_the_others() {
               "and the mode that answered still uses the pump's floor");
 }
 
+// A disconnect while the range chain is in flight must not wedge it.
+//
+// The chain sets an in-flight flag so a second chain cannot start, and clears it
+// when it finishes. But Transport::reset() drops a queued command WITHOUT
+// invoking its callback, so a link drop mid-chain kills the chain silently and
+// the flag would stay set forever: every later read answers "already in flight",
+// and every setpoint write is permanently back on the fallback constants, with
+// nothing visible but a DEBUG line. One ordinary BLE drop during a ~200 ms
+// window would do it. invalidate_cache() releases the flag for that reason.
+static void test_a_disconnect_mid_chain_does_not_wedge_the_read() {
+  std::cout << "\n=== setpoint ranges: a drop mid-chain does not stop them being read again ===" << std::endl;
+  Harness h;
+  h.sim.mode_byte = 0x02;
+  h.sim.drop_range_sub = 15;  // the chain will stall waiting on constant pressure
+  h.prime_temp_limits();
+  h.advance(500);             // read 15 is out and unanswered -- chain in flight
+
+  TEST_ASSERT(h.frames_range_read == 2, "the chain is parked mid-way");
+  TEST_ASSERT(!h.control.setpoint_ranges_known(), "and has not completed");
+
+  // The link drops: caches invalidated, queue cleared without callbacks.
+  h.control.invalidate_cache();
+  h.transport.reset();
+
+  // Reconnect, and this time the pump answers everything.
+  h.sim.drop_range_sub = 0;
+  const int before = h.frames_range_read;
+  h.schedule.invalidate_cache();
+  h.control.sync_cache_async(nullptr);
+  h.advance(3000);
+
+  TEST_ASSERT(h.frames_range_read > before,
+              "the read runs again on the new connection rather than reporting itself busy");
+  TEST_ASSERT(h.control.setpoint_ranges_known(), "and completes");
+  float lo = NAN, hi = NAN;
+  TEST_ASSERT(h.control.get_setpoint_range(ControlMode::CONSTANT_PRESSURE, lo, hi) &&
+                  std::fabs(hi - 2.450f) < 0.01f,
+              "the mode that was silent before now has its range");
+}
+
 static void test_set_setpoint_clamped() {
   std::cout << "\n=== set_setpoint: pump clamps -> clamped ===" << std::endl;
   Harness h;
@@ -4635,6 +4675,7 @@ int main() {
   test_setpoint_falls_back_when_the_ranges_never_arrive();
   test_a_degenerate_range_is_not_used();
   test_a_mode_that_does_not_answer_does_not_shift_the_others();
+  test_a_disconnect_mid_chain_does_not_wedge_the_read();
   test_a_disconnect_drops_the_ranges();
   test_set_setpoint_clamped();
   test_set_setpoint_rejected_kept_old();
