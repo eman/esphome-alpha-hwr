@@ -91,6 +91,13 @@ wider built-in bounds and says so in the `detail` of any refusal
 (`… (pump limits not read)`). In that state the pump may still clamp a value it
 dislikes, and the settle event reports `clamped` with what it stored.
 
+The range is the mode's **factory** range. It does not account for an active
+limiter: the pump also has MaxFlow and MinFlow limiters, off by default but
+settable from the Grundfos app, and one that is enabled will hold flow below the
+setpoint without changing any of the numbers above. A constant-flow setpoint over
+an enabled MaxFlow cap therefore passes validation and is then limited, and
+nothing here reports it — see #274.
+
 **This applies to the entity sliders too**, which reach the same validator
 through the facade. Their declared `min_value`/`max_value` in
 `alpha_hwr_controls.yaml` are unchanged and are now wider than the pump on every

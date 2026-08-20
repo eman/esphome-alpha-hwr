@@ -1125,7 +1125,15 @@
 
   The four reads run **after** the cache-sync verdict rather than before it, so
   time-to-ready is unchanged; they gate nothing, and a pump that will not answer
-  leaves each mode on its fallback. A degenerate answer (max at or below min) is
+  leaves each mode on its fallback.
+
+  Note what the range is: the mode's **factory** range, which does not account
+  for an active limiter. The pump also has MaxFlow and MinFlow limiters
+  (86/600–659), off by default but settable from the Grundfos app, and one that
+  is enabled holds flow below the setpoint without changing any of these numbers
+  — issue #274 covers reading them.
+
+  A degenerate answer (max at or below min) is
   refused as a source rather than cached, so `setpoint_ranges_known()` cannot
   claim a complete set off the back of one — though `get_setpoint_range()`
   re-checks the invariant on every call, so a cached one would not actually have
