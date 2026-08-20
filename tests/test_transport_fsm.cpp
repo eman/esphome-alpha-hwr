@@ -582,19 +582,30 @@ void test_a_command_honours_its_own_timeout_not_the_default() {
 // outstanding, the pump may still answer them, and if it does not, each one's
 // own timeout says so.
 
-/// Feed a partial frame that declares 259 bytes and never ends, until the
-/// reassembly buffer passes its cap. No time passes, so the staleness guard
-/// cannot be what ends it.
+/// Feed a partial frame that declares more bytes than the buffer will hold, and
+/// stop in the one place where the overflow guard is the only thing that can end
+/// it. No time passes, so the staleness guard is not in play either.
+///
+/// The sizes are exact and they have to be. The declared frame is 259 bytes (the
+/// longest a GENIbus length byte can describe) and the buffer's cap is 256, so
+/// the ONLY totals that are over the cap and still short of the declared length
+/// are 257 and 258. Land anywhere at or past 259 and the completion test fires
+/// instead, the frame is dispatched, CRC-rejected and cleared -- and every
+/// assertion below then passes with the overflow guard disabled, which is
+/// exactly what a first draft of this helper did: 20-byte fragments cannot stop
+/// between 256 and 259, so it overshot to 260 and the mutation survived.
 static void overflow_the_reassembly_buffer(
     esphome::alpha_hwr::core::Transport &transport) {
   std::vector<uint8_t> head(20, 0x11);
   head[0] = 0x24;
-  head[1] = 0xFF;   // 255 + 4 = a 259-byte frame, longer than the buffer allows
+  head[1] = 0xFF;   // 255 + 4 = a 259-byte frame
   transport.on_notification(head.data(), head.size());
   const std::vector<uint8_t> more(20, 0x22);
-  for (int i = 0; i < 13; i++) {
+  for (int i = 0; i < 11; i++) {          // 20 + 11*20 = 240
     transport.on_notification(more.data(), more.size());
   }
+  const std::vector<uint8_t> tail(17, 0x33);   // 240 + 17 = 257: over the cap,
+  transport.on_notification(tail.data(), tail.size());  // three short of the frame
 }
 
 void test_an_inbound_overflow_does_not_cancel_a_command_in_flight() {
@@ -619,7 +630,7 @@ void test_an_inbound_overflow_does_not_cancel_a_command_in_flight() {
   TEST_ASSERT(cb_calls == 0,
               "the command is still outstanding -- losing inbound frame sync "
               "says nothing about whether the pump will answer it");
-  TEST_ASSERT(!transport.is_reassembling(),
+  TEST_ASSERT(!transport.is_reassembling() && transport.get_buffer_size() == 0,
               "  ...and the partial frame itself is gone, which is the part "
               "that had to happen");
 
