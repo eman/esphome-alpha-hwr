@@ -1089,16 +1089,21 @@
   The auto-slot resolver decides which slots are recyclable by asking which
   stored events have expired, and it asked that against **the new event's own
   begin timestamp** instead of against the clock. For an event a few minutes out
-  the two questions have the same answer, which is every event the Lovelace
-  card's Quick Run has ever produced. For an event years out they do not: a 2040
-  event makes everything in the next fourteen years look expired, so the picker
-  returned a slot holding a live event and the write overwrote it. `set_vacation`
-  resolves through the same line, and a vacation is months out by nature — one
-  booked for next summer would have cleared every single event before it.
+  the two questions have the same answer, which is what the Lovelace card's Quick
+  Run *presets* produce. For an event years out they do not: a 2040 event makes
+  everything in the next thirteen-odd years look expired, so the picker returned
+  a slot holding a live event and the write overwrote it. `set_vacation` resolves
+  through the same line, and a vacation is months out by nature — one booked for
+  next summer would have cleared every single event before it.
 
-  Reachable before now, but not by any client: until #255 was fixed both
-  services refused every argument at the parser, so the case that breaks this
-  had no way to reach it.
+  Under-reached before now, not unreachable. Every path through the Home
+  Assistant services was blocked at the parser until #255, so no service call
+  arrived. Two surfaces were never behind that parser, though: the schedule
+  editor's **Set Vacation** button calls `submit_set_vacation()` on the component
+  directly, and `build_event_window()` anchors it to the current calendar year,
+  so it could place a vacation up to eleven months out — far enough to expire
+  every live event in the pool. The card's **Custom Run** date pickers take an
+  arbitrary date too, but they go through the service, so #255 held them off.
 
   Fixed by measuring expiry against the node's wall clock. The reference
   timestamp is no longer optional — a caller with no clock has to say so, by
@@ -1121,12 +1126,21 @@
   a full pool and the button refused. It now passes the node's clock like every
   other caller.
 
-  Five host tests, including the reported case (a 2040 event and a live one
-  tomorrow, five slots, the live one must survive), the vacation variant, and
-  the pair that pins both directions of the no-clock rule. The single-event
-  fixtures now anchor their windows to the node clock — stamped in 1970, as they
-  were, every event is expired against any real clock and the tests pass either
-  way. Four mutation entries, including the reported line itself.
+  Four new host tests — the reported case (a 2040 event and a live one tomorrow,
+  five slots, the live one must survive), the vacation variant, and the pair that
+  pins both directions of the no-clock rule — plus the existing reuse test
+  retargeted at the clock and now asserting the recycle note. The single-event
+  fixtures now anchor their windows to the node clock, which is not cosmetic:
+  `test_single_event_auto_slot`'s "live" event ended in 1970, so it was live only
+  relative to the new event's begin, and its slot assertion held under the old
+  comparison and failed under the fixed one. Four mutation entries, including the
+  reported line itself.
+
+  Verified on the bench: the issue's own two writes, on a pump with five empty
+  slots, now land in slots 0 and 1 with both events surviving, and a vacation
+  booked for July 2027 takes slot 2 and evicts neither. Recycling a slot that
+  really had ended reports `reused slot 3, which held an event that ended (…)`
+  in the settle event; the write into the empty slot beside it reports nothing.
 
 
 - **`set_single_event` and `set_vacation` rejected every input on real

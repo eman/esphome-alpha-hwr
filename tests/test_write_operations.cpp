@@ -2562,15 +2562,19 @@ static void test_schedule_enabled_pump_keeps_its_flag() {
 //
 // The resolver picks a slot by asking which stored events have expired, and it
 // used to ask that question against the NEW EVENT'S BEGIN rather than against
-// the clock. For an event a few minutes out the two agree, which is every event
-// the Lovelace card's Quick Run ever produced. For an event years out they do
-// not: a 2040 event makes everything in the next fourteen years look expired,
-// so the picker hands back a slot holding a live event and the write destroys
-// it -- observed on the bench, with four slots free.
+// the clock. For an event a few minutes out the two agree, which is what the
+// Lovelace card's Quick Run presets produce. For an event years out they do
+// not: a 2040 event makes everything in the next thirteen-odd years look
+// expired, so the picker hands back a slot holding a live event and the write
+// destroys it -- observed on the bench, with four slots free.
 //
 // Every fixture below therefore states its timestamps relative to
-// NODE_EPOCH_AT_BOOT. Written as bare small integers they land in 1970, which
-// is expired against any real clock, and the tests would pass either way.
+// NODE_EPOCH_AT_BOOT, and that is not cosmetic. Written as bare small integers
+// they land in 1970, and then a fixture says something other than what it looks
+// like it says: test_single_event_auto_slot's "live" event ended at 3000000, so
+// it was live only relative to the new event's begin and expired against any
+// real clock. Its slot-1 assertion held under the old comparison and failed
+// under the fixed one -- the fixture, not the code, was what had to change.
 // ---------------------------------------------------------------------------
 
 // Windows used by the single-event slot tests, all relative to the node clock.

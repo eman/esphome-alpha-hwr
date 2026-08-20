@@ -864,15 +864,17 @@ MUTATIONS=(
 # The auto-slot resolver picks a slot by asking which stored events have
 # EXPIRED, and it used to ask that against the new event's own begin timestamp
 # rather than against the clock. The two agree for an event a few minutes out --
-# which is every event the Lovelace card's Quick Run ever produced -- and part
+# which is what the Lovelace card's Quick Run presets produce -- and part
 # company completely for one years out: a 2040 event makes everything in the
-# next fourteen years look expired, so the picker returns a slot holding a live
-# event and the write destroys it, settling ACCEPTED. This restores exactly the
-# line issue #262 reported, bench-observed with four slots free.
+# next thirteen-odd years look expired, so the picker returns a slot holding a
+# live event and the write destroys it, settling ACCEPTED. This restores exactly
+# the line issue #262 reported, bench-observed with four slots free.
 #
-# It needs a fixture whose timestamps mean something: against events stamped in
-# 1970 both references agree that everything has expired, which is why the
-# single-event tests now anchor their windows to the node clock.
+# It needs a fixture whose timestamps mean something. The single-event tests
+# anchor their windows to the node clock for that reason: an event stamped in
+# 1970 is expired against any real clock, so a fixture calling one "live" is
+# live only relative to the new event's begin and stops meaning anything the
+# moment the right question is asked.
 "single-event-expiry-measured-from-the-new-event|components/alpha_hwr/write_operation_service.cpp|      const uint32_t now_ts = time_service_.now_unix();|      const uint32_t now_ts = op->begin_ts;"
 # Recycling a slot destroys what was in it. Legitimate -- the event had ended --
 # and it used to be silent, which is most of why #262 was expensive to diagnose:

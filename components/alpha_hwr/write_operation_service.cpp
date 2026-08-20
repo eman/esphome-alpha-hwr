@@ -1783,14 +1783,15 @@ void WriteOperationService::run_single_event_(uint32_t seq) {
       //
       // This used to pass op->begin_ts -- the new event's own begin -- on the
       // reasoning that any event ending before the new one starts is over
-      // anyway. True for an event a few minutes out, which is all the Lovelace
-      // card's Quick Run ever produced, and false the moment anything is
-      // scheduled far ahead: a 2040 event makes every event in the next
-      // fourteen years look expired, so the picker returns a slot holding a
-      // live event and the write below destroys it. Bench-observed with four
-      // slots free (issue #262), and set_vacation resolves through this same
-      // line -- a vacation booked for next summer would have cleared every
-      // single event between now and then.
+      // anyway. True for an event a few minutes out, which is what the Lovelace
+      // card's Quick Run PRESETS produce, and false the moment anything is
+      // scheduled far ahead -- which the card's Custom Run, the editor's
+      // vacation button and any automation calling the service all can: a 2040
+      // event makes every event in the next thirteen-odd years look expired, so
+      // the picker returns a slot holding a live event and the write below
+      // destroys it. Bench-observed with four slots free (issue #262), and
+      // set_vacation resolves through this same line -- a vacation booked for
+      // next summer would have cleared every single event between now and then.
       //
       // now_unix() answers 0 when the node has no synced clock, and the picker
       // reads 0 as "expire nothing" rather than "expire everything": with no
@@ -1818,9 +1819,11 @@ void WriteOperationService::run_single_event_(uint32_t seq) {
       // a WARN on the node, and the same sentence in the settle event's detail
       // so a client sees which slot was recycled and what was in it.
       //
-      // The predicate is hoisted so mutation_check.sh has a pipe-free line to
-      // anchor to: its entries are split on '|', so a search string containing
-      // '||' is truncated and the mutation scores as though nothing changed.
+      // The predicate is hoisted to keep the anchored line free of '||':
+      // mutation_check.sh splits its entries on '|', so a search string holding
+      // one is truncated. The script flags that as a malformed entry rather
+      // than letting it pass silently, but a flagged entry still proves nothing
+      // about the line it was meant to cover.
       for (const auto &ev : schedule_service_.get_cached_single_events()) {
         const bool recycling_this_slot = ev.enabled && ev.index == slot;
         if (!recycling_this_slot) continue;

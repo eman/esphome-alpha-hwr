@@ -1285,8 +1285,13 @@ public:
   /// ended months ago reported a full pool and the editor refused to add one.
   /// Passing the real clock is what makes "expired events do not exhaust the
   /// pool" true on this surface too, and now_unix() answers 0 when there is no
-  /// synced clock, which restores exactly the old conservative behaviour for
-  /// the case that has no honest answer (issue #262).
+  /// synced clock -- which the picker reads as "expire nothing", the same
+  /// conservative answer this call site used to get by default (issue #262).
+  /// The one formal difference, a DISABLED cached event, cannot arise: the
+  /// cache only ever holds enabled ones (see read_single_events_async() and
+  /// the cache update in write_single_event_async()). The case is moot from
+  /// here in any event -- both editor buttons run build_event_window() first,
+  /// which refuses outright without a synced clock.
   int find_free_single_event_slot() const {
     return schedule_service_.find_free_single_event_slot(time_service_.now_unix());
   }
