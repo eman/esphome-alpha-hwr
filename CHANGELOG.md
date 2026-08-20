@@ -1136,12 +1136,19 @@
 
   An earlier version of that assert is worth recording, because it verified
   clean and was wrong. It allowed any bound type spelled `long long` **or**
-  `int64_t`, reasoning that both are of guaranteed width. On glibc LP64 —
-  which is what CI runs the unit tests on — `int64_t` *is* `long`, so
-  `ParseInt = long` satisfied the allowlist and the assert passed. It fired only
-  on hosts where `int64_t` is `long long`, and the author's machine is one of
-  those. A check that depends on which spelling a platform picked for a typedef
-  is not a check.
+  `int64_t`, reasoning that both are of guaranteed width. Probed on
+  `ubuntu-latest`, which is what CI runs the unit tests on:
+
+  ```
+  int64_t is long:                            1
+  OLD assert with ParseInt=long would PASS:   1
+  ```
+
+  `int64_t` *is* `long` there, so the very type the assert existed to reject
+  satisfied it. It fired only on hosts where `int64_t` is `long long` — the
+  author's machine is one of those, which is why it looked verified. A check
+  that depends on which spelling a platform picked for a typedef is not a
+  check, and one verified on a single platform is not verified.
 
   Verified on the pump. `set_single_event` with a near-future window settles
   `accepted` at `seq: 2` where it previously answered `invalid` at `seq: 0`; a
