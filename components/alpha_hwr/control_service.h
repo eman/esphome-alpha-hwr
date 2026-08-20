@@ -456,6 +456,9 @@ class ControlService {
     /// True only when all four reads have landed on this connection. A partial
     /// set is not usable as a whole -- get_setpoint_range() answers per mode.
     bool setpoint_ranges_valid_{false};
+    /// A range read is in flight. Two concurrent chains would put eight reads
+    /// on the wire and let the older one publish the completeness flag.
+    bool setpoint_ranges_reading_{false};
 
    public:
     /// Has the pump's own on/off-time LIMITS block been read back yet?
@@ -492,7 +495,11 @@ class ControlService {
     ///   the pump as unbounded (issue #273).
     bool get_setpoint_range(ControlMode mode, float &min_out, float &max_out) const;
 
-    /// True once every scalar mode's range has been read on this connection.
+    /// True when the last range read completed all four modes on this
+    /// connection. NOT the gate for using a range -- get_setpoint_range()
+    /// answers per mode, because a pump that will not answer for one mode
+    /// should not cost the other three their real bounds. This exists so a
+    /// caller (and the tests) can tell a complete read from a partial one.
     bool setpoint_ranges_known() const { return setpoint_ranges_valid_; }
 
    private:

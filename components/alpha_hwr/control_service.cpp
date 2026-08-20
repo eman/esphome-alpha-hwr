@@ -385,21 +385,51 @@ void ControlService::read_one_setpoint_range_(ControlMode mode, uint16_t sub,
 }
 
 void ControlService::read_setpoint_ranges(std::function<void(bool)> callback) {
-  // Four sequential reads. Sequential rather than fired together because the
-  // transport is a one-at-a-time queue either way, and chaining keeps the
-  // "all four landed" answer honest.
-  read_one_setpoint_range_(ControlMode::CONSTANT_SPEED, 13, [this, callback](bool a) {
-    read_one_setpoint_range_(ControlMode::CONSTANT_PRESSURE, 15, [this, callback, a](bool b) {
-      read_one_setpoint_range_(ControlMode::PROPORTIONAL_PRESSURE, 17, [this, callback, a, b](bool c) {
-        read_one_setpoint_range_(ControlMode::CONSTANT_FLOW, 39, [this, callback, a, b, c](bool d) {
-          setpoint_ranges_valid_ = a && b && c && d;
-          if (!setpoint_ranges_valid_) {
-            ESP_LOGW(TAG, "Setpoint ranges incomplete (cs=%d cp=%d pp=%d cf=%d); "
-                          "modes that did not answer keep their fallback bounds",
-                     a, b, c, d);
-          }
-          if (callback) callback(setpoint_ranges_valid_);
-        });
+  // Four sequential reads, and the chain STOPS at the first failure. That is
+  // not tidiness, it is the only safe order.
+  //
+  // All four objects are type 301 version 1, so all four reads declare the same
+  // expectation and the transport cannot tell their replies apart -- it matches
+  // on object TYPE, never on the instance, and says so at its parse site. A
+  // chain that carried on after a timeout would therefore hand read N's late
+  // reply to read N+1, shifting every remaining range by one slot: constant
+  // pressure would end up bounded by constant speed's 1650-3671 read as
+  // Pascals, i.e. 0.168-0.374 m, and an ordinary 1.5 m setpoint would be
+  // refused as INVALID with a confident and false attribution to the pump. It
+  // would persist for the whole connection, because nothing re-reads these.
+  //
+  // Stopping means a mode after the failure simply keeps its fallback bounds,
+  // which is the honest answer and the one get_setpoint_range() is built for.
+  //
+  // Abandonment on disconnect is inherited rather than implemented: Transport's
+  // reset() clears the command queue WITHOUT invoking callbacks, so a link drop
+  // mid-chain kills the chain outright and no reply from the old connection can
+  // reach this cache. That is a dependency worth naming -- if reset() ever
+  // starts failing pending callbacks instead of dropping them, this chain would
+  // run its remaining reads against the next connection and would need a
+  // generation counter like the one in alpha_hwr.cpp.
+  if (setpoint_ranges_reading_) {
+    ESP_LOGD(TAG, "Setpoint range read already in flight; not starting a second");
+    if (callback) callback(false);
+    return;
+  }
+  setpoint_ranges_reading_ = true;
+  auto finish = [this, callback](bool complete) {
+    setpoint_ranges_reading_ = false;
+    setpoint_ranges_valid_ = complete;
+    if (!complete) {
+      ESP_LOGW(TAG, "Setpoint ranges incomplete; the modes that did not answer "
+                    "keep their fallback bounds until the next connection");
+    }
+    if (callback) callback(complete);
+  };
+  read_one_setpoint_range_(ControlMode::CONSTANT_SPEED, 13, [this, finish](bool a) {
+    if (!a) { finish(false); return; }
+    read_one_setpoint_range_(ControlMode::CONSTANT_PRESSURE, 15, [this, finish](bool b) {
+      if (!b) { finish(false); return; }
+      read_one_setpoint_range_(ControlMode::PROPORTIONAL_PRESSURE, 17, [this, finish](bool c) {
+        if (!c) { finish(false); return; }
+        read_one_setpoint_range_(ControlMode::CONSTANT_FLOW, 39, finish);
       });
     });
   });

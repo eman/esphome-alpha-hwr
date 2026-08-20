@@ -212,6 +212,14 @@ MUTATIONS=(
 # The ranges belong to the pump on the other end. A reconnect may be a different
 # pump, and a stale range would bound the new one.
 "setpoint-ranges-survive-a-disconnect|components/alpha_hwr/control_service.h|     setpoint_ranges_valid_ = false;|     setpoint_ranges_valid_ = setpoint_ranges_valid_;"
+# The range chain must stop at the first failure. All four objects are type 301
+# version 1, so all four reads declare the same expectation and the transport --
+# which matches on object TYPE and never on the instance -- cannot tell their
+# replies apart. Carrying on after a timeout hands read N's late reply to read
+# N+1 and shifts every remaining range by one slot: constant pressure ends up
+# bounded by constant speed's 1650-3671 read as Pascals, and a 1.5 m setpoint is
+# refused as INVALID blaming the pump, for the rest of the connection.
+"setpoint-range-chain-continues-past-a-failure|components/alpha_hwr/control_service.cpp|    if (!a) { finish(false); return; }|    (void) a;"
 # The setpoint readback waits SETPOINT_CONFIRM_DELAY_MS after the write so the
 # pump has time to store the value (#82/#85). That delay used to be unfalsifiable:
 # the simulator applied a setpoint the instant the frame arrived, so a confirm at
