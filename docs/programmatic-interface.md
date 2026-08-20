@@ -54,7 +54,7 @@ they settle as `set_single_event` / `clear_single_event`.
 | --- | --- | --- |
 | `set_pump_enabled` | `enabled: bool`, `op_id: string` | Run state only, via the pump's unfused Class 3 START/STOP commands — carries no mode and no setpoint at all. A pump-rejected command settles `rejected`; the run state is always confirmed by readback (Class 3 produces no notification of its own). |
 | `set_mode` | `mode: string`, `op_id: string` | Control mode only, via the pump's unfused mode-change object — touches neither the run state nor any mode's stored setpoint. |
-| `set_setpoint` | `mode: string`, `value: float`, `op_id: string` | **Switches the pump into `mode` AND sets that mode's setpoint** — `mode` is not merely selecting which stored setpoint to edit; after this call the pump is running (or armed) in that mode. This is exactly the pair the pump fuses in one write. Use `set_mode` to switch modes without touching a setpoint. The pump stores an independent setpoint per mode, so setpoint writes to different modes never supersede each other. |
+| `set_setpoint` | `mode: string`, `value: float`, `op_id: string` | **Switches the pump into `mode` AND sets that mode's setpoint** — `mode` is not merely selecting which stored setpoint to edit; after this call the pump is running (or armed) in that mode. This is exactly the pair the pump fuses in one write. Use `set_mode` to switch modes without touching a setpoint. The pump stores an independent setpoint per mode, so setpoint writes to different modes never supersede each other. The value is validated against the pump's own published range for that mode — see below. |
 | `set_temperature_range` | `min_c: float`, `max_c: float`, `autoadapt: bool`, `op_id: string` | The temperature-range config object (its own fused write), after switching to temperature-range mode. |
 | `set_cycle_times` | `on_minutes: float`, `off_minutes: float`, `flow: float`, `op_id: string` | The cycle-time config object, after switching to cycle-time mode. Minutes are whole, 1–60 (float-typed for platform reasons; fractional values settle `invalid`). `flow` is the flow the pump targets during ON periods, in m³/h (0.1–10.0). **Each field accepts `0` = keep existing**: kept fields are resolved from a fresh read of the pump's stored config (a kept flow is echoed back byte-for-byte, no float round trip), so flow-only or single-period writes are safe. All three at `0` settles `invalid`. |
 | `set_pump_state` | `state: string` (`off`\|`engaged`\|`scheduled`), `op_id: string` | **Coupled run-state + schedule selector** — the safe, one-call way to reach a legal state (see [Run state and the schedule](#run-state-and-the-schedule)). Writes only the flags that differ from the current state, in an order that never passes through the dead `STOP`+schedule combo. Unknown `state` settles `invalid`. |
@@ -107,6 +107,31 @@ a `config write not acknowledged; …` prefix on `detail`, so the silence is
 still reported — it just no longer decides the verdict. It is one of several
 cases where an `accepted` settle carries a non-empty `detail` — see the
 [`write_settled` statuses](#the-write_settled-event) for the rest.
+
+#### Setpoint ranges come from the pump
+
+`set_setpoint` bounds the requested value against the mode's own `min_set_point`
+and `max_set_point`, read from the pump at connect. On the bench unit those are:
+
+| mode | min | max |
+| --- | --- | --- |
+| `constant_speed` | 1650 | 3671 RPM |
+| `constant_pressure` | 1.000 | 2.450 m |
+| `proportional_pressure` | 2.599 | 4.569 m |
+| `constant_flow` | 0.114 | 2.498 m³/h |
+
+Out-of-range settles `invalid` with the pump's bound in `detail` — no write is
+attempted. Note the ranges are narrower than a client might expect, and
+proportional pressure's does not overlap constant pressure's.
+
+If the pump has not answered the range read (the first moments of a connection,
+or a firmware that does not expose the objects), the component falls back to
+wider built-in bounds and says so in the `detail` of any refusal
+(`… (pump limits not read)`). In that state the pump may still clamp a value it
+dislikes, and the settle event reports `clamped` with what it stored.
+
+The **entity** sliders in `alpha_hwr_controls.yaml` still carry their static
+`min_value`/`max_value`; only the service validation is pump-derived.
 
 ### Run state and the schedule
 

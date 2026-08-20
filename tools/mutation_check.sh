@@ -193,6 +193,25 @@ MUTATIONS=(
 # any test provoked one. This entry is the proof that net works: reversing the
 # fused control request's address turns it red.
 "control-request-addressed-sub-first|components/alpha_hwr/control_service.cpp|  apdu[2] = 0x56;  // Object id 86, the start/stop request\n  apdu[3] = 0x00;  // Sub-id high\n  apdu[4] = 0x06;  // Sub-id low -- 86/6, overall_operation_local_request_obj|  apdu[2] = 0x00;  // mutated: the sub-first layout the deleted write used\n  apdu[3] = 0x06;\n  apdu[4] = 0x00;"
+# Setpoint bounds come from the pump, not from the constants in our source
+# (issue #273). The fallback constants are inherited guesses, wrong in both
+# directions on every mode this pump has -- 500 RPM where it will not go below
+# 1650, 10 m3/h where its ceiling is 2.5, and 0.5 m for proportional pressure
+# where the floor is 2.6. Ignoring the pump's answer puts all of that back, and
+# the operation still settles ACCEPTED afterwards because the pump clamps, so
+# only a test that looks at the BOUND can see it.
+"setpoint-bounds-ignore-the-pump|components/alpha_hwr/write_operation_service.cpp|  const bool from_pump = control_.get_setpoint_range(op->mode, pump_lo, pump_hi);|  const bool from_pump = false;"
+# ...and the fallback has to stay reachable. Claiming the pump's range when none
+# was read hands the validation NAN bounds, which reject every setpoint in a
+# mode the pump never answered for.
+"setpoint-bounds-claim-a-range-that-was-never-read|components/alpha_hwr/write_operation_service.cpp|  if (from_pump) {\n    lo = pump_lo;\n    hi = pump_hi;\n  }|  lo = pump_lo;\n  hi = pump_hi;"
+# The range read must reject a degenerate answer rather than caching it. A max
+# at or below the min refuses every setpoint in that mode for the rest of the
+# connection -- worse than never having read it.
+"setpoint-range-accepts-an-inverted-range|components/alpha_hwr/control_service.cpp|        const bool usable = !std::isnan(lo) && !std::isnan(hi) && hi > lo;|        const bool usable = true;"
+# The ranges belong to the pump on the other end. A reconnect may be a different
+# pump, and a stale range would bound the new one.
+"setpoint-ranges-survive-a-disconnect|components/alpha_hwr/control_service.h|     setpoint_ranges_valid_ = false;|     setpoint_ranges_valid_ = setpoint_ranges_valid_;"
 # The setpoint readback waits SETPOINT_CONFIRM_DELAY_MS after the write so the
 # pump has time to store the value (#82/#85). That delay used to be unfalsifiable:
 # the simulator applied a setpoint the instant the frame arrived, so a confirm at

@@ -950,14 +950,42 @@ void WriteOperationService::run_set_setpoint_(uint32_t seq) {
             format_detail("%s has no scalar setpoint", ControlService::mode_to_string(op->mode)));
     return;
   }
-  // Range validation mirrors the legacy setters.
+  // Range validation. The fallback constants below are guesses inherited from
+  // the legacy setters, and they are wrong in both directions on every mode
+  // this pump has: it will not go below 1650 RPM where they allow 500, and its
+  // constant-flow ceiling is 2.5 m³/h where they allow 10. Proportional
+  // pressure is the widest miss -- a floor of 2.6 m against their 0.5.
+  //
+  // So the pump's own numbers are used when it has told us them. It publishes
+  // min_set_point / max_set_point per mode in the type-301 factory objects
+  // (86/13, 15, 17, 39), which is what the Grundfos app reads to bound its
+  // setpoint slider (issue #273).
+  //
+  // The constants stay as the fallback rather than being deleted, and the
+  // fallback is deliberately the wider range: with no reading from the pump the
+  // honest position is that we do not know the limit, and refusing a setpoint
+  // the pump would have accepted is worse than letting the pump clamp it -- the
+  // readback still reports what it stored, so nothing is claimed falsely
+  // either way.
   float lo = 0.5f, hi = 10.0f;
   const char *unit = "m";
   if (op->mode == ControlMode::CONSTANT_SPEED) { lo = 500.0f; hi = 4500.0f; unit = "RPM"; }
   if (op->mode == ControlMode::CONSTANT_FLOW) { lo = 0.1f; hi = 10.0f; unit = "m³/h"; }
+  float pump_lo = NAN, pump_hi = NAN;
+  const bool from_pump = control_.get_setpoint_range(op->mode, pump_lo, pump_hi);
+  if (from_pump) {
+    lo = pump_lo;
+    hi = pump_hi;
+  }
   if (std::isnan(op->value) || op->value < lo || op->value > hi) {
+    // Say which bound refused, because the two mean different things to a
+    // client: the pump's is a fact about the hardware, ours is an admission
+    // that we have not read one yet.
     finish_(seq, WriteStatus::INVALID,
-            format_detail("value out of range %.1f-%.1f %s", lo, hi, unit));
+            from_pump
+                ? format_detail("value out of the pump's range %.4g-%.4g %s", lo, hi, unit)
+                : format_detail("value out of range %.1f-%.1f %s (pump limits not read)",
+                                lo, hi, unit));
     return;
   }
 
