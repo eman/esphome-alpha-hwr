@@ -1,0 +1,25 @@
+name: probe
+on: workflow_dispatch
+jobs:
+  probe:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Which type is int64_t here
+        run: |
+          cat > p.cpp <<'CPP'
+          #include <cstdint>
+          #include <cstdio>
+          #include <type_traits>
+          int main() {
+            printf("platform: 64-bit glibc, sizeof(long)=%zu\n", sizeof(long));
+            printf("int64_t is long:       %d\n", (int) std::is_same<int64_t, long>::value);
+            printf("int64_t is long long:  %d\n", (int) std::is_same<int64_t, long long>::value);
+            printf("OLD assert 2 with ParseInt=long would PASS: %d\n",
+                   (int) (std::is_same<long, long long>::value ||
+                          std::is_same<long, int64_t>::value));
+            printf("NEW assert (long vs long long distinct)  : %d\n",
+                   (int) std::is_same<long, long long>::value);
+            return 0;
+          }
+          CPP
+          g++ -std=c++17 p.cpp -o p && ./p
