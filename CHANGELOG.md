@@ -1138,6 +1138,17 @@
   readiness check; they now apply the same check at the far end, so a read cut
   short keeps the previous data instead of publishing a truncated one.
 
+  It also retires a guard added only two changes ago. `ControlService`'s
+  setpoint-range read carries an in-flight flag, and issue #273 had
+  `invalidate_cache()` release it because a disconnect mid-chain would otherwise
+  leave it set for the life of the node — silently, and with every setpoint
+  write back on the fallback constants. That was a symptom of this bug, so the
+  flag is now released by the chain's own callback on every path. The line stays
+  (it is one assignment, and the failure it guards is silent and permanent) but
+  the mutation that proved it is retired as an equivalent mutant, verified in
+  two steps: the suite passes with the line deleted, and fails again with the
+  line deleted *and* `reset()` put back to clearing its queue.
+
   A command being failed is now taken off the queue *before* its callback runs,
   which the old order got away with only because `reset()` did not invoke
   anything. `cmd` in `Transport::loop()` is a reference into the deque, and a

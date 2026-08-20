@@ -1363,12 +1363,19 @@ static void test_a_mode_that_does_not_answer_does_not_shift_the_others() {
 // A disconnect while the range chain is in flight must not wedge it.
 //
 // The chain sets an in-flight flag so a second chain cannot start, and clears it
-// when it finishes. But Transport::reset() drops a queued command WITHOUT
-// invoking its callback, so a link drop mid-chain kills the chain silently and
-// the flag would stay set forever: every later read answers "already in flight",
-// and every setpoint write is permanently back on the fallback constants, with
-// nothing visible but a DEBUG line. One ordinary BLE drop during a ~200 ms
-// window would do it. invalidate_cache() releases the flag for that reason.
+// when it finishes. This case exists because that used to be escapable: before
+// issue #259, Transport::reset() dropped a queued command WITHOUT invoking its
+// callback, so a link drop mid-chain killed the chain silently and the flag
+// stayed set forever -- every later read answering "already in flight", every
+// setpoint write permanently back on the fallback constants, and nothing
+// visible but a DEBUG line. invalidate_cache() was added to release it.
+//
+// reset() now fails what it abandons, so the chain's own `finish` runs and the
+// flag is released whichever of the two gets there first. The test still pins
+// the OUTCOME -- a drop mid-chain must not stop the ranges being read on the
+// next connection -- which is what it was always about; it just no longer
+// distinguishes which of the two releasers did it, and the mutation that used
+// to prove invalidate_cache()'s half has been retired as an equivalent mutant.
 static void test_a_disconnect_mid_chain_does_not_wedge_the_read() {
   std::cout << "\n=== setpoint ranges: a drop mid-chain does not stop them being read again ===" << std::endl;
   Harness h;

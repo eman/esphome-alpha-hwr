@@ -348,17 +348,24 @@ class ControlService {
      // The ranges belong to the pump we were talking to, not to the next one.
      cs_range_ = cp_range_ = pp_range_ = cf_range_ = SetpointRange{};
      setpoint_ranges_valid_ = false;
-     // ...and the in-flight flag with them, or the read never happens again.
+     // ...and the in-flight flag with them.
      //
-     // Transport::reset() drops a queued command WITHOUT invoking its callback,
-     // so a disconnect mid-chain kills the chain silently: `finish` never runs
-     // and the flag stays set. Clearing it only on completion would mean one
-     // ordinary BLE drop during the ~200 ms chain leaves every later
+     // This was load-bearing when it was written (issue #273):
+     // Transport::reset() dropped a queued command WITHOUT invoking its
+     // callback, so a disconnect mid-chain killed the chain silently, `finish`
+     // never ran, and the flag stayed set -- leaving every later
      // read_setpoint_ranges() answering "already in flight" for the life of the
      // node, and every setpoint write permanently back on the fallback
-     // constants -- with nothing to see but a DEBUG line. The chain's own
-     // abandonment is inherited from reset(); the flag has to be released here
-     // because nothing else will release it.
+     // constants, with nothing to see but a DEBUG line. One ordinary BLE drop
+     // inside a ~200 ms window did it.
+     //
+     // Issue #259 removed that mechanism: reset() now fails what it abandons,
+     // so the chain's own callback reaches `finish` and releases the flag on
+     // every path that could strand it. This line is therefore belt-and-braces
+     // now rather than the only releaser, and no test can tell it from its own
+     // absence -- see the note in tools/mutation_check.sh, which used to carry a
+     // mutation for it. Kept because it is one assignment and the failure it
+     // guards against is silent and permanent.
      setpoint_ranges_reading_ = false;
      // Drop any in-flight mode command (issue #91): a command issued on a prior
      // connection must not be "confirmed" by a read on the next connection.
