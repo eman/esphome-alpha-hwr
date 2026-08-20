@@ -345,7 +345,12 @@ MUTATIONS=(
 # instead of being told immediately. The second leaves the failed command at the
 # head of the queue, which wedges the link for every command after it -- far
 # worse than the one write that was lost.
-"transport-send-failure-silent|components/alpha_hwr/transport.cpp|          this->peer_resync_started_ms_ = now;\n        }\n        if (cmd.callback) {\n          cmd.callback(false, nullptr, 0);\n        }|          this->peer_resync_started_ms_ = now;\n        }"
+#
+# Both were retargeted for issue #259: the branches call fail_front_command_()
+# now instead of inlining callback-then-pop, so each mutation replaces that call
+# with a bare pop_front() -- the command still leaves the queue, its caller is
+# still never told.
+"transport-send-failure-silent|components/alpha_hwr/transport.cpp|          this->peer_resync_started_ms_ = now;\n        }\n        this->fail_front_command_();|          this->peer_resync_started_ms_ = now;\n        }\n        this->command_queue_.pop_front();"
 "transport-send-failure-wedges-queue|components/alpha_hwr/transport.cpp|        ESP_LOGE(TAG, \"Failed to send chunk, dropping command\");|        ESP_LOGE(TAG, \"Failed to send chunk\"); if (true) break;"
 # The queue-advance property ON ITS OWN. The entry above drops the failure report
 # and the pop in one edit, so the report assertions kill it and it proves nothing
@@ -385,7 +390,7 @@ MUTATIONS=(
 # than at some comfortable fraction of it for this reason; with a looser probe
 # this mutant survives.
 "transport-peer-resync-window-too-short|components/alpha_hwr/transport.h|  static constexpr uint32_t PEER_RESYNC_HOLD_MS = REASSEMBLY_TIMEOUT_MS + 100;|  static constexpr uint32_t PEER_RESYNC_HOLD_MS = 700;"
-"transport-missing-writer-silent|components/alpha_hwr/transport.cpp|ESP_LOGW(TAG, \"Write callback not set, dropping command\");\n        if (cmd.callback) {\n          cmd.callback(false, nullptr, 0);\n        }|ESP_LOGW(TAG, \"Write callback not set, dropping command\");"
+"transport-missing-writer-silent|components/alpha_hwr/transport.cpp|ESP_LOGW(TAG, \"Write callback not set, dropping command\");\n        this->fail_front_command_();|ESP_LOGW(TAG, \"Write callback not set, dropping command\");\n        this->command_queue_.pop_front();"
 # Restores issue #179's off-by-one: a seven-byte Class 7 header instead of six,
 # which cost every device-info string its first character. It survived for as
 # long as it did because the only test fixture was generated from the same wrong
