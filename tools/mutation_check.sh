@@ -879,6 +879,14 @@ MUTATIONS=(
 # commands the pump may still answer.
 "inbound-overflow-never-drops-the-partial|components/alpha_hwr/transport.cpp|  if (reassembly_buffer_.size() > MAX_PACKET_SIZE) {|  if (false) {"
 "inbound-overflow-cancels-the-queue|components/alpha_hwr/transport.cpp|  if (reassembly_buffer_.size() > MAX_PACKET_SIZE) {|  if (reassembly_buffer_.size() > MAX_PACKET_SIZE) { reset(); return; } if (false) {"
+# Reporting the failure is only half of it. The chain now reaches its terminal
+# branch on the abandoned exit too, and that branch is where the display cache is
+# written -- so both of these services need the readiness gate they already open
+# with applied at the far end as well. Without it every dropped link replaces a
+# good display with however many entries happened to land first, and it looks
+# exactly like a short log rather than a truncated read.
+"abandoned-history-read-cached-as-the-answer|components/alpha_hwr/history_service.cpp|      if (!session_.is_ready()) {|      if (false) {"
+"abandoned-event-log-read-cached-as-the-answer|components/alpha_hwr/event_log_service.cpp|        if (!session_.is_ready()) {|        if (false) {"
 # Deliberate absence: abandon_queue_()'s `if (this->abandoning_) return;` guard.
 # Confirmed by experiment to be an equivalent mutant -- the nested call finds the
 # queue already swapped out and returns at the emptiness check one line above, so

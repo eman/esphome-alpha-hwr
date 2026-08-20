@@ -101,6 +101,20 @@ void EventLogService::read_entries_async(
       if (!self)
         return;  // chain abandoned (disconnect)
       if (idx >= count) {
+        // The same gate read_entries_async() opens with, applied at the other
+        // end -- see the note in HistoryService::read_trends_async(). A single
+        // entry that fails to read is tolerated by design (the branch below
+        // logs it and moves on), so a partially-read log is indistinguishable
+        // from a complete one here unless the abandoned case is named. Since
+        // issue #259 a disconnect mid-chain unwinds to this branch, and caching
+        // three entries of twenty would leave the display claiming the log is
+        // three entries long.
+        if (!session_.is_ready()) {
+          ESP_LOGD(TAG, "Event log read abandoned with %zu of %u entries; keeping the previous data",
+                   entries->size(), (unsigned) count);
+          if (on_complete) on_complete(false, cached_entries_);
+          return;
+        }
         cached_entries_ = *entries;
         entries_cached_ = true;
         ESP_LOGI(TAG, "Read %zu event log entries", entries->size());

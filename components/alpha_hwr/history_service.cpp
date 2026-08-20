@@ -78,6 +78,22 @@ void HistoryService::read_trends_async(
     if (!self)
       return;  // chain abandoned (disconnect) -- nothing left to continue
     if (idx >= NUM_TRENDS) {
+      // The same gate this function opens with, applied at the other end.
+      // Transport::reset() now fails the queue instead of dropping it (issue
+      // #259), so a disconnect mid-chain unwinds through the failure branch
+      // below and arrives here -- with whatever channels had already landed.
+      // Missing channels are ordinarily fine (see the branch below: not every
+      // pump populates all four), which is exactly why this case needs telling
+      // apart: caching two channels as the answer would replace a good display
+      // with a truncated one on every dropped link. Session::on_disconnected()
+      // runs before the transport is reset, so this is false by the time the
+      // unwind reaches here.
+      if (!session_.is_ready()) {
+        ESP_LOGD(TAG, "Trend read abandoned with %zu of %zu channels; keeping the previous data",
+                 trends->size(), NUM_TRENDS);
+        if (on_complete) on_complete(false, cached_trends_);
+        return;
+      }
       cached_trends_ = *trends;
       trends_cached_ = true;
       ESP_LOGI(TAG, "Read %zu trend channels", trends->size());

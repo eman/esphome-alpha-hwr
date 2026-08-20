@@ -1119,6 +1119,14 @@
   hold and the reply debt now survive that path on their own, instead of being
   saved and restored by hand around a call that should not have been there.
 
+  One consequence needed handling on the way. Because an abandoned chain now
+  reaches its terminal branch, and that branch is where the trend and event-log
+  display caches are written, a dropped link would have replaced a good display
+  with however many entries happened to land first — indistinguishable, at that
+  point, from a genuinely short log. Both services already open with a
+  readiness check; they now apply the same check at the far end, so a read cut
+  short keeps the previous data instead of publishing a truncated one.
+
 - **Setpoint validation used hardcoded ranges; the pump publishes its own, per
   mode, and they are much narrower** (issue #273). `run_set_setpoint_` bounded a
   requested setpoint against constants inherited from the legacy setters. They
