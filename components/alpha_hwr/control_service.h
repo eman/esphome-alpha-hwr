@@ -345,6 +345,21 @@ class ControlService {
      cached_cycle_time_off_ = -1;
      dhw_config_valid_ = false;
      temp_limits_tail_valid_ = false;
+     // The ranges belong to the pump we were talking to, not to the next one.
+     cs_range_ = cp_range_ = pp_range_ = cf_range_ = SetpointRange{};
+     setpoint_ranges_valid_ = false;
+     // ...and the in-flight flag with them, or the read never happens again.
+     //
+     // Transport::reset() drops a queued command WITHOUT invoking its callback,
+     // so a disconnect mid-chain kills the chain silently: `finish` never runs
+     // and the flag stays set. Clearing it only on completion would mean one
+     // ordinary BLE drop during the ~200 ms chain leaves every later
+     // read_setpoint_ranges() answering "already in flight" for the life of the
+     // node, and every setpoint write permanently back on the fallback
+     // constants -- with nothing to see but a DEBUG line. The chain's own
+     // abandonment is inherited from reset(); the flag has to be released here
+     // because nothing else will release it.
+     setpoint_ranges_reading_ = false;
      // Drop any in-flight mode command (issue #91): a command issued on a prior
      // connection must not be "confirmed" by a read on the next connection.
      mode_command_pending_ = false;
@@ -446,6 +461,17 @@ class ControlService {
     uint8_t cached_temp_limits_tail_[5]{0x00, 0x00, 0x00, 0x16, 0x00};
     bool temp_limits_tail_valid_{false};
 
+    /// Per-mode setpoint bounds from the type-301 factory objects, in DISPLAY
+    /// units, indexed by the four scalar modes. NAN until read (issue #273).
+    struct SetpointRange { float min{NAN}; float max{NAN}; };
+    SetpointRange cs_range_, cp_range_, pp_range_, cf_range_;
+    /// True only when all four reads have landed on this connection. A partial
+    /// set is not usable as a whole -- get_setpoint_range() answers per mode.
+    bool setpoint_ranges_valid_{false};
+    /// A range read is in flight. Two concurrent chains would put eight reads
+    /// on the wire and let the older one publish the completeness flag.
+    bool setpoint_ranges_reading_{false};
+
    public:
     /// Has the pump's own on/off-time LIMITS block been read back yet?
     ///
@@ -466,6 +492,27 @@ class ControlService {
     /// and this would read true. Deriving the tail bound from the declared
     /// size is the check for that, and is not made here.
     bool temp_limits_known() const { return temp_limits_tail_valid_; }
+
+    /// The pump's own setpoint range for @p mode, in DISPLAY units.
+    ///
+    /// Read from the mode's type-301 ControlModeFactoryConfiguration --
+    /// object 86 sub-id 13 (constant speed), 15 (constant pressure), 17
+    /// (proportional pressure) and 39 (constant flow) -- and cached in the same
+    /// units get_setpoint_for_mode() returns, so a caller comparing a requested
+    /// setpoint against it does not have to know the wire units.
+    ///
+    /// @return false when this mode has no range, either because it has no
+    ///   scalar setpoint or because the read has not landed on this connection.
+    ///   Callers must then fall back to their own bounds rather than treating
+    ///   the pump as unbounded (issue #273).
+    bool get_setpoint_range(ControlMode mode, float &min_out, float &max_out) const;
+
+    /// True when the last range read completed all four modes on this
+    /// connection. NOT the gate for using a range -- get_setpoint_range()
+    /// answers per mode, because a pump that will not answer for one mode
+    /// should not cost the other three their real bounds. This exists so a
+    /// caller (and the tests) can tell a complete read from a partial one.
+    bool setpoint_ranges_known() const { return setpoint_ranges_valid_; }
 
    private:
   /// How long send_set_mode_request() waits for the pump's short ACK (issue #248).
@@ -654,6 +701,27 @@ class ControlService {
    * @param callback Called with true when the read parsed and caches updated.
    */
   void read_dhw_config(std::function<void(bool)> callback);
+
+  /**
+   * Read the pump's per-mode setpoint ranges (issue #273).
+   *
+   * Four type-301 `ControlModeFactoryConfiguration` objects, one per scalar
+   * mode: object 86 sub-id 13 / 15 / 17 / 39. Each is a 28-byte struct whose
+   * first three floats are `default_set_point`, `min_set_point` and
+   * `max_set_point`; only the last two are kept, converted to display units.
+   *
+   * `resulting_min_set_point`, the fourth float, is deliberately not read. It
+   * is not a floor: on the bench pump it is -3671.0 for constant speed, and
+   * 9804.0 -- constant pressure's minimum -- under proportional pressure, whose
+   * real floor is 25490. The Grundfos app binds `min_set_point` / `max_set_point`
+   * and ignores it, and so does this.
+   *
+   * Non-gating, like read_dhw_config(): a pump that will not answer leaves the
+   * caller on its own bounds rather than blocking the whole cache sync.
+   */
+  void read_setpoint_ranges(std::function<void(bool)> callback);
+  void read_one_setpoint_range_(ControlMode mode, uint16_t sub,
+                                std::function<void(bool)> callback);
 
   /**
    * Write the DHW on/off configuration (Object 91 Sub 421, OpSpec 0x8F,

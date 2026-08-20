@@ -1080,6 +1080,97 @@
 
 ### Fixed
 
+- **Setpoint validation used hardcoded ranges; the pump publishes its own, per
+  mode, and they are much narrower** (issue #273). `run_set_setpoint_` bounded a
+  requested setpoint against constants inherited from the legacy setters. They
+  are wrong in *both* directions on every mode this pump has:
+
+  | mode | obj/sub | pump min – max | the constants |
+  | --- | --- | --- | --- |
+  | constant speed | 86/13 | **1650 – 3671** RPM | 500 – 4500 |
+  | constant pressure | 86/15 | **1.000 – 2.450** m | 0.5 – 10.0 |
+  | proportional pressure | 86/17 | **2.599 – 4.569** m | 0.5 – 10.0 |
+  | constant flow | 86/39 | **0.114 – 2.498** m³/h | 0.1 – 10.0 |
+
+  The pump keeps these in the type-301 `ControlModeFactoryConfiguration` object
+  for each mode, as `min_set_point` and `max_set_point`, and the Grundfos GO app
+  reads exactly those two fields to bound its setpoint slider. The component now
+  reads them too, converts them to display units and validates against them.
+
+  What this changes for a client: asking for 1200 RPM used to be accepted, sent,
+  clamped by the pump to 1650, and settled `clamped` a round trip later. It is
+  now `invalid` immediately, with the pump's own floor in the detail. Asking for
+  10 m³/h used to be accepted against a ceiling four times the real one.
+
+  **Proportional pressure is the worst of the four, and its values had never
+  been seen.** The object is documented — the profile has 86/17 as type 301, and
+  `widget_configuration_52_7.xml` binds its min and max — but the HWR setpoint
+  widget does not bind it, no capture contains a read of it, and the pump never
+  enters the mode in any recorded session. So the range was read off the bench
+  directly. Its floor is *five times* the constant we were using, and its range
+  does not overlap constant pressure's, though the constants treat the two
+  identically.
+
+  The constants stay as the fallback rather than being deleted, and the fallback
+  is deliberately the wider range: with nothing read from the pump the honest
+  position is that we do not know the limit, and refusing a setpoint the pump
+  would have taken is worse than letting the pump clamp it — the readback
+  reports what it stored either way. The settle detail says which bound refused,
+  because "the hardware cannot" and "we have not looked" are different facts.
+
+  `resulting_min_set_point`, the fourth float in the struct, is deliberately not
+  read. It is not a floor: on the bench pump it is −3671.0 for constant speed,
+  and 9804.0 — constant pressure's minimum — under proportional pressure, whose
+  real floor is 25490. The app ignores it too.
+
+  The four reads run **after** the cache-sync verdict rather than before it, so
+  time-to-ready is unchanged; they gate nothing, and a pump that will not answer
+  leaves each mode on its fallback.
+
+  Note what the range is: the mode's **factory** range, which does not account
+  for an active limiter. The pump also has MaxFlow and MinFlow limiters
+  (86/600–659), off by default but settable from the Grundfos app, and one that
+  is enabled holds flow below the setpoint without changing any of these numbers
+  — issue #274 covers reading them.
+
+  A degenerate answer (max at or below min) is
+  refused as a source rather than cached, so `setpoint_ranges_known()` cannot
+  claim a complete set off the back of one — though `get_setpoint_range()`
+  re-checks the invariant on every call, so a cached one would not actually have
+  bounded anything. The ranges are dropped on disconnect, because the next
+  connection may be a different pump.
+
+  Two properties of the read are load-bearing rather than tidy. The chain **stops
+  at the first failure**: all four objects are type 301 version 1, so all four
+  reads declare the same expectation and the transport — which matches on object
+  type and never on the instance — cannot tell their replies apart. A chain that
+  carried on would hand a timed-out read's late reply to the next mode, shifting
+  every remaining range by one slot; constant pressure would end up bounded by
+  constant speed's 1650–3671 read as Pascals, refusing an ordinary 1.5 m setpoint
+  as `invalid` and blaming the pump for the rest of the connection. And a second
+  chain cannot start while one is in flight, which would otherwise put eight
+  reads on the wire and let the older one publish the completeness flag — with
+  that guard released on disconnect as well as on completion, since
+  `Transport::reset()` drops a queued command without invoking its callback, so
+  a drop mid-chain would otherwise leave it latched and the ranges never read
+  again for the life of the node.
+
+  Seven host tests, the load-bearing one being a simulated pump whose range is
+  *wider* than the constants — accepting 5000 RPM is possible only by using the
+  pump's number, where a narrower range would also pass against code that had
+  merely become stricter. Six mutation entries. The simulator answers with a
+  byte-faithful type-301 frame carrying, for proportional pressure, the
+  genuinely deceptive `resulting_min_set_point` the real pump sends there:
+  9804.0, which is *constant pressure's* minimum — a plausible positive number,
+  in the right unit, for the wrong mode.
+
+  One thing this changes for the Home Assistant sliders, which reach the same
+  validator: their declared bounds are now wider than the pump on every mode, so
+  part of each slider's travel is a refusal rather than a value the pump clamps.
+  Narrowing them means re-sending entity info against Home Assistant's cached
+  registry, and is tracked separately.
+
+
 - **The "dedicated" setpoint write was addressed backwards, and the pump had
   been refusing it since the day it was written** (issue #258). It is gone
   rather than corrected, and the reasoning is worth recording because the

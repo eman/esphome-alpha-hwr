@@ -54,7 +54,7 @@ they settle as `set_single_event` / `clear_single_event`.
 | --- | --- | --- |
 | `set_pump_enabled` | `enabled: bool`, `op_id: string` | Run state only, via the pump's unfused Class 3 START/STOP commands — carries no mode and no setpoint at all. A pump-rejected command settles `rejected`; the run state is always confirmed by readback (Class 3 produces no notification of its own). |
 | `set_mode` | `mode: string`, `op_id: string` | Control mode only, via the pump's unfused mode-change object — touches neither the run state nor any mode's stored setpoint. |
-| `set_setpoint` | `mode: string`, `value: float`, `op_id: string` | **Switches the pump into `mode` AND sets that mode's setpoint** — `mode` is not merely selecting which stored setpoint to edit; after this call the pump is running (or armed) in that mode. This is exactly the pair the pump fuses in one write. Use `set_mode` to switch modes without touching a setpoint. The pump stores an independent setpoint per mode, so setpoint writes to different modes never supersede each other. |
+| `set_setpoint` | `mode: string`, `value: float`, `op_id: string` | **Switches the pump into `mode` AND sets that mode's setpoint** — `mode` is not merely selecting which stored setpoint to edit; after this call the pump is running (or armed) in that mode. This is exactly the pair the pump fuses in one write. Use `set_mode` to switch modes without touching a setpoint. The pump stores an independent setpoint per mode, so setpoint writes to different modes never supersede each other. The value is validated against the pump's own published range for that mode — see below. |
 | `set_temperature_range` | `min_c: float`, `max_c: float`, `autoadapt: bool`, `op_id: string` | The temperature-range config object (its own fused write), after switching to temperature-range mode. |
 | `set_cycle_times` | `on_minutes: float`, `off_minutes: float`, `flow: float`, `op_id: string` | The cycle-time config object, after switching to cycle-time mode. Minutes are whole, 1–60 (float-typed for platform reasons; fractional values settle `invalid`). `flow` is the flow the pump targets during ON periods, in m³/h (0.1–10.0). **Each field accepts `0` = keep existing**: kept fields are resolved from a fresh read of the pump's stored config (a kept flow is echoed back byte-for-byte, no float round trip), so flow-only or single-period writes are safe. All three at `0` settles `invalid`. |
 | `set_pump_state` | `state: string` (`off`\|`engaged`\|`scheduled`), `op_id: string` | **Coupled run-state + schedule selector** — the safe, one-call way to reach a legal state (see [Run state and the schedule](#run-state-and-the-schedule)). Writes only the flags that differ from the current state, in an order that never passes through the dead `STOP`+schedule combo. Unknown `state` settles `invalid`. |
@@ -63,8 +63,49 @@ they settle as `set_single_event` / `clear_single_event`.
 `constant_flow`, `auto_adapt_radiator`, `auto_adapt_underfloor`,
 `auto_adapt_combined`, `cycle_time`, `temperature_range`.
 
-Setpoint units and ranges: pressure modes in meters (0.5–10.0),
-`constant_speed` in RPM (500–4500), `constant_flow` in m³/h (0.1–10.0).
+Setpoint units: pressure modes in meters, `constant_speed` in RPM,
+`constant_flow` in m³/h. The **ranges are the pump's own** and are narrower than
+you may expect — see [Setpoint ranges come from the pump](#setpoint-ranges-come-from-the-pump).
+
+### Setpoint ranges come from the pump
+
+`set_setpoint` bounds the requested value against the mode's own `min_set_point`
+and `max_set_point`, which the component reads from the pump on connect. On the
+bench unit those are:
+
+| mode | min | max |
+| --- | --- | --- |
+| `constant_speed` | 1650 | 3671 RPM |
+| `constant_pressure` | 1.000 | 2.450 m |
+| `proportional_pressure` | 2.599 | 4.569 m |
+| `constant_flow` | 0.114 | 2.498 m³/h |
+
+Out of range settles `invalid` with the pump's bound in `detail`, and no write is
+attempted. Two things to note: the ranges are considerably narrower than the
+mode's nominal span, and proportional pressure's does not overlap constant
+pressure's, so a value that is ordinary in one is impossible in the other.
+
+If the pump has not answered the range read — the first moments of a connection,
+or a firmware that does not expose the objects — the component falls back to
+wider built-in bounds and says so in the `detail` of any refusal
+(`… (pump limits not read)`). In that state the pump may still clamp a value it
+dislikes, and the settle event reports `clamped` with what it stored.
+
+The range is the mode's **factory** range. It does not account for an active
+limiter: the pump also has MaxFlow and MinFlow limiters, off by default but
+settable from the Grundfos app, and one that is enabled will hold flow below the
+setpoint without changing any of the numbers above. A constant-flow setpoint over
+an enabled MaxFlow cap therefore passes validation and is then limited, and
+nothing here reports it — see #274.
+
+**This applies to the entity sliders too**, which reach the same validator
+through the facade. Their declared `min_value`/`max_value` in
+`alpha_hwr_controls.yaml` are unchanged and are now wider than the pump on every
+mode, so part of each slider's travel — including both endpoints, and
+proportional pressure's midpoint — is a hard refusal rather than a value the
+pump clamps. Home Assistant shows a failed write rather than the setpoint
+snapping to a clamped value. Narrowing the sliders means re-sending entity info
+against Home Assistant's cached registry and is tracked separately.
 
 ### `set_temperature_range` and `set_cycle_times` settle on the pump, never on the ACK
 

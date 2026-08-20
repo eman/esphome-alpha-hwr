@@ -74,6 +74,22 @@ struct PumpSim {
   // Trailing limit bytes of the Sub 430 struct (min/max on/off-time limits +
   // version tail; issue #106). Distinctive values so preservation is provable.
   uint8_t temp_limits_tail[5] = {0x05, 0x3C, 0x02, 0x3C, 0x01};
+  // Per-mode setpoint ranges from the type-301 factory objects (issue #273), in
+  // PUMP-NATIVE units. These are the real values: 86/13, 86/15 and 86/39 are
+  // decoded from resources/traffic_capture (`geni_capture_scan.py`) and 86/17 is
+  // bench-read, since proportional pressure appears in no capture. RPM for
+  // speed, Pascals for the two pressure modes, m³/s for flow.
+  struct FactoryRange { float def, lo, hi, resulting_min; };
+  FactoryRange range_cs{2800.0f, 1650.0f, 3671.0f, -3671.0f};
+  FactoryRange range_cp{16000.0f, 9804.0f, 24025.0f, 9804.0f};
+  FactoryRange range_pp{35785.0f, 25490.0f, 44804.0f, 9804.0f};
+  FactoryRange range_cf{6.309019954642281e-05f, 3.1545099773211405e-05f, 6.939999875612557e-04f,
+                        3.1545099773211405e-05f};
+  bool respond_setpoint_ranges{true};
+  /// Answer every range read except this sub-id (0 = answer all). Models the
+  /// pump that does not implement one of the four objects, which is the state
+  /// the per-mode get_setpoint_range() contract exists to serve.
+  uint8_t drop_range_sub{0};
   // DHW on/off config (Obj 91 Sub 421): stored flow setpoint + live periods.
   uint8_t dhw_setpoint_raw[4] = {0x38, 0x84, 0x4F, 0x30};  // 1.0 gal/min native
   int cycle_on{5}, cycle_off{15};
@@ -286,6 +302,7 @@ struct Harness {
   int frames_class3_run{0}; // Class 3 START/STOP commands
   int frames_class3_remote{0}; // Class 3 remote enable/disable commands
   int frames_dhw_read{0};   // Obj 91 Sub 421 reads
+  int frames_range_read{0};  // Obj 86 Sub 13/15/17/39 factory-range reads
   int frames_dhw_write{0};   // Obj 91 Sub 421 writes
   int frames_temp_write{0};  // Obj 91 Sub 430 temperature-range writes (OpSpec 0x97)
   // When each of those reached the pump. The step-2 timing is a claim the
@@ -554,6 +571,19 @@ struct Harness {
                            [this]() { inject_short_ack(); }});
         }
       }
+    } else if (opspec == 0x03 && apdu_len >= 5 && apdu[2] == 0x56 &&
+               (apdu[4] == 13 || apdu[4] == 15 || apdu[4] == 17 || apdu[4] == 39) &&
+               apdu[3] == 0x00) {
+      // Per-mode setpoint range reads (issue #273)
+      frames_range_read++;
+      if (sim.respond_setpoint_ranges && apdu[4] != sim.drop_range_sub) {
+        switch (apdu[4]) {
+          case 13: inject_setpoint_range_frame(sim.range_cs); break;
+          case 15: inject_setpoint_range_frame(sim.range_cp); break;
+          case 17: inject_setpoint_range_frame(sim.range_pp); break;
+          default: inject_setpoint_range_frame(sim.range_cf); break;
+        }
+      }
     } else if (opspec == 0x03 && apdu_len >= 5 && apdu[2] == 91 && apdu[3] == 0x01 && apdu[4] == 0xAE) {
       // Obj 91 Sub 430 config read
       if (sim.drop_obj91_reads > 0) {
@@ -735,6 +765,35 @@ struct Harness {
     int sub = sim.sub_for_mode();
     float sp = (sub >= 0) ? sim.setpoints[sub] : NAN;
     protocol::encode_float_be(sp, f.data() + 16);
+    inject(std::move(f));
+  }
+
+  /// A type-301 ControlModeFactoryConfiguration reply (issue #273).
+  ///
+  /// Byte-faithful to the pump, which matters here: bytes 6-9 are `00 01 2D 01`
+  /// -- TypeH 0x0001 and (TypeL << 8) | Version 0x2D01 -- and the read declares
+  /// exactly those. Building it with the generic helper would put 0x0000 in
+  /// bytes 6-7 and match only through the matcher's `|| packet_type_high == 0`
+  /// arm, i.e. for a reason the real pump does not supply. That is how the
+  /// Obj 91 fixture came to describe a frame this pump never sends (#258).
+  void inject_setpoint_range_frame(const PumpSim::FactoryRange &r) {
+    std::vector<uint8_t> f = {0x24, 0, 0xF8, 0xE7, 0x0A, 0x23,
+                              0x00, 0x01, 0x2D, 0x01, 0x00, 0x00, 0x1C};
+    uint8_t body[28] = {};
+    protocol::encode_float_be(r.def, body + 0);
+    protocol::encode_float_be(r.lo, body + 4);
+    protocol::encode_float_be(r.hi, body + 8);
+    // resulting_min_set_point, and the value here is chosen to be the one that
+    // would actually fool someone. The pump sends -3671.0 for constant speed --
+    // obviously not a floor -- but for proportional pressure it sends 9804.0,
+    // which is constant PRESSURE's minimum: a plausible positive number, in the
+    // right unit, for the wrong mode. Callers pass that value in; anything
+    // reading this field as a floor gets a wrong answer that looks right.
+    protocol::encode_float_be(r.resulting_min, body + 12);
+    f.insert(f.end(), body, body + 28);
+    f.push_back(0xAA);
+    f.push_back(0xBB);
+    f[1] = static_cast<uint8_t>(f.size() - 4);
     inject(std::move(f));
   }
 
@@ -1051,6 +1110,294 @@ static void test_set_setpoint_accepted() {
   TEST_ASSERT(r && r->enabled == 1, "settled enabled state reported");
   TEST_ASSERT(h.frames_0601 == 1, "one fused control request carried the setpoint");
   TEST_ASSERT(h.commit_count == 1, "and one configuration commit followed it");
+}
+
+// ---------------------------------------------------------------------------
+// Setpoint bounds come from the pump, not from constants (issue #273)
+//
+// The fallback constants are inherited guesses and they are wrong in both
+// directions on every mode this pump has -- it will not go below 1650 RPM where
+// they allow 500, and its constant-flow ceiling is 2.5 m³/h where they allow 10.
+// Proportional pressure is the widest miss: a floor of 2.6 m against 0.5.
+//
+// The pump publishes min_set_point / max_set_point per mode in the type-301
+// factory objects at 86/13, 15, 17 and 39, which is what the Grundfos app reads
+// to bound its setpoint slider.
+// ---------------------------------------------------------------------------
+
+// The test that cannot pass on the constants. The simulated pump is given a
+// range WIDER than the fallback, and a value only it allows: 5000 RPM is past
+// the constant ceiling of 4500, so accepting it is only possible by using the
+// pump's number. A test using a narrower range would also pass against code
+// that had simply become stricter.
+static void test_setpoint_bounds_come_from_the_pump() {
+  std::cout << "\n=== set_setpoint: the pump's range is what bounds the write (issue #273) ===" << std::endl;
+  Harness h;
+  h.sim.mode_byte = 0x02;
+  h.sim.range_cs = {2800.0f, 200.0f, 6000.0f, -6000.0f};  // wider than the 500-4500 fallback
+  h.sim.setpoints[13] = 1700.0f;
+  h.prime_temp_limits();
+
+  TEST_ASSERT(h.frames_range_read == 4, "all four factory ranges were read");
+  TEST_ASSERT(h.control.setpoint_ranges_known(), "and the cache says so");
+  float lo = NAN, hi = NAN;
+  TEST_ASSERT(h.control.get_setpoint_range(ControlMode::CONSTANT_SPEED, lo, hi) &&
+                  lo == 200.0f && hi == 6000.0f,
+              "the constant-speed range is the pump's, in display units");
+
+  h.write_op.submit_set_setpoint(ControlMode::CONSTANT_SPEED, 5000.0f, "pr1");
+  h.advance(12000);
+
+  const WriteResult *r = h.result_for("pr1");
+  TEST_ASSERT(h.events_for("pr1") == 1, "exactly one terminal event");
+  TEST_ASSERT(r && r->status == WriteStatus::ACCEPTED,
+              "5000 RPM is past the hardcoded 4500 and inside the pump's range, so it is written");
+}
+
+// The other direction, with the pump's real numbers: 1200 RPM clears the
+// inherited 500-4500 and the pump will not go below 1650. Refused up front,
+// naming the pump as the source -- a client can act on "the hardware cannot"
+// differently from "we have not looked".
+static void test_setpoint_below_the_pump_floor_is_refused() {
+  std::cout << "\n=== set_setpoint: below the pump's floor -> invalid, and it says whose floor ===" << std::endl;
+  Harness h;
+  h.sim.mode_byte = 0x02;
+  h.prime_temp_limits();
+
+  h.write_op.submit_set_setpoint(ControlMode::CONSTANT_SPEED, 1200.0f, "pr2");
+  h.advance(12000);
+
+  const WriteResult *r = h.result_for("pr2");
+  TEST_ASSERT(h.events_for("pr2") == 1, "exactly one terminal event");
+  TEST_ASSERT(r && r->status == WriteStatus::INVALID, "refused before anything reached the wire");
+  TEST_ASSERT(r && r->detail.find("pump's range") != std::string::npos,
+              "the detail attributes the bound to the pump");
+  TEST_ASSERT(r && r->detail.find("1650") != std::string::npos,
+              "and quotes the pump's actual floor");
+  TEST_ASSERT(h.frames_0601 == 0, "nothing was written");
+}
+
+// Proportional pressure, whose VALUES had never been seen until they were read
+// off the bench. The object was documented -- the profile has 86/17 as type 301
+// and widget_configuration_52_7.xml binds its min/max -- but the HWR setpoint
+// widget does not bind it, no capture contains a read of it, and the pump never
+// enters the mode in any recorded session, so nothing said what it holds. Its
+// range is 2.599-4.569 m and does not overlap constant pressure's 1.000-2.450 m,
+// while the fallback validates both against the same 0.5-10.0. So 1.5 m is a
+// perfectly good constant-pressure setpoint and an impossible one here.
+static void test_proportional_pressure_has_its_own_range() {
+  std::cout << "\n=== set_setpoint: proportional pressure is bounded by ITS range, not pressure's ===" << std::endl;
+  Harness h;
+  h.sim.mode_byte = 0x01;
+  h.prime_temp_limits();
+
+  float lo = NAN, hi = NAN;
+  TEST_ASSERT(h.control.get_setpoint_range(ControlMode::PROPORTIONAL_PRESSURE, lo, hi) &&
+                  std::fabs(lo - 2.599f) < 0.01f && std::fabs(hi - 4.569f) < 0.01f,
+              "the pump's proportional-pressure range converts to metres");
+  float cp_lo = NAN, cp_hi = NAN;
+  TEST_ASSERT(h.control.get_setpoint_range(ControlMode::CONSTANT_PRESSURE, cp_lo, cp_hi) &&
+                  std::fabs(cp_hi - 2.450f) < 0.01f,
+              "and constant pressure has a different one");
+  TEST_ASSERT(cp_hi < lo, "the two ranges do not even overlap");
+
+  // Constant flow, whose conversion is the other one and had no assertion at
+  // all: the pump reports m³/s and the range is kept in m³/h. Dropping the
+  // x3600 leaves bounds of 3.2e-05 to 6.9e-04 m³/h, which refuses every
+  // realistic flow setpoint -- a total loss of the mode, and invisible without
+  // this line.
+  float cf_lo = NAN, cf_hi = NAN;
+  TEST_ASSERT(h.control.get_setpoint_range(ControlMode::CONSTANT_FLOW, cf_lo, cf_hi) &&
+                  std::fabs(cf_lo - 0.1136f) < 0.001f && std::fabs(cf_hi - 2.4984f) < 0.001f,
+              "and constant flow's range is in m³/h, not the m³/s the pump sends");
+
+  h.write_op.submit_set_setpoint(ControlMode::PROPORTIONAL_PRESSURE, 1.5f, "pr3");
+  h.advance(12000);
+
+  const WriteResult *r = h.result_for("pr3");
+  TEST_ASSERT(h.events_for("pr3") == 1, "exactly one terminal event");
+  TEST_ASSERT(r && r->status == WriteStatus::INVALID,
+              "1.5 m is fine for constant pressure and impossible for proportional pressure");
+  TEST_ASSERT(r && r->detail.find("pump's range") != std::string::npos, "the pump is named as the bound");
+
+  // A flow setpoint the pump can reach, against a range it reported in m³/s.
+  h.write_op.submit_set_setpoint(ControlMode::CONSTANT_FLOW, 2.0f, "pr3f");
+  h.advance(12000);
+  const WriteResult *rf = h.result_for("pr3f");
+  TEST_ASSERT(rf && rf->status == WriteStatus::ACCEPTED,
+              "2.0 m³/h is inside the pump's flow range and goes through");
+  // ...and one it cannot: 3.0 clears the 0.1-10.0 fallback and exceeds 2.4984.
+  h.write_op.submit_set_setpoint(ControlMode::CONSTANT_FLOW, 3.0f, "pr3g");
+  h.advance(12000);
+  const WriteResult *rg = h.result_for("pr3g");
+  TEST_ASSERT(rg && rg->status == WriteStatus::INVALID,
+              "3.0 m³/h clears the fallback ceiling and not the pump's");
+}
+
+// A pump that will not answer leaves us on the fallback, and the fallback is
+// deliberately the WIDER range: with nothing read, refusing a setpoint the pump
+// would have taken is worse than letting the pump clamp it. The detail has to
+// admit which case it is.
+static void test_setpoint_falls_back_when_the_ranges_never_arrive() {
+  std::cout << "\n=== set_setpoint: no ranges read -> the constants, and the detail says so ===" << std::endl;
+  Harness h;
+  h.sim.mode_byte = 0x02;
+  h.sim.respond_setpoint_ranges = false;
+  h.sim.setpoints[13] = 1700.0f;
+  h.prime_temp_limits();
+  h.advance(20000);  // let the four reads time out
+
+  TEST_ASSERT(!h.control.setpoint_ranges_known(), "no ranges landed");
+  float lo = NAN, hi = NAN;
+  TEST_ASSERT(!h.control.get_setpoint_range(ControlMode::CONSTANT_SPEED, lo, hi),
+              "and none is offered");
+
+  // 4400 RPM: inside the fallback, outside what the pump would really allow.
+  h.write_op.submit_set_setpoint(ControlMode::CONSTANT_SPEED, 4400.0f, "pr4");
+  h.advance(12000);
+  const WriteResult *r = h.result_for("pr4");
+  TEST_ASSERT(r && r->status == WriteStatus::ACCEPTED,
+              "the fallback lets it through rather than guessing a limit");
+
+  // ...and past the fallback it is still refused, saying why the bound is ours.
+  h.write_op.submit_set_setpoint(ControlMode::CONSTANT_SPEED, 4600.0f, "pr5");
+  h.advance(12000);
+  const WriteResult *r5 = h.result_for("pr5");
+  TEST_ASSERT(r5 && r5->status == WriteStatus::INVALID, "past the fallback it is refused");
+  TEST_ASSERT(r5 && r5->detail.find("pump limits not read") != std::string::npos,
+              "and the detail admits the bound is ours, not the pump's");
+}
+
+// A pump that answers with a range that is not one. Taking max <= min at face
+// value would refuse every setpoint in that mode for the rest of the
+// connection -- worse than never having read it.
+static void test_a_degenerate_range_is_not_used() {
+  std::cout << "\n=== set_setpoint: a max below the min is refused as a source ===" << std::endl;
+  Harness h;
+  h.sim.mode_byte = 0x02;
+  h.sim.range_cs = {2800.0f, 3671.0f, 1650.0f, 0.0f};  // inverted
+  h.sim.setpoints[13] = 1700.0f;
+  h.prime_temp_limits();
+
+  float lo = NAN, hi = NAN;
+  // get_setpoint_range() re-checks max > min independently, so this assertion
+  // holds whether or not the read path rejected the range. It is a guard, not
+  // the detector -- the line below is what catches a read path that cached it.
+  TEST_ASSERT(!h.control.get_setpoint_range(ControlMode::CONSTANT_SPEED, lo, hi),
+              "the inverted range is not offered to callers");
+  TEST_ASSERT(!h.control.setpoint_ranges_known(),
+              "and the read refused it as a source, so the set is not complete");
+
+  h.write_op.submit_set_setpoint(ControlMode::CONSTANT_SPEED, 2000.0f, "pr6");
+  h.advance(12000);
+  const WriteResult *r = h.result_for("pr6");
+  TEST_ASSERT(r && r->status == WriteStatus::ACCEPTED,
+              "the write proceeds on the fallback rather than being refused by nonsense");
+}
+
+// The ranges belong to the pump on the other end of the link. A reconnect may
+// be a different pump, and a stale range would bound the new one.
+static void test_a_disconnect_drops_the_ranges() {
+  std::cout << "\n=== setpoint ranges: a disconnect drops them ===" << std::endl;
+  Harness h;
+  h.sim.mode_byte = 0x02;
+  h.prime_temp_limits();
+  TEST_ASSERT(h.control.setpoint_ranges_known(), "read on this connection");
+
+  h.control.invalidate_cache();
+
+  float lo = NAN, hi = NAN;
+  TEST_ASSERT(!h.control.setpoint_ranges_known(), "gone after invalidate_cache()");
+  TEST_ASSERT(!h.control.get_setpoint_range(ControlMode::CONSTANT_SPEED, lo, hi),
+              "and no mode offers one");
+}
+
+// A pump that answers for some modes and not others. The chain stops at the
+// first failure, deliberately: all four objects are type 301 v1, so their
+// replies are indistinguishable to the transport, and carrying on would hand a
+// late reply to the NEXT mode's read. Constant pressure would then be bounded
+// by constant speed's 1650-3671 read as Pascals -- 0.168-0.374 m -- and an
+// ordinary 1.5 m setpoint refused as INVALID, blaming the pump, for the rest of
+// the connection.
+//
+// So: constant speed keeps the range it read, and everything after the silent
+// mode keeps its fallback. Nothing is shifted and nothing is invented.
+static void test_a_mode_that_does_not_answer_does_not_shift_the_others() {
+  std::cout << "\n=== setpoint ranges: one silent mode stops the chain, it does not shift it ===" << std::endl;
+  Harness h;
+  h.sim.mode_byte = 0x02;
+  h.sim.drop_range_sub = 15;  // constant pressure never answers
+  h.prime_temp_limits();
+  h.advance(8000);            // let its read time out
+
+  float lo = NAN, hi = NAN;
+  TEST_ASSERT(h.control.get_setpoint_range(ControlMode::CONSTANT_SPEED, lo, hi) &&
+                  lo == 1650.0f && hi == 3671.0f,
+              "the mode read before the silence keeps its real range");
+  TEST_ASSERT(!h.control.get_setpoint_range(ControlMode::CONSTANT_PRESSURE, lo, hi),
+              "the silent mode has none");
+  TEST_ASSERT(!h.control.get_setpoint_range(ControlMode::PROPORTIONAL_PRESSURE, lo, hi),
+              "and the chain stopped, so the modes after it were never read");
+  TEST_ASSERT(!h.control.get_setpoint_range(ControlMode::CONSTANT_FLOW, lo, hi),
+              "...including constant flow");
+  TEST_ASSERT(!h.control.setpoint_ranges_known(), "the set is not complete");
+  TEST_ASSERT(h.frames_range_read == 2,
+              "exactly two reads went out -- the chain did not carry on past the failure");
+
+  // The mode with no range falls back, and 1.5 m -- which the shifted range
+  // would have refused -- goes through.
+  h.write_op.submit_set_setpoint(ControlMode::CONSTANT_PRESSURE, 1.5f, "pr7");
+  h.advance(12000);
+  const WriteResult *r = h.result_for("pr7");
+  TEST_ASSERT(r && r->status == WriteStatus::ACCEPTED,
+              "a legitimate constant-pressure setpoint is not refused by another mode's numbers");
+
+  // ...while the mode that DID answer is still bounded by the pump.
+  h.write_op.submit_set_setpoint(ControlMode::CONSTANT_SPEED, 1200.0f, "pr8");
+  h.advance(12000);
+  const WriteResult *r8 = h.result_for("pr8");
+  TEST_ASSERT(r8 && r8->status == WriteStatus::INVALID,
+              "and the mode that answered still uses the pump's floor");
+}
+
+// A disconnect while the range chain is in flight must not wedge it.
+//
+// The chain sets an in-flight flag so a second chain cannot start, and clears it
+// when it finishes. But Transport::reset() drops a queued command WITHOUT
+// invoking its callback, so a link drop mid-chain kills the chain silently and
+// the flag would stay set forever: every later read answers "already in flight",
+// and every setpoint write is permanently back on the fallback constants, with
+// nothing visible but a DEBUG line. One ordinary BLE drop during a ~200 ms
+// window would do it. invalidate_cache() releases the flag for that reason.
+static void test_a_disconnect_mid_chain_does_not_wedge_the_read() {
+  std::cout << "\n=== setpoint ranges: a drop mid-chain does not stop them being read again ===" << std::endl;
+  Harness h;
+  h.sim.mode_byte = 0x02;
+  h.sim.drop_range_sub = 15;  // the chain will stall waiting on constant pressure
+  h.prime_temp_limits();
+  h.advance(500);             // read 15 is out and unanswered -- chain in flight
+
+  TEST_ASSERT(h.frames_range_read == 2, "the chain is parked mid-way");
+  TEST_ASSERT(!h.control.setpoint_ranges_known(), "and has not completed");
+
+  // The link drops: caches invalidated, queue cleared without callbacks.
+  h.control.invalidate_cache();
+  h.transport.reset();
+
+  // Reconnect, and this time the pump answers everything.
+  h.sim.drop_range_sub = 0;
+  const int before = h.frames_range_read;
+  h.schedule.invalidate_cache();
+  h.control.sync_cache_async(nullptr);
+  h.advance(3000);
+
+  TEST_ASSERT(h.frames_range_read > before,
+              "the read runs again on the new connection rather than reporting itself busy");
+  TEST_ASSERT(h.control.setpoint_ranges_known(), "and completes");
+  float lo = NAN, hi = NAN;
+  TEST_ASSERT(h.control.get_setpoint_range(ControlMode::CONSTANT_PRESSURE, lo, hi) &&
+                  std::fabs(hi - 2.450f) < 0.01f,
+              "the mode that was silent before now has its range");
 }
 
 static void test_set_setpoint_clamped() {
@@ -4322,6 +4669,14 @@ int main() {
   test_set_mode_accepted();
   test_set_mode_rejected();
   test_set_setpoint_accepted();
+  test_setpoint_bounds_come_from_the_pump();
+  test_setpoint_below_the_pump_floor_is_refused();
+  test_proportional_pressure_has_its_own_range();
+  test_setpoint_falls_back_when_the_ranges_never_arrive();
+  test_a_degenerate_range_is_not_used();
+  test_a_mode_that_does_not_answer_does_not_shift_the_others();
+  test_a_disconnect_mid_chain_does_not_wedge_the_read();
+  test_a_disconnect_drops_the_ranges();
   test_set_setpoint_clamped();
   test_set_setpoint_rejected_kept_old();
   test_set_setpoint_resolve_abort();

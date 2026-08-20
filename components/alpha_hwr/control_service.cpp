@@ -215,6 +215,14 @@ void ControlService::sync_cache_async(std::function<void(bool)> callback) {
           }
           callback(valid);
         }
+        // The per-mode setpoint ranges (issue #273), AFTER the verdict rather
+        // than before it. They are four more reads and they gate nothing: a
+        // pump that will not answer leaves the write layer on its fallback
+        // bounds, which is a worse validation but not a broken component.
+        // Putting them ahead of the callback would have added their timeouts to
+        // the time-to-ready for no gain -- and on a pump that answers, they
+        // land a few hundred milliseconds later anyway.
+        read_setpoint_ranges(nullptr);
       });
     });
   });
@@ -288,6 +296,148 @@ void ControlService::read_dhw_config(std::function<void(bool)> callback) {
 
       if (callback) callback(true);
     }, 5000);
+}
+
+namespace {
+/// Pump-native -> display units, matching cache_setpoint_for_mode().
+float native_to_display(ControlMode mode, float native) {
+  switch (mode) {
+    case ControlMode::CONSTANT_PRESSURE:
+    case ControlMode::PROPORTIONAL_PRESSURE:
+      return native / 9806.65f;  // Pascals -> meters
+    case ControlMode::CONSTANT_FLOW:
+      return native * 3600.0f;   // m³/s -> m³/h
+    default:
+      return native;             // RPM is native
+  }
+}
+}  // namespace
+
+bool ControlService::get_setpoint_range(ControlMode mode, float &min_out, float &max_out) const {
+  const SetpointRange *r = nullptr;
+  switch (mode) {
+    case ControlMode::CONSTANT_SPEED:        r = &cs_range_; break;
+    case ControlMode::CONSTANT_PRESSURE:     r = &cp_range_; break;
+    case ControlMode::PROPORTIONAL_PRESSURE: r = &pp_range_; break;
+    case ControlMode::CONSTANT_FLOW:         r = &cf_range_; break;
+    default: return false;  // no scalar setpoint, so no range
+  }
+  // Hoisted, and spelled without a '||', so mutation_check.sh has a pipe-free
+  // line to anchor to -- its entries are split on that character.
+  const bool usable = !std::isnan(r->min) && !std::isnan(r->max) && r->max > r->min;
+  if (!usable) return false;
+  min_out = r->min;
+  max_out = r->max;
+  return true;
+}
+
+void ControlService::read_one_setpoint_range_(ControlMode mode, uint16_t sub,
+                                              std::function<void(bool)> callback) {
+  uint8_t apdu[5] = {0x0A, 0x03, 86, static_cast<uint8_t>(sub >> 8),
+                     static_cast<uint8_t>(sub & 0xFF)};
+  // Type 301 version 1: reply header bytes 6-9 are `00 01 2D 01`, so TypeH is
+  // 0x0001 and (TypeL << 8) | Version is 0x2D01. Real type expectations, unlike
+  // the Obj 91 reads -- so this takes the ordinary exact-match path and needs
+  // none of the workaround in transport.cpp.
+  this->transport_.send_apdu_command(
+      apdu, 5, 0x2D01, 0x0001,
+      [this, mode, sub, callback](bool ok, const uint8_t *payload, size_t payload_len) {
+        if (!ok) {
+          ESP_LOGW(TAG, "Setpoint range read failed for Obj 86 Sub %u", static_cast<unsigned>(sub));
+          if (callback) callback(false);
+          return;
+        }
+        const int offset =
+            (payload_len >= 3 && payload[0] == 0x00 && payload[1] == 0x00) ? 3 : 0;
+        // default_set_point, min_set_point, max_set_point: three floats in.
+        if (payload_len < static_cast<size_t>(offset + 12)) {
+          ESP_LOGW(TAG, "Setpoint range reply too short for Sub %u (len=%zu)",
+                   static_cast<unsigned>(sub), payload_len);
+          if (callback) callback(false);
+          return;
+        }
+        const float lo = native_to_display(mode, protocol::decode_float_be(&payload[offset + 4]));
+        const float hi = native_to_display(mode, protocol::decode_float_be(&payload[offset + 8]));
+        // A pump that answers with a degenerate range is not a pump to validate
+        // against. Refusing it here is what keeps setpoint_ranges_known() from
+        // claiming a complete set; get_setpoint_range() re-checks max > min on
+        // every call, so a cached one would fall back rather than bound
+        // anything, and the two together are belt and braces.
+        const bool usable = !std::isnan(lo) && !std::isnan(hi) && hi > lo;
+        if (!usable) {
+          ESP_LOGW(TAG, "Setpoint range for Sub %u is not usable (%.4f-%.4f)",
+                   static_cast<unsigned>(sub), lo, hi);
+          if (callback) callback(false);
+          return;
+        }
+        SetpointRange r{lo, hi};
+        switch (mode) {
+          case ControlMode::CONSTANT_SPEED:        cs_range_ = r; break;
+          case ControlMode::CONSTANT_PRESSURE:     cp_range_ = r; break;
+          case ControlMode::PROPORTIONAL_PRESSURE: pp_range_ = r; break;
+          case ControlMode::CONSTANT_FLOW:         cf_range_ = r; break;
+          default: break;
+        }
+        ESP_LOGD(TAG, "Setpoint range for %s: %.4f - %.4f", get_mode_name(mode), lo, hi);
+        if (callback) callback(true);
+      },
+      // Shorter than the 5 s config reads. Nothing waits on these, and four of
+      // them chained is four timeouts on a pump that does not answer them.
+      3000);
+}
+
+void ControlService::read_setpoint_ranges(std::function<void(bool)> callback) {
+  // Four sequential reads, and the chain STOPS at the first failure. That is
+  // not tidiness, it is the only safe order.
+  //
+  // All four objects are type 301 version 1, so all four reads declare the same
+  // expectation and the transport cannot tell their replies apart -- it matches
+  // on object TYPE, never on the instance, and says so at its parse site. A
+  // chain that carried on after a timeout would therefore hand read N's late
+  // reply to read N+1, shifting every remaining range by one slot: constant
+  // pressure would end up bounded by constant speed's 1650-3671 read as
+  // Pascals, i.e. 0.168-0.374 m, and an ordinary 1.5 m setpoint would be
+  // refused as INVALID with a confident and false attribution to the pump. It
+  // would persist for the whole connection, because nothing re-reads these.
+  //
+  // Stopping means a mode after the failure simply keeps its fallback bounds,
+  // which is the honest answer and the one get_setpoint_range() is built for.
+  //
+  // Abandonment on disconnect is inherited rather than implemented: Transport's
+  // reset() clears the command queue WITHOUT invoking callbacks, so a link drop
+  // mid-chain kills the chain outright and no reply from the old connection can
+  // reach this cache. That is a dependency worth naming -- if reset() ever
+  // starts failing pending callbacks instead of dropping them, this chain would
+  // run its remaining reads against the next connection and would need a
+  // generation counter like the one in alpha_hwr.cpp.
+  // Released by invalidate_cache() as well as by `finish`, because a disconnect
+  // mid-chain drops the pending callback without invoking it -- see the note
+  // there. Without that release this guard is a one-way latch.
+  if (setpoint_ranges_reading_) {
+    ESP_LOGD(TAG, "Setpoint range read already in flight; not starting a second");
+    if (callback) callback(false);
+    return;
+  }
+  setpoint_ranges_reading_ = true;
+  auto finish = [this, callback](bool complete) {
+    setpoint_ranges_reading_ = false;
+    setpoint_ranges_valid_ = complete;
+    if (!complete) {
+      ESP_LOGW(TAG, "Setpoint ranges incomplete; the modes that did not answer "
+                    "keep their fallback bounds until the next connection");
+    }
+    if (callback) callback(complete);
+  };
+  read_one_setpoint_range_(ControlMode::CONSTANT_SPEED, 13, [this, finish](bool a) {
+    if (!a) { finish(false); return; }
+    read_one_setpoint_range_(ControlMode::CONSTANT_PRESSURE, 15, [this, finish](bool b) {
+      if (!b) { finish(false); return; }
+      read_one_setpoint_range_(ControlMode::PROPORTIONAL_PRESSURE, 17, [this, finish](bool c) {
+        if (!c) { finish(false); return; }
+        read_one_setpoint_range_(ControlMode::CONSTANT_FLOW, 39, finish);
+      });
+    });
+  });
 }
 
 bool ControlService::get_mode_async(std::function<void(bool, ControlMode)> on_complete) {

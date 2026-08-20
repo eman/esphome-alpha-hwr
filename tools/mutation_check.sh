@@ -193,6 +193,52 @@ MUTATIONS=(
 # any test provoked one. This entry is the proof that net works: reversing the
 # fused control request's address turns it red.
 "control-request-addressed-sub-first|components/alpha_hwr/control_service.cpp|  apdu[2] = 0x56;  // Object id 86, the start/stop request\n  apdu[3] = 0x00;  // Sub-id high\n  apdu[4] = 0x06;  // Sub-id low -- 86/6, overall_operation_local_request_obj|  apdu[2] = 0x00;  // mutated: the sub-first layout the deleted write used\n  apdu[3] = 0x06;\n  apdu[4] = 0x00;"
+# Setpoint bounds come from the pump, not from the constants in our source
+# (issue #273). The fallback constants are inherited guesses, wrong in both
+# directions on every mode this pump has -- 500 RPM where it will not go below
+# 1650, 10 m3/h where its ceiling is 2.5, and 0.5 m for proportional pressure
+# where the floor is 2.6. Ignoring the pump's answer puts all of that back, and
+# the operation still settles ACCEPTED afterwards because the pump clamps, so
+# only a test that looks at the BOUND can see it.
+"setpoint-bounds-ignore-the-pump|components/alpha_hwr/write_operation_service.cpp|  const bool from_pump = control_.get_setpoint_range(op->mode, pump_lo, pump_hi);|  const bool from_pump = false;"
+# ...and the fallback has to stay reachable. Claiming the pump's range when none
+# was read hands the validation NAN bounds -- and every comparison against NAN
+# is false, so it ACCEPTS every setpoint, in a mode the pump never answered for.
+# The validation stops existing rather than becoming stricter, which is the
+# quieter of the two failures.
+"setpoint-bounds-claim-a-range-that-was-never-read|components/alpha_hwr/write_operation_service.cpp|  if (from_pump) {\n    lo = pump_lo;\n    hi = pump_hi;\n  }|  lo = pump_lo;\n  hi = pump_hi;"
+# The range read must reject a degenerate answer rather than caching it, so that
+# setpoint_ranges_known() does not claim a complete set off the back of one.
+# Note what this does NOT do: get_setpoint_range() re-checks max > min on every
+# call, so a cached degenerate range would not actually bound anything -- the
+# write layer would fall back and accept. The two checks are belt and braces and
+# only the completeness flag can tell them apart, which is why exactly one
+# assertion catches this.
+"setpoint-range-accepts-an-inverted-range|components/alpha_hwr/control_service.cpp|        const bool usable = !std::isnan(lo) && !std::isnan(hi) && hi > lo;|        const bool usable = true;"
+# The ranges belong to the pump on the other end. A reconnect may be a different
+# pump, and a stale range would bound the new one.
+"setpoint-ranges-survive-a-disconnect|components/alpha_hwr/control_service.h|     setpoint_ranges_valid_ = false;|     setpoint_ranges_valid_ = setpoint_ranges_valid_;"
+# The range chain must stop at the first failure. All four objects are type 301
+# version 1, so all four reads declare the same expectation and the transport --
+# which matches on object TYPE and never on the instance -- cannot tell their
+# replies apart. Carrying on after a timeout hands read N's late reply to read
+# N+1 and shifts every remaining range by one slot: constant pressure ends up
+# bounded by constant speed's 1650-3671 read as Pascals, and a 1.5 m setpoint is
+# refused as INVALID blaming the pump, for the rest of the connection.
+# The pump reports flow in m3/s and the range is kept in m3/h. Dropping the
+# conversion leaves constant flow bounded by 3.2e-05 to 6.9e-04 m3/h, which
+# refuses every realistic setpoint -- a total loss of the mode, and one that
+# nothing in the suite could see until constant flow got a range assertion of
+# its own. The pressure conversion was covered from the start; this one was not.
+# The in-flight guard must be released on disconnect, not only on completion.
+# Transport::reset() drops a queued command WITHOUT invoking its callback, so a
+# link drop mid-chain kills the chain silently: the guard stays set, every later
+# read answers "already in flight", and every setpoint write is permanently back
+# on the fallback constants for the life of the node -- visible only as a DEBUG
+# line. One ordinary BLE drop inside a ~200 ms window does it.
+"setpoint-range-guard-is-a-one-way-latch|components/alpha_hwr/control_service.h|     setpoint_ranges_reading_ = false;\n     // Drop any in-flight mode command|     // Drop any in-flight mode command"
+"setpoint-range-flow-conversion-dropped|components/alpha_hwr/control_service.cpp|      return native * 3600.0f;   // m³/s -> m³/h|      return native;"
+"setpoint-range-chain-continues-past-a-failure|components/alpha_hwr/control_service.cpp|    if (!a) { finish(false); return; }|    (void) a;"
 # The setpoint readback waits SETPOINT_CONFIRM_DELAY_MS after the write so the
 # pump has time to store the value (#82/#85). That delay used to be unfalsifiable:
 # the simulator applied a setpoint the instant the frame arrived, so a confirm at
