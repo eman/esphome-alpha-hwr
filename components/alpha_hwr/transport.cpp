@@ -12,6 +12,7 @@
 #include "response_match.h"
 #include <algorithm>
 #include <cinttypes>
+#include <utility>
 
 namespace esphome {
 namespace alpha_hwr {

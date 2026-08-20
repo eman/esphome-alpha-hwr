@@ -357,7 +357,12 @@ MUTATIONS=(
 # writes cannot tell the second command being sent from the first being re-sent,
 # so five assertions passed against a transport that never advanced. The test
 # asserts on the payload byte now.
-"transport-failed-command-stays-queued|components/alpha_hwr/transport.cpp|          this->peer_resync_started_ms_ = now;\n        }\n        if (cmd.callback) {\n          cmd.callback(false, nullptr, 0);\n        }\n        this->command_queue_.pop_front();|          this->peer_resync_started_ms_ = now;\n        }\n        if (cmd.callback) {\n          cmd.callback(false, nullptr, 0);\n        }"
+# Retargeted for issue #259: the three failure paths no longer inline the
+# callback-then-pop, they call fail_front_command_(). Removing the pop there
+# removes it from all three at once, which is a wider mutation than the original
+# but the same defect -- the failed command stays at the head of the queue and
+# wedges the link for everything behind it.
+"transport-failed-command-stays-queued|components/alpha_hwr/transport.cpp|  Command cmd = std::move(this->command_queue_.front());\n  this->command_queue_.pop_front();|  Command cmd = this->command_queue_.front();"
 # The peer-resync hold, in the three ways it can be got wrong. A write that dies
 # part-way through a packet leaves the peer holding the head of a frame whose
 # length byte promises more; a receiver built like ours appends whatever comes
