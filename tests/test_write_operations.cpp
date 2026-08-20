@@ -133,12 +133,12 @@ struct PumpSim {
   bool honor_mode_change{true};       // apply 0x0A01 mode changes
   // Answer the unfused 0x0A01 mode write with a short ACK, and how late.
   //
-  // Default ON because the pump does it: 12 mode writes in the de-duplicated
-  // reference captures, all 12 acknowledged, 38-85 ms. (They are only visible
+  // Default ON because the pump does it: 31 mode writes in the de-duplicated
+  // reference captures, all 31 acknowledged, 38-113 ms. (They are only visible
   // once the capture is reassembled -- a mode write is a 22-byte frame against a
   // 20-byte ATT payload, so it spans two packets. See
-  // resources/traffic_capture/README.md, which also records why this was once
-  // written down as 31.)
+  // resources/traffic_capture/README.md, and `tools/geni_capture_scan.py sets`,
+  // which reproduces the count. It was once written down as 12.)
   //
   // A mock that answers less than the pump does is not the safe default here:
   // it would make the mode command time out on every write, which under the
@@ -224,6 +224,15 @@ struct PumpSim {
     if (mode_byte == 0x08) return 39;
     return -1;
   }
+  // How long the pump takes to store a setpoint written by the fused request.
+  //
+  // Zero used to be the only behaviour, and it made SETPOINT_CONFIRM_DELAY_MS
+  // unfalsifiable: the simulated pump applied the value in the same instant the
+  // frame arrived, so a confirm read at 1600 ms, at 1200 ms or at 0 ms all
+  // passed. The whole #82/#85 settle-delay rationale survived only as a comment.
+  // A pump that needs a moment is what makes the delay a claim a test can check.
+  uint32_t setpoint_apply_delay_ms{1400};
+  // Applied by the harness at clock_base_ms + this, via a deferred task.
   void apply_setpoint(int sub, float native) {
     if (!honor_setpoint_writes || sub < 0) return;
     setpoints[sub] = transform ? transform(sub, native) : native;
@@ -385,8 +394,10 @@ struct Harness {
   ///
   /// A Class 10 request addresses `[Obj][SubH][SubL]`, object first. That is
   /// how all 20 distinct address shapes across the 420 SETs in
-  /// resources/traffic_capture are laid out, and it is what the GENI profile
-  /// shipped inside the Grundfos Home APK describes. Get it backwards and the
+  /// resources/traffic_capture are laid out, without exception -- the captures
+  /// are the whole evidence for the ORDER; the GENI profile says which (obj,
+  /// sub) pairs exist and what type each is, and nothing about byte layout.
+  /// Get it backwards and the
   /// first byte is a sub-id fragment rather than an object, so the pump answers
   /// Unknown Data Item -- which is precisely what it had been doing to the
   /// "dedicated" setpoint write for as long as that write existed, unnoticed
@@ -398,41 +409,72 @@ struct Harness {
   /// the point: adding an address to this list is the moment to check it against
   /// the profile and the captures, which is the check that was never made.
   ///
+  /// The LENGTH is checked too, and it is not redundant with check_apdu_length()
+  /// -- that one asks whether the frame carries what it declares, this one asks
+  /// whether what it declares is what the object is. A Class 10 SET to a typed
+  /// object carries `[Obj][SubH][SubL][TypeH][TypeL][Ver][Size(3)]` and then the
+  /// object's whole body, so the declared payload is always `9 + fixedSize`, and
+  /// every SET shape in resources/traffic_capture satisfies that. Without it, a
+  /// bare float at an allowlisted address passes both checks -- which is the
+  /// deleted setpoint write with only its address repaired, and the pump would
+  /// refuse that too, reading the top half of the float as the type word.
+  ///
   /// Unrecognised addresses are answered the way the pump answers them --
   /// APDU head 0x81, Unknown Data Item, one payload byte carrying the offending
   /// item id -- so a test that provokes one sees a refusal rather than silence.
-  bool class10_address_is_known(const uint8_t *apdu, size_t apdu_len) {
-    if (apdu_len < 5) return true;             // not addressed; nothing to check
+  ///
+  /// @return the declared payload length this address requires, or -1 when the
+  ///   pump has no such item.
+  int expected_class10_set_length(const uint8_t *apdu, size_t apdu_len) {
+    if (apdu_len < 5) return -1;
     const uint8_t obj = apdu[2];
     const uint16_t sub = static_cast<uint16_t>((apdu[3] << 8) | apdu[4]);
     switch (obj) {
-      case 84:   // ClockProgram: overview, single events, weekly layers
-        return sub == 1 || (sub >= 900 && sub < 935) || (sub >= 1000 && sub <= 1004);
-      case 86:   // overall_operation_local_request / overall_control_mode_local_request
-        return sub == 6 || sub == 10;
-      case 91:   // DHW on/off config, temperature-range config
-        return sub == 421 || sub == 430;
-      case 94:   // DateTimeConfig
-        return sub == 100;
+      case 84:  // ClockProgram
+        if (sub == 1) return 19;                     // overview, 10-byte body
+        if (sub >= 900 && sub < 935) return 19;      // single event, 10
+        if (sub >= 1000 && sub <= 1004) return 51;   // weekly layer, 42
+        return -1;
+      case 86:  // operation request / control-mode request, both type 303
+        if (sub == 6 || sub == 10) return 16;        // 7-byte struct
+        return -1;
+      case 91:
+        if (sub == 421) return 15;                   // DHW config, 6
+        if (sub == 430) return 23;                   // temperature range, 14
+        return -1;
+      case 94:
+        if (sub == 100) return 20;                   // DateTimeConfig, 11
+        return -1;
       default:
-        return false;
+        return -1;
     }
   }
 
   void check_class10_set_address(const uint8_t *apdu, size_t apdu_len) {
     if (apdu_len < 2 || apdu[0] != 0x0A) return;
     if (((apdu[1] >> 6) & 0x03) != 0x02) return;   // SET only; GETs go elsewhere
-    if (class10_address_is_known(apdu, apdu_len)) return;
+    const int expected = expected_class10_set_length(apdu, apdu_len);
+    const int declared = apdu[1] & 0x3F;
+    if (expected == declared) return;
     g_unknown_class10_addresses++;
     const uint8_t obj = apdu_len >= 3 ? apdu[2] : uint8_t{0};
     const unsigned sub =
         apdu_len >= 5 ? static_cast<unsigned>((apdu[3] << 8) | apdu[4]) : 0u;
-    // Answer as the pump does: Unknown Data Item, offending item id.
-    inject({0x24, 0x06, 0xF8, 0xE7, 0x0A, 0x81, obj, 0x00, 0xAA, 0xBB});
-    char buf[160];
-    snprintf(buf, sizeof(buf),
-             "class 10 SET opspec 0x%02X addresses obj %u sub %u -- the pump has no such item",
-             apdu[1], static_cast<unsigned>(obj), sub);
+    // Answer as the pump does: head 0x81 is `10 000001` -- acknowledge Unknown
+    // Data Item, one payload byte -- and that byte is the offending item id.
+    // One byte, not two: the same nine-byte frame length as inject_short_ack().
+    inject({0x24, 0x05, 0xF8, 0xE7, 0x0A, 0x81, obj, 0xAA, 0xBB});
+    char buf[192];
+    if (expected < 0) {
+      snprintf(buf, sizeof(buf),
+               "class 10 SET opspec 0x%02X addresses obj %u sub %u -- the pump has no such item",
+               apdu[1], static_cast<unsigned>(obj), sub);
+    } else {
+      snprintf(buf, sizeof(buf),
+               "class 10 SET to obj %u sub %u declares %d payload bytes; that object's body "
+               "needs %d",
+               static_cast<unsigned>(obj), sub, declared, expected);
+    }
     const std::string entry(buf);
     for (const auto &seen : g_unknown_class10_address_detail)
       if (seen == entry) return;
@@ -489,7 +531,15 @@ struct Harness {
       sim.enabled = (apdu[12] == 0x00);
       sim.mode_byte = apdu[13];
       float sp = protocol::decode_float_be(apdu + 14);
-      if (!std::isnan(sp)) sim.apply_setpoint(sim.sub_for_mode(), sp);
+      if (!std::isnan(sp)) {
+        const int sub = sim.sub_for_mode();
+        if (sim.setpoint_apply_delay_ms == 0) {
+          sim.apply_setpoint(sub, sp);
+        } else {
+          tasks.push_back({mock_millis + sim.setpoint_apply_delay_ms,
+                           [this, sub, sp]() { sim.apply_setpoint(sub, sp); }});
+        }
+      }
       if (sim.ack_control_write) inject_short_ack();
     } else if (opspec == 0x90 && apdu_len >= 18 && apdu[2] == 0x56 && apdu[4] == 0x0A && apdu[5] == 0x01) {
       // Unfused mode change (0x0A01, PR #98)
@@ -4410,7 +4460,7 @@ int main() {
   for (const auto &d : g_unknown_class10_address_detail)
     std::cout << "  " << d << std::endl;
   TEST_ASSERT(g_unknown_class10_addresses == 0,
-              "No Class 10 SET is addressed at an item this pump would refuse");
+              "No Class 10 SET is addressed or sized at something this pump would refuse");
 
   std::cout << "\n===========================================================" << std::endl;
   std::cout << "  Test Results" << std::endl;

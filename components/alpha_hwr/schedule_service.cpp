@@ -211,8 +211,10 @@ void ScheduleService::set_state_async(bool enable, std::function<void(bool)> on_
   // -- "the SET operation never returns anything but the APDU Head" (GENIbus
   // App. Prog. Manual fig 3.5 note 1) -- so it timed out at 3 s on every write
   // and the note below was written to explain the silence. The captures say the
-  // opposite: 34 writes to this address in resources/traffic_capture, every one
-  // answered in 50-193 ms with the ordinary short ACK.
+  // opposite: 77 writes to this address in resources/traffic_capture, every one
+  // answered in 36-193 ms with the ordinary short ACK
+  // (`tools/geni_capture_scan.py sets` and `... latency`; earlier counts of 34
+  // and 50-193 predate the corpus reassembly).
   //
   // The verdict is unchanged and still comes from the readback. What changes is
   // that the acknowledgement is consumed by the write that earned it rather than
@@ -616,7 +618,7 @@ void ScheduleService::write_class10_command(const uint8_t *apdu,
   // setpoint write, every control request and every layer write schedules one.
   // Leaving it unawaited meant one unclaimed acknowledgement per schedule
   // change, in the exact shape the next write's matcher accepts (issue #248).
-  // 34 instances in resources/traffic_capture, every one answered in 50-193 ms.
+  // 77 instances in resources/traffic_capture, every one answered in 36-193 ms.
   this->transport_.send_apdu_command(
       apdu, apdu_len, 0, 0,
       [](bool success, const uint8_t * /*data*/, size_t /*len*/) {
@@ -747,8 +749,9 @@ void ScheduleService::write_cached_layer_async(
   // DEBUG by quiet_timeout, and the callback below reported success from the
   // timeout path -- which is why it looked like it worked.
   //
-  // resources/traffic_capture settles it directly: 20 layer writes across the
-  // five layers, every one answered in 36-142 ms with the ordinary short Class
+  // resources/traffic_capture settles it directly: 40 layer writes across the
+  // five layers (`tools/geni_capture_scan.py sets`; an earlier count of 20 was
+  // taken before the ATT reassembly), every one answered in 36-142 ms with the ordinary short Class
   // 10 ACK, `24 05 F8 E7 0A 01 00 AE A2` -- the same nine bytes every other SET
   // is answered with.
   //

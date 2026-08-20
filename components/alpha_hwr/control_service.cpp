@@ -632,7 +632,13 @@ void ControlService::send_configuration_commit() {
 bool ControlService::send_control_request(ControlMode mode, bool start_pump, float setpoint,
                                           bool queue_commit) {
   // Reference: control.py::_send_control_request() lines 233-284
-  // Payload: [2F 01 00 00 07 00][Flag][Mode][Suffix/Setpoint(4)]
+  //
+  // Whole frame, after the class and OpSpec bytes:
+  //   [56][00 06][01 2F][01][00 00 07][00][Flag][Mode][Setpoint(4)]
+  //    obj   sub    type  ver   size    <-- the 7-byte type-303 struct -->
+  // apdu[2..5] carry the object, the sub-id and the type's high byte; `payload`
+  // below picks up at the type's LOW byte, which is why it starts 2F rather
+  // than at a field boundary.
 
   ControlModeMapping mapping;
   if (!get_class10_mapping(mode, mapping)) {
@@ -642,14 +648,14 @@ bool ControlService::send_control_request(ControlMode mode, bool start_pump, flo
   }
 
   uint8_t payload[12];
-  payload[0] = 0x2F;
-  payload[1] = 0x01;
-  payload[2] = 0x00;
+  payload[0] = 0x2F;  // type low (0x012F = 303, OperationStatusRequest)
+  payload[1] = 0x01;  // object version
+  payload[2] = 0x00;  // size, 3 bytes big-endian
   payload[3] = 0x00;
-  payload[4] = 0x07;
-  payload[5] = 0x00;
-  payload[6] = start_pump ? 0x00 : 0x01;  // 0=Start, 1=Stop
-  payload[7] = mapping.mode_byte;
+  payload[4] = 0x07;  // ...7, the struct's fixedSize
+  payload[5] = 0x00;  // control_source = Undefined
+  payload[6] = start_pump ? 0x00 : 0x01;  // operation_mode: 0=Start, 1=Stop
+  payload[7] = mapping.mode_byte;         // control_mode
 
   if (!std::isnan(setpoint)) {
     // Encode setpoint as float32 BE in the set_point field
@@ -688,7 +694,8 @@ bool ControlService::send_control_request(ControlMode mode, bool start_pump, flo
   apdu[2] = 0x56;  // Object id 86, the start/stop request
   apdu[3] = 0x00;  // Sub-id high
   apdu[4] = 0x06;  // Sub-id low -- 86/6, overall_operation_local_request_obj
-  apdu[5] = 0x01;  // Type high; payload[0..1] are 0x2F 0x01, completing type 303
+  apdu[5] = 0x01;  // Type high; payload[0] is 0x2F, completing type 0x012F = 303
+                   // (payload[1] is the object version, payload[2..4] the size)
   memcpy(&apdu[6], payload, 12);
 
   // Awaited (issue #253). Same arrangement as the mode write above: the
@@ -752,8 +759,8 @@ bool ControlService::send_set_mode_request(ControlMode mode) {
   }
 
   uint8_t payload[12];
-  payload[0] = 0x2F;               // type 303 (0x012F, little-endian)
-  payload[1] = 0x01;
+  payload[0] = 0x2F;               // type low (apdu[5] holds the 0x01 high byte)
+  payload[1] = 0x01;               // object version
   payload[2] = 0x00;
   payload[3] = 0x00;
   payload[4] = 0x07;               // 7-byte OperationStatusRequest struct follows
@@ -776,7 +783,7 @@ bool ControlService::send_set_mode_request(ControlMode mode) {
   apdu[2] = 0x56;  // Object id 86, the mode request
   apdu[3] = 0x00;  // Sub-id high
   apdu[4] = 0x0A;  // Sub-id low -- 86/10, overall_control_mode_local_request_obj
-  apdu[5] = 0x01;  // Type high; payload[0..1] are 0x2F 0x01, completing type 303
+  apdu[5] = 0x01;  // Type high; payload[0] is 0x2F, completing type 0x012F = 303
   memcpy(&apdu[6], payload, 12);
 
   // Await the pump's short ACK rather than firing and forgetting (issue #248).

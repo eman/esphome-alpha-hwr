@@ -155,9 +155,12 @@ inline bool apdu_ack_is_ok(uint8_t apdu_head) { return apdu_ack(apdu_head) == Ap
 /// documents: writes exceed the 20-byte ATT payload and fragment, so a scanner
 /// reading packets individually sees only part of the traffic.)
 ///
-/// It is request-consistent in a way that rules out coincidence: Obj 202 Sub 100
-/// answers BUSY every time (24/24) and Obj 202 Sub 200 answers OPERATION_FAILED
-/// every time (12/12), while every other object answers OK.
+/// It is request-consistent in a way that rules out coincidence: every one of
+/// the 13 reads of Obj 202 Sub 200 is answered OPERATION_FAILED, and all 26 of
+/// the short replies to Obj 202 Sub 100 are BUSY -- that object is read 52 times
+/// and answers with real data the other half, which is itself the tell: a value
+/// that alternates with data is a status, not data. Every other object answers
+/// OK.
 ///
 /// Reading only the head's acknowledge therefore reports success for a pump that
 /// said "busy" or "that failed" -- the same defect issue #208 fixed one layer up,

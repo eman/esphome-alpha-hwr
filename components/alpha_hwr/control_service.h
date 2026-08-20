@@ -354,8 +354,8 @@ class ControlService {
    private:
     // The write-operation layer (issue #92) sequences multi-step writes and
     // terminal settle events on top of this service's wire primitives
-    // (send_control_request, send_set_mode_request, set_class10_setpoint,
-    // write_temp_range_config, write_cycle_config, read_obj91_config) and its
+    // (send_control_request, send_set_mode_request, write_temp_range_config,
+    // write_cycle_config, read_obj91_config) and its
     // command-coordination state (commanded_mode_/mode_command_pending_). It is
     // deliberately a friend rather than widening the public API: the primitives
     // are unsafe to call without the sequencing the op layer provides.
@@ -482,11 +482,13 @@ class ControlService {
   /// this one be free: a wait long enough to outlast the tail would have to
   /// exceed the step-2 delay, and would then be paid on every unanswered write.
   ///
-  /// The pump does answer this write -- 12 mode writes in the de-duplicated
-  /// captures, every one acknowledged, 38-85 ms. Every Class 10 SET in that
+  /// The pump does answer this write -- 31 mode writes in the de-duplicated
+  /// captures, every one acknowledged, 38-113 ms. Every Class 10 SET in that
   /// corpus is acknowledged, 420 of 420. See resources/traffic_capture/README.md,
-  /// including why an earlier revision concluded the opposite, and why the count
-  /// there was once given as 420.
+  /// including why an earlier revision concluded the opposite.
+  /// `tools/geni_capture_scan.py sets` and `... latency` reproduce both figures;
+  /// they were once written down as 12 and 38-85, taken before the ATT
+  /// reassembly the corpus needs.
   static constexpr uint32_t MODE_ACK_TIMEOUT_MS = 400;
 
     /**
@@ -694,24 +696,44 @@ class ControlService {
   //
   //  - It was addressed sub-id first, `[SubH][SubL][ObjH][ObjL]`. Every Class 10
   //    SET this pump accepts is object first, `[Obj][SubH][SubL]`: all 20
-  //    distinct address shapes across 420 SETs in resources/traffic_capture, and
-  //    all nine shapes this component sends. So the frame said object 0x00 and
-  //    the pump answered Unknown Data Item, quoting that 0x00 straight back --
-  //    bench-observed, and true for every setpoint since the method existed.
-  //  - Sub-ids 13, 15 and 39 are not setpoint registers. The GENI profile shipped
-  //    inside the Grundfos Home APK names them control_mode_cs/cp/cf_factory_config_obj,
-  //    type 301 ControlModeFactoryConfiguration -- a 28-byte struct of seven
-  //    floats beginning with default_set_point. The per-mode USER setpoints are
-  //    sub 14 / 16 / 40, type 302, 18 bytes including three PID terms. So a
-  //    corrected frame would have written four bytes into the factory defaults.
-  //  - Nothing needed it. The fused object 86 sub-id 6 request carries set_point
-  //    as one of its four fields, which is how the app sets a setpoint: 25 such
-  //    writes in the corpus, each carrying a real value, each acknowledged.
+  //    distinct address shapes across the 420 SETs in resources/traffic_capture,
+  //    without exception. So the frame said object 0x00 and the pump answered
+  //    Unknown Data Item, quoting that 0x00 straight back -- bench-observed, and
+  //    true of every setpoint write since the method existed.
+  //  - No repair of the ADDRESS makes it a legal frame, which is the part worth
+  //    keeping. Sub-ids 13/15/39 are object type 301
+  //    ControlModeFactoryConfiguration -- ReadWrite, but a 28-byte STRUCT of
+  //    seven floats. A Class 10 SET to a typed object carries
+  //    `[Obj][SubH][SubL][TypeH][TypeL][Ver][Size(3)]` and the whole body, so
+  //    every SET shape in the corpus declares `9 + fixedSize`. This one carried
+  //    a bare float, so with the address corrected the pump would read the top
+  //    half of that float as the type word and refuse it again -- on type and
+  //    length rather than on address. Making it legal would mean a
+  //    read-modify-write of seven floats into the FACTORY record; the live
+  //    per-mode setpoint is local_set_point in the type-302 user record at sub
+  //    14/16/40. The app reads 13/15/39 (~450 times each) and never writes them.
+  //  - Nothing needed it. The bench settles this, not the captures: with this
+  //    write deleted, `set_setpoint constant_speed 1900` sends the fused request
+  //    and its commit and nothing else, and the pump's stored setpoint moves
+  //    1800 -> 1900 (issue #258). The fused object 86 sub-id 6 request carries
+  //    set_point as one of its four fields and the pump stores it.
+  //
+  // What the corpus does NOT show, and the first draft of this note wrongly
+  // claimed: the app does not use 86/6 to CHANGE a setpoint. All 25 of its 86/6
+  // writes are start/stop presses that pass the mode's current value through --
+  // 12 of them carry the map default 3671.0 -- and constant_flow.log changes a
+  // setpoint with no 86/6 write at all, using the type-302 user config at 86/40
+  // (2.000 then 1.500 m3/h). The app's own widget config agrees: it binds
+  // 86/6's set_point as the DISPLAYED current value and binds the three per-mode
+  // editors to control_mode_cs/cf/cp_user_config_obj.local_set_point. Whether we
+  // should follow it there is an open question, filed separately; what is
+  // settled is that our fused write works and the deleted one never did.
   //
   // The one thing that write did do was schedule the configuration commit, and
   // the commit is real -- every one of those 25 sub-6 writes is followed
-  // immediately by an object 84 sub-id 1 overview write. send_control_request()
-  // issues it now, via its own queue_commit.
+  // immediately by an object 84 sub-id 1 overview write, with nothing in between
+  // but the short acknowledgement. send_control_request() issues it now, via its
+  // own queue_commit.
   //
   // Verify any of this with `tools/geni_capture_scan.py`.
 

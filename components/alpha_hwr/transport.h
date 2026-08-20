@@ -121,8 +121,11 @@ class Transport {
   /// which the short-ACK branch declines to match on shape alone (issue #248).
   ///
   /// 500 ms, against a measured tail of 295. Across resources/traffic_capture --
-  /// reassembled from ATT fragments and de-duplicated, n~12k -- replies arrive at
-  /// p50 54 ms, p90 84, p99 121, max 295, and NOTHING exceeds 400. (An earlier
+  /// reassembled from ATT fragments and de-duplicated, n = 19768 pairs -- replies
+  /// arrive at p50 55 ms, p90 85, p99 144, max 295, and NOTHING exceeds 400.
+  /// (`tools/geni_capture_scan.py latency`; the p99 was previously given as 121
+  /// and the pair count as ~12k, both from a scan that lost part of three
+  /// PacketLogger captures to an endianness misread. An earlier
   /// revision cited a 994 ms maximum and sized two constants from it; that figure
   /// was an artifact of scanning un-reassembled packets. See
   /// resources/traffic_capture/README.md.)
@@ -143,7 +146,7 @@ class Transport {
   /// 400 ms against a measured worst case of 193. Across
   /// resources/traffic_capture, reassembled and de-duplicated, the pump answers
   /// every SET in 36-193 ms; the widest tail anywhere in that corpus, over all
-  /// ~10k request/reply pairs, is 295 ms. The value is deliberately the same as
+  /// 19768 request/reply pairs, is 295 ms. The value is deliberately the same as
   /// ControlService::MODE_ACK_TIMEOUT_MS, which was sized to equal the delay its
   /// caller already waits -- there is no reason for two numbers here, and the
   /// pump does not distinguish these writes anyway.

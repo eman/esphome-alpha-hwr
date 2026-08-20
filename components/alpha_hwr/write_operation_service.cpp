@@ -979,11 +979,12 @@ void WriteOperationService::run_set_setpoint_(uint32_t seq) {
     float native = to_native_units_(op->mode, op->value);
     // One write, and the fused one is it. A second "dedicated" register write
     // used to follow SETPOINT_STEP2_DELAY_MS later; it was addressed backwards,
-    // the pump refused it every time, and the sub-ids it aimed at are the
-    // per-mode FACTORY configuration objects rather than setpoint registers --
-    // see the note where ControlService::set_class10_setpoint() used to be
-    // (issue #258). The fused request already carries set_point, which is how
-    // the Grundfos app sets one.
+    // the pump refused it every time, and no repair of the address would have
+    // made it legal -- see the note where ControlService::set_class10_setpoint()
+    // used to be (issue #258). The fused request carries set_point, and the
+    // bench says the pump stores it: with the second write gone, a setpoint
+    // change still moves the pump's stored value and the readback still
+    // confirms it.
     //
     // queue_commit is true now because that deleted write was what scheduled
     // the commit. The commit itself is not redundant: in the captures every one
@@ -996,13 +997,11 @@ void WriteOperationService::run_set_setpoint_(uint32_t seq) {
     control_.note_mode_commanded(op->mode);
     control_.cache_setpoint_for_mode(op->mode, native);
 
-    // The readback still lands where it did: the step-2 delay is now dead time
-    // rather than a second write, and folding it into one timer keeps the
-    // confirm at the same 1600 ms after the write that #82/#85 settled on.
-    // Issue #250 tracks whether 1200 ms is the right confirm interval at all.
+    // The readback lands where it always did, 1600 ms after the write -- see
+    // SETPOINT_CONFIRM_DELAY_MS, which is one constant now rather than a step-2
+    // delay plus a confirm delay, because there is no step 2 any more.
     op->phase = Phase::CONFIRMING;
-    schedule_([this, seq]() { confirm_setpoint_(seq); },
-              SETPOINT_STEP2_DELAY_MS + SETPOINT_CONFIRM_DELAY_MS);
+    schedule_([this, seq]() { confirm_setpoint_(seq); }, SETPOINT_CONFIRM_DELAY_MS);
   });
 }
 

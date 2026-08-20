@@ -192,7 +192,17 @@ MUTATIONS=(
 # unrecognised Class 10 SET the way the pump does, and main() fails the run if
 # any test provoked one. This entry is the proof that net works: reversing the
 # fused control request's address turns it red.
-"control-request-addressed-sub-first|components/alpha_hwr/control_service.cpp|  apdu[2] = 0x56;  // Object id 86, the start/stop request|  apdu[2] = 0x00;  // mutated: sub-id high, as the deleted register write had it"
+"control-request-addressed-sub-first|components/alpha_hwr/control_service.cpp|  apdu[2] = 0x56;  // Object id 86, the start/stop request\n  apdu[3] = 0x00;  // Sub-id high\n  apdu[4] = 0x06;  // Sub-id low -- 86/6, overall_operation_local_request_obj|  apdu[2] = 0x00;  // mutated: the sub-first layout the deleted write used\n  apdu[3] = 0x06;\n  apdu[4] = 0x00;"
+# The setpoint readback waits SETPOINT_CONFIRM_DELAY_MS after the write so the
+# pump has time to store the value (#82/#85). That delay used to be unfalsifiable:
+# the simulator applied a setpoint the instant the frame arrived, so a confirm at
+# 1600 ms, at 1200 or at 0 all passed, and the whole rationale survived only as a
+# comment. PumpSim::setpoint_apply_delay_ms models a pump that needs a moment,
+# which is what turns the delay into a claim. Two ways to break it: read back too
+# early by the amount the deleted step-2 write used to cost, and read back
+# immediately.
+"setpoint-confirm-does-not-wait|components/alpha_hwr/write_operation_service.cpp|    schedule_([this, seq]() { confirm_setpoint_(seq); }, SETPOINT_CONFIRM_DELAY_MS);|    schedule_([this, seq]() { confirm_setpoint_(seq); }, 0);"
+"setpoint-confirm-loses-the-step2-lead|components/alpha_hwr/write_operation_service.h|  static constexpr uint32_t SETPOINT_CONFIRM_DELAY_MS = 1600;|  static constexpr uint32_t SETPOINT_CONFIRM_DELAY_MS = 1200;"
 # The single-event slot bound is the last stop before a caller's index becomes
 # SubID 900+idx on the wire. Two ways to get it wrong, and the pair is the point:
 # hardcoding 35 still rejects absurd values while quietly accepting slot 10 on a

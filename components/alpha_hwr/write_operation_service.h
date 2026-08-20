@@ -540,8 +540,16 @@ class WriteOperationService {
   static constexpr uint32_t MODE_CONFIRM_DELAY_MS = 1500;
   static constexpr uint32_t MODE_RETRY_DELAY_MS = 2000;
   static constexpr uint8_t MODE_MAX_ATTEMPTS = 4;  // matches issue #99's budget
-  static constexpr uint32_t SETPOINT_STEP2_DELAY_MS = 400;
-  static constexpr uint32_t SETPOINT_CONFIRM_DELAY_MS = 1200;  // the #82/#85 readback
+  // How long after the fused control request the setpoint readback goes out.
+  //
+  // 1600, and it used to be spelled 400 + 1200: a SETPOINT_STEP2_DELAY_MS wait
+  // for a second "step 2" register write, then SETPOINT_CONFIRM_DELAY_MS from
+  // there. That write is gone (issue #258) and with it the step it was named
+  // after, so the two collapse into the one number that was always the real
+  // one -- how long the pump gets to store the value before we read it back.
+  // #82/#85 settled the total; #250 asks whether it should be larger, since the
+  // Grundfos app waits 2500 ms after any write.
+  static constexpr uint32_t SETPOINT_CONFIRM_DELAY_MS = 1600;
   static constexpr uint32_t SETPOINT_RETRY_DELAY_MS = 1500;
   static constexpr uint8_t SETPOINT_MAX_ATTEMPTS = 2;
   static constexpr uint32_t CONFIG_STEP2_DELAY_MS = 400;

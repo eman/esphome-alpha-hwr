@@ -1104,16 +1104,49 @@
   four bytes of float into the factory defaults, with no type, version or size
   header, and no payload for the other 24 bytes.
 
-  Nothing needed it. The fused object 86 sub-id 6 request already carries
-  `set_point` as one of its four fields, which is how the Grundfos app sets one:
-  25 such writes in the captures, each with a real value, each acknowledged. The
-  operation's verdict has always come from the readback, so the refusal changed
-  no outcome — which is exactly why it survived. What the deleted write *did* do
-  was schedule the configuration commit, and that commit is real: every one of
-  those 25 fused writes is followed immediately by an object 84 sub-id 1
-  overview write. `send_control_request()` issues it now via its own
+  Correcting the byte order would not have produced a *legal* frame either, which
+  is the part worth keeping. Sub-ids 13, 15 and 39 are object type 301
+  `ControlModeFactoryConfiguration` — `ReadWrite`, but a 28-byte **struct** of
+  seven floats beginning with `default_set_point`. A Class 10 SET to a typed
+  object carries `[Obj][SubH][SubL][TypeH][TypeL][Ver][Size(3)]` and the whole
+  body; every SET shape in the captures declares `9 + fixedSize`. This one
+  carried a bare float, so with the address corrected the pump would read the top
+  half of that float as the type word and refuse it again — on type and length
+  rather than on address. Making it legal would mean a read-modify-write of seven
+  floats into the *factory* record, when the live per-mode setpoint is
+  `local_set_point` in the type-302 user record at sub 14/16/40. The app reads
+  13/15/39 about 450 times each and never writes them.
+
+  Nothing needed it, and the **bench** settles that rather than the captures.
+  With the write deleted, `set_setpoint constant_speed 1900` sends the fused
+  request and its commit and nothing else, and the pump's stored setpoint moves
+  1800 → 1900 with the readback confirming. The operation's verdict has always
+  come from that readback, so the refusal changed no outcome — which is exactly
+  why it survived.
+
+  What the captures do *not* show, and an earlier draft of this entry wrongly
+  claimed: the app never uses object 86 sub-id 6 to **change** a setpoint. All 25
+  of its sub-6 writes are start/stop presses passing the mode's current value
+  through — 12 of them carry the map default 3671.0 — and `constant_flow.log`
+  changes a setpoint with no sub-6 write at all, using the type-302 user config
+  at sub 40 (2.000 then 1.500 m³/h). The app's own widget configuration agrees:
+  it binds sub-6's `set_point` as the *displayed* current value and binds the
+  three per-mode editors to `control_mode_{cs,cf,cp}_user_config_obj.local_set_point`.
+  Whether this component should follow it there is filed separately; what is
+  settled is that the fused write works on this pump and the deleted one never
+  did.
+
+  What the deleted write *did* do was schedule the configuration commit, and that
+  commit is real: every one of the 25 fused writes is followed immediately by an
+  object 84 sub-id 1 overview write, with nothing between them but the short
+  acknowledgement. `send_control_request()` issues it now via its own
   `queue_commit`, so a setpoint write still commits, 200 ms after the frame
-  instead of 600 ms. The confirm readback lands where it always did.
+  instead of 600 ms. The confirm readback lands where it always did — and it is
+  pinned now: `SETPOINT_STEP2_DELAY_MS` named a step that no longer exists, so it
+  and `SETPOINT_CONFIRM_DELAY_MS` fold into the one number that was always the
+  real one, 1600 ms. The simulated pump gained an apply latency, because without
+  one a confirm at 1600 ms, at 1200 or at 0 all passed and the whole #82/#85
+  settle rationale survived only as a comment.
 
   The mislabelled comments that made this easy to write are corrected too.
   `send_control_request()` and `send_set_mode_request()` both annotated their
@@ -1125,24 +1158,48 @@
   nicknames rather than addresses — so nothing is inferred from it again.
 
   **The simulator now refuses what the pump refuses.** It used to accept an
-  OpSpec `0x88` SET at any address, which is why the host suite showed this
-  write working for as long as it did. It answers an unrecognised Class 10 SET
-  with `Unknown Data Item` and the offending item id, exactly as the pump does,
-  and the suite fails if any test provoked one — a net over every Class 10 SET
-  the component sends, not just this one. A mutation entry reverses the fused
-  control request's address to prove the net catches it.
+  OpSpec `0x88` SET at any address, which is why the host suite showed this write
+  working for as long as it did. It answers an unrecognised Class 10 SET with
+  `Unknown Data Item` and the offending item id, exactly as the pump does, and
+  the suite fails if any test provoked one — a net over every Class 10 SET the
+  component sends, not just this one. It checks the declared length against the
+  object's body size too, so the *repaired* frame is caught as well as the
+  original: a bare float at a real address clears both the old address check and
+  the existing declared-vs-carried check, and the pump would still refuse it.
+  Mutation entries reverse the fused request's address and shorten the confirm
+  delay, proving both nets catch.
 
   **New tool: `tools/geni_capture_scan.py`.** The capture corpus has a trap its
-  README has documented since #248 — writes exceed the 20-byte ATT payload and
-  fragment, so a scanner reading packets individually finds every read and not
-  one write — and the project has fallen into it twice. The scanner reassembles
-  ATT value streams before scanning, drops the three duplicate sessions, and
-  reports SET/GET/reply censuses; reassembly is self-checking at ~100% coverage
-  with nothing left over. Several counts in the protocol comments were
+  README has documented since #248 — almost every write exceeds the 20-byte ATT
+  payload and is split across several, so a scanner reading packets individually
+  finds every read and 13 of the 420 writes — and the project has fallen into it
+  twice. The scanner reassembles ATT value streams before scanning, drops the
+  duplicate sessions, and reports SET/GET/reply/latency censuses; reassembly is
+  self-checking at exactly 100% coverage of every GENIbus stream with nothing
+  left over. Which layer matters is worth naming: the app sends a sequence of
+  independent ATT Write Commands rather than one long PDU the controller
+  fragments, so it is the ATT-value concatenation that recovers a write, not the
+  HCI continuation flag. It carries a `selftest` — CRC against a captured frame,
+  frame-walker edge cases, PacketLogger endianness both ways, and the census
+  itself when the corpus is present — wired into the Python CI job, where the
+  corpus half skips because `resources/` is gitignored. Several counts in the
+  protocol comments were
   pre-reassembly artifacts and are corrected against it: **420** Class 10 SETs
   (was 195), **459** short replies split 420 OK / 26 BUSY / 13 OPERATION_FAILED
   (was 136 / 100 / 24 / 12), 25 fused control-request writes (was 16), 40 layer
-  writes (was 20). None of the conclusions those numbers supported changes.
+  writes (was 20), 31 mode writes at 38–113 ms (was 12 at 38–85), 77 overview
+  commits at 36–193 ms (was 34 at 50–193), and p99 latency 144 ms over 19,768
+  pairs (was 121 over ~12k). None of the conclusions those numbers supported
+  changes.
+
+  On 420 specifically: it has been published, retracted as "not reproducible at
+  any level of de-duplication", replaced by 195, and is now back. The retraction
+  gave a checkable reason — that a request telegram can carry more than one APDU
+  and counting per APDU yields 195 — and it is false twice over. All 44,200
+  telegrams in the corpus carry exactly one APDU, so the two counting rules are
+  the same rule here; and counting per APDU could not produce a *smaller* number
+  in any case. 195 is what a scan produces when it loses frames. `selftest` pins
+  the census now, so a fourth figure cannot appear quietly.
 
 
 - **A single event scheduled far ahead evicted a live nearer one** (issue #262).
