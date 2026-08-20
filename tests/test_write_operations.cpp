@@ -424,14 +424,15 @@ struct Harness {
     if (((apdu[1] >> 6) & 0x03) != 0x02) return;   // SET only; GETs go elsewhere
     if (class10_address_is_known(apdu, apdu_len)) return;
     g_unknown_class10_addresses++;
+    const uint8_t obj = apdu_len >= 3 ? apdu[2] : uint8_t{0};
+    const unsigned sub =
+        apdu_len >= 5 ? static_cast<unsigned>((apdu[3] << 8) | apdu[4]) : 0u;
     // Answer as the pump does: Unknown Data Item, offending item id.
-    inject({0x24, 0x06, 0xF8, 0xE7, 0x0A, 0x81, apdu_len >= 3 ? apdu[2] : uint8_t{0},
-            0x00, 0xAA, 0xBB});
+    inject({0x24, 0x06, 0xF8, 0xE7, 0x0A, 0x81, obj, 0x00, 0xAA, 0xBB});
     char buf[160];
     snprintf(buf, sizeof(buf),
              "class 10 SET opspec 0x%02X addresses obj %u sub %u -- the pump has no such item",
-             apdu[1], apdu_len >= 3 ? apdu[2] : 0,
-             apdu_len >= 5 ? static_cast<unsigned>((apdu[3] << 8) | apdu[4]) : 0u);
+             apdu[1], static_cast<unsigned>(obj), sub);
     const std::string entry(buf);
     for (const auto &seen : g_unknown_class10_address_detail)
       if (seen == entry) return;
