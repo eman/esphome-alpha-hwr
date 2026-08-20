@@ -945,8 +945,7 @@ void ScheduleService::write_single_event_async(
       /*expect_short_ack=*/true, /*quiet_timeout=*/true);
 }
 
-int ScheduleService::find_free_single_event_slot(
-    uint32_t reusable_before_ts) const {
+int ScheduleService::find_free_single_event_slot(uint32_t now_ts) const {
   uint8_t max_events = overview_cached_ ? overview_structure_[1] : 35;
   // A cold cache means every slot "looks free", so answering 0 here hands the
   // caller a live slot to overwrite -- the clobber class issue #92 exists to
@@ -957,9 +956,14 @@ int ScheduleService::find_free_single_event_slot(
 
   std::set<uint8_t> used;
   for (const auto &ev : cached_single_events_) {
-    if (reusable_before_ts > 0 &&
-        (!ev.enabled || ev.end_timestamp < reusable_before_ts)) {
-      continue;  // disabled or expired — reusable
+    // now_ts == 0 is "the caller has no clock", not "the epoch": with no
+    // reference time nothing is known to have expired, so every enabled event
+    // keeps its slot. Reading it as a timestamp would expire nothing either
+    // (no event ends before 1970), but only by accident -- the guard is what
+    // makes the safe answer the deliberate one.
+    const bool expired = now_ts > 0 && ev.end_timestamp < now_ts;
+    if (!ev.enabled || expired) {
+      continue;  // disabled or over — reusable
     }
     used.insert(ev.index);
   }

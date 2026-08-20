@@ -1278,8 +1278,17 @@ public:
     write_op_service_.submit_clear_single_event(index, "", on_complete,
                                                 services::WriteOrigin::ENTITY);
   }
+  /// Free single-event slot, expiry judged against the node's own clock.
+  ///
+  /// The picker used to be called here with no reference time at all, which
+  /// reads as "expire nothing": a pump whose five slots all held events that
+  /// ended months ago reported a full pool and the editor refused to add one.
+  /// Passing the real clock is what makes "expired events do not exhaust the
+  /// pool" true on this surface too, and now_unix() answers 0 when there is no
+  /// synced clock, which restores exactly the old conservative behaviour for
+  /// the case that has no honest answer (issue #262).
   int find_free_single_event_slot() const {
-    return schedule_service_.find_free_single_event_slot();
+    return schedule_service_.find_free_single_event_slot(time_service_.now_unix());
   }
 
   /**

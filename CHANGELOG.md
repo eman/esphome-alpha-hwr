@@ -1080,6 +1080,55 @@
 
 ### Fixed
 
+- **A single event scheduled far ahead evicted a live nearer one** (issue #262).
+  Bench-observed, not inferred: two writes fifteen seconds apart on a pump with
+  five empty slots, one for tomorrow and one for 2040. Both settled `accepted`,
+  both took slot 0, and the readback showed only the 2040 event. The nearer one
+  was destroyed with four slots free, and nothing anywhere said so.
+
+  The auto-slot resolver decides which slots are recyclable by asking which
+  stored events have expired, and it asked that against **the new event's own
+  begin timestamp** instead of against the clock. For an event a few minutes out
+  the two questions have the same answer, which is every event the Lovelace
+  card's Quick Run has ever produced. For an event years out they do not: a 2040
+  event makes everything in the next fourteen years look expired, so the picker
+  returned a slot holding a live event and the write overwrote it. `set_vacation`
+  resolves through the same line, and a vacation is months out by nature — one
+  booked for next summer would have cleared every single event before it.
+
+  Reachable before now, but not by any client: until #255 was fixed both
+  services refused every argument at the parser, so the case that breaks this
+  had no way to reach it.
+
+  Fixed by measuring expiry against the node's wall clock. The reference
+  timestamp is no longer optional — a caller with no clock has to say so, by
+  passing 0, and 0 means **expire nothing** rather than expire everything: a
+  picker that cannot tell the time refuses to recycle rather than guessing which
+  events are over. The refusal names the clock (`"no free single event slots
+  (node clock not set, so expired events cannot be reused)"`) so a node that has
+  simply never synced does not read as a pump with a full slot pool.
+
+  The eviction was also silent by construction, which is most of what made it
+  expensive to diagnose: the operation settles `accepted` because it did write
+  successfully, to a slot it was entitled to choose, and nothing compared the
+  slot's previous contents against what replaced them. Recycling a slot now logs
+  a WARN and carries the same sentence into the settle event's `detail`, naming
+  the slot and the window it replaced.
+
+  The **Add Single Event** editor button gets the fix from the other side: it
+  called the picker with no reference time at all, which reads as "expire
+  nothing", so a pump whose five slots all held events from months ago reported
+  a full pool and the button refused. It now passes the node's clock like every
+  other caller.
+
+  Five host tests, including the reported case (a 2040 event and a live one
+  tomorrow, five slots, the live one must survive), the vacation variant, and
+  the pair that pins both directions of the no-clock rule. The single-event
+  fixtures now anchor their windows to the node clock — stamped in 1970, as they
+  were, every event is expired against any real clock and the tests pass either
+  way. Four mutation entries, including the reported line itself.
+
+
 - **`set_single_event` and `set_vacation` rejected every input on real
   hardware** (issue #255). Both services answered a terminal `invalid` to any
   argument a client could send, with `seq: 0` — the request never reached the

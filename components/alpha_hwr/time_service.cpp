@@ -94,6 +94,17 @@ bool TimeService::current_time(ESPTime &out) const {
 #endif
 }
 
+uint32_t TimeService::now_unix() const {
+  ESPTime now;
+  if (!current_time(now)) return 0;
+  // clock_is_synced() floors the year at 2021, so a clock that passed it cannot
+  // produce a negative or zero timestamp -- but the cast is from time_t, and
+  // this returning 0 has to mean "no clock" and nothing else. Checking costs a
+  // comparison and keeps the sentinel unambiguous rather than argued.
+  if (now.timestamp <= 0) return 0;
+  return static_cast<uint32_t>(now.timestamp);
+}
+
 bool TimeService::wall_clock_is_set() const {
 #ifdef USE_TIME
   if (time_id_ == nullptr) {

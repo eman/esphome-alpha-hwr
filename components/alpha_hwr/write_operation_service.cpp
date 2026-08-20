@@ -4,6 +4,7 @@
 #include "esphome/core/hal.h"
 #include "esphome/core/log.h"
 #include <algorithm>
+#include <cinttypes>
 #include <cstdarg>
 #include <cstdio>
 #include <cstring>
@@ -1777,12 +1778,58 @@ void WriteOperationService::run_single_event_(uint32_t seq) {
         write_single_event_(seq);
         return;
       }
-      // The new event's begin timestamp doubles as "now": any cached
-      // event that ended before it is expired and its slot reusable.
-      int slot = schedule_service_.find_free_single_event_slot(op->begin_ts);
+      // Which stored events have expired is a question about NOW, and only
+      // about now.
+      //
+      // This used to pass op->begin_ts -- the new event's own begin -- on the
+      // reasoning that any event ending before the new one starts is over
+      // anyway. True for an event a few minutes out, which is all the Lovelace
+      // card's Quick Run ever produced, and false the moment anything is
+      // scheduled far ahead: a 2040 event makes every event in the next
+      // fourteen years look expired, so the picker returns a slot holding a
+      // live event and the write below destroys it. Bench-observed with four
+      // slots free (issue #262), and set_vacation resolves through this same
+      // line -- a vacation booked for next summer would have cleared every
+      // single event between now and then.
+      //
+      // now_unix() answers 0 when the node has no synced clock, and the picker
+      // reads 0 as "expire nothing" rather than "expire everything": with no
+      // trustworthy clock the honest move is to refuse to reuse rather than to
+      // guess which events are over.
+      const uint32_t now_ts = time_service_.now_unix();
+      int slot = schedule_service_.find_free_single_event_slot(now_ts);
       if (slot < 0) {
-        finish_(seq, WriteStatus::REJECTED, "no free single event slots");
+        // Two different problems, and the pump is only one of them. Without
+        // the clock said out loud, a node that has simply never synced looks
+        // like a pump with a genuinely full slot pool.
+        finish_(seq, WriteStatus::REJECTED,
+                now_ts == 0
+                    ? "no free single event slots (node clock not set, so "
+                      "expired events cannot be reused)"
+                    : "no free single event slots");
         return;
+      }
+      // Reusing a slot destroys whatever it held. That is legitimate here --
+      // the event had ENDED -- but issue #262 was expensive to diagnose
+      // precisely because the destruction was silent: the operation settles
+      // ACCEPTED, because it did write successfully to a slot it was entitled
+      // to choose, and nothing compared the slot's previous contents against
+      // what replaced them. So the choice is recorded rather than implicit:
+      // a WARN on the node, and the same sentence in the settle event's detail
+      // so a client sees which slot was recycled and what was in it.
+      //
+      // The predicate is hoisted so mutation_check.sh has a pipe-free line to
+      // anchor to: its entries are split on '|', so a search string containing
+      // '||' is truncated and the mutation scores as though nothing changed.
+      for (const auto &ev : schedule_service_.get_cached_single_events()) {
+        const bool recycling_this_slot = ev.enabled && ev.index == slot;
+        if (!recycling_this_slot) continue;
+        op->slot_note = format_detail(
+            "reused slot %d, which held an event that ended (%" PRIu32
+            "-%" PRIu32 ")",
+            slot, ev.begin_timestamp, ev.end_timestamp);
+        ESP_LOGW(TAG, "Single event: %s", op->slot_note.c_str());
+        break;
       }
       op->slot = static_cast<int16_t>(slot);
       write_single_event_(seq);
@@ -1887,7 +1934,9 @@ void WriteOperationService::confirm_single_event_(uint32_t seq) {
       const bool content_is_a_verdict = want_enabled ? window_matches : true;
       bool match = actual.enabled == want_enabled && content_is_a_verdict;
       if (match) {
-        finish_(seq, WriteStatus::ACCEPTED, "");
+        // Empty for the ordinary case; set when the auto-slot resolver
+        // recycled a slot that still held an expired event (issue #262).
+        finish_(seq, WriteStatus::ACCEPTED, op->slot_note);
         return;
       }
       if (op->attempts < SCHED_MAX_ATTEMPTS) {

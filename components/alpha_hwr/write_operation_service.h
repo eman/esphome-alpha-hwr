@@ -438,6 +438,11 @@ class WriteOperationService {
     // CLEAR_SINGLE_EVENT auto-resolve to the active Stop (vacation) slot.
     uint8_t single_event_action{0x02};
     bool clear_by_vacation{false};
+    // Set by the auto-slot resolver when the slot it picked still held an
+    // enabled event that had already ended. Empty otherwise. Carried into the
+    // ACCEPTED settle detail so recycling a slot is stated rather than
+    // inferred from a slot number that changed (issue #262).
+    std::string slot_note;
 
     // UPLOAD_SCHEDULE fields
     codec::UploadRequest upload;

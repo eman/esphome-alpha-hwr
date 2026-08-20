@@ -861,6 +861,35 @@ MUTATIONS=(
 # ...and the skip for a CLEAR must stay a skip: a cleared slot's window is
 # meaningless, so comparing it would reject every successful clear.
 "single-event-confirm-checks-a-cleared-window|components/alpha_hwr/write_operation_service.cpp|      const bool content_is_a_verdict = want_enabled ? window_matches : true;|      const bool content_is_a_verdict = window_matches;"
+# The auto-slot resolver picks a slot by asking which stored events have
+# EXPIRED, and it used to ask that against the new event's own begin timestamp
+# rather than against the clock. The two agree for an event a few minutes out --
+# which is every event the Lovelace card's Quick Run ever produced -- and part
+# company completely for one years out: a 2040 event makes everything in the
+# next fourteen years look expired, so the picker returns a slot holding a live
+# event and the write destroys it, settling ACCEPTED. This restores exactly the
+# line issue #262 reported, bench-observed with four slots free.
+#
+# It needs a fixture whose timestamps mean something: against events stamped in
+# 1970 both references agree that everything has expired, which is why the
+# single-event tests now anchor their windows to the node clock.
+"single-event-expiry-measured-from-the-new-event|components/alpha_hwr/write_operation_service.cpp|      const uint32_t now_ts = time_service_.now_unix();|      const uint32_t now_ts = op->begin_ts;"
+# Recycling a slot destroys what was in it. Legitimate -- the event had ended --
+# and it used to be silent, which is most of why #262 was expensive to diagnose:
+# the operation settles ACCEPTED because the write really did land, and nothing
+# said the slot had been occupied. Dropping the note is invisible to every
+# status assertion in the suite.
+"single-event-slot-reuse-is-silent|components/alpha_hwr/write_operation_service.cpp|        finish_(seq, WriteStatus::ACCEPTED, op->slot_note);|        finish_(seq, WriteStatus::ACCEPTED, \"\");"
+# ...and the note has to be about the slot actually taken. Reporting the first
+# cached event instead names a slot that was never touched and a window that
+# still exists -- a worse lie than saying nothing, since it reads as a
+# destruction that did not happen.
+"single-event-reuse-note-names-any-slot|components/alpha_hwr/write_operation_service.cpp|        const bool recycling_this_slot = ev.enabled && ev.index == slot;|        const bool recycling_this_slot = ev.enabled;"
+# A node with no synced clock cannot say what has expired, so the picker treats
+# every enabled event as holding its slot and the pool reads full. That is the
+# safe direction, but it makes a node that has simply never synced look like a
+# pump with five live events -- unless the refusal says which of the two it is.
+"single-event-full-pool-hides-a-missing-clock|components/alpha_hwr/write_operation_service.cpp|                now_ts == 0|                false"
 # event_type is the only thing distinguishing a vacation from a one-time run in
 # the settle event -- they share a command string. Without it the two API
 # handlers are interchangeable and nothing notices.
