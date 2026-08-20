@@ -449,9 +449,14 @@ class Transport {
   /// suppression itself and must not be counted again.
   void note_reply_owed_(bool already_suppressed);
 
-  /// Report failure to the command at the head of the queue, having taken it
-  /// off the queue first. See the note at the definition: the callback is
-  /// service code, and it must not be able to reach the entry it belongs to.
+  /// Settle the command at the head of the queue, having taken it OFF the queue
+  /// first. Every completion goes through here, success and failure alike. See
+  /// the note at the definition: the callback is service code, it can queue,
+  /// clear and reset the transport, and it must not be able to reach the entry
+  /// it belongs to while it runs.
+  void complete_front_command_(bool ok, const uint8_t *data, size_t len);
+
+  /// complete_front_command_(false, nullptr, 0) -- the shape a timeout reports.
   void fail_front_command_();
 
   /// Fail every queued command, and everything their callbacks queue in turn.

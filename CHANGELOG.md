@@ -1085,7 +1085,7 @@
   code that has moved is scored `(not applied)` and turns the sweep red — which
   is correct, but only after the better part of an hour, and only for the
   entries a filter happened to select. The static check answers the same
-  question for all 259 in about a second. Retargeting the three entries issue
+  question for all of them in about seven seconds. Retargeting the three entries issue
   #259 invalidated is what prompted it: one was noticed while writing the
   change, two were found by the sweep.
 
@@ -1104,7 +1104,7 @@
   `ControlService::invalidate_cache()`. That is three hand-written compensations
   for one missing contract, and a fourth caller — the next `*_async` read anyone
   adds — gets none of them. The opening sequence used to carry a whole-sequence
-  backstop for exactly this and it went away with the sequence (issue #174),
+  backstop for exactly this and it went away with the sequence (issue #229),
   which is what the reporter noticed.
 
   `reset()` now fails what it abandons: each queued callback is invoked with
@@ -1137,6 +1137,19 @@
   point, from a genuinely short log. Both services already open with a
   readiness check; they now apply the same check at the far end, so a read cut
   short keeps the previous data instead of publishing a truncated one.
+
+  An adversarial review pass found three more consequences, all now fixed and
+  pinned. `Pump Clock Drift` published NAN on every disconnect that landed while
+  its read was queued — the one leg of the initial read chain that captured the
+  component but not the read-chain generation, so it was the only consumer the
+  new callbacks reached uncompensated. The same move-then-pop discipline the
+  failure paths got was missing from the three *success* completions, where the
+  consequence is worse (a `pop_front()` on a deque the callback emptied); a
+  callback does not become safe by having succeeded. And the drain's re-entrancy
+  guard was documented as an equivalent mutant on the strength of an experiment
+  that could not reach it — a chain that queues its next read *before* resetting
+  recurses one drain per step, and the cap is counted per call, so it is no help
+  at all.
 
   It also retires a guard added only two changes ago. `ControlService`'s
   setpoint-range read carries an in-flight flag, and issue #273 had

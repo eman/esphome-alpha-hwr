@@ -885,7 +885,7 @@ MUTATIONS=(
 # reset() used to clear the queue in silence, so a service with a read in flight
 # heard nothing again -- no reply, no failure, and no timeout either, because the
 # timeout lived in the queue entry that was just discarded. The suite pinned that
-# as a hazard rather than testing against it. These four say the repair holds.
+# as a hazard rather than testing against it. These say the repair holds.
 "reset-drops-callbacks-silently|components/alpha_hwr/transport.cpp|  abandon_queue_();|  command_queue_.clear();"
 "reset-reports-success-to-what-it-abandons|components/alpha_hwr/transport.cpp|    if (cmd.callback) {\n      cmd.callback(false, nullptr, 0);|    if (cmd.callback) {\n      cmd.callback(true, nullptr, 0);"
 # A read chain continues past a failed step by sending the next read from inside
@@ -893,17 +893,23 @@ MUTATIONS=(
 # loop the chain stops half-unwound and its caller's on_complete is never
 # reached -- the original hang, moved one command along.
 "reset-leaves-half-unwound-chains-queued|components/alpha_hwr/transport.cpp|    while (!this->command_queue_.empty()) {|    while (false) {"
-# And the drain is bounded, because a chain that re-sends on every failure would
-# otherwise spin until the task watchdog fires. Mutated to a cap of zero rather
-# than to no cap at all: removing it entirely makes the suite HANG, which this
-# script reports as its own outcome and which would cost every full sweep the
-# whole test timeout.
 # And the command being failed must be off the queue BEFORE its callback runs.
 # `cmd` in loop() is a reference into the deque; a callback that reaches reset()
 # would otherwise find its own entry still at the head and be invoked a second
 # time from inside itself. This mutation restores the old order exactly.
-"failed-command-still-on-the-queue-during-its-callback|components/alpha_hwr/transport.cpp|  Command cmd = std::move(this->command_queue_.front());\n  this->command_queue_.pop_front();\n  if (cmd.callback) {\n    cmd.callback(false, nullptr, 0);\n  }|  Command &cmd = this->command_queue_.front();\n  if (cmd.callback) {\n    cmd.callback(false, nullptr, 0);\n  }\n  this->command_queue_.pop_front();"
+"command-still-on-the-queue-during-its-callback|components/alpha_hwr/transport.cpp|  Command cmd = std::move(this->command_queue_.front());\n  this->command_queue_.pop_front();\n  if (cmd.callback) {\n    cmd.callback(ok, data, len);\n  }|  Command &cmd = this->command_queue_.front();\n  if (cmd.callback) {\n    cmd.callback(ok, data, len);\n  }\n  this->command_queue_.pop_front();"
+# The drain is bounded, because a chain that re-sends on every failure would
+# otherwise spin until the task watchdog fires. Mutated to a cap of zero rather
+# than to no cap at all: removing it entirely makes the suite HANG, which this
+# script reports as its own outcome and which would cost every full sweep the
+# whole test timeout.
+#
+# Two entries, because the cap has to be BOTH present and large enough. A cap of
+# 8 survived the whole suite when a skeptic tried it, and a cap of 8 would strand
+# every read chain longer than eight commands on a disconnect -- the exact
+# failure this change exists to fix. The tests now pin the count exactly.
 "abandon-drain-cap-stops-it-dead|components/alpha_hwr/transport.h|  static constexpr size_t MAX_ABANDON_STEPS = 512;|  static constexpr size_t MAX_ABANDON_STEPS = 0;"
+"abandon-drain-cap-too-small-for-a-real-chain|components/alpha_hwr/transport.h|  static constexpr size_t MAX_ABANDON_STEPS = 512;|  static constexpr size_t MAX_ABANDON_STEPS = 8;"
 # The inbound overflow is the other half. It runs on a LIVE link -- a corrupt
 # fragment declaring a long frame is enough -- and it used to reach reset(), so
 # one bad fragment cancelled every read in flight with nothing telling any
@@ -911,6 +917,14 @@ MUTATIONS=(
 # commands the pump may still answer.
 "inbound-overflow-never-drops-the-partial|components/alpha_hwr/transport.cpp|  if (reassembly_buffer_.size() > MAX_PACKET_SIZE) {|  if (false) {"
 "inbound-overflow-cancels-the-queue|components/alpha_hwr/transport.cpp|  if (reassembly_buffer_.size() > MAX_PACKET_SIZE) {|  if (reassembly_buffer_.size() > MAX_PACKET_SIZE) { reset(); return; } if (false) {"
+# And the reply debt survives it. This is the one genuine REVERSAL in the
+# overflow half of the change -- the old path cleared the debt deliberately, on
+# the argument that clearing was "the safer of the two errors". It is not:
+# clearing lets a reply owed by an abandoned command be taken for the next
+# write's acknowledgement, which is the misattribution issue #248 exists to
+# prevent. It shipped with no test until a skeptic put the old clear back and
+# watched all 31 binaries pass.
+"inbound-overflow-forgives-the-reply-debt|components/alpha_hwr/transport.cpp|    reassembling_ = false;\n    reassembly_buffer_.clear();\n    expected_packet_length_ = 0;\n    return;|    reassembling_ = false;\n    reassembly_buffer_.clear();\n    expected_packet_length_ = 0;\n    owed_pending_ = false;\n    owed_replies_ = 0;\n    return;"
 # Reporting the failure is only half of it. The chain now reaches its terminal
 # branch on the abandoned exit too, and that branch is where the display cache is
 # written -- so both of these services need the readiness gate they already open
@@ -919,13 +933,19 @@ MUTATIONS=(
 # exactly like a short log rather than a truncated read.
 "abandoned-history-read-cached-as-the-answer|components/alpha_hwr/history_service.cpp|      if (!session_.is_ready()) {|      if (false) {"
 "abandoned-event-log-read-cached-as-the-answer|components/alpha_hwr/event_log_service.cpp|        if (!session_.is_ready()) {|        if (false) {"
-# Deliberate absence: abandon_queue_()'s `if (this->abandoning_) return;` guard.
-# Confirmed by experiment to be an equivalent mutant -- the nested call finds the
-# queue already swapped out and returns at the emptiness check one line above, so
-# no observable behaviour changes. It is kept because without it a callback that
-# queues a command AND calls reset() recurses one drain deep per nesting, and
-# unbounded recursion on a part with ~8 KB of stack is not a risk worth taking
-# for a line that costs nothing.
+# The re-entrancy guard, which this file previously recorded as a deliberate
+# absence and an "equivalent mutant confirmed by experiment". Both halves of that
+# were wrong, and the note contradicted itself two sentences later.
+#
+# The experiment behind it only removed the guard and ran the suite -- and the
+# suite's only re-entrant case reset WITHOUT queueing first, so the nested call
+# returned at abandon_queue_()'s emptiness check and never reached the guard at
+# all. A read chain does the opposite: it sends the next command and could reach
+# reset() after, and then the queue is not empty and the guard is the only thing
+# standing between this and one recursive drain per chain step. MAX_ABANDON_STEPS
+# does not help, because it is counted per call and each nested drain starts at
+# zero. A skeptic reproduced the SIGSEGV.
+"abandon-drain-re-enters-itself-per-chain-step|components/alpha_hwr/transport.cpp|  if (this->abandoning_) return;|  // mutated: no re-entrancy guard"
 # Issue #253: the other four Class 10 sends, and the gate that lets any of them
 # be answered.
 #
@@ -1150,8 +1170,8 @@ fi
 # Does every entry still point at code that exists? An entry whose search string
 # stopped matching is scored "(not applied)" and turns the sweep red -- correctly,
 # but only after the better part of an hour, and only for the entries a filter
-# happened to select. This answers the same question in about a second, for all
-# of them, without building anything.
+# happened to select. This answers the same question in about seven seconds, for
+# all of them, without building anything.
 #
 # It exists because retargeting entries after a refactor is easy to half-do:
 # issue #259 moved three failure paths behind one helper and left three entries

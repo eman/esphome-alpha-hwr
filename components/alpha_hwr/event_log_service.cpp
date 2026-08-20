@@ -101,8 +101,9 @@ void EventLogService::read_entries_async(
       if (!self)
         return;  // chain abandoned (disconnect)
       if (idx >= count) {
-        // The same gate read_entries_async() opens with, applied at the other
-        // end -- see the note in HistoryService::read_trends_async(). A single
+        // The same gate read_metadata_async() opens with -- which is the
+        // first thing read_entries_async() calls -- applied at the other end.
+        // See the note in HistoryService::read_trends_async(). A single
         // entry that fails to read is tolerated by design (the branch below
         // logs it and moves on), so a partially-read log is indistinguishable
         // from a complete one here unless the abandoned case is named. Since

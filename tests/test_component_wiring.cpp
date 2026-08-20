@@ -80,6 +80,9 @@ struct Rig {
   esphome::sensor::Sensor recycles;
   esphome::sensor::Sensor gaps_truncated;
   esphome::sensor::Sensor watch_time;
+  // Pump Clock Drift. Attached by default because the only way to see that a
+  // disconnect publishes to it is to have it wired (issue #259).
+  esphome::sensor::Sensor clock_drift;
   AlphaHwrComponent component{&client};
 
   BLEService service;
@@ -105,6 +108,7 @@ struct Rig {
     component.set_link_recycles_sensor(&recycles);
     component.set_link_gaps_truncated_sensor(&gaps_truncated);
     component.set_link_watch_time_sensor(&watch_time);
+    component.set_clock_diff_sensor(&clock_drift);
   }
 
   void setup() { component.setup(); }
@@ -1196,6 +1200,44 @@ void test_the_default_names_the_fault_without_touching_the_link() {
               "recycled — that counter is one an automation thresholds on");
 }
 
+// ── A disconnect must not publish a drift reading it never took (issue #259) ──
+//
+// The drift leg of the initial read chain reads the pump's clock. Every other
+// leg of that chain captures the read-chain generation and returns if it has
+// moved; this one captured only `this`.
+//
+// That cost nothing while Transport::reset() dropped abandoned callbacks in
+// silence. Now that it fails them, the abandoned clock read reports an invalid
+// time, and the else-branch publishes NAN -- to a user-facing sensor, on every
+// dropped link, for the whole time the read sits queued behind the rest of the
+// chain. On a flapping link the sensor reads `unknown` more often than it reads
+// a number.
+//
+// It is also the clobber the leg already guards against one level up: the note
+// on its timeout says the figure is "how far out was the pump when we found
+// it" and must survive a re-armed chain. NAN is the same overwrite with a
+// worse value.
+void test_a_disconnect_does_not_publish_a_drift_reading() {
+  std::cout << "\n=== A disconnect mid-chain publishes no clock drift ==="
+            << std::endl;
+  Rig r;
+  r.setup();
+  r.connect_and_subscribe();
+
+  // Far enough in for the chain to be running and the clock read to be queued,
+  // but not so far that it has been answered and published legitimately.
+  r.advance(4000);
+  const uint32_t published_before = r.clock_drift.publish_count;
+
+  r.disconnect(ESP_GATT_CONN_TIMEOUT);
+  r.advance(1000);
+
+  TEST_ASSERT(r.clock_drift.publish_count == published_before,
+              "the abandoned clock read publishes nothing -- a link that "
+              "dropped mid-read has not measured a drift of NAN, it has not "
+              "measured a drift");
+}
+
 int main() {
   std::cout << "===========================================================" << std::endl;
   std::cout << "  Component BLE Wiring Test Suite" << std::endl;
@@ -1214,6 +1256,7 @@ int main() {
   test_a_reconnect_reaches_ready_exactly_once();
   test_one_cache_is_not_enough_for_ready();
   test_ready_clears_on_disconnect();
+  test_a_disconnect_does_not_publish_a_drift_reading();
   test_link_gap_baseline_is_published_once_at_zero();
   test_gap_counters_do_not_publish_on_every_tick();
   test_a_quiet_link_fills_the_rungs_end_to_end();

@@ -418,28 +418,44 @@ void Transport::reset() {
   abandon_queue_();
 }
 
-void Transport::fail_front_command_() {
+void Transport::complete_front_command_(bool ok, const uint8_t *data, size_t len) {
   if (this->command_queue_.empty()) return;
   // Off the queue BEFORE the callback runs, which is the opposite of the order
-  // this used to be in, and the order matters for two reasons.
+  // this used to be in, and the order matters for three reasons.
   //
-  // `cmd` in loop() is a REFERENCE into the deque. A callback is service code
-  // and service code touches the transport: it queues the next read of a chain,
-  // and it may reach reset(). Either way the reference is dangling by the time
-  // the old `pop_front()` two lines later ran -- and if the queue had been
-  // emptied, that pop ran on an empty deque.
+  // `cmd` at every call site is a REFERENCE into the deque. A callback is
+  // service code and service code touches the transport: it queues the next
+  // read of a chain, and it may reach reset(). Either way the reference is
+  // dangling by the time the `pop_front()` that used to follow it ran -- and if
+  // the queue had been emptied, that pop ran on an empty deque.
   //
-  // The second reason arrived with issue #259. reset() now FAILS the queue
+  // Worse, moving the command out here steals the std::function's heap target
+  // from the deque element. If the element were still reachable, the closure
+  // could be freed while its own operator() was executing -- which the read
+  // chains make concrete, since the queued callback holds the only strong
+  // reference to the closure that owns it.
+  //
+  // The third reason arrived with issue #259. reset() now FAILS the queue
   // rather than clearing it, so a reset() reached from this callback would find
   // this very command still sitting at the front and invoke its callback a
-  // second time, re-entrantly, from inside itself. Taking it off the queue first
-  // removes it from anything the callback can reach.
+  // second time, re-entrantly, from inside itself. Taking it off the queue
+  // first removes it from anything the callback can reach.
+  //
+  // This applies to EVERY completion, not only the failures. The first cut of
+  // the issue-#259 fix converted the three failure paths and left the three
+  // success paths in try_dispatch_response() with the old shape -- an asymmetry
+  // with no defence, since a callback does not become safe by having succeeded.
+  // A skeptic reproduced all three symptoms on the success path under ASan:
+  // double invocation, heap-use-after-free of the executing closure, and a
+  // pop_front() on an empty deque.
   Command cmd = std::move(this->command_queue_.front());
   this->command_queue_.pop_front();
   if (cmd.callback) {
-    cmd.callback(false, nullptr, 0);
+    cmd.callback(ok, data, len);
   }
 }
+
+void Transport::fail_front_command_() { this->complete_front_command_(false, nullptr, 0); }
 
 void Transport::abandon_queue_() {
   if (this->command_queue_.empty()) return;
@@ -482,9 +498,10 @@ void Transport::abandon_queue_() {
   }
 
   this->abandoning_ = false;
-  // The drain leaves nothing behind, including anything a callback queued on the
-  // last step before the cap.
-  this->command_queue_.clear();
+  // No clear() here. The inner drain above runs at the end of every iteration
+  // and the cap breaks at the top of one, so the queue is already empty at both
+  // exits -- a clear() would be dead code, and a skeptic confirmed deleting it
+  // changes nothing observable.
   this->state_ = State::IDLE;
   ESP_LOGD(TAG, "Abandoned %zu queued command(s)", steps);
 }
@@ -576,10 +593,7 @@ bool Transport::try_dispatch_response(const uint8_t* data, size_t len) {
       // only two classes could reach it and silently reports 7 for every other.
       ESP_LOGV(TAG, "Class %u response matched (wildcard match by class byte)",
                static_cast<unsigned>(data[4]));
-      if (cmd.callback) {
-        cmd.callback(true, data, len);
-      }
-      this->command_queue_.pop_front();
+      this->complete_front_command_(true, data, len);
       this->state_ = State::IDLE;
       return true;
     }
@@ -709,10 +723,7 @@ bool Transport::try_dispatch_response(const uint8_t* data, size_t len) {
                    protocol::apdu_ack_name(ack));
         }
       }
-      if (cmd.callback) {
-        cmd.callback(success, data, len);
-      }
-      this->command_queue_.pop_front();
+      this->complete_front_command_(success, data, len);
       this->state_ = State::IDLE;
       return true;
     }
@@ -972,10 +983,7 @@ bool Transport::try_dispatch_response(const uint8_t* data, size_t len) {
     if (matched) {
       ESP_LOGV(TAG, "Command response matched for Obj %d (Sub %d -> %d)", 
                packet_type_low_ver, cmd.expect_type_high, packet_type_high);
-      if (cmd.callback) {
-        cmd.callback(true, payload, payload_len);
-      }
-      this->command_queue_.pop_front();
+      this->complete_front_command_(true, payload, payload_len);
       this->state_ = State::IDLE;
       return true;
      } else {

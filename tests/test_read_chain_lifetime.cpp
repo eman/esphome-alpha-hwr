@@ -345,6 +345,71 @@ static void test_abandoned_event_log_read_reports_failure() {
               "log with no entries in it");
 }
 
+/// One event-log entry's reply. The entry read uses the register-read shape, so
+/// there is no 3-byte sub-header: `EventLogEntry::from_bytes` reads the payload
+/// directly and takes the timestamp from bytes 10-13. A non-zero timestamp is
+/// what makes the entry count -- zero ones are dropped.
+static std::vector<uint8_t> event_entry_reply(uint32_t stamp) {
+  std::vector<uint8_t> body(16, 0x00);
+  body[4] = 0x01;   // cycle counter
+  body[9] = 0x01;   // event type: Start
+  body[10] = (stamp >> 24) & 0xFF;
+  body[11] = (stamp >> 16) & 0xFF;
+  body[12] = (stamp >> 8) & 0xFF;
+  body[13] = stamp & 0xFF;
+  return with_crc(class10_response(0x0000, 0xF402, body));
+}
+
+static std::vector<uint8_t> event_meta_reply(uint16_t available) {
+  return with_crc(class10_response(0x0000, 0xF301,
+                                   {0x00, 0x00, 0x00,
+                                    0x00, 0x01,                            // cycle
+                                    (uint8_t) (available >> 8), (uint8_t) available,
+                                    0x00, 0x14,                            // max entries
+                                    0x00}));
+}
+
+/// The other half of the event-log gate, and the half nothing asserted.
+///
+/// The gate does two things: report failure, and leave the cache alone. The
+/// verdict assertion above covers only the first, so a one-sided gate that
+/// reported false and cached the truncated read anyway would pass. This is the
+/// event-log analogue of test_abandoned_history_read_keeps_the_previous_data.
+static void test_abandoned_event_log_read_keeps_the_previous_data() {
+  Rig rig;
+  services::EventLogService svc(rig.transport, rig.session);
+
+  svc.read_entries_async(
+      [](bool, const std::vector<services::EventLogEntry> &) {});
+  step(rig.transport, 2);
+  auto meta = event_meta_reply(2);
+  rig.transport.on_notification(meta.data(), meta.size());
+  for (uint32_t i = 0; i < 2; i++) {
+    step(rig.transport, 2);
+    auto entry = event_entry_reply(1700000000u + i * 3600u);
+    rig.transport.on_notification(entry.data(), entry.size());
+  }
+  step(rig.transport, 2);
+
+  const std::string full = svc.format_display();
+  TEST_ASSERT(full.find("Start") != std::string::npos,
+              "event log: the first read landed real entries");
+
+  // A second read, abandoned after the metadata but before any entry lands.
+  svc.read_entries_async(
+      [](bool, const std::vector<services::EventLogEntry> &) {});
+  step(rig.transport, 2);
+  auto meta2 = event_meta_reply(2);
+  rig.transport.on_notification(meta2.data(), meta2.size());
+  step(rig.transport, 2);
+  rig.session.on_disconnected();
+  rig.transport.reset();
+
+  TEST_ASSERT(svc.format_display() == full,
+              "event log: a read cut short by a disconnect leaves the previous "
+              "entries in place instead of publishing an empty log");
+}
+
 /// The failure mode is unbounded growth, not a single stranded allocation, so
 /// assert repetition explicitly: N invocations must retain nothing.
 static void test_no_accumulation() {
@@ -386,6 +451,7 @@ int main() {
   test_abandoned_history_read_reports_failure();
   test_abandoned_history_read_keeps_the_previous_data();
   test_abandoned_event_log_read_reports_failure();
+  test_abandoned_event_log_read_keeps_the_previous_data();
 
   std::cout << "\n==========================================" << std::endl;
   std::cout << "Results: " << tests_passed << " passed, " << tests_failed

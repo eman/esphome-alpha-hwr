@@ -68,9 +68,16 @@ void HistoryService::read_trends_async(
   // whole chain (plus `trends` and `on_complete`) leaks once per invocation --
   // i.e. on every reconnect. Hold a weak_ptr here and let the transport command
   // queue hold the only strong reference, so the chain is released either by the
-  // final pop_front() or by command_queue_.clear() in Transport::reset() when a
-  // disconnect abandons it mid-flight. Nulling the pointer in the terminal branch
-  // would not cover that second case.
+  // final pop_front() or, when a disconnect abandons it mid-flight, by
+  // Transport::reset() draining the queue. Nulling the pointer in the terminal
+  // branch would not cover that second case.
+  //
+  // reset() used to CLEAR the queue, which released the chain without ever
+  // running it; since issue #259 it fails each queued command instead, so the
+  // chain unwinds through the failure branch below and does reach its terminal
+  // branch. The ownership argument is unchanged -- the strong reference still
+  // lives in the queued callback and dies with it -- but the old wording named
+  // a clear() that no longer happens.
   std::weak_ptr<std::function<void(size_t)>> read_next_weak = read_next;
 
   *read_next = [this, trends, on_complete, read_next_weak](size_t idx) {
