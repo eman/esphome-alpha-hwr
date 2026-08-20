@@ -359,8 +359,10 @@ void ControlService::read_one_setpoint_range_(ControlMode mode, uint16_t sub,
         const float lo = native_to_display(mode, protocol::decode_float_be(&payload[offset + 4]));
         const float hi = native_to_display(mode, protocol::decode_float_be(&payload[offset + 8]));
         // A pump that answers with a degenerate range is not a pump to validate
-        // against. Refusing it here keeps the caller on its own bounds rather
-        // than on a range that would reject everything.
+        // against. Refusing it here is what keeps setpoint_ranges_known() from
+        // claiming a complete set; get_setpoint_range() re-checks max > min on
+        // every call, so a cached one would fall back rather than bound
+        // anything, and the two together are belt and braces.
         const bool usable = !std::isnan(lo) && !std::isnan(hi) && hi > lo;
         if (!usable) {
           ESP_LOGW(TAG, "Setpoint range for Sub %u is not usable (%.4f-%.4f)",

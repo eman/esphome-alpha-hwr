@@ -1102,12 +1102,14 @@
   now `invalid` immediately, with the pump's own floor in the detail. Asking for
   10 m³/h used to be accepted against a ceiling four times the real one.
 
-  **Proportional pressure is the worst of the four and had no evidence at all
-  until now.** It appears in no capture, neither Grundfos app reads 86/17 or
-  86/18, and the pump never enters the mode in any recorded session — so its
-  range was read off the bench directly. Its floor is *five times* the constant
-  we were using, and its range does not overlap constant pressure's, though the
-  constants treat the two identically.
+  **Proportional pressure is the worst of the four, and its values had never
+  been seen.** The object is documented — the profile has 86/17 as type 301, and
+  `widget_configuration_52_7.xml` binds its min and max — but the HWR setpoint
+  widget does not bind it, no capture contains a read of it, and the pump never
+  enters the mode in any recorded session. So the range was read off the bench
+  directly. Its floor is *five times* the constant we were using, and its range
+  does not overlap constant pressure's, though the constants treat the two
+  identically.
 
   The constants stay as the fallback rather than being deleted, and the fallback
   is deliberately the wider range: with nothing read from the pump the honest
@@ -1124,16 +1126,37 @@
   The four reads run **after** the cache-sync verdict rather than before it, so
   time-to-ready is unchanged; they gate nothing, and a pump that will not answer
   leaves each mode on its fallback. A degenerate answer (max at or below min) is
-  refused as a source rather than cached, since taking it at face value would
-  reject every setpoint in that mode for the rest of the connection. The ranges
-  are dropped on disconnect, because the next connection may be a different pump.
+  refused as a source rather than cached, so `setpoint_ranges_known()` cannot
+  claim a complete set off the back of one — though `get_setpoint_range()`
+  re-checks the invariant on every call, so a cached one would not actually have
+  bounded anything. The ranges are dropped on disconnect, because the next
+  connection may be a different pump.
 
-  Six host tests, the load-bearing one being a simulated pump whose range is
+  Two properties of the read are load-bearing rather than tidy. The chain **stops
+  at the first failure**: all four objects are type 301 version 1, so all four
+  reads declare the same expectation and the transport — which matches on object
+  type and never on the instance — cannot tell their replies apart. A chain that
+  carried on would hand a timed-out read's late reply to the next mode, shifting
+  every remaining range by one slot; constant pressure would end up bounded by
+  constant speed's 1650–3671 read as Pascals, refusing an ordinary 1.5 m setpoint
+  as `invalid` and blaming the pump for the rest of the connection. And a second
+  chain cannot start while one is in flight, which would otherwise put eight
+  reads on the wire and let the older one publish the completeness flag.
+
+  Seven host tests, the load-bearing one being a simulated pump whose range is
   *wider* than the constants — accepting 5000 RPM is possible only by using the
   pump's number, where a narrower range would also pass against code that had
-  merely become stricter. Four mutation entries. The simulator answers the reads
-  with a byte-faithful type-301 frame, including the hostile
-  `resulting_min_set_point` the real pump sends.
+  merely become stricter. Six mutation entries. The simulator answers with a
+  byte-faithful type-301 frame carrying, for proportional pressure, the
+  genuinely deceptive `resulting_min_set_point` the real pump sends there:
+  9804.0, which is *constant pressure's* minimum — a plausible positive number,
+  in the right unit, for the wrong mode.
+
+  One thing this changes for the Home Assistant sliders, which reach the same
+  validator: their declared bounds are now wider than the pump on every mode, so
+  part of each slider's travel is a refusal rather than a value the pump clamps.
+  Narrowing them means re-sending entity info against Home Assistant's cached
+  registry, and is tracked separately.
 
 
 - **The "dedicated" setpoint write was addressed backwards, and the pump had

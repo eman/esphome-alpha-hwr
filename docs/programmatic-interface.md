@@ -63,8 +63,42 @@ they settle as `set_single_event` / `clear_single_event`.
 `constant_flow`, `auto_adapt_radiator`, `auto_adapt_underfloor`,
 `auto_adapt_combined`, `cycle_time`, `temperature_range`.
 
-Setpoint units and ranges: pressure modes in meters (0.5–10.0),
-`constant_speed` in RPM (500–4500), `constant_flow` in m³/h (0.1–10.0).
+Setpoint units: pressure modes in meters, `constant_speed` in RPM,
+`constant_flow` in m³/h. The **ranges are the pump's own** and are narrower than
+you may expect — see [Setpoint ranges come from the pump](#setpoint-ranges-come-from-the-pump).
+
+### Setpoint ranges come from the pump
+
+`set_setpoint` bounds the requested value against the mode's own `min_set_point`
+and `max_set_point`, which the component reads from the pump on connect. On the
+bench unit those are:
+
+| mode | min | max |
+| --- | --- | --- |
+| `constant_speed` | 1650 | 3671 RPM |
+| `constant_pressure` | 1.000 | 2.450 m |
+| `proportional_pressure` | 2.599 | 4.569 m |
+| `constant_flow` | 0.114 | 2.498 m³/h |
+
+Out of range settles `invalid` with the pump's bound in `detail`, and no write is
+attempted. Two things to note: the ranges are considerably narrower than the
+mode's nominal span, and proportional pressure's does not overlap constant
+pressure's, so a value that is ordinary in one is impossible in the other.
+
+If the pump has not answered the range read — the first moments of a connection,
+or a firmware that does not expose the objects — the component falls back to
+wider built-in bounds and says so in the `detail` of any refusal
+(`… (pump limits not read)`). In that state the pump may still clamp a value it
+dislikes, and the settle event reports `clamped` with what it stored.
+
+**This applies to the entity sliders too**, which reach the same validator
+through the facade. Their declared `min_value`/`max_value` in
+`alpha_hwr_controls.yaml` are unchanged and are now wider than the pump on every
+mode, so part of each slider's travel — including both endpoints, and
+proportional pressure's midpoint — is a hard refusal rather than a value the
+pump clamps. Home Assistant shows a failed write rather than the setpoint
+snapping to a clamped value. Narrowing the sliders means re-sending entity info
+against Home Assistant's cached registry and is tracked separately.
 
 ### `set_temperature_range` and `set_cycle_times` settle on the pump, never on the ACK
 
@@ -107,31 +141,6 @@ a `config write not acknowledged; …` prefix on `detail`, so the silence is
 still reported — it just no longer decides the verdict. It is one of several
 cases where an `accepted` settle carries a non-empty `detail` — see the
 [`write_settled` statuses](#the-write_settled-event) for the rest.
-
-#### Setpoint ranges come from the pump
-
-`set_setpoint` bounds the requested value against the mode's own `min_set_point`
-and `max_set_point`, read from the pump at connect. On the bench unit those are:
-
-| mode | min | max |
-| --- | --- | --- |
-| `constant_speed` | 1650 | 3671 RPM |
-| `constant_pressure` | 1.000 | 2.450 m |
-| `proportional_pressure` | 2.599 | 4.569 m |
-| `constant_flow` | 0.114 | 2.498 m³/h |
-
-Out-of-range settles `invalid` with the pump's bound in `detail` — no write is
-attempted. Note the ranges are narrower than a client might expect, and
-proportional pressure's does not overlap constant pressure's.
-
-If the pump has not answered the range read (the first moments of a connection,
-or a firmware that does not expose the objects), the component falls back to
-wider built-in bounds and says so in the `detail` of any refusal
-(`… (pump limits not read)`). In that state the pump may still clamp a value it
-dislikes, and the settle event reports `clamped` with what it stored.
-
-The **entity** sliders in `alpha_hwr_controls.yaml` still carry their static
-`min_value`/`max_value`; only the service validation is pump-derived.
 
 ### Run state and the schedule
 
