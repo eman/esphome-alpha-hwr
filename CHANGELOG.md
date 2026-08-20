@@ -1122,6 +1122,14 @@
   Verified by narrowing the alias back and building both: `make -C tests test`
   stops on the second, `esphome compile` stops on the first.
 
+  Verified on the pump. `set_single_event` with a near-future window settles
+  `accepted` at `seq: 2` where it previously answered `invalid` at `seq: 0`; a
+  2040 window settles `accepted` and reads back from the pump intact as
+  `2040-06-01 03:00 - 03:05 (run)`, so nothing downstream of the parser narrows
+  it either; and `set_vacation` settles `accepted` with `event_type: stop`. The
+  rejections still reject on the device — negative, over-width, reversed and
+  truncated pairs all settle `invalid` at `seq: 0`, for both services.
+
 - **The Lovelace card mangled — and could destroy — a schedule window that
   crosses midnight** (issue #174). A cell whose end is earlier than its start
   (22:00–02:00 is stored as `[1320, 120]`) reaches the card today from the
