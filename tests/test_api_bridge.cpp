@@ -413,6 +413,33 @@ static void test_partially_numeric_arguments_are_rejected() {
 
 // The counterpart: well-formed input must still be accepted, or the strictness
 // above would be indistinguishable from rejecting everything.
+//
+// Read the epoch cases below in the light of HOW this file is built, because on
+// a 64-bit host most of them are documentation and it took issue #255 to notice.
+//
+// `long` is 64 bits here and 32 on the ESP32-C3. The bound that broke #255
+// narrowed only at the target's width, so every case below passed while the
+// firmware refused all of them -- `0,4294967295` sat in this accepted list the
+// whole time, both compiler legs green. The bug was not uncovered. It was
+// covered by an assertion that could not fail.
+//
+// `make test-ilp32` is the answer to that, and CI runs it as "Unit tests
+// (32-bit long)": this same file rebuilt with -m32, so `long` is 32 bits and
+// these assertions mean at the target's width what they claim at the host's.
+// Nothing here is written twice and nothing is a replica.
+//
+// Which leg earns which case is worth being exact about:
+//
+//   - At 64 bits, the three epoch cases added with #255 are documentation.
+//     They pass identically against the broken code -- verified by restoring it
+//     and running them. They are kept for what they say, not for what they
+//     catch, and the pre-existing `0,4294967295` is what kills a mutation on
+//     the epoch ceiling.
+//   - At 32 bits they are load-bearing, and they divide the defect in two:
+//     `0,4294967295` fails on the narrowed BOUND, and `2147483648,2147483649`
+//     fails on the narrowed PARSE, where a 32-bit std::strtol saturates at
+//     2147483647 and reports ERANGE. Both halves shipped; each needs its own
+//     case.
 static void test_well_formed_arguments_still_reach_the_operation_layer() {
   std::cout << "\n=== well-formed arguments are still accepted ===" << std::endl;
 
@@ -428,6 +455,17 @@ static void test_well_formed_arguments_still_reach_the_operation_layer() {
       {"clear_schedule_entry", "4,6"},
       {"set_single_event", "0,4294967295"},
       {"set_vacation", "1000,2000"},
+      // Issue #255. On the device every one of these was refused, because the
+      // parser's upper bound travelled as a `long` and 4294967295 narrowed to
+      // -1 in the ESP32-C3's 32 bits, making `v > hi` reject every value >= 0.
+      // A plausible present-day window is the case a user actually hits; the
+      // two above 2147483647 are the ones a 32-bit `std::strtol` saturates on
+      // and reports as ERANGE, which this parser treats as a rejection. The
+      // wire holds a `uint32_t` (ClockProgramSingleEvent, object type 220), so
+      // its last instant is in 2106 and none of these is out of range.
+      {"set_single_event", "1798761600,1798761900"},
+      {"set_single_event", "2147483648,2147483649"},
+      {"set_vacation", "2200000000,2200086400"},
   };
 
   for (const auto &c : cases) {

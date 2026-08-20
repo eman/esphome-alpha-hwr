@@ -1080,6 +1080,84 @@
 
 ### Fixed
 
+- **`set_single_event` and `set_vacation` rejected every input on real
+  hardware** (issue #255). Both services answered a terminal `invalid` to any
+  argument a client could send, with `seq: 0` — the request never reached the
+  write layer. On the device there was no input either service would accept, and
+  there had not been for as long as the parser has existed.
+
+  The bound that says "fits the `uint32` the wire carries" was passed as a plain
+  `long`. `long` is 32 bits on the ESP32-C3 (RISC-V, ILP32), so
+  `parse_int_field(s, 0, 4294967295L, &v)` compiled to `hi = -1` and the guard
+  became `if (v > -1) return false` — a rejection of every value at or above
+  zero. The literal itself was fine; the damage was at the call, where it
+  narrowed into the parameter.
+
+  What this broke, on a pump: the Lovelace card's **Quick Run** and **Custom
+  Run** buttons, which call `set_single_event`, and any automation or script
+  calling either service. The vacation date-pickers in
+  `packages/alpha_hwr_schedule_editor.yaml` are unaffected — they call the
+  component directly from a lambda and never pass through this parser — as are
+  `clear_single_event`, whose 0–99 bound fits a 32-bit `long`, and
+  `clear_vacation`, which takes no data argument and parses nothing.
+
+  Fixed by naming the parse width once and fixing it: every bound and every
+  parsed value in the bridge now travels as `long long` via a `ParseInt` alias,
+  and parsing goes through `std::strtoll`. That second half matters on its own —
+  `std::strtol` on a 32-bit `long` saturates at 2147483647 and reports `ERANGE`,
+  which this parser treats as a rejection, so correcting the bound alone would
+  have left **every timestamp after 2038-01-19 refused** while the pump holds
+  instants until 2106. Grundfos' own GENI profile for this pump, shipped inside
+  the Grundfos Home app, is what settles the ceiling: `ClockProgramSingleEvent`,
+  object type 220, fixed size 10, declares `begin` and `end` as `uint32_t`.
+
+  The suite could not see any of this, and the reason is the interesting part:
+  `long` is 64 bits on every host anyone runs these tests on, so the firmware
+  refused inputs this file listed **by name** as accepted — `0,4294967295` among
+  them — and both compiler legs stayed green. The bug was not uncovered. It was
+  covered by an assertion that could not fail.
+
+  So the suite now runs at the target's word size instead of arguing around it.
+  A new CI job, **Unit tests (32-bit long)**, rebuilds `test_api_bridge` with
+  `-m32` on `gcc-multilib` — same file, same assertions, `long` at 32 bits. It
+  needs no new test cases to catch #255: the `0,4294967295` case that was
+  already there fails against the code that shipped the bug. It also catches any
+  future 32-bit narrowing anywhere in that file, which a check aimed at one
+  constant cannot.
+
+  Two `static_assert`s back it up at compile time. One reduces to
+  `2147483647 >= 4294967295` and fails only on an ILP32 target, reproducing the
+  defect exactly. The other ties the bound type to the parse — `long` and
+  `long long` are distinct types even where both are 64 bits wide, so narrowing
+  *either* the alias or `strtoll` back to `strtol` fails on every platform. That
+  second one matters more than it looks: the `strtol` half is a separate
+  regression with the same symptom, and asserting only the alias would have left
+  it bare.
+
+  An earlier version of that assert is worth recording, because it verified
+  clean and was wrong. It allowed any bound type spelled `long long` **or**
+  `int64_t`, reasoning that both are of guaranteed width. Probed on
+  `ubuntu-latest`, which is what CI runs the unit tests on:
+
+  ```
+  int64_t is long:                            1
+  OLD assert with ParseInt=long would PASS:   1
+  ```
+
+  `int64_t` *is* `long` there, so the very type the assert existed to reject
+  satisfied it. It fired only on hosts where `int64_t` is `long long` — the
+  author's machine is one of those, which is why it looked verified. A check
+  that depends on which spelling a platform picked for a typedef is not a
+  check, and one verified on a single platform is not verified.
+
+  Verified on the pump. `set_single_event` with a near-future window settles
+  `accepted` at `seq: 2` where it previously answered `invalid` at `seq: 0`; a
+  2040 window settles `accepted` and reads back from the pump intact as
+  `2040-06-01 03:00 - 03:05 (run)`, so nothing downstream of the parser narrows
+  it either; and `set_vacation` settles `accepted` with `event_type: stop`. The
+  rejections still reject on the device — negative, over-width, reversed and
+  truncated pairs all settle `invalid` at `seq: 0`, for both services.
+
 - **The Lovelace card mangled — and could destroy — a schedule window that
   crosses midnight** (issue #174). A cell whose end is earlier than its start
   (22:00–02:00 is stored as `[1320, 120]`) reaches the card today from the

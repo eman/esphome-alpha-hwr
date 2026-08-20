@@ -410,6 +410,42 @@ test-asan:
 # nothing at all and just re-ran the binaries g++ had built. A command-line
 # variable is global in the sub-make, so VARIANT differs and each compiler keeps
 # its own cache.
+# The ILP32 leg: build the bridge's parser where `long` is 32 bits, which is
+# the ESP32-C3's word size and the one this suite otherwise cannot express.
+#
+# Issue #255 is why. An epoch bound of 4294967295 was passed as a `long`
+# parameter; on the device it narrowed to -1 and `set_single_event` and
+# `set_vacation` refused every input a client could send. This suite listed
+# `0,4294967295` among the ACCEPTED inputs the whole time and stayed green,
+# because `long` is 64 bits on every host anyone runs it on. The bug was not
+# uncovered -- it was covered by an assertion that could not fail here.
+#
+# -m32 removes that asymmetry rather than working around it: the SAME
+# assertions, compiled at the target's word size. No new test cases, and no
+# test that is honest only about a replica. Against the code that shipped #255,
+# the existing `0,4294967295` case fails here.
+#
+# One binary, not the suite. test_api_bridge is where the argument parsing
+# lives, and the point is the parser's width, not a second copy of everything.
+#
+# x86 Linux with gcc-multilib only -- there is no -m32 on arm64 macOS. Absent
+# support is a skip with a reason rather than a failure, on the same principle
+# as the Lovelace target below: a checkout that cannot build it is not broken.
+# CI checks for the toolchain separately, so a missing multilib there fails the
+# job instead of quietly skipping it.
+ILP32_CXXFLAGS = -std=c++17 -Wall -Wextra $(OPT) -m32 -I. -I./mocks -I../
+test-ilp32:
+	@printf 'int main(){return 0;}' > .ilp32-probe.c; \
+	if $(CXX) -m32 .ilp32-probe.c -o .ilp32-probe >/dev/null 2>&1; then \
+	  rm -f .ilp32-probe .ilp32-probe.c; \
+	  echo "== test_api_bridge at ILP32 (long is 32 bits, as on the ESP32-C3) =="; \
+	  $(MAKE) test_api_bridge CXXFLAGS="$(ILP32_CXXFLAGS)" LDFLAGS="-m32" && ./test_api_bridge; \
+	else \
+	  rm -f .ilp32-probe .ilp32-probe.c; \
+	  echo "SKIP: $(CXX) cannot target -m32 here (needs x86 Linux + gcc-multilib)."; \
+	  echo "      This leg is what catches a bound that narrows on the ESP32-C3 (issue #255)."; \
+	fi
+
 test-gcc:
 	$(MAKE) test CXX=g++
 
@@ -473,4 +509,4 @@ help:
 	@echo "Objects are cached under .obj/<flags-hash>/<group>/, so switching"
 	@echo "OPT, CXX or sanitizers keeps both variants rather than rebuilding."
 
-.PHONY: all test test-asan test-gcc test-clang test-js test-all clean clean-bin print-objdir help
+.PHONY: all test test-asan test-ilp32 test-gcc test-clang test-js test-all clean clean-bin print-objdir help
