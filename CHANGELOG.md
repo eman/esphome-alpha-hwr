@@ -44,12 +44,15 @@
   display it does not spend a round trip per connection on it.
 
   **Rebuilt after review before shipping.** The first implementation was
-  withdrawn from #287 with two defect classes: it read libc, so it was inert on
-  the device (issue #289), and it named the wrong day whenever a transition fell
-  at local midnight — 212 start-side wrong answers across the timezone database,
+  withdrawn from #287 with two claimed defect classes, of which **one was real**:
+  it named the wrong day whenever a transition fell at local midnight — 212 start-side wrong answers across the timezone database,
   affecting Havana, Cairo, Beirut, the Azores, Santiago and Nuuk. The probe now
-  samples through `ESPTime` and derives the date and the hour from one reading,
-  advanced together. It also refuses to emit half a rule for a year with a
+  derives the date and the hour from one reading, advanced together.
+
+  The second claimed defect — that reading libc made it inert on the device —
+  was **wrong**: ESPHome overrides `localtime_r()` there, so the old probe
+  worked. It samples through `ESPTime` now regardless, for the reasons in #289's
+  correction, but that part was tidiness rather than a fix. It also refuses to emit half a rule for a year with a
   single transition (a country adopting or abolishing DST), and keys transition
   ordering on the offset *direction* rather than an `is_dst` flag, so a zone
   redefinition that flips the flag without moving the clock is not read as a
@@ -385,10 +388,11 @@
 
   **Withdrawn from #287 and restored here.** The check was correct; its inputs
   were not. `op->end_ts` can come from `build_event_window()`, which used
-  `mktime()` — and per issue #289 libc has no timezone on the ESP32, so that
-  timestamp and `now_unix()` were in different bases and every window ending
-  inside the node's UTC offset was refused. #289 put both on `ESPTime`; the
-  check needed no change, only a floor to stand on.
+  `mktime()` — which ESPHome does **not** override on the ESP32 (unlike
+  `localtime_r`; see #289 and its correction), so that timestamp and
+  `now_unix()` were in different bases and every window ending inside the node's
+  UTC offset was refused. #289 put both on `ESPTime`; the check needed no
+  change, only a floor to stand on.
 
 - **Local time now comes from ESPHome's timezone engine, not from libc — which
   fixes single events firing at the wrong hour on every non-UTC node**

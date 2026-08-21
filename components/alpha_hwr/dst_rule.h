@@ -317,10 +317,14 @@ inline DstRule probe_host_dst_rule(int year) {
   if (year < 1970 || year > 2100)
     return r;  // valid stays false
 
-  // The node's own zone, sampled through ESPTime -- **not** libc (issue #289).
-  // ESPHome calls tzset() only under USE_HOST, so on the ESP32 localtime_r
-  // answers UTC and this whole function used to find no transitions at all,
-  // reporting every user in a DST zone as disagreeing with their pump.
+  // The node's own zone, sampled through ESPTime rather than libc (issue #289).
+  //
+  // NOT because libc would be wrong here: ESPHome overrides localtime_r() on
+  // embedded targets to use its parsed zone, so the previous implementation
+  // worked on the device. An earlier version of this comment said otherwise and
+  // was corrected. ESPTime is used because it is right on both targets without
+  // depending on that override, which is a choice about robustness rather than
+  // a bug fix.
   auto offset_at = [](time_t t) -> int32_t {
     ESPTime fields = ESPTime::from_epoch_local(t);
     fields.recalc_timestamp_utc(false);
