@@ -3157,6 +3157,15 @@ static constexpr uint32_t EVENT_TOMORROW_END = NODE_EPOCH_AT_BOOT + 86400 + 3600
 static constexpr uint32_t EVENT_NEXT_WEEK_BEGIN = NODE_EPOCH_AT_BOOT + 7 * 86400;
 static constexpr uint32_t EVENT_NEXT_WEEK_END = NODE_EPOCH_AT_BOOT + 7 * 86400 + 3600;
 // The pair from the bench transcript in issue #262: 2040-06-01 10:00-10:05 UTC.
+// Two windows that BOTH cover the node's clock right now, overlapping each
+// other. The multiplicity issue #290 is about only arises among vacations that
+// are live at the same instant -- that is the only case where clearing one and
+// stopping leaves the pump held off.
+static constexpr uint32_t EVENT_LIVE_A_BEGIN = NODE_EPOCH_AT_BOOT - 86400;
+static constexpr uint32_t EVENT_LIVE_A_END = NODE_EPOCH_AT_BOOT + 9 * 86400;
+static constexpr uint32_t EVENT_LIVE_B_BEGIN = NODE_EPOCH_AT_BOOT - 3600;
+static constexpr uint32_t EVENT_LIVE_B_END = NODE_EPOCH_AT_BOOT + 14 * 86400;
+
 static constexpr uint32_t EVENT_2040_BEGIN = 2222157600;
 static constexpr uint32_t EVENT_2040_END = 2222157900;
 
@@ -3947,6 +3956,111 @@ static void test_clear_vacation_targets_stop_slot() {
   TEST_ASSERT(r && r->slot == 2, "auto-resolved the vacation (Stop) slot 2");
   TEST_ASSERT(h.sim.single_events[2][0] == 0, "vacation slot 2 is now disabled");
   TEST_ASSERT(h.sim.single_events[1][0] == 1, "run event in slot 1 left untouched");
+}
+
+// ---------------------------------------------------------------------------
+// Issue #290: setting a vacation over an existing one creates a second, and
+// clear_vacation used to clear only one of them
+// ---------------------------------------------------------------------------
+//
+// #267 fixed the RANKING of stored vacations. A ranking orders a set; it does
+// not bound the set's size. submit_set_vacation() resolves through
+// find_free_single_event_slot(), which prefers an EMPTY slot and does not look
+// for an existing vacation to replace -- so a second enabled Stop event is
+// written, and clear_vacation cleared the best-ranked one, settled ACCEPTED,
+// and left the pump holding itself off under the other.
+//
+// Creation is deliberately unchanged: a second future absence is legitimate, and
+// replacing silently would destroy a stored event, which is the class of thing
+// #262 exists to prevent. What changed is that clearing now means clearing.
+
+// First, the behaviour the issue reproduces: a second vacation really is created.
+static void test_setting_a_vacation_over_one_creates_a_second() {
+  std::cout << "\n=== set_vacation: creating a second one is deliberate (#290) ===" << std::endl;
+  Harness h;
+  h.prime_cache();
+  h.seed_single_event(0, 0x01, EVENT_LIVE_A_BEGIN, EVENT_LIVE_A_END);
+
+  h.write_op.submit_set_vacation(EVENT_LIVE_B_BEGIN, EVENT_LIVE_B_END, "vac_second");
+  h.advance(60000);
+
+  const WriteResult *r = h.result_for("vac_second");
+  TEST_ASSERT(h.events_for("vac_second") == 1, "#290: exactly one terminal event");
+  TEST_ASSERT(r && r->status == WriteStatus::ACCEPTED, "#290: the second vacation is accepted");
+  TEST_ASSERT(r && r->slot != 0, "#290: ...into a free slot, not over the existing one");
+  TEST_ASSERT(h.sim.single_events[0][0] == 1,
+              "#290: the existing vacation is NOT destroyed -- creation is unchanged");
+}
+
+// The acceptance case: two overlapping live vacations, and clear_vacation must
+// leave the pump not held off.
+static void test_clear_vacation_clears_every_live_vacation() {
+  std::cout << "\n=== clear_vacation: clears every vacation covering now (#290) ===" << std::endl;
+  Harness h;
+  h.prime_cache();
+  h.seed_single_event(0, 0x01, EVENT_LIVE_A_BEGIN, EVENT_LIVE_A_END);
+  h.seed_single_event(1, 0x01, EVENT_LIVE_B_BEGIN, EVENT_LIVE_B_END);
+
+  h.write_op.submit_clear_vacation("vac_all");
+  h.advance(120000);
+
+  TEST_ASSERT(h.events_for("vac_all") == 1,
+              "#290: exactly one terminal event across a multi-slot clear");
+  const WriteResult *r = h.result_for("vac_all");
+  TEST_ASSERT(r && r->status == WriteStatus::ACCEPTED, "#290: status is accepted");
+  TEST_ASSERT(h.sim.single_events[0][0] == 0, "#290: slot 0 is cleared");
+  TEST_ASSERT(h.sim.single_events[1][0] == 0,
+              "#290: and so is slot 1 -- the pump is not still held off");
+  TEST_ASSERT(r && r->detail.find("cleared 2 vacations") != std::string::npos,
+              std::string("#290: the detail says how many were cleared (got \"") +
+                  (r ? r->detail : std::string()) + "\")");
+  TEST_ASSERT(r && r->detail.find("slots 0, 1") != std::string::npos,
+              "#290: ...and which slots they were");
+}
+
+// A live vacation plus a FUTURE one: the booking must survive. This is what
+// "leave creation alone" is worth -- clearing the current absence must not
+// cancel next month's.
+static void test_clear_vacation_leaves_a_future_booking_alone() {
+  std::cout << "\n=== clear_vacation: a future vacation is not cleared (#290) ===" << std::endl;
+  Harness h;
+  h.prime_cache();
+  h.seed_single_event(0, 0x01, EVENT_LIVE_A_BEGIN, EVENT_LIVE_A_END);
+  h.seed_single_event(1, 0x01, EVENT_NEXT_WEEK_BEGIN, EVENT_NEXT_WEEK_END);
+
+  h.write_op.submit_clear_vacation("vac_future");
+  h.advance(120000);
+
+  TEST_ASSERT(h.events_for("vac_future") == 1, "#290: exactly one terminal event");
+  const WriteResult *r = h.result_for("vac_future");
+  TEST_ASSERT(r && r->status == WriteStatus::ACCEPTED, "#290: status is accepted");
+  TEST_ASSERT(h.sim.single_events[0][0] == 0, "#290: the live vacation is cleared");
+  TEST_ASSERT(h.sim.single_events[1][0] == 1,
+              "#290: next week's booking survives -- only what covers NOW is cleared");
+  TEST_ASSERT(r && r->detail.find("cleared 2 vacations") == std::string::npos,
+              "#290: and a single clear does not claim to have cleared several");
+}
+
+// The #267 case, which must not regress: a live vacation plus an ENDED one. The
+// ranking picks the live one, and the ended one is left where it is.
+static void test_clear_vacation_still_prefers_the_live_one_over_an_ended_one() {
+  std::cout << "\n=== clear_vacation: an ended vacation does not shadow a live one (#267) ==="
+            << std::endl;
+  Harness h;
+  h.prime_cache();
+  h.seed_single_event(0, 0x01, EVENT_ENDED_BEGIN, EVENT_ENDED_END);
+  h.seed_single_event(1, 0x01, EVENT_LIVE_A_BEGIN, EVENT_LIVE_A_END);
+
+  h.write_op.submit_clear_vacation("vac_267");
+  h.advance(120000);
+
+  TEST_ASSERT(h.events_for("vac_267") == 1, "#267: exactly one terminal event");
+  const WriteResult *r = h.result_for("vac_267");
+  TEST_ASSERT(r && r->status == WriteStatus::ACCEPTED, "#267: status is accepted");
+  TEST_ASSERT(r && r->slot == 1, "#267: the LIVE vacation is the one targeted");
+  TEST_ASSERT(h.sim.single_events[1][0] == 0, "#267: the live vacation is cleared");
+  TEST_ASSERT(h.sim.single_events[0][0] == 1,
+              "#267: the ended one is left alone -- only what covers now is cleared");
 }
 
 static void test_clear_vacation_none_active() {
@@ -5315,6 +5429,10 @@ int main() {
   test_clear_vacation_will_still_clear_a_finished_one();
   test_clear_vacation_without_a_clock_does_not_rank();
   test_the_vacation_display_does_not_name_a_finished_one();
+  test_setting_a_vacation_over_one_creates_a_second();
+  test_clear_vacation_clears_every_live_vacation();
+  test_clear_vacation_leaves_a_future_booking_alone();
+  test_clear_vacation_still_prefers_the_live_one_over_an_ended_one();
   test_clear_vacation_none_active();
   test_clear_single_event();
   test_single_event_slot_bounded_by_pump_capacity();

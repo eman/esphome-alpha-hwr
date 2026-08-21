@@ -438,6 +438,17 @@ class WriteOperationService {
     // CLEAR_SINGLE_EVENT auto-resolve to the active Stop (vacation) slot.
     uint8_t single_event_action{0x02};
     bool clear_by_vacation{false};
+    // clear_vacation clears EVERY enabled Stop event covering now, not just the
+    // best-ranked one (issue #290). These carry that walk across the
+    // write -> settle -> confirm cycle, which runs once per slot; finish_() is
+    // still called exactly once, at the end, so the one-terminal-event contract
+    // holds across a multi-slot write.
+    std::vector<uint8_t> vacation_slots;
+    uint8_t vacation_cursor{0};
+    // Slots that were covering now but did not fit in MAX_VACATIONS_PER_CLEAR.
+    // Reported in the settle detail so "cleared 8, 2 remain" is never mistaken
+    // for "the vacation is over".
+    uint8_t vacation_unhandled{0};
     // Set by the auto-slot resolver when the slot it picked still held an
     // enabled event that had already ended. Empty otherwise. Carried into the
     // ACCEPTED settle detail so recycling a slot is stated rather than
@@ -649,6 +660,34 @@ class WriteOperationService {
   // reports TIMEOUT and waits 15 minutes.
   static constexpr uint32_t WATCHDOG_SET_CLOCK_MS = 30000;
   static constexpr uint32_t WATCHDOG_SINGLE_EVENT_MS = 60000;
+  /**
+   * Most vacations one `clear_vacation` will clear (issue #290).
+   *
+   * A policy cap, and stated as one rather than dressed up as a derived bound.
+   * Its whole job is to make the watchdog budget below computable: the watchdog
+   * cannot be re-armed once an operation is running (arming again adds a second
+   * timer rather than replacing the first), so the budget has to be fixed before
+   * the slots are resolved.
+   *
+   * It is not expected to bind. Only vacations that are live AT THE SAME INSTANT
+   * can be multiple here, they all have to fit in the pump's single-event slots,
+   * and this bench unit has five of those. If it ever does bind, the operation
+   * clears what it can and the settle detail names how many are left, so a
+   * second call finishes the job -- which is the honest failure for a cap,
+   * rather than reporting the pump un-held while it is not.
+   */
+  static constexpr uint8_t MAX_VACATIONS_PER_CLEAR = 8;
+  /**
+   * Budget for a vacation clear, which may walk several slots.
+   *
+   * The expensive preamble -- the overview read and the full single-event read --
+   * happens once for the whole operation; each additional slot costs only
+   * write + settle + confirm readbacks, which is where the smaller per-slot
+   * increment comes from. A backstop, not an expectation: the ordinary
+   * one-vacation case still settles in seconds.
+   */
+  static constexpr uint32_t WATCHDOG_CLEAR_VACATION_MS =
+      WATCHDOG_SINGLE_EVENT_MS + (MAX_VACATIONS_PER_CLEAR - 1) * 20000;
   static constexpr uint32_t WATCHDOG_REFRESH_SCHEDULE_MS = 30000;
   static constexpr uint32_t WATCHDOG_REFRESH_EVENTS_MS = 120000;
   // Upload: overview + up to 5 x (read + write + commit) + settle +

@@ -4,6 +4,37 @@
 
 ### Added
 
+- **The Class 7 string decode is a pure function, so its memory-safety guard is
+  provable again** (issue #282). `read_class7_string_async()`'s callback computes
+  `string_len = len - HEADER_LEN - CRC_LEN` in `size_t` arithmetic; a frame under
+  8 bytes wraps that to ~1.8e19 and the copy loop reads ~127 bytes past the
+  frame. `MIN_FRAME_LEN` is what stops it.
+
+  The decode lived in a lambda inside a private method, so the only way to reach
+  it was through a `Transport` — and once #278 gave `on_notification()` a length
+  floor of its own the two guards masked each other's mutations: relaxing the
+  inner one is invisible because the outer one rejects the frame first, and
+  removing the outer one is invisible because the inner one still refuses to
+  parse it. CI found it as an equivalent mutant, 266/267 on #279.
+
+  `protocol::decode_class7_string()` is now pure and callable with arbitrary
+  bytes, for the reason `schedule_codec`, `telemetry_decoder` and
+  `response_match.h` are — Class 7 was the odd one out. A host test hands it a
+  7-byte frame with no transport in front of it, and the `len < 5` relaxation
+  fails three assertions again. Both mutation directions are back, and the
+  upward one is kept alongside because it stays provable if the transport's
+  floor moves again.
+
+  **Both guards stay.** The transport's floor is about framing and this one is
+  about memory safety, and a unit that parses bytes should not have to assume
+  anything about who handed them over. Two protections masking each other is a
+  documentation problem, not a duplication problem.
+
+  The null-buffer case is now reported distinctly from the too-short case, the
+  overlong case is truncated *and says so* rather than silently, and the count
+  byte remains reported-but-never-trusted to bound the copy — trusting a
+  radio-supplied count is an overread waiting to happen from the other direction.
+
 - **A bad-CRC frame drop is counted, not just logged** (`link_crc_drops`, issue
   #260). A frame that fails its CRC was dropped correctly and then left no trace
   anyone could find: no counter, no entity, nothing in Home Assistant, the whole
@@ -457,6 +488,81 @@
   only configuration where renaming the rpm sensor fails.
 
 ### Changed
+
+- **`clear_vacation` clears every vacation covering now, not just one** (issue
+  #290). `submit_set_vacation()` resolves through `find_free_single_event_slot()`,
+  which prefers an **empty** slot and does not look for an existing vacation to
+  replace — so setting a vacation while one is stored writes a *second* enabled
+  Stop event. `clear_vacation` then cleared the best-ranked one, settled
+  `accepted`, and left the pump holding itself off under the other.
+
+  #267 fixed the *ranking* of stored vacations, and that ranking is correct for
+  the question it answers. But a ranking orders a set; it does not bound the
+  set's size. This is #267's own sentence — "cleared the finished one and settled
+  `accepted` … while the pump was still holding itself off" — with "finished"
+  replaced by "the other live one".
+
+  Every enabled Stop event covering the current time is now cleared, in slot
+  order, as one operation with **one** terminal event. The settle detail names
+  the count and the slots (`cleared 2 vacations (slots 0, 1)`); a clear that
+  fails part-way settles `rejected` and reports how many were cleared and that
+  the rest still cover now, because at that point the pump is still held off and
+  a bare rejection would not say so.
+
+  **Creation is deliberately unchanged.** A second future absence is legitimate,
+  and replacing one silently would destroy a stored event — the class of thing
+  #262 exists to prevent. A vacation that has not begun is left alone by a
+  clear, so ending the current absence does not cancel next month's booking.
+
+  One judgement stated rather than hidden: a single clear walks at most
+  `MAX_VACATIONS_PER_CLEAR` (8) slots, because the watchdog cannot be re-armed
+  once an operation is running and its budget therefore has to be fixed before
+  the slots are resolved. It is not expected to bind — only vacations live at the
+  *same instant* can be multiple, and they all have to fit in the pump's slots,
+  of which this bench unit has five. If it ever does, the detail says how many
+  are left and a second call finishes the job.
+
+- **A wire-supplied length is no longer a loop bound** (issue #284).
+  `EventLogService::read_entries_async()` decided how many entries to read from
+  two `uint16_t` fields it had just decoded off the metadata reply, and nothing
+  clamped either — so `count` could be **65,535**. That is roughly 1.9 hours of
+  reads at the corpus's reply latency (91 hours if they go unanswered), ~512 KB
+  accumulated in `cached_entries_` on a part with a fraction of that free, and a
+  `uint16_t` sub-id that wraps from idx 55336 into a completely different part of
+  object 88's address space. It also reintroduced #259: `abandon_queue_()` caps
+  its unwind at 512 steps, so a disconnect during a longer chain strands the
+  caller with no terminal callback.
+
+  Two ceilings, and they say different things. The **address map** gives 1001:
+  `geni_profile_52_7.xml` has `event_log_obj` at sub-ids 10200–11200, so reading
+  past that is meaningless whatever the pump claims — a bound with no "is it
+  enough?" conversation attached. The **binding** one is
+  `Transport::MAX_ABANDON_STEPS`, since a chain longer than the unwind cap is
+  exactly the hazard above; a `static_assert` now makes the two agree by
+  construction rather than by comment, which is why that constant became public.
+  Clamping is reported at WARN, never silent.
+
+  Two more of the same shape in the same pass:
+
+  - **A second chain can no longer be queued behind the first.** A clamp bounds
+    one chain and does nothing about N of them, and the re-arm backoff bumps the
+    read generation without stopping work already in the transport queue — so a
+    slow read could be duplicated into an unbounded one. `read_entries_async()`
+    now refuses while one is in flight, releasing the flag on every terminal
+    path including the abandoned one.
+  - **The single-event read is clamped to the address map.**
+    `get_max_single_events()` returned `overview_structure_[1]` — a byte straight
+    off the wire. `SINGLE_EVENT_SLOT_LIMIT` guarded the *write* path and was
+    simply never applied to the read, the identical omission the sibling client
+    found (eman/alpha-hwr#40). SubID is `900 + slot` and the schedule *layer*
+    records start at 1000, so a pump reporting more than 100 sent the read chain
+    into layer 0, reading schedule layers as though they were single events. The
+    clamp moved into the accessor, where all three call sites share it — two had
+    already drifted apart.
+
+  Worth saying plainly: no pump has been seen reporting a wrong count on either
+  side. Both bench units report 20 entries and 5 slots, so these bounds are
+  unfalsifiable against real hardware and their whole value is in the shape.
 
 - **A Class 10 read the pump declines completes at once instead of timing out**
   (issue #283). The pump answers a read it cannot fulfil with the same nine bytes

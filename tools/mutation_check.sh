@@ -469,30 +469,71 @@ MUTATIONS=(
 # assumption -- so the parser and its test agreed, and the pump was blamed. The
 # fixtures are transcribed from a capture now, which is what makes this mutation
 # fail rather than merely shift both sides together.
-"class7-header-length|components/alpha_hwr/device_info_service.cpp|      static const size_t HEADER_LEN = 6;|      static const size_t HEADER_LEN = 7;"
+"class7-header-length|components/alpha_hwr/class7_string.h|constexpr size_t CLASS7_HEADER_LEN = 6;|constexpr size_t CLASS7_HEADER_LEN = 7;"
 # The length guard stands between a runt frame and an unsigned underflow:
-# string_len is size_t, so a frame under 8 bytes wraps it to ~1.8e19 and the copy
-# loop reads ~127 bytes past the frame.
+# string_bytes is a size_t difference, so a frame under 8 bytes wraps it to
+# ~1.8e19 and the copy loop reads ~127 bytes past the frame.
 #
-# It used to be mutated by RELAXING it (to `len < 5`), because transport.cpp
-# dispatched Class 3/7 on len >= 5 and 5-, 6- and 7-byte frames really did reach
-# this callback. Issue #278 closed that: on_notification() now refuses a frame
-# start whose length byte is below 4, and 4 is the structural floor -- the field
-# counts DA + SA + APDU, so 1 + 1 + 2. Every frame that now reaches a service is
-# therefore at least 8 bytes, which is exactly what this guard checks, and the
-# relaxation became an equivalent mutant: CI found it surviving at 266/267.
+# BOTH DIRECTIONS ARE MUTATED AGAIN, and the story is worth keeping because it is
+# how an equivalent mutant is made and unmade.
 #
-# The guard stays. It is a memory-safety check in a unit that should not have to
-# assume anything about the transport's floor, and the two protections masking
-# each other's mutations is a reason to document the redundancy, not to delete
-# half of it. What replaces the entry is the mutation the redundancy does NOT
-# mask: a guard set too HIGH rejects the 9-byte captured frames the decode tests
-# use, which nothing else would catch.
+# Relaxing it (to `len < 5`) was the original entry: transport.cpp dispatched
+# Class 3/7 on len >= 5, so 5-, 6- and 7-byte frames really did reach this
+# decode. Issue #278 closed that -- on_notification() now refuses a frame start
+# whose length byte is below 4, the structural floor (DA + SA + APDU = 1 + 1 + 2)
+# -- so every frame reaching a service is at least 8 bytes, which is exactly what
+# this guard checks. The two guards then masked each other and the relaxation
+# became an equivalent mutant: CI found it surviving at 266/267.
 #
-# Proving the guard is not too LOW now needs the parser reachable without a
-# transport in front of it. That is a real gap, and it is filed rather than
-# papered over.
-"class7-runt-guard-too-strict|components/alpha_hwr/device_info_service.cpp|      static const size_t MIN_FRAME_LEN = HEADER_LEN + CRC_LEN;|      static const size_t MIN_FRAME_LEN = 20;"
+# What un-masked it was not weakening either guard but making this one reachable.
+# Issue #282 extracted the decode into protocol::decode_class7_string(), pure and
+# callable with arbitrary bytes, so a host test hands it a 7-byte frame with no
+# transport in front of it. The transport's floor no longer stands between the
+# test and the guard, and `len < 5` fails three assertions again.
+#
+# The upward mutation is kept alongside it. It was never masked -- a guard set too
+# HIGH rejects the captured frames the decode tests use -- and it is the direction
+# that stays provable if the transport's floor moves again.
+"class7-runt-guard-too-low|components/alpha_hwr/class7_string.h|constexpr size_t CLASS7_MIN_FRAME_LEN = CLASS7_HEADER_LEN + CLASS7_CRC_LEN;|constexpr size_t CLASS7_MIN_FRAME_LEN = 5;"
+"class7-runt-guard-too-strict|components/alpha_hwr/class7_string.h|  if (len < CLASS7_MIN_FRAME_LEN) {|  if (len < 20) {"
+# The count byte is reported, never trusted to bound the copy. Trusting it is an
+# overread waiting to happen from the other direction -- it is radio-supplied.
+"class7-count-byte-bounds-the-copy|components/alpha_hwr/class7_string.h|  size_t take = string_bytes;|  size_t take = data[5];"
+# ---------------------------------------------------------------------------
+# Wire-supplied lengths used as loop bounds (issue #284)
+#
+# `available_entries` and `max_entries` are both uint16 fields straight off the
+# metadata reply and nothing clamped either, so the chain could be 65,535 reads:
+# ~1.9 hours at the corpus's reply latency, ~512 KB accumulated on a part with a
+# fraction of that free, and a uint16 sub-id that wraps out of the event-log
+# address range entirely from idx 55336. The clamp is also what keeps the chain
+# at or under Transport::MAX_ABANDON_STEPS, past which an abandoned chain cannot
+# tell its caller anything -- the hazard #259 closed.
+"event-log-count-unclamped|components/alpha_hwr/event_log_service.cpp|      count = EVENT_LOG_MAX_CHAIN_ENTRIES;|      // mutated: believe the pump"
+# One chain at a time. A clamp bounds ONE chain; the re-arm backoff retires
+# timers without stopping work already queued in the transport, so without this
+# a slow chain gets a duplicate queued behind it and a slow read becomes an
+# unbounded one.
+"event-log-second-chain-allowed|components/alpha_hwr/event_log_service.cpp|  if (entries_reading_) {|  if (false) {"
+# The same shape one service across, and the same omission the sibling client
+# had: SINGLE_EVENT_SLOT_LIMIT guarded the WRITE path and was never applied to
+# the read. SubID is 900 + slot and the schedule LAYER records start at 1000, so
+# an unclamped count sends the read chain into layer 0, reading schedule layers
+# as though they were single events.
+"single-event-count-unclamped|components/alpha_hwr/schedule_service.h|      return static_cast<uint8_t>(SINGLE_EVENT_SLOT_LIMIT);|      return reported;"
+# ---------------------------------------------------------------------------
+# clear_vacation clears every vacation covering now (issue #290)
+#
+# #267 fixed the RANKING of stored vacations, but a ranking orders a set without
+# bounding its size: setting a vacation while one is stored writes a second, and
+# clearing the best-ranked one settled ACCEPTED while the pump went on holding
+# itself off under the other. Killing this leaves that behaviour exactly.
+"clear-vacation-stops-at-the-first|components/alpha_hwr/write_operation_service.cpp|        if (more_vacation_slots) {|        if (false) {"
+# Only what covers NOW is cleared. Without the covers-now term every stored Stop
+# event is collected, so clearing the current absence cancels next month's
+# booking too -- which is the destruction "leave creation alone" was chosen to
+# avoid.
+"clear-vacation-takes-every-stored-stop|components/alpha_hwr/schedule_service.cpp|      if (covers_now)|      if (true)"
 "response-crc-enforcement|components/alpha_hwr/transport.cpp|if (!protocol::frame_crc_valid(reassembly_buffer_.data(), frame_len)) {|if (false) {"
 "response-crc-trim|components/alpha_hwr/transport.cpp|if (expected_packet_length_ >= 4 && frame_len > expected_packet_length_) {|if (false) {"
 "register-read-vetoes-type-match|components/alpha_hwr/transport.cpp|bool wildcard_command = (cmd.expect_type_low_ver == 0x0000 && cmd.expect_type_high == 0x0000);|bool wildcard_command = true;"
@@ -1373,7 +1414,11 @@ MUTATIONS=(
 # finished vacation as THE vacation.
 "vacation-display-names-a-finished-one|components/alpha_hwr/schedule_service.cpp|  const bool nothing_to_show = ev == nullptr |  const bool nothing_to_show = ev == nullptr; //"
 # ...and that the caller hands it a real clock rather than the unknown sentinel.
-"vacation-slot-caller-passes-no-clock|components/alpha_hwr/write_operation_service.cpp|        int slot = schedule_service_.find_vacation_slot(time_service_.now_unix());|        int slot = schedule_service_.find_vacation_slot(0);"
+# Retargeted when clear_vacation went from picking ONE vacation to clearing every
+# one covering now (issue #290). Same guarantee: without the node's clock,
+# nothing can be judged to cover now, and the resolver falls back to the
+# unknown-clock ranking -- which is #267's defect exactly.
+"vacation-slot-caller-passes-no-clock|components/alpha_hwr/write_operation_service.cpp|            schedule_service_.find_vacation_slots(time_service_.now_unix(), &slots);|            schedule_service_.find_vacation_slots(0, &slots);"
 "single-event-confirm-ignores-the-action|components/alpha_hwr/write_operation_service.cpp|                                  actual.action == op->single_event_action;|                                  true;"
 # ...and the skip for a CLEAR must stay a skip: a cleared slot's window is
 # meaningless, so comparing it would reject every successful clear.
@@ -1410,7 +1455,10 @@ MUTATIONS=(
 # the operation settles ACCEPTED because the write really did land, and nothing
 # said the slot had been occupied. Dropping the note is invisible to every
 # status assertion in the suite.
-"single-event-slot-reuse-is-silent|components/alpha_hwr/write_operation_service.cpp|        finish_(seq, WriteStatus::ACCEPTED, op->slot_note);|        finish_(seq, WriteStatus::ACCEPTED, \"\");"
+# Retargeted when the ACCEPTED detail gained the vacation-clear wording (issue
+# #290). The slot note is now the value `detail` starts from, so blanking it
+# there is the same mutation one line up.
+"single-event-slot-reuse-is-silent|components/alpha_hwr/write_operation_service.cpp|        std::string detail = op->slot_note;|        std::string detail;"
 # ...and the note has to be about the slot actually taken. Reporting the first
 # cached event instead names a slot that was never touched and a window that
 # still exists -- a worse lie than saying nothing, since it reads as a
