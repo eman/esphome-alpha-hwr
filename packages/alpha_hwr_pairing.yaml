@@ -285,6 +285,23 @@ alpha_hwr:
    # link_watch_time:
    #   name: "Pump Link Watched Time"
 
+   # Bad-CRC frame drops (issue #260). A passenger on the same trip: it costs one
+   # more entity and rides along with the run above at no extra collection cost,
+   # and link_gap_report.py prints it as a rate per watched hour beside the gap
+   # histogram.
+   #
+   # It answers a question the gap counters cannot. They say how long the link
+   # went QUIET; this says how many frames arrived CORRUPTED while it did not.
+   # Both present from outside as an unexplained write timeout, and until this
+   # existed the whole record of a drop was one log line -- so a sighting had no
+   # baseline to be compared against and meant nothing either way.
+   #
+   # Useful on its own, without the histogram, if you are chasing unexplained
+   # timeouts: it needs no raised data_timeout and no measurement run.
+   #
+   # link_crc_drops:
+   #   name: "Pump Link CRC Drops"
+
    # Run state, and the alarm for the illegal "schedule on but pump stopped"
    # state that silently loses every window (issue #124). "Engage Pump" reads
    # off for both AUTO and STOP once the schedule is on, so these are the only

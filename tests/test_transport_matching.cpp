@@ -44,6 +44,8 @@ int tests_failed = 0;
  * argument for the three new members, which makes it the thing this file has
  * to pin hardest -- for every member, not just for the two it was written for.
  */
+using esphome::alpha_hwr::protocol::apdu_object_type;
+using esphome::alpha_hwr::protocol::apdu_object_version;
 using esphome::alpha_hwr::protocol::class_wildcard_matches;
 using esphome::alpha_hwr::protocol::ignore_unrelated_while_awaiting_wildcard_class;
 using esphome::alpha_hwr::protocol::is_wildcard_matched_class;
@@ -323,6 +325,85 @@ void test_every_acknowledge_kind_has_a_name() {
               "Illegal Operation");
 }
 
+// ============================================================================
+// Test: the reply's type and version decode at the REAL byte boundary (#281)
+// ============================================================================
+//
+// The expectations come from geni_profile_52_7.xml, not from re-deriving the
+// accessor's own arithmetic -- a test that recomputed `((h & 0xFF) << 8) |
+// (lv >> 8)` would agree with any shift the accessor happened to use. Each row
+// below is a wire header observed on this pump (issue #281's table), split into
+// the two byte-pairs exactly as Transport::try_dispatch_response() splits it,
+// and then decoded. The third column is what the profile calls that type.
+void test_reply_type_and_version_decode_at_the_real_boundary() {
+  std::cout << "\n=== Testing Reply Type/Version Decode (issue #281) ===" << std::endl;
+
+  struct Row {
+    uint8_t wire[4];  // reply bytes 6-9: [00][TypeH][TypeL][Version]
+    uint16_t type;
+    uint8_t version;
+    const char *profile_name;
+  };
+
+  const Row rows[] = {
+      {{0x00, 0x01, 0x2F, 0x01}, 303, 1, "operation status (Object 86 Sub 7)"},
+      {{0x00, 0x00, 0xDA, 0x01}, 218, 1, "ClockProgramOverview"},
+      {{0x00, 0x01, 0x00, 0x03}, 256, 3, "ProtectedMotorStateDetails"},
+      {{0x00, 0x02, 0x35, 0x02}, 565, 2, "PumpedMediaRelatedProcessValuesExtended"},
+      {{0x00, 0x02, 0x16, 0x02}, 534, 2, "MediaTemperatureInfo"},
+      {{0x00, 0x01, 0x2D, 0x01}, 301, 1, "setpoint factory config"},
+      {{0x00, 0x01, 0x42, 0x01}, 322, 1, "DateTimeActual"},
+      {{0x00, 0x03, 0xF4, 0x02}, 1012, 2, "temperature range config"},
+      {{0x00, 0x00, 0xDC, 0x01}, 220, 1, "ClockProgramSingleEvent"},
+      {{0x00, 0x00, 0xF3, 0x01}, 243, 1, "event log info"},
+      {{0x00, 0x00, 0xF4, 0x02}, 244, 2, "event log entry"},
+  };
+
+  for (const Row &row : rows) {
+    // Exactly the split try_dispatch_response() performs.
+    const uint16_t type_high = (uint16_t) ((row.wire[0] << 8) | row.wire[1]);
+    const uint16_t type_low_ver = (uint16_t) ((row.wire[2] << 8) | row.wire[3]);
+
+    TEST_ASSERT(apdu_object_type(type_high, type_low_ver) == row.type,
+                std::string("type decodes to the profile's ") + row.profile_name);
+    TEST_ASSERT(apdu_object_version(type_low_ver) == row.version,
+                std::string("version decodes for ") + row.profile_name);
+  }
+
+  // Types 244 v2 and 1012 v2 share a low pair (0xF402) and differ only in the
+  // high pair -- the confusion transport.cpp's own comment exists to prevent.
+  // The decode has to keep them apart, which is the whole point of decoding at
+  // the real boundary rather than printing the pair.
+  TEST_ASSERT(apdu_object_type(0x0000, 0xF402) != apdu_object_type(0x0003, 0xF402),
+              "types sharing a low byte-pair stay distinct after decoding");
+  TEST_ASSERT(apdu_object_version(0xF402) == 2,
+              "and both are version 2, which is what makes the pair collide");
+}
+
+// ============================================================================
+// Test: the numbers the old label printed were not object IDs (#281)
+// ============================================================================
+//
+// The pair form printed as `Object %d SubID %d` gave `Object 55809 SubID 0` for
+// ClockProgramOverview -- verbatim the line quoted in #253 while a real bug was
+// being chased. This pins the arithmetic behind that so the regression is
+// recognisable if the label ever comes back.
+void test_the_old_label_named_nothing_lookupable() {
+  std::cout << "\n=== Testing the Old Label Named Nothing (issue #281) ===" << std::endl;
+
+  const uint16_t type_high = 0x0000;     // reply bytes 6-7 for ClockProgramOverview
+  const uint16_t type_low_ver = 0xDA01;  // reply bytes 8-9
+
+  // What the log used to print, in the order it printed it.
+  TEST_ASSERT(type_low_ver == 55809, "the old first number was 0xDA01 = 55809");
+  TEST_ASSERT(type_high == 0, "the old second number was 0");
+
+  // What it is.
+  TEST_ASSERT(apdu_object_type(type_high, type_low_ver) == 218,
+              "the frame is type 218 (ClockProgramOverview), not Object 55809");
+  TEST_ASSERT(apdu_object_version(type_low_ver) == 1, "at version 1, not SubID 0");
+}
+
 int main() {
   std::cout << "===========================================================" << std::endl;
   std::cout << "  Transport Wildcard Class Matching Test Suite" << std::endl;
@@ -346,6 +427,9 @@ int main() {
   test_new_classes_do_not_answer_each_other();
   test_new_classes_still_require_the_wildcard_expectation();
   test_ignore_gate_engages_for_the_new_classes();
+
+  test_reply_type_and_version_decode_at_the_real_boundary();
+  test_the_old_label_named_nothing_lookupable();
 
   std::cout << "\n===========================================================" << std::endl;
   std::cout << "  Test Results" << std::endl;

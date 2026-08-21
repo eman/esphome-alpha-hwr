@@ -802,6 +802,22 @@ void AlphaHwrComponent::publish_link_diagnostics_(uint32_t now_ms) {
     }
   }
 
+  // Bad-CRC drops (issue #260). Change-gated like the rest: on a healthy link
+  // this never moves, and republishing a constant every tick is the load shape
+  // that OOMs this node (issue #127).
+  //
+  // Published unthrottled, unlike link_watch_time below, because the two have
+  // opposite cadences: watched time advances on every notification, this
+  // advances only when a frame is corrupted -- one occurrence in ~5,900 log
+  // lines across three bench sessions, and zero in two of them. A throttle
+  // would delay the one reading anybody is waiting for and save nothing.
+  const uint32_t crc_drops = this->transport_.crc_drops();
+  if (this->link_crc_drops_sensor_ != nullptr &&
+      this->link_crc_drops_published_ != crc_drops) {
+    this->link_crc_drops_published_ = crc_drops;
+    this->link_crc_drops_sensor_->publish_state(static_cast<float>(crc_drops));
+  }
+
   const uint32_t truncated = this->link_gap_.truncated();
   if (this->link_gaps_truncated_sensor_ != nullptr &&
       this->link_gaps_truncated_published_ != truncated) {

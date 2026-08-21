@@ -124,6 +124,7 @@ LINK_GAP_THRESHOLDS_S = [15, 20, 30, 45, 60, 90]
 CONF_LINK_GAPS_OVER = [f"link_gaps_over_{t}s" for t in LINK_GAP_THRESHOLDS_S]
 CONF_LINK_GAPS_TRUNCATED = "link_gaps_truncated"
 CONF_LINK_WATCH_TIME = "link_watch_time"
+CONF_LINK_CRC_DROPS = "link_crc_drops"
 CONF_PUMP_LAST_LINK_FAILURE = "pump_last_link_failure"
 CONF_PUMP_CLOCK_DST = "pump_clock_dst"
 CONF_FLOW_LIMITER = "flow_limiter"
@@ -427,6 +428,23 @@ CONFIG_SCHEMA = (
                 entity_category=ENTITY_CATEGORY_DIAGNOSTIC,
                 state_class=STATE_CLASS_TOTAL_INCREASING,
             ),
+            # Bad-CRC frame drops (issue #260). Off by default and following the
+            # same conventions as the gap histogram above, and total_increasing
+            # for the same reason: it is a RAM counter that restarts at every
+            # boot, and Home Assistant's long-term statistics recognise the reset
+            # and keep accumulating across the OTAs a measurement run will meet.
+            #
+            # It answers a question the gap entities cannot. A quiet link and a
+            # link shedding corrupted frames both present as an unexplained write
+            # timeout, and before this there was no counter, no entity and no way
+            # to collect a baseline -- the whole record of a drop was one log
+            # line, which makes any sighting uninterpretable.
+            cv.Optional(CONF_LINK_CRC_DROPS): sensor.sensor_schema(
+                icon="mdi:alert-octagon-outline",
+                accuracy_decimals=0,
+                entity_category=ENTITY_CATEGORY_DIAGNOSTIC,
+                state_class=STATE_CLASS_TOTAL_INCREASING,
+            ),
             cv.Optional(CONF_PUMP_LINK_STATUS): text_sensor.text_sensor_schema(
                 icon="mdi:bluetooth-connect",
             ),
@@ -712,6 +730,10 @@ async def to_code(config):
     if CONF_LINK_WATCH_TIME in config:
         sens = await sensor.new_sensor(config[CONF_LINK_WATCH_TIME])
         cg.add(var.set_link_watch_time_sensor(sens))
+
+    if CONF_LINK_CRC_DROPS in config:
+        sens = await sensor.new_sensor(config[CONF_LINK_CRC_DROPS])
+        cg.add(var.set_link_crc_drops_sensor(sens))
 
     if CONF_PUMP_LINK_STATUS in config:
         sens = await text_sensor.new_text_sensor(config[CONF_PUMP_LINK_STATUS])

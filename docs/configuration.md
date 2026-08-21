@@ -600,6 +600,49 @@ will certainly meet. Read them from the statistics graph, not the current state.
 and prints the recycle rate each candidate default would have cost, with the
 decision rule it applies printed alongside the answer.
 
+#### Bad-CRC frame drops
+
+| Entity | Reads |
+| --- | --- |
+| `link_crc_drops` | Frames discarded for a failed CRC, since boot |
+
+A frame that fails its CRC is dropped — correctly, and that check is doing
+load-bearing work, since before it every readback that decides a write verdict
+was parsed from unverified bytes. What the drop used to leave behind was one log
+line: no counter, no entity, nothing in Home Assistant. So a link quietly
+shedding frames was indistinguishable, from outside, from a component that
+occasionally times out for no reason.
+
+This answers a question the gap counters above cannot. They measure how long the
+link went **quiet**; this measures how many frames arrived **corrupted** while it
+did not. Both present as an unexplained write timeout.
+
+Also `total_increasing`, and also off by default — but unlike the histogram it
+needs no raised `data_timeout` and no measurement run, so it is worth switching
+on by itself if you are chasing timeouts you cannot explain. When the histogram
+*is* running, this rides along at no extra collection cost, and
+`tools/link_gap_report.py` prints it as a rate per watched hour beside the gap
+table.
+
+Read the rate, not the count. A raw number of drops means nothing without a
+denominator, and a run with zero of them is consistent both with a clean link and
+with a link a little worse than clean — the report says which bound the run
+actually supports rather than declaring the link healthy. The denominator comes
+from `link_watch_time`, so declare that one too if you want the report to state a
+rate; the entity itself works alone, and Home Assistant will happily graph the
+raw count.
+
+The warning line names the declared length and the frame's leading bytes as well
+as the length received:
+
+```
+Dropping frame with a bad CRC (len=56, declared=59, head=24 37 F8 E7)
+```
+
+That distinction is the diagnosis. A bit-flip in the payload preserves the frame
+length, so a length that disagrees with the declared one points at a corrupted
+length byte or a misassembly across fragments rather than at radio noise.
+
 #### Running a measurement run
 
 The eight entities are **off by default** — they are an instrument for one

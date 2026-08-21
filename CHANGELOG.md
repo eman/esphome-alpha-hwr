@@ -4,6 +4,38 @@
 
 ### Added
 
+- **A bad-CRC frame drop is counted, not just logged** (`link_crc_drops`, issue
+  #260). A frame that fails its CRC was dropped correctly and then left no trace
+  anyone could find: no counter, no entity, nothing in Home Assistant, the whole
+  record being one `ESP_LOGW`. So a link quietly shedding frames was
+  indistinguishable, from outside, from a component that occasionally timed out
+  for no reason.
+
+  That check is doing load-bearing work — before it, every control, schedule,
+  single-event, event-log and device-info payload, *including the readbacks that
+  decide write verdicts*, was parsed from unverified bytes. How often it fires is
+  a property of the link worth knowing, and it could not be collected.
+
+  The counter follows the existing link-diagnostic conventions: off by default,
+  `total_increasing` so a run survives the reboots it will meet, and not cleared
+  by a disconnect — a dropped link says nothing about how many frames the radio
+  corrupted. `tools/link_gap_report.py` picks it up alongside the gap histogram
+  at no extra collection cost and prints it **per watched hour**, because a raw
+  count answers nothing: the one occurrence on record was "one in roughly 5,900
+  log lines", which has no denominator. Where the run saw zero, the report says
+  what bound that supports rather than declaring the link healthy.
+
+  The warning itself now carries the declared length and the leading bytes:
+
+  ```
+  Dropping frame with a bad CRC (len=56, declared=59, head=24 37 F8 E7)
+  ```
+
+  A bit-flip in the payload preserves the frame length, so a length that
+  disagrees with the declared one points at a corrupted length byte or a
+  misassembly across fragments rather than at radio noise. One line, and it turns
+  the next sighting into evidence instead of another anecdote.
+
 - **The pump's own daylight-saving rule is read and checked against the node's
   timezone** (`Pump Clock DST`, issue #286). The pump keeps a DST rule of its own
   and applies it to its own clock, twice a year, independently of anything the
@@ -423,6 +455,87 @@
   only configuration where renaming the rpm sensor fails.
 
 ### Changed
+
+- **A Class 10 read the pump declines completes at once instead of timing out**
+  (issue #283). The pump answers a read it cannot fulfil with the same nine bytes
+  a write acknowledgement uses — `24 05 F8 E7 0A 01 04 EE 26`, acknowledge OK at
+  the head with `OPERATION_FAILED` below. That frame matched nothing:
+  `short_ack_shape` requires the queued command to be a SET, and the `len < 11`
+  floor dropped it. The read waited out its whole timeout and the log said "no
+  response" about a pump that had answered in milliseconds — #208's defect, one
+  operation across.
+
+  Measured against the pump: an answered read costs 0.06 s and a declined one
+  the full 3.00 s, and anything walking a sub-id range pays it per read — 54
+  declined sub-ids in one limiter sweep, about 2.7 minutes of dead link. **The
+  seconds are the smaller half.** A declined read and a silent pump produced the
+  same result, and 54 of them were read as "the pump ignores these", which was
+  wrong and reached a bench note.
+
+  **The caller declares it.** #279 tried this as an unconditional branch and was
+  withdrawn: `TelemetryService` queues its five Class 10 reads with no callback,
+  so they never record a reply debt, and a refusal to one of them arrives
+  orphaned while the next read is in flight — the branch then completed an
+  innocent read as a failure, and did so most on exactly the pumps it was written
+  for, since a pump that refuses reads is a pump that generates these orphans.
+  The limiter and setpoint-range chains opt in; nothing else does.
+
+  Three further constraints, each one #279 was withdrawn for missing: an upper
+  length bound of 9 bytes, because byte 5 is the *first* APDU's length on a
+  multi-APDU telegram and App C.17 makes "first APDU errored, second carries the
+  answer" a documented case; `apdu_op(...) == GET` rather than
+  `!apdu_is_set(...)`, since the negation also catches INFO; and the status byte
+  read only when the head's acknowledge is OK, because otherwise that byte is the
+  offending Data Item's ID. Added on top: a frame whose acknowledges are *both*
+  OK is left alone — it is byte-identical to a legitimate one-byte data reply,
+  and failing a read on it would trade three seconds for a lie.
+
+  The refusal is handed to the callback as bytes where a timeout passes
+  `nullptr`, so a caller can tell "the pump declined" from "the pump said
+  nothing" with no change to the callback signature. A refusal arriving while an
+  abandoned command is still owed one pays that debt first, exactly as the
+  short-ACK branch does (#248), so one late reply costs at most one match.
+
+- **`Control mode updated to ...` says what happened, and stops repeating it**
+  (issue #265). The line lived in `get_mode_async()`'s readback handler — a read
+  path — and fired on every successful readback, most of which are the periodic
+  one driven by `control_state_poll_interval` where nothing changed at all.
+
+  Two defects in one line. "Updated to" claimed a state change that had not
+  happened, so a reader scanning for changes had no way to tell a poll from a
+  real transition without diffing consecutive lines; it now reads `Control mode
+  is 2 (Constant Speed), setpoint=1650.00`. And it was the highest-frequency line
+  in a normal build — on an idle pump essentially the only recurring INFO line,
+  twice a minute, about 2,880 a day, every one identical. It now logs at INFO
+  when the mode or the setpoint moved and at DEBUG when neither did, which is the
+  same argument `publish_gate.h` already makes one layer over (issue #127); the
+  gate had been applied to the entity publishes and not to the log.
+
+  The first reading after a connect counts as a move, so the state still reaches
+  INFO once per link. The comparison treats NAN as a value rather than a missing
+  one — `get_setpoint_for_mode()` returns NAN for every mode with no scalar
+  setpoint, and a plain `!=` would have reported a change on every poll of
+  exactly those modes.
+
+- **Match-failure logs name the object type and version instead of two
+  byte-pairs labelled as neither** (issue #281). `Object %d SubID %d` was wrong in
+  both halves and the numbers were not a type either: a reply carries no Object ID
+  and no Sub-ID, and the two 16-bit values the matcher holds split the reply's
+  `[00][TypeH][TypeL][Version]` header one byte off that boundary.
+
+  The split is correct and stays — comparing both halves is equivalent to
+  comparing type and version together, so matching is unaffected. What it is not
+  is a pair of numbers anyone can look up. `Object 55809 SubID 0` is verbatim the
+  line quoted in #253 while a real bug was being chased; it is type 218 v1,
+  `ClockProgramOverview`, and there is no Object 55809.
+
+  New `protocol::apdu_object_type()` / `apdu_object_version()` accessors decode at
+  the real boundary, and everything a human reads goes through them — the command
+  timeout warning, the quiet-timeout line, the `[AWAITING]` trace, and the three
+  lines in the (callerless) `pending_handlers_` path the issue named. The pair
+  form is left in the matcher, where it works, with a note at the field
+  declarations saying what it is not. The sibling Python client made the same fix
+  (eman/alpha-hwr#39).
 
 - **A single-event window that has already ended is refused** (issue #269).
   `run_single_event_()` validated only that the end was after the begin, so a
