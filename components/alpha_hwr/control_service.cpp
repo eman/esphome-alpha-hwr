@@ -345,6 +345,96 @@ bool ControlService::get_setpoint_range(ControlMode mode, float &min_out, float 
   return true;
 }
 
+void ControlService::read_one_limiter_(uint16_t sub, bool is_config,
+                                       std::function<void(bool)> callback) {
+  uint8_t apdu[5] = {0x0A, 0x03, 86, static_cast<uint8_t>(sub >> 8),
+                     static_cast<uint8_t>(sub & 0xFF)};
+  // Type 895 v1 (config) and 896 v1 (status). Reply header bytes are
+  // `00 03 7F 01` and `00 03 80 01`, so TypeH is 0x0003 and (TypeL << 8) |
+  // Version is 0x7F01 / 0x8001 -- the same encoding read_one_setpoint_range_()
+  // uses, and a real type expectation, so this takes the exact-match path.
+  const uint16_t type_low_ver = is_config ? 0x7F01 : 0x8001;
+  this->transport_.send_apdu_command(
+      apdu, 5, type_low_ver, 0x0003,
+      [this, sub, is_config, callback](bool ok, const uint8_t *payload, size_t payload_len) {
+        if (!ok) {
+          ESP_LOGD(TAG, "Limiter read failed for Obj 86 Sub %u",
+                   static_cast<unsigned>(sub));
+          if (callback) callback(false);
+          return;
+        }
+        // Same size-header skip as the setpoint ranges: the pump prefixes a
+        // three-byte size that is not part of the record.
+        const size_t offset =
+            (payload_len >= 3 && payload[0] == 0x00 && payload[1] == 0x00) ? 3 : 0;
+        const uint8_t *body = payload + offset;
+        const size_t body_len = payload_len - offset;
+
+        bool decoded = false;
+        if (is_config) {
+          const LimiterConfig c = decode_limiter_config(body, body_len);
+          decoded = c.valid;
+          if (c.valid) {
+            if (sub == SUB_LIMITER_CONFIG_MAX_FLOW) limiters_.max_flow = c;
+            if (sub == SUB_LIMITER_CONFIG_MIN_FLOW) limiters_.min_flow = c;
+            ESP_LOGD(TAG, "Limiter %u: %s %s at %.2f gpm", static_cast<unsigned>(sub),
+                     limiter_name_string(c.name), c.enabled ? "enabled" : "disabled",
+                     c.limit_gpm());
+          }
+        } else {
+          const LimiterStatus s = decode_limiter_status(body, body_len);
+          decoded = s.valid;
+          if (s.valid) {
+            if (sub == SUB_LIMITER_STATUS_MAX_FLOW) limiters_.max_flow_status = s;
+            if (sub == SUB_LIMITER_STATUS_MIN_FLOW) limiters_.min_flow_status = s;
+            if (sub == SUB_LIMITATION_MANAGER) limiters_.manager = s;
+            ESP_LOGD(TAG, "Limiter status %u: %s %s ref %.1f",
+                     static_cast<unsigned>(sub), limiter_name_string(s.name),
+                     s.limiting ? "LIMITING" : "idle", s.reference);
+          }
+        }
+        if (!decoded) {
+          ESP_LOGW(TAG, "Limiter reply for Sub %u too short (len=%zu)",
+                   static_cast<unsigned>(sub), payload_len);
+        } else if (on_limiter_update_) {
+          // Per record, not per chain: see set_limiter_update_callback().
+          on_limiter_update_();
+        }
+        if (callback) callback(decoded);
+      },
+      // Same 3 s as the setpoint ranges, and for the same reason: nothing waits
+      // on these, and five chained reads is five timeouts on a pump that does
+      // not implement them.
+      3000);
+}
+
+void ControlService::read_limiters(std::function<void(bool)> callback) {
+  // Configuration first, then status. Sequential rather than fired together:
+  // the two config records share one type code and the three status records
+  // share another, so an overlapping read hands one reply to the wrong request
+  // -- the same hazard read_setpoint_ranges() documents, where carrying on past
+  // a failure bounds constant pressure by constant speed's numbers.
+  read_one_limiter_(SUB_LIMITER_CONFIG_MAX_FLOW, true, [this, callback](bool) {
+    read_one_limiter_(SUB_LIMITER_CONFIG_MIN_FLOW, true, [this, callback](bool) {
+      poll_limiter_status(callback);
+    });
+  });
+}
+
+void ControlService::poll_limiter_status(std::function<void(bool)> callback) {
+  read_one_limiter_(SUB_LIMITER_STATUS_MAX_FLOW, false, [this, callback](bool a) {
+    read_one_limiter_(SUB_LIMITER_STATUS_MIN_FLOW, false, [this, callback, a](bool b) {
+      read_one_limiter_(SUB_LIMITATION_MANAGER, false,
+                        [callback, a, b](bool c) {
+                          // Any one of the three is enough to answer "is a
+                          // limiter active"; the manager alone names which.
+                          const bool any = a || b || c;
+                          if (callback) callback(any);
+                        });
+    });
+  });
+}
+
 void ControlService::read_one_setpoint_range_(ControlMode mode, uint16_t sub,
                                               std::function<void(bool)> callback) {
   uint8_t apdu[5] = {0x0A, 0x03, 86, static_cast<uint8_t>(sub >> 8),

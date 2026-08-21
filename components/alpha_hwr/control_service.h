@@ -7,6 +7,7 @@
 #include "session.h"
 #include "codec.h"
 #include "frame_builder.h"
+#include "limiter.h"
 
 namespace esphome {
 namespace alpha_hwr {
@@ -490,6 +491,11 @@ class ControlService {
     /// on the wire and let the older one publish the completeness flag.
     bool setpoint_ranges_reading_{false};
 
+    /// The limiter family (issue #274). Written only by read_limiters() and
+    /// poll_limiter_status().
+    LimiterState limiters_{};
+    std::function<void()> on_limiter_update_{};
+
    public:
     /// Has the pump's own on/off-time LIMITS block been read back yet?
     ///
@@ -531,6 +537,48 @@ class ControlService {
     /// should not cost the other three their real bounds. This exists so a
     /// caller (and the tests) can tell a complete read from a partial one.
     bool setpoint_ranges_known() const { return setpoint_ranges_valid_; }
+
+  /**
+   * @brief Read the pump's flow-limiter family (issue #274).
+   *
+   * The limiter constrains the pump BELOW what it was asked for, and every
+   * signal this component publishes says the write worked -- because it did.
+   * Measured on a real installation with MaxFlow at 1.6 gpm: 3000 RPM
+   * commanded, 1883 delivered, settled `accepted`, with the pump reporting 3000
+   * back from its own 86/7. See limiter.h.
+   *
+   * Reads exactly six addresses: the two config records (86/600, 601), the two
+   * status records (86/640, 641) and the manager (86/660). **Not a sweep.** The
+   * profile declares twenty slots per family and the rest are empty, answering
+   * a nine-byte OPERATION_FAILED frame that is below the `len >= 11` gate in
+   * try_dispatch_response() -- so it never matches, and each one costs a full
+   * read timeout. Two independent client implementations hit that.
+   *
+   * @param callback Called with true when at least the status is usable.
+   */
+  void read_limiters(std::function<void(bool)> callback);
+
+  /// Poll just the two status records and the manager, without re-reading the
+  /// configuration. Whether a limiter is *enabled* changes only when somebody
+  /// edits it in the GO app; whether it is *limiting* changes with the load.
+  void poll_limiter_status(std::function<void(bool)> callback);
+
+  /// Everything read from the limiter family. `known()` is false until a read
+  /// lands, so "no limiter" is distinguishable from "we have not looked".
+  const LimiterState &limiter_state() const { return limiters_; }
+
+  /// Called whenever any limiter record is stored, rather than when the read
+  /// chain finishes.
+  ///
+  /// The chain is five reads and it does not always complete: a reconnect
+  /// re-arms the initial read chain, which resets the transport and drops
+  /// whatever was queued. Publishing only at the end meant a link that flapped
+  /// during the read left the entities empty even though four of the five
+  /// records had landed. Each record is independently meaningful, so each one
+  /// is published as it arrives.
+  void set_limiter_update_callback(std::function<void()> cb) {
+    on_limiter_update_ = std::move(cb);
+  }
 
    private:
   /// How long send_set_mode_request() waits for the pump's short ACK (issue #248).
@@ -738,6 +786,12 @@ class ControlService {
    * caller on its own bounds rather than blocking the whole cache sync.
    */
   void read_setpoint_ranges(std::function<void(bool)> callback);
+
+  /// One type 895 (config) or type 896 (status) read. @p is_config picks which
+  /// decoder and which type expectation to use.
+  void read_one_limiter_(uint16_t sub, bool is_config,
+                         std::function<void(bool)> callback);
+
   void read_one_setpoint_range_(ControlMode mode, uint16_t sub,
                                 std::function<void(bool)> callback);
 

@@ -4,6 +4,56 @@
 
 ### Added
 
+- **The pump's flow limiters are read and surfaced** (`Pump Flow Limiter` and
+  `Pump Flow Limited`, issue #274). The pump has MaxFlow and MinFlow limiters,
+  set from the Grundfos GO app and entirely separate from the setpoint. This
+  component read none of it.
+
+  That is the worst shape a diagnostic hole comes in, because **every signal the
+  component publishes says the write worked — and it did.** Measured by
+  @jfriend00 on a real installation with MaxFlow at 1.6 gpm, constant speed:
+  1700 RPM commanded delivered 1701, and 3000 RPM commanded delivered 1883, with
+  flow pinned at 1.59 gpm. Every write settled `accepted`, and the pump reported
+  the commanded setpoint back from its own 86/7 each time. At 3000 RPM it
+  delivered 63% of what was asked, and nothing said so.
+
+  `Pump Flow Limiter` distinguishes four states, and the distinctions are the
+  point: `No limiter enabled`, `MaxFlow enabled at 1.60 gpm (not limiting)` —
+  switched on but not yet biting, which it will the moment the setpoint rises —
+  `MaxFlow limiting at 1.60 gpm`, and `unknown`, because a pump that has not
+  answered is not a pump with no limiter. `Pump Flow Limited` is the same thing
+  as one bit, for automations.
+
+  Caps are reported in gallons per minute, the unit they were entered in: the
+  values land on the wire in m³/s and every limit value seen on two pumps
+  converts to an exact gpm figure.
+
+  Six addresses are read — 86/600, 601 (config), 640, 641 (status) and 660 (the
+  manager, which names *which* limiter is binding) — and **not a sweep**. The
+  profile declares twenty slots per family; all fifty-four others answer a
+  nine-byte `OPERATION_FAILED` frame that is below the receiver's `len >= 11`
+  gate, so it never matches and each one costs a full read timeout. Two
+  independent client implementations hit that.
+
+  Reading only. Enabling a limiter silently caps the pump, which is not a change
+  to make as a side effect. The reads are issued only when one of the entities is
+  configured.
+
+- **`Cycle Flow` is documented, including that the vendor does not offer it**
+  (issue #280). The control sets the flow the pump targets during the ON periods
+  of Cycle Time Control. It regulates — bench-measured within 1% across four
+  setpoints, with motor speed moving to hold it — and the Grundfos GO app has no
+  equivalent, while the manual says the mode has no flow parameter at all.
+
+  It stays, deliberately: the register split is what the pump's own layout says
+  (Object 91 Sub 421's first field is a flow setpoint; Sub 430 has no flow
+  field), and being undocumented by the vendor is not a reason to remove
+  something that works. It is also **not** the MaxFlow limiter under another
+  name — 2.0 and 3.0 gpm cycle-flow runs were delivered in full with MaxFlow
+  enabled at 1.4 and 1.6 gpm. The discrepancy is now recorded in
+  `docs/configuration.md` and beside the code, so the next person to notice it
+  finds the answer rather than repeating the investigation.
+
 - **A watchdog for links that are connected, streaming, and never usable**
   (`ready_timeout`, issue #211). Reported from a live installation: connected,
   pairing on, telemetry updating in Home Assistant, `Pump Ready` off

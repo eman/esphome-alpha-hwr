@@ -83,6 +83,11 @@ struct Rig {
   // Pump Clock Drift. Attached by default because the only way to see that a
   // disconnect publishes to it is to have it wired (issue #259).
   esphome::sensor::Sensor clock_drift;
+  // The limiter entities (issue #274). NOT attached by default: the component
+  // only reads the limiter family when one of them is configured, and that
+  // restraint is itself pinned below.
+  esphome::text_sensor::TextSensor flow_limiter;
+  esphome::binary_sensor::BinarySensor flow_limited;
   AlphaHwrComponent component{&client};
 
   BLEService service;
@@ -200,6 +205,20 @@ struct Rig {
   /// Pump Ready waits on unpopulated.
   bool answer_overview{true};
 
+  /// The limiter family (issue #274). Answered by default: the reads are only
+  /// issued when a limiter entity is attached, and no test that does not attach
+  /// one will ever ask for them.
+  bool answer_limiters{true};
+  bool limiter_max_flow_enabled{true};
+  bool limiter_limiting{false};
+  int limiter_reads{0};
+
+  /// Attach both limiter entities, which is what makes the reads happen at all.
+  void attach_limiter_entities() {
+    component.set_flow_limiter_text_sensor(&flow_limiter);
+    component.set_flow_limiter_active_binary_sensor(&flow_limited);
+  }
+
   /// Go completely deaf: answer nothing at all, without consuming the backlog,
   /// so that setting it back to true delivers everything the pump owed. This is
   /// how a quiet interval is produced against the real notification path rather
@@ -242,15 +261,28 @@ struct Rig {
 /// them would look like it expected requests nothing sends any more.
 /// Wrap a DataObject body in the response envelope the transport expects:
 /// type identifiers at bytes 8-9, a 3-byte size header, then the body.
+/// @param type_high Bytes 6-7 of the reply, the type's high half. Zero for the
+///   objects that carry a type below 256; the limiter family is type 895/896,
+///   so its replies really do read `00 03 7F 01` and a frame hardcoding `00 00`
+///   here would never match the read that asked for it.
 static std::vector<uint8_t> data_object_frame(uint8_t type_hi, uint8_t type_lo,
-                                              const uint8_t *body, size_t body_len) {
-  std::vector<uint8_t> f = {0x24, 0x00, 0xF8, 0xE7, 0x0A, 0x13, 0x00, 0x00,
+                                              const uint8_t *body, size_t body_len,
+                                              uint16_t type_high = 0x0000,
+                                              int opspec = -1) {
+  std::vector<uint8_t> f = {0x24, 0x00, 0xF8, 0xE7, 0x0A, 0x13,
+                            static_cast<uint8_t>(type_high >> 8),
+                            static_cast<uint8_t>(type_high & 0xFF),
                             type_hi, type_lo, 0x00, 0x00,
                             static_cast<uint8_t>(body_len)};
   f.insert(f.end(), body, body + body_len);
   f.push_back(0x00);
   f.push_back(0x00);
   f[1] = static_cast<uint8_t>(f.size() - 4);
+  // Byte 5 is the APDU body length in the response direction, and on every one
+  // of the 24,233 CRC-valid captured inbound frames it equals total_len - 8.
+  // Left at the historical 0x13 unless a caller asks, so the fixtures that
+  // predate this keep the bytes they were verified with.
+  if (opspec >= 0) f[5] = static_cast<uint8_t>(opspec);
   return with_crc(std::move(f));
 }
 
@@ -266,7 +298,40 @@ void Rig::answer_outstanding_writes() {
     if (cls == 0x0A && opspec == 0x03 && req.size() >= 9) {
       const uint8_t obj = req[6];
       const uint16_t sub = static_cast<uint16_t>((req[7] << 8) | req[8]);
-      if (obj == 0x56) {
+      if (obj == 0x56 && sub >= 600 && sub <= 660) {
+        // The limiter family (issue #274). Every byte below is from a real
+        // pump: @jfriend00's unit with MaxFlow enabled, driven into the
+        // limiting state. Type 895 v1 (config, 18 bytes) and 896 v1 (status,
+        // 6 bytes), whose replies carry the type high half at bytes 6-7.
+        limiter_reads++;
+        if (!answer_limiters) {
+          // fall through: nothing answers, which is a pump without the family
+        } else if (sub == 600) {
+          const uint8_t enable_byte = limiter_max_flow_enabled ? 0x01 : 0x00;
+          const uint8_t cfg[18] = {0x01, enable_byte,
+                                   0x38, 0xD3, 0xB2, 0x11,   // 1.6 gpm
+                                   0x3F, 0x19, 0x99, 0x9A, 0x3F, 0xCC, 0xCC, 0xCD,
+                                   0x3E, 0xCC, 0xCC, 0xCD};
+          notify(data_object_frame(0x7F, 0x01, cfg, sizeof(cfg), 0x0003, 0x19));
+        } else if (sub == 601) {
+          const uint8_t cfg[18] = {0x02, 0x00, 0x39, 0x25, 0x63, 0x1D,  // 2.5 gpm, off
+                                   0x3F, 0x19, 0x99, 0x9A, 0x3F, 0xCC, 0xCC, 0xCD,
+                                   0x3E, 0xCC, 0xCC, 0xCD};
+          notify(data_object_frame(0x7F, 0x01, cfg, sizeof(cfg), 0x0003, 0x19));
+        } else if (sub == 640) {
+          // Either "running under the cap, ref 3671" or "limiting at 1883.1".
+          const uint8_t idle[6] = {0x01, 0x00, 0x45, 0x65, 0x70, 0x00};
+          const uint8_t busy[6] = {0x01, 0x01, 0x44, 0xEB, 0x63, 0x4A};
+          notify(data_object_frame(0x80, 0x01, limiter_limiting ? busy : idle, 6, 0x0003, 0x0D));
+        } else if (sub == 641) {
+          const uint8_t idle[6] = {0x02, 0x00, 0x00, 0x00, 0x00, 0x00};
+          notify(data_object_frame(0x80, 0x01, idle, 6, 0x0003, 0x0D));
+        } else if (sub == 660) {
+          const uint8_t idle[6] = {0x00, 0x00, 0x44, 0xCE, 0x40, 0x00};
+          const uint8_t busy[6] = {0x01, 0x01, 0x44, 0xEB, 0x27, 0xD6};
+          notify(data_object_frame(0x80, 0x01, limiter_limiting ? busy : idle, 6, 0x0003, 0x0D));
+        }
+      } else if (obj == 0x56) {
         // Operation status (Obj 86) -- the frame captured on hardware, and what
         // populates the control-mode cache.
         notify(with_crc({0x24, 0x12, 0xF8, 0xE7, 0x0A, 0x0E, 0x00, 0x01, 0x2F, 0x01,
@@ -1238,6 +1303,95 @@ void test_a_disconnect_does_not_publish_a_drift_reading() {
               "measured a drift");
 }
 
+// ── The pump's flow limiters (issue #274) ────────────────────────────────────
+//
+// The limiter constrains the pump BELOW what it was asked for, while every
+// signal the component publishes says the write worked -- because it did.
+// Measured by @jfriend00 with MaxFlow at 1.6 gpm: 3000 RPM commanded, 1883
+// delivered, settled `accepted`, with the pump reporting 3000 back from its
+// own 86/7.
+//
+// The decode and the three-state reporting are pinned in tests/test_limiter.cpp
+// against real captured frames. What is pinned here is the wiring: that the
+// reads go out, that the answer reaches both entities, that the status is
+// re-read as the load changes, and that a node asking for neither entity does
+// not pay for any of it.
+void test_an_enabled_limiter_reaches_the_entities() {
+  std::cout << "\n=== An enabled limiter reaches the entities ===" << std::endl;
+  Rig r;
+  r.attach_limiter_entities();
+  r.limiter_max_flow_enabled = true;
+  r.limiter_limiting = false;  // on, but not biting yet
+  r.setup();
+  r.connect_and_subscribe();
+  r.run_until_ready();
+  r.advance(30000);
+
+  TEST_ASSERT(r.limiter_reads > 0, "the component read the limiter family");
+  TEST_ASSERT(r.flow_limiter.has_state(), "and published a verdict");
+  TEST_ASSERT(r.flow_limiter.state.find("MaxFlow enabled") != std::string::npos,
+              "naming the limiter that is switched on");
+  TEST_ASSERT(r.flow_limiter.state.find("1.60") != std::string::npos,
+              "and its cap in gpm, the unit it was entered in");
+  TEST_ASSERT(r.flow_limiter.state.find("not limiting") != std::string::npos,
+              "while saying it is not biting yet");
+  TEST_ASSERT(!r.flow_limited.state,
+              "so the one-bit form an automation reads is false");
+}
+
+// The state the whole issue exists to make visible.
+void test_a_limiter_actively_limiting_raises_the_binary_sensor() {
+  std::cout << "\n=== A limiter actively limiting raises the binary sensor ===" << std::endl;
+  Rig r;
+  r.attach_limiter_entities();
+  r.limiter_max_flow_enabled = true;
+  r.limiter_limiting = true;
+  r.setup();
+  r.connect_and_subscribe();
+  r.run_until_ready();
+
+  TEST_ASSERT(r.flow_limited.state,
+              "the pump is being held below what it was asked for, and one "
+              "entity says so in a form an automation can act on");
+  TEST_ASSERT(r.flow_limiter.state.find("MaxFlow limiting") != std::string::npos,
+              "and the other names which limiter");
+}
+
+// A pump whose firmware does not implement the family. Every read goes
+// unanswered, which must leave "unknown" rather than an all-clear -- reporting
+// "no limiter enabled" for a pump we could not ask is exactly the false
+// reassurance this issue is about.
+void test_a_pump_without_the_limiter_family_reports_unknown() {
+  std::cout << "\n=== A pump that cannot answer leaves the limiter unknown ===" << std::endl;
+  Rig r;
+  r.attach_limiter_entities();
+  r.answer_limiters = false;
+  r.setup();
+  r.connect_and_subscribe();
+  r.run_until_ready();
+
+  TEST_ASSERT(r.limiter_reads > 0, "the reads went out");
+  const bool silent = !r.flow_limiter.has_state() ||
+                      r.flow_limiter.state == "unknown";
+  TEST_ASSERT(silent, "and nothing claimed there was no limiter");
+  TEST_ASSERT(!r.flow_limited.state, "the binary sensor does not assert limiting either");
+}
+
+// The restraint that keeps this optional rather than a tax: five frames per
+// connection and three per control poll, on a node that displays neither.
+void test_a_node_without_limiter_entities_does_not_read_them() {
+  std::cout << "\n=== No limiter entity, no limiter reads ===" << std::endl;
+  Rig r;
+  // deliberately no attach_limiter_entities()
+  r.setup();
+  r.connect_and_subscribe();
+  r.run_until_ready();
+
+  TEST_ASSERT(r.limiter_reads == 0,
+              "nothing asked, so the family costs nothing on a node that does "
+              "not display it");
+}
+
 // ── Diagnostic suspend (issue #243) ──────────────────────────────────────────
 //
 // The pump holds one BLE connection at a time, so a bonded, connected node owns
@@ -1816,6 +1970,10 @@ int main() {
   test_suspending_is_not_counted_as_a_failed_attempt();
   test_releasing_under_a_held_fault_does_not_silence_the_surface();
   test_an_open_during_a_suspension_is_torn_down_not_adopted();
+  test_an_enabled_limiter_reaches_the_entities();
+  test_a_limiter_actively_limiting_raises_the_binary_sensor();
+  test_a_pump_without_the_limiter_family_reports_unknown();
+  test_a_node_without_limiter_entities_does_not_read_them();
   test_link_gap_baseline_is_published_once_at_zero();
   test_gap_counters_do_not_publish_on_every_tick();
   test_a_quiet_link_fills_the_rungs_end_to_end();

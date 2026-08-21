@@ -194,6 +194,29 @@ MUTATIONS=(
 # any test provoked one. This entry is the proof that net works: reversing the
 # fused control request's address turns it red.
 "control-request-addressed-sub-first|components/alpha_hwr/control_service.cpp|  apdu[2] = 0x56;  // Object id 86, the start/stop request\n  apdu[3] = 0x00;  // Sub-id high\n  apdu[4] = 0x06;  // Sub-id low -- 86/6, overall_operation_local_request_obj|  apdu[2] = 0x00;  // mutated: the sub-first layout the deleted write used\n  apdu[3] = 0x06;\n  apdu[4] = 0x00;"
+# The pump's flow limiters (issue #274). The limiter constrains the pump BELOW
+# what it was asked for while every signal we publish says the write worked --
+# because it did. Measured with MaxFlow at 1.6 gpm: 3000 RPM commanded, 1883
+# delivered, settled `accepted`, with the pump reporting 3000 back from its own
+# 86/7. Every fixture in tests/test_limiter.cpp is a real frame.
+"limiter-enable-byte-ignored|components/alpha_hwr/limiter.h|  c.enabled = body[1] != 0;|  c.enabled = true;"
+"limiter-status-byte-ignored|components/alpha_hwr/limiter.h|  s.limiting = body[1] != 0;|  s.limiting = false;"
+# "Not read" must stay distinguishable from "no limiter". Reporting an all-clear
+# for a pump we could not ask is the same false reassurance the issue is about.
+"limiter-unread-reads-as-all-clear|components/alpha_hwr/limiter.h|  bool known() const {\n    return max_flow.valid |  bool known() const {\n    return true; //"
+# An enabled limiter that is not biting yet is its own state: it starts biting
+# the moment the setpoint rises, and a user told "no limiter" will not
+# understand the clamp when it arrives.
+"limiter-enabled-but-idle-reported-as-clear|components/alpha_hwr/limiter.h|  if (s.any_enabled()) {|  if (false) {"
+# The config record is 18 bytes and the status 6. Reading a short one past its
+# end is the memory-safety half.
+"limiter-config-short-frame-decoded|components/alpha_hwr/limiter.h|  const bool long_enough = body_is_readable && len >= LIMITER_CONFIG_BODY_LEN;|  const bool long_enough = true;"
+"limiter-status-short-frame-decoded|components/alpha_hwr/limiter.h|  const bool long_enough = body_is_readable && len >= LIMITER_STATUS_BODY_LEN;|  const bool long_enough = true;"
+# Each record is published as it lands rather than when the five-read chain
+# finishes: a reconnect mid-chain resets the transport and drops the rest, which
+# left the entities empty even though most of the family had been read.
+"limiter-published-only-on-chain-completion|components/alpha_hwr/control_service.cpp|        } else if (on_limiter_update_) {|        } else if (false) {"
+
 # The pump's published range EXPLAINS a clamp; it does not gate the write
 # (issue #276). #273/#275 made it a gate, against the pump's own type-301
 # min_set_point / max_set_point. The bounds were right and the gate was still
