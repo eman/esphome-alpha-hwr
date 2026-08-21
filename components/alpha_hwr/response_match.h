@@ -1,5 +1,6 @@
 #pragma once
 
+#include <cstddef>
 #include <cstdint>
 
 /**
@@ -201,6 +202,51 @@ inline bool class10_reply_is_ok(uint8_t head, bool has_payload, uint8_t first_pa
   return first_payload == static_cast<uint8_t>(Class10Ack::OK);
 }
 
+/**
+ * Both acknowledges of a short Class 10 reply, decoded together.
+ *
+ * A short Class 10 frame is the same nine bytes whether it acknowledges a SET or
+ * declines a GET (issue #283), so both of Transport's branches need exactly this
+ * decode. It lived inline in one of them and was copied into the other, which is
+ * how the two readings of the byte after the head drift apart -- and that byte is
+ * where issue #208 came from.
+ *
+ * @param head            the APDU head byte (frame byte 5)
+ * @param byte_after_head the byte following it (frame byte 6); read only when
+ *                        the fields below say it exists AND means a status
+ * @param frame_len       the whole frame's length, CRC included
+ */
+struct ShortClass10Reply {
+  /// Did the APDU head accept the operation?
+  bool head_ok;
+  /// Does a Class 10 status byte exist to be read?
+  bool has_payload;
+  /// The Class 10 status, or 0 when there is none to read.
+  uint8_t class10_ack;
+  /// Did the pump accept, reading BOTH acknowledges?
+  bool ok;
+};
+
+inline ShortClass10Reply decode_short_class10_reply(uint8_t head, uint8_t byte_after_head,
+                                                    size_t frame_len) {
+  ShortClass10Reply reply{};
+  reply.head_ok = apdu_ack_is_ok(head);
+  // frame_len >= 9, not 7. A real short Class 10 reply is
+  // `24 05 F8 E7 0A 01 PL CRC CRC` -- nine bytes -- so the payload byte exists
+  // only at that length. At `>= 7` an eight-byte CRC-valid frame whose head
+  // declares one payload byte makes byte 6 the CRC HIGH BYTE, and that byte then
+  // decides a write's verdict rather than just the wording of a log line.
+  reply.has_payload = apdu_payload_len(head) == 1 && frame_len >= 9;
+  // Only meaningful when the head's acknowledge IS OK. When it is not, that byte
+  // is the offending Data Item's ID and not a status -- the two readings are told
+  // apart by the head, never by the byte itself (issue #208). Zeroed here so no
+  // caller can read it as a status by accident; a caller reporting the item ID
+  // reads the frame byte directly, under its own head test.
+  reply.class10_ack = (reply.head_ok && reply.has_payload) ? byte_after_head : 0;
+  reply.ok = class10_reply_is_ok(head, reply.has_payload, reply.class10_ack);
+  return reply;
+}
+
 /// The operation an APDU head requests, in the REQUEST direction.
 ///
 /// Same two bits as the acknowledge, read the other way round (App. Prog.
@@ -227,6 +273,48 @@ inline ApduOp apdu_op(uint8_t apdu_head) {
 /// data reply is byte-identical to a short ACK -- which is why the queued
 /// command's operation, not the reply's shape, is what may be tested here.
 inline bool apdu_is_set(uint8_t apdu_head) { return apdu_op(apdu_head) == ApduOp::SET; }
+
+/**
+ * The object type and version a Class 10 reply carries, decoded at the REAL
+ * byte boundary (issue #281).
+ *
+ * A reply carries no Object ID and no Sub-ID. Bytes 6-9 are
+ * `[00][TypeH][TypeL][Version]`, so the type spans bytes 7-8 and the version is
+ * byte 9. Transport splits those same four bytes into two 16-bit halves *one
+ * byte off* that boundary:
+ *
+ *     type_high    = (data[6] << 8) | data[7]   = TypeH
+ *     type_low_ver = (data[8] << 8) | data[9]   = (TypeL << 8) | Version
+ *
+ * That split is kept deliberately, because comparing both halves is equivalent
+ * to comparing type and version together, so matching is unaffected. What it is
+ * NOT is a pair of numbers a human can look up: printed as `Object %d SubID %d`
+ * the pair for `ClockProgramOverview` reads `Object 55809 SubID 0`, and there is
+ * no Object 55809. That exact line appeared in the #253 debugging thread while a
+ * real bug was being chased.
+ *
+ * So: the pair form stays in the matcher, where it is correct, and anything a
+ * human reads goes through these. Type 218 v1 lands on a name in
+ * `geni_profile_52_7.xml`; `Object 55809` lands on nothing.
+ *
+ * Note these decode a pair that was READ OFF A REPLY, or an expectation
+ * expressed in the same encoding. They say nothing about a request, which
+ * carries no type at all.
+ */
+inline uint16_t apdu_object_type(uint16_t type_high, uint16_t type_low_ver) {
+  // Named halves rather than one expression, because which byte comes from which
+  // pair is the entire content of this function: TypeH is the low byte of the
+  // first pair, TypeL is the HIGH byte of the second. The pair boundary and the
+  // type boundary differ by exactly this one byte.
+  const uint16_t type_msb = static_cast<uint16_t>((type_high & 0xFF) << 8);
+  const uint16_t type_lsb = static_cast<uint16_t>(type_low_ver >> 8);
+  return static_cast<uint16_t>(type_msb | type_lsb);
+}
+
+/// The version byte of the same four-byte reply header. See apdu_object_type().
+inline uint8_t apdu_object_version(uint16_t type_low_ver) {
+  return static_cast<uint8_t>(type_low_ver & 0xFF);
+}
 
 /// Human-readable acknowledge, for logs. Kept beside the enum so a new kind
 /// cannot be added without a name.

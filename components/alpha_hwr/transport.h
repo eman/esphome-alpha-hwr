@@ -190,6 +190,14 @@ class Transport {
     // Expected reply identity. NOT an Object/Sub ID -- see send_command().
     // expect_type_low_ver = (TypeL << 8) | Version (reply bytes 8-9)
     // expect_type_high    = TypeH                  (reply bytes 6-7)
+    //
+    // And they are not the type and the version either: the split falls one
+    // byte off that boundary. Correct for matching, meaningless to read. Both
+    // names are accurate about what the fields HOLD -- two byte-pairs -- and
+    // that is exactly how they ended up in a format string as an object and a
+    // sub-id (issue #281). Anything a human reads goes through
+    // protocol::apdu_object_type() / apdu_object_version(), which decode at the
+    // real boundary; the pair form stays here, in the matcher, where it works.
     uint16_t expect_type_low_ver{0};
     uint16_t expect_type_high{0};
     CommandCallback callback{nullptr};
@@ -198,6 +206,25 @@ class Transport {
     bool waiting_for_response{false};
     bool allow_register_read{false};  // When true, don't filter register-read OpSpecs
     bool expect_short_ack{false};     // When true, disables the Class 10 wildcard matching path
+    /// The caller declares that a head-only answer to its READ is possible, so
+    /// a short Class 10 frame carrying a refusal may complete it as a failure
+    /// instead of being left to time out (issue #283).
+    ///
+    /// Opt-in, and that is the whole design. #279 tried this as an unconditional
+    /// branch and a skeptic pass reproduced three failures, the disqualifying
+    /// one being that TelemetryService queues its five Class 10 reads with NO
+    /// callback: they never enter AWAITING_RESPONSE, never record a reply debt,
+    /// and a refusal to one of them arrives orphaned while the next read is in
+    /// flight -- so the branch completed an innocent read as a failure, and did
+    /// so most on exactly the pumps it was written for, since a pump that
+    /// refuses reads is a pump that generates these orphans.
+    ///
+    /// Requiring the declaration is #253's principle: only a caller that knows a
+    /// head-only answer is possible participates in attribution. It does not
+    /// make a late orphan impossible -- nothing can, since a Class 10 refusal
+    /// carries no request identifier -- it bounds who can be hurt by one to the
+    /// callers that asked.
+    bool expect_short_read_refusal{false};
     // When true, silence is not worth a warning: the caller's verdict comes from
     // a readback, not from this acknowledgement. It does NOT mean silence is
     // expected -- every Class 10 SET in the captures is answered -- and it has
@@ -215,6 +242,9 @@ class Transport {
   Transport();
 
   void set_write_callback(WriteCallback callback) { write_callback_ = callback; }
+
+  /// Frames dropped for a bad CRC since boot (issue #260). See crc_drops_.
+  uint32_t crc_drops() const { return crc_drops_; }
 
   /**
    * Process transport state machine and command queue.
@@ -253,7 +283,8 @@ class Transport {
   void send_command(const std::vector<uint8_t>& packet, uint16_t expect_type_low_ver = 0,
                     uint16_t expect_type_high = 0, CommandCallback callback = nullptr,
                     uint32_t timeout_ms = 3000, bool allow_register_read = false,
-                    bool expect_short_ack = false, bool quiet_timeout = false);
+                    bool expect_short_ack = false, bool quiet_timeout = false,
+                    bool expect_short_read_refusal = false);
 
   /**
    * Helper to build and queue a command directly from an APDU.
@@ -268,7 +299,8 @@ class Transport {
                          uint16_t expect_type_low_ver = 0, uint16_t expect_type_high = 0,
                          CommandCallback callback = nullptr,
                          uint32_t timeout_ms = 3000, bool allow_register_read = false,
-                         bool expect_short_ack = false, bool quiet_timeout = false);
+                         bool expect_short_ack = false, bool quiet_timeout = false,
+                         bool expect_short_read_refusal = false);
 
   /**
    * Set callback for complete packets.
@@ -448,9 +480,27 @@ class Transport {
   bool owed_pending_{false};
   uint32_t owed_since_ms_{0};
 
+  /// Frames dropped for a bad CRC, since boot (issue #260).
+  ///
+  /// A drop used to leave one ESP_LOGW and nothing else, so a link quietly
+  /// shedding frames looked from outside like a component that occasionally
+  /// times out for no reason -- and the CRC check is doing load-bearing work,
+  /// since before it the command-response path parsed every readback that
+  /// decides a write verdict from unverified bytes.
+  ///
+  /// Deliberately NOT cleared by reset(): a disconnect says nothing about how
+  /// many frames the radio has corrupted, and the entity that publishes this is
+  /// total_increasing so a measurement run survives the reconnects it will meet.
+  uint32_t crc_drops_{0};
+
   /// Is a reply to an abandoned command still plausibly in flight? Clears an
   /// expired debt, so it is not const.
   bool stale_reply_possible_();
+
+  /// Pay one owed reply with the frame in hand, and mark `cmd` as having had a
+  /// frame withheld. See the definition for why both short-frame branches share
+  /// it (issue #248, issue #283).
+  void consume_owed_reply_(Command &cmd);
 
   /// Record that a command gave up without its reply. `already_suppressed` is
   /// that command's own flag: when set, its debt was collected by the

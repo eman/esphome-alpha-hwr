@@ -405,7 +405,21 @@ void ControlService::read_one_limiter_(uint16_t sub, bool is_config,
       // Same 3 s as the setpoint ranges, and for the same reason: nothing waits
       // on these, and five chained reads is five timeouts on a pump that does
       // not implement them.
-      3000);
+      3000, /*allow_register_read=*/false, /*expect_short_ack=*/false,
+      /*quiet_timeout=*/false,
+      // This is the caller issue #283 was written for. Walking the limiter
+      // family on real hardware, sub-ids 602-619, 622-639 and 642-659 all answer
+      // OPERATION_FAILED -- a head-only Class 10 frame that matched nothing, so
+      // each declined read paid its whole 3 s timeout and then reported the same
+      // "no response" a genuinely silent pump reports. Fifty-four of them on one
+      // sweep, read as "the pump ignores these", which was wrong.
+      //
+      // The declaration is safe here in the way the field's note requires: this
+      // read has a callback, so it enters AWAITING_RESPONSE and records a reply
+      // debt, and the chain is strictly sequential -- read_limiters() stops at
+      // the first failure precisely because these records share a type code and
+      // a late reply would otherwise be cached against the wrong limiter.
+      /*expect_short_read_refusal=*/true);
 }
 
 void ControlService::read_limiters(std::function<void(bool)> callback) {
@@ -539,7 +553,13 @@ void ControlService::read_one_setpoint_range_(ControlMode mode, uint16_t sub,
       },
       // Shorter than the 5 s config reads. Nothing waits on these, and four of
       // them chained is four timeouts on a pump that does not answer them.
-      3000);
+      3000, /*allow_register_read=*/false, /*expect_short_ack=*/false,
+      /*quiet_timeout=*/false,
+      // Declared for the same reason as the limiter chain (issue #283): four
+      // optional reads on a pump that may not implement them, each with a
+      // callback and each strictly sequential, so a decline should cost a log
+      // line rather than three seconds and an ambiguous "no response".
+      /*expect_short_read_refusal=*/true);
 }
 
 void ControlService::read_setpoint_ranges(std::function<void(bool)> callback) {
@@ -699,6 +719,13 @@ bool ControlService::get_mode_async(std::function<void(bool, ControlMode)> on_co
                          control_source);
               }
 
+              // Captured BEFORE anything below writes to them, because they are
+              // what control_readback_changed() compares against to decide
+              // whether this readback observed anything move (issue #265).
+              const float setpoint_before = get_setpoint_for_mode(reported);
+              const bool had_prior_mode = mode_valid_;
+              const ControlMode prior_mode = current_mode_;
+
               // The reported setpoint belongs to whatever mode the pump is
               // ACTUALLY in right now, so cache it into that mode's own slot
               // regardless of whether we keep current_mode_ optimistic below. This
@@ -736,12 +763,36 @@ bool ControlService::get_mode_async(std::function<void(bool, ControlMode)> on_co
               current_mode_ = reported;
               mode_valid_ = true;
 
-              ESP_LOGI(TAG, "Control mode updated to %d (%s), setpoint=%.2f",
-                control_mode_byte, get_mode_name(current_mode_), get_setpoint_for_mode(current_mode_));
+              // Issue #265. Two separate defects lived in the old line:
+              //
+              // "Updated to" claimed a state change on a READ path. This is
+              // get_mode_async()'s readback handler, and most of its calls are
+              // the periodic one driven by control_state_poll_interval, where
+              // nothing changed at all. A reader scanning for changes had no way
+              // to tell a poll from a real transition without diffing
+              // consecutive lines. "Control mode is ..." says what happened.
+              //
+              // And it was the highest-frequency line in a normal build -- on an
+              // idle pump essentially the only recurring INFO line, twice a
+              // minute, ~2,880 a day, every one identical. That is the same load
+              // shape publish_gate.h exists for one layer over (issue #127), and
+              // the gate got applied to the entity publishes and not to the log.
+              // So: INFO when something moved, DEBUG when it did not. The first
+              // reading after a connect counts as a move (mode_valid_ was false),
+              // which is what keeps the state visible at INFO once per link.
+              const float setpoint_now = get_setpoint_for_mode(current_mode_);
+              if (control_readback_changed(had_prior_mode, prior_mode, current_mode_,
+                                           setpoint_before, setpoint_now)) {
+                ESP_LOGI(TAG, "Control mode is %d (%s), setpoint=%.2f",
+                  control_mode_byte, get_mode_name(current_mode_), setpoint_now);
+              } else {
+                ESP_LOGD(TAG, "Control mode is %d (%s), setpoint=%.2f (unchanged)",
+                  control_mode_byte, get_mode_name(current_mode_), setpoint_now);
+              }
 
               // Notify mode change
               if (mode_change_callback_) {
-                mode_change_callback_(current_mode_, operation_mode, get_setpoint_for_mode(current_mode_));
+                mode_change_callback_(current_mode_, operation_mode, setpoint_now);
               }
 
               if (on_complete) {

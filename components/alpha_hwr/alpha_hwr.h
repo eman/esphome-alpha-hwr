@@ -293,6 +293,9 @@ public:
   void set_link_watch_time_sensor(sensor::Sensor *sensor) {
     link_watch_time_sensor_ = sensor;
   }
+  void set_link_crc_drops_sensor(sensor::Sensor *sensor) {
+    link_crc_drops_sensor_ = sensor;
+  }
   void set_operating_hours_sensor(sensor::Sensor *sensor) {
     operating_hours_sensor_ = sensor;
   }
@@ -589,6 +592,13 @@ private:
   sensor::Sensor *link_watch_time_sensor_{nullptr};
   uint32_t link_watch_time_published_{0xFFFFFFFFu};
   uint32_t link_watch_time_publish_ms_{0};
+  // Bad-CRC frame drops (issue #260). A companion to the gap histogram rather
+  // than part of it: the histogram says how long the link went quiet, this says
+  // how many frames arrived corrupted while it was not. Both are needed to tell
+  // "the pump stopped answering" from "the answers are arriving broken", which
+  // present identically as an unexplained write timeout.
+  sensor::Sensor *link_crc_drops_sensor_{nullptr};
+  uint32_t link_crc_drops_published_{0xFFFFFFFFu};
   void publish_link_diagnostics_(uint32_t now_ms);
   /// The largest threshold that actually has a sensor attached, in ms; 0 when
   /// no rung is configured.

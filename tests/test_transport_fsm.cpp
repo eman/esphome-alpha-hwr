@@ -368,6 +368,49 @@ static void test_bad_crc_frame_is_dropped() {
   TEST_ASSERT(packets.size() == 1, "a frame with a garbage CRC is dropped");
 }
 
+// Issue #260: the drop is counted, not merely logged.
+//
+// Asserted in both directions in one run, because a counter that only ever goes
+// up is as useless as one that never does: a "drops" number that also counts
+// sound frames cannot tell a noisy link from a busy one, which is the entire
+// question the counter exists to answer.
+static void test_bad_crc_drops_are_counted() {
+  esphome::alpha_hwr::core::Transport transport;
+  std::vector<std::vector<uint8_t>> packets;
+  transport.set_packet_callback([&packets](const uint8_t *d, size_t n) {
+    packets.push_back(std::vector<uint8_t>(d, d + n));
+  });
+
+  TEST_ASSERT(transport.crc_drops() == 0, "#260: the counter starts at zero");
+
+  auto good = frame_with_lead_byte(0x11);
+  transport.on_notification(good.data(), good.size());
+  TEST_ASSERT(packets.size() == 1 && transport.crc_drops() == 0,
+              "#260: a sound frame is delivered and does not move the counter");
+
+  auto corrupt = good;
+  corrupt[10] ^= 0xFF;
+  transport.on_notification(corrupt.data(), corrupt.size());
+  TEST_ASSERT(transport.crc_drops() == 1, "#260: a bad-CRC frame increments it");
+
+  auto garbage = good;
+  garbage[garbage.size() - 2] ^= 0xAA;
+  transport.on_notification(garbage.data(), garbage.size());
+  TEST_ASSERT(transport.crc_drops() == 2, "#260: and it accumulates");
+
+  // A second sound frame after the drops, so the test cannot pass by counting
+  // every frame that arrives once a first one has failed.
+  transport.on_notification(good.data(), good.size());
+  TEST_ASSERT(packets.size() == 2 && transport.crc_drops() == 2,
+              "#260: a sound frame after a drop still does not move it");
+
+  // Not cleared by a disconnect. reset() fails the command queue; it says
+  // nothing about how many frames the radio corrupted, and the entity is
+  // total_increasing precisely so a measurement run survives a reconnect.
+  transport.reset();
+  TEST_ASSERT(transport.crc_drops() == 2, "#260: reset() does not clear the count");
+}
+
 // A notification carrying more than one frame's worth of bytes must dispatch
 // the first frame at its DECLARED length, not the whole buffer. The completion
 // test is `>=`, so the surplus sits in the reassembly buffer; it is outside
@@ -393,6 +436,192 @@ static void test_trailing_bytes_are_trimmed() {
     TEST_ASSERT(packets[0].size() == first.size(),
                 "  ...trimmed to the declared frame length, not the whole buffer");
   }
+}
+
+// ---------------------------------------------------------------------------
+// Issue #283: a Class 10 read the pump DECLINES completes promptly, and only
+// for a caller that declared it.
+//
+// The pump answers a read it cannot fulfil with the same nine bytes a write
+// acknowledgement uses -- `24 05 F8 E7 0A 01 04 EE 26`, head acknowledge OK
+// with OPERATION_FAILED below. That frame matched nothing: short_ack_shape
+// requires the queued command to be a SET, and the len < 11 floor dropped it.
+// The read waited out its whole timeout and reported the same "no response" a
+// silent pump reports.
+//
+// Each case below is a constraint the withdrawn #279 branch failed.
+// ---------------------------------------------------------------------------
+
+// The refusal exactly as the pump sends it: head 0x01 (acknowledge OK, one
+// payload byte), payload 0x04 = OPERATION_FAILED.
+static std::vector<uint8_t> class10_refusal(uint8_t head, uint8_t payload, bool with_payload) {
+  std::vector<uint8_t> f{0x24, 0x00, 0xF8, 0xE7, 0x0A, head};
+  if (with_payload) f.push_back(payload);
+  f.push_back(0x00);
+  f.push_back(0x00);
+  f[1] = static_cast<uint8_t>(f.size() - 4);
+  return with_crc(std::move(f));
+}
+
+namespace {
+struct ReadRig {
+  esphome::alpha_hwr::core::Transport transport;
+  int callbacks = 0;
+  bool success = false;
+  size_t bytes_handed_back = 0;
+
+  // `apdu_head` is the REQUEST's operation: 0x03 GET, 0xC1 INFO, 0x81 SET.
+  void queue(bool declare_refusal, uint8_t apdu_head = 0x03) {
+    transport.set_write_callback([](const uint8_t *, size_t) { return true; });
+    const uint8_t apdu[5] = {0x0A, apdu_head, 86, 0x02, 0x5A};
+    transport.send_apdu_command(
+        apdu, 5, /*expect_type_low_ver=*/0x7F01, /*expect_type_high=*/0x0003,
+        [this](bool ok, const uint8_t *data, size_t len) {
+          callbacks++;
+          success = ok;
+          bytes_handed_back = (data != nullptr) ? len : 0;
+        },
+        /*timeout_ms=*/3000, /*allow_register_read=*/false, /*expect_short_ack=*/false,
+        /*quiet_timeout=*/false, /*expect_short_read_refusal=*/declare_refusal);
+    for (int i = 0; i < 4; i++) { mock_millis += 51; transport.loop(); }
+  }
+};
+}  // namespace
+
+static void test_declined_read_completes_when_declared() {
+  ReadRig rig;
+  rig.queue(/*declare_refusal=*/true);
+
+  auto refusal = class10_refusal(0x01, 0x04, true);
+  TEST_ASSERT(refusal.size() == 9, "#283: the hardware refusal is nine bytes");
+  rig.transport.on_notification(refusal.data(), refusal.size());
+
+  TEST_ASSERT(rig.callbacks == 1, "#283: a declared read completes on the refusal");
+  TEST_ASSERT(!rig.success, "#283: ...as a failure, since no data was returned");
+  // The distinction that matters more than the seconds. A timeout completes
+  // through fail_front_command_(), which passes nullptr -- so a caller can tell
+  // "the pump declined" from "the pump said nothing" without a signature change.
+  TEST_ASSERT(rig.bytes_handed_back == 9,
+              "#283: ...and the frame is handed back, unlike a timeout's nullptr");
+}
+
+static void test_undeclared_read_is_left_alone() {
+  // The disqualifying failure of #279, in the small: TelemetryService's reads do
+  // not declare this, and an orphan refusal must not complete one of them.
+  ReadRig rig;
+  rig.queue(/*declare_refusal=*/false);
+
+  auto refusal = class10_refusal(0x01, 0x04, true);
+  rig.transport.on_notification(refusal.data(), refusal.size());
+  TEST_ASSERT(rig.callbacks == 0, "#283: an undeclared read is not completed by a refusal");
+
+  // And it still times out the way it always did, rather than being wedged.
+  mock_millis += 4000;
+  rig.transport.loop();
+  TEST_ASSERT(rig.callbacks == 1 && !rig.success,
+              "#283: ...it times out as before");
+}
+
+static void test_refusal_branch_requires_a_get() {
+  // `apdu_op(...) == GET`, not `!apdu_is_set(...)`. There are three operations,
+  // and the negation also catches INFO -- the log would then say "read declined"
+  // about one.
+  ReadRig rig;
+  rig.queue(/*declare_refusal=*/true, /*apdu_head=*/0xC1);  // INFO
+
+  auto refusal = class10_refusal(0x01, 0x04, true);
+  rig.transport.on_notification(refusal.data(), refusal.size());
+  TEST_ASSERT(rig.callbacks == 0, "#283: an INFO request is not a declined read");
+}
+
+static void test_refusal_branch_has_an_upper_length_bound() {
+  // #279 had no ceiling. Byte 5 is the FIRST APDU's length on a multi-APDU
+  // telegram (#226), so without one, any Class 10 telegram of any size whose
+  // first APDU declared 0 or 1 payload bytes read as a refusal -- and App C.17
+  // makes "first APDU errored, second carries the answer" a documented case.
+  ReadRig rig;
+  rig.queue(/*declare_refusal=*/true);
+
+  // A long telegram whose head byte is the very one the refusal uses.
+  std::vector<uint8_t> long_frame{0x24, 0x00, 0xF8, 0xE7, 0x0A, 0x01, 0x04};
+  while (long_frame.size() < 24) long_frame.push_back(0x33);
+  long_frame.push_back(0x00);
+  long_frame.push_back(0x00);
+  long_frame[1] = static_cast<uint8_t>(long_frame.size() - 4);
+  long_frame = with_crc(std::move(long_frame));
+  TEST_ASSERT(long_frame.size() > 9, "#283: the fixture is longer than a refusal");
+
+  rig.transport.on_notification(long_frame.data(), long_frame.size());
+  TEST_ASSERT(rig.callbacks == 0,
+              "#283: a multi-APDU-length telegram is not read as a refusal");
+}
+
+static void test_an_ambiguous_ok_frame_is_not_a_refusal() {
+  // A head-only frame whose acknowledges are BOTH ok is byte-identical to a
+  // legitimate one-byte data reply, and nothing in it separates the two.
+  // Failing a read on that would trade three seconds for a lie, which is the
+  // trade this issue explicitly refuses.
+  ReadRig rig;
+  rig.queue(/*declare_refusal=*/true);
+
+  auto ok_frame = class10_refusal(0x01, 0x00, true);  // Class 10 ack OK
+  rig.transport.on_notification(ok_frame.data(), ok_frame.size());
+  TEST_ASSERT(rig.callbacks == 0, "#283: an all-ok short frame is left alone");
+}
+
+static void test_head_refusal_is_reported_without_reading_the_status_byte() {
+  // When the head's acknowledge is NOT ok, the byte after it is the offending
+  // Data Item's ID and not a Class 10 status -- the two readings are told apart
+  // by the head, never by the byte (#208). The withdrawn branch read it
+  // unconditionally as a status. Both shapes must still complete the read.
+  ReadRig unknown_item;
+  unknown_item.queue(/*declare_refusal=*/true);
+  auto item = class10_refusal(0x81, 0x00, true);  // Unknown Data Item, ID 0x00
+  unknown_item.transport.on_notification(item.data(), item.size());
+  TEST_ASSERT(unknown_item.callbacks == 1 && !unknown_item.success,
+              "#283: Unknown Data Item completes the read as a failure");
+
+  // Unknown Class declares a zero-length payload, so its frame is 8 bytes, not
+  // 9 -- which is why the length window is [8, 9] and not == 9.
+  ReadRig unknown_class;
+  unknown_class.queue(/*declare_refusal=*/true);
+  auto klass = class10_refusal(0x40, 0x00, false);
+  TEST_ASSERT(klass.size() == 8, "#283: an Unknown Class refusal is eight bytes");
+  unknown_class.transport.on_notification(klass.data(), klass.size());
+  TEST_ASSERT(unknown_class.callbacks == 1 && !unknown_class.success,
+              "#283: Unknown Class completes the read as a failure");
+}
+
+static void test_refusal_pays_a_standing_reply_debt_first() {
+  // Same rule the short-ACK branch follows (#248): a command that gave up is
+  // still owed an answer, and that answer arrives in exactly this shape. Claim
+  // it for the debt rather than for the live read, or one late reply costs every
+  // match that follows it.
+  ReadRig rig;
+  rig.queue(/*declare_refusal=*/true);
+
+  // Let the first read time out, which records the debt.
+  mock_millis += 4000;
+  rig.transport.loop();
+  TEST_ASSERT(rig.callbacks == 1, "#283: the first read timed out");
+
+  // A second read goes out on the same transport, and then the FIRST read's
+  // refusal turns up late, inside the 500 ms stale-reply window.
+  rig.queue(/*declare_refusal=*/true);
+  auto refusal = class10_refusal(0x01, 0x04, true);
+  rig.transport.on_notification(refusal.data(), refusal.size());
+
+  TEST_ASSERT(rig.callbacks == 1,
+              "#283: a late refusal pays the standing debt, not the live read");
+
+  // The debt is now settled, so the NEXT refusal belongs to the live read and
+  // completes it. This is what makes the previous assertion discriminating: with
+  // no refusal branch at all the count would also have stayed at 1, and the test
+  // would have passed for the wrong reason. It is also the #248 property -- at
+  // most ONE match is lost per late reply, never an unbounded chain of them.
+  rig.transport.on_notification(refusal.data(), refusal.size());
+  TEST_ASSERT(rig.callbacks == 2 && !rig.success && rig.bytes_handed_back == 9,
+              "#283: the next refusal completes the live read; the debt cost one frame");
 }
 
 static void test_bad_crc_cannot_answer_a_command() {
@@ -1745,6 +1974,14 @@ int main() {
   test_trailing_bytes_are_trimmed();
   test_mode_read_matches_without_fallback();
   test_bad_crc_frame_is_dropped();
+  test_bad_crc_drops_are_counted();
+  test_declined_read_completes_when_declared();
+  test_undeclared_read_is_left_alone();
+  test_refusal_branch_requires_a_get();
+  test_refusal_branch_has_an_upper_length_bound();
+  test_an_ambiguous_ok_frame_is_not_a_refusal();
+  test_head_refusal_is_reported_without_reading_the_status_byte();
+  test_refusal_pays_a_standing_reply_debt_first();
   test_bad_crc_cannot_answer_a_command();
   test_length_collision_does_not_veto_a_type_match();
 

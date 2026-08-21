@@ -41,6 +41,43 @@ enum class ControlMode : uint8_t {
 };
 
 /**
+ * Did a control-state readback observe anything that moved? (issue #265)
+ *
+ * `get_mode_async()`'s handler is a READ path, and most of its calls are the
+ * periodic one driven by `control_state_poll_interval`. It used to log every
+ * one of them at INFO as "Control mode updated to ...", which claimed a
+ * transition that had not happened and made it the highest-frequency line in a
+ * normal build -- on an idle pump, essentially the only recurring INFO line,
+ * twice a minute, ~2,880 a day, every one identical.
+ *
+ * The decision lives here rather than inline for the same reason
+ * response_match.h exists: a host test can assert the shipped predicate instead
+ * of re-deriving it, and the mock ESP_LOGx macros compile to nothing, so the
+ * log level itself is not observable on the host.
+ *
+ * The two things it has to get right:
+ *
+ * - **The first reading after a connect counts as a move.** `had_prior_mode` is
+ *   the service's `mode_valid_`, false until the pump has been read once, so
+ *   the state reaches the log at INFO once per link rather than being gated
+ *   away against a cache that was never populated.
+ * - **NAN is a value here, not a missing one.** `get_setpoint_for_mode()`
+ *   returns NAN for the modes with no scalar setpoint (DHW, temperature range,
+ *   AutoAdapt), and `NAN != NAN`, so a plain `!=` would report a change on
+ *   every single poll of exactly those modes -- reinstating the defect for the
+ *   pumps most likely to sit in one mode indefinitely.
+ */
+inline bool control_readback_changed(bool had_prior_mode, ControlMode prior_mode,
+                                     ControlMode reported_mode, float prior_setpoint,
+                                     float reported_setpoint) {
+  if (!had_prior_mode) return true;
+  if (prior_mode != reported_mode) return true;
+  if (std::isnan(prior_setpoint) != std::isnan(reported_setpoint)) return true;
+  if (std::isnan(prior_setpoint)) return false;
+  return prior_setpoint != reported_setpoint;
+}
+
+/**
  * Operation Mode Enumeration.
  * 
  * Defines the pump's operational state (running, stopped, etc.).
