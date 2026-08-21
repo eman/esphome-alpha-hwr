@@ -415,12 +415,29 @@ MUTATIONS=(
 # fixtures are transcribed from a capture now, which is what makes this mutation
 # fail rather than merely shift both sides together.
 "class7-header-length|components/alpha_hwr/device_info_service.cpp|      static const size_t HEADER_LEN = 6;|      static const size_t HEADER_LEN = 7;"
-# The length guard is the only thing standing between a runt frame and an
-# unsigned underflow: string_len is size_t, so a frame under 8 bytes wraps it to
-# ~1.8e19 and the copy loop reads ~127 bytes past the frame. transport.cpp
-# dispatches Class 3/7 on len >= 5, so 5-, 6- and 7-byte frames do reach the
-# callback. A skeptic pass found this relaxation left the whole suite green.
-"class7-runt-guard-relaxed|components/alpha_hwr/device_info_service.cpp|      static const size_t MIN_FRAME_LEN = HEADER_LEN + CRC_LEN;|      static const size_t MIN_FRAME_LEN = 5;"
+# The length guard stands between a runt frame and an unsigned underflow:
+# string_len is size_t, so a frame under 8 bytes wraps it to ~1.8e19 and the copy
+# loop reads ~127 bytes past the frame.
+#
+# It used to be mutated by RELAXING it (to `len < 5`), because transport.cpp
+# dispatched Class 3/7 on len >= 5 and 5-, 6- and 7-byte frames really did reach
+# this callback. Issue #278 closed that: on_notification() now refuses a frame
+# start whose length byte is below 4, and 4 is the structural floor -- the field
+# counts DA + SA + APDU, so 1 + 1 + 2. Every frame that now reaches a service is
+# therefore at least 8 bytes, which is exactly what this guard checks, and the
+# relaxation became an equivalent mutant: CI found it surviving at 266/267.
+#
+# The guard stays. It is a memory-safety check in a unit that should not have to
+# assume anything about the transport's floor, and the two protections masking
+# each other's mutations is a reason to document the redundancy, not to delete
+# half of it. What replaces the entry is the mutation the redundancy does NOT
+# mask: a guard set too HIGH rejects the 9-byte captured frames the decode tests
+# use, which nothing else would catch.
+#
+# Proving the guard is not too LOW now needs the parser reachable without a
+# transport in front of it. That is a real gap, and it is filed rather than
+# papered over.
+"class7-runt-guard-too-strict|components/alpha_hwr/device_info_service.cpp|      static const size_t MIN_FRAME_LEN = HEADER_LEN + CRC_LEN;|      static const size_t MIN_FRAME_LEN = 20;"
 "response-crc-enforcement|components/alpha_hwr/transport.cpp|if (!protocol::frame_crc_valid(reassembly_buffer_.data(), frame_len)) {|if (false) {"
 "response-crc-trim|components/alpha_hwr/transport.cpp|if (expected_packet_length_ >= 4 && frame_len > expected_packet_length_) {|if (false) {"
 "register-read-vetoes-type-match|components/alpha_hwr/transport.cpp|bool wildcard_command = (cmd.expect_type_low_ver == 0x0000 && cmd.expect_type_high == 0x0000);|bool wildcard_command = true;"
