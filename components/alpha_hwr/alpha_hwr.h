@@ -1187,7 +1187,12 @@ public:
   /// Not persisted: the flag initialises false, so a node coming back from a
   /// power cut is connected. A node that refuses to talk to the pump because
   /// someone flipped a switch a week ago is a worse failure than the
-  /// inconvenience this solves.
+  /// inconvenience this solves -- and it is also the only way out if the API is
+  /// unavailable, since there is no timeout and no auto-release.
+  ///
+  /// Suspending is NOT idempotent, deliberately: the teardown is fire-and-forget
+  /// and can fail to take, so a second call retries it. Releasing is, because
+  /// its side effects are destructive on repeat. See the guard.
   void set_suspended(bool suspended);
   bool is_suspended() const { return suspended_; }
 

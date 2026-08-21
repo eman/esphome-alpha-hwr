@@ -240,16 +240,40 @@ Neither use needs the bond cleared. **Do not clear the bond to free the pump** �
 clearing the ESP's bond strands it until someone re-pairs at the pump itself.
 
 While suspended, **Pump Link Status** reads `Suspended` and **Pump Link Fault**
-reads `None`. Neither is a fault. The fault stays masked through the reconnect
-until the pump is READY again, so releasing the switch does not publish the
-node's own `Local Host Terminated (0x16)` for the ~15 s it takes to get back —
-which is exactly the window an automation watches.
+reads `None`. Neither is a fault.
+
+Releasing forgets the node's own `Local Host Terminated (0x16)` teardown, so it
+is not republished across the reconnect — but **only** that reason. A fault that
+was already showing when you suspended survives the toggle, which matters
+because a latched fault is often why you are reaching for the switch; and a
+genuine failure of the reconnect itself publishes normally rather than being
+suppressed.
 
 **Which package provides it.** The switch ships in `alpha_hwr_pairing.yaml`,
-alongside the link diagnostics, because that is the package a bonded node loads
-— and a bonded, connected node is the one holding the pump. If you build a
-configuration from `alpha_hwr_base.yaml` instead, add the switch yourself or
-load the pairing package.
+alongside the link diagnostics it acts on.
+
+If you build from `alpha_hwr_base.yaml` instead you do not get it — and you
+still hold the pump, because it is the *connection* that holds it, not the bond.
+A base-only node connects, reaches `Pump Ready`, and denies the pump to
+everything else exactly as a bonded one does. Load the pairing package, or add
+the switch yourself:
+
+```yaml
+switch:
+  - platform: template
+    name: "Suspend Pump Link"
+    icon: "mdi:bluetooth-off"
+    optimistic: false
+    lambda: 'return id(pump).is_suspended();'
+    turn_on_action:
+      - lambda: 'id(pump).set_suspended(true);'
+    turn_off_action:
+      - lambda: 'id(pump).set_suspended(false);'
+```
+
+**The switch is the only way back.** There is no timeout and no auto-release, so
+if the Home Assistant API is unavailable while suspended, the way out is to
+restart the node — the flag is not persisted, so it comes back connected.
 
 **Not persisted.** A reboot comes back connected. A node that refuses to talk to
 the pump after a power cut, because of a switch flipped a week ago, is a worse

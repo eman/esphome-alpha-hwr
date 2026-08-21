@@ -1244,8 +1244,8 @@ void test_a_disconnect_does_not_publish_a_drift_reading() {
 // it and the Grundfos GO app cannot. Before this the only way to hand the pump
 // over was to remove power from the node.
 //
-// The two calls are trivial. What needs testing is the three guards, because
-// without them the component undoes its own switch: the reconnect-settle path
+// The two calls are trivial. What needs testing is the guards, because without
+// them the component undoes its own switch: the reconnect-settle path
 // (`reconnect_settle_time`, on by default) turns auto-connect off on a
 // disconnect and schedules a timer that turns it back on. A suspend is a
 // disconnect, so it trips that path with its own teardown and the flag comes
@@ -1560,10 +1560,228 @@ void test_suspending_a_ready_link_reports_immediately_and_once() {
               "the status flips on the click, and Suspended outranks the ready "
               "rung -- the session is still READY at this instant");
 
-  // A second identical call must not tear the link down again.
+  // A second click RE-ISSUES the teardown. The first is fire-and-forget and can
+  // fail to take -- esp_ble_gattc_close() tears down the ACL only if no other
+  // client holds it, and can complete with no DISCONNECT at all -- so a switch
+  // that reads ON over a live link must still be actionable. Releasing twice is
+  // the case that must stay idempotent, and it is asserted below.
   r.component.set_suspended(true);
-  TEST_ASSERT(r.client.mock_disconnect_calls() == before + 1,
-              "  ...and suspending twice disconnects once");
+  TEST_ASSERT(r.client.mock_disconnect_calls() == before + 2,
+              "  ...and suspending again retries the teardown rather than "
+              "swallowing the click");
+
+  r.component.set_suspended(false);
+  const int after_release = r.client.mock_disconnect_calls();
+  r.component.set_suspended(false);
+  TEST_ASSERT(r.client.mock_disconnect_calls() == after_release,
+              "  ...while releasing twice is a no-op, because its side effects "
+              "are destructive on repeat");
+}
+
+// Disarming the gap sampler at the click is not enough on its own.
+//
+// Two events re-arm it inside the asynchronous teardown window, and the
+// DISCONNECT behind them then samples -- moving `truncated_`, which is the
+// trust check on every other number in the histogram and the exact statistic
+// the disarm exists to protect.
+void test_events_in_the_teardown_window_do_not_re_arm_the_sampler() {
+  std::cout << "\n=== A suspension survives events in its teardown window ==="
+            << std::endl;
+
+  // Path A: a notification. LinkGapSampler::on_inbound() SELF-ARMS when it
+  // finds the sampler disarmed, by design -- so one frame arriving between the
+  // click and the disconnect undoes the disarm.
+  {
+    Rig r;
+    arm_the_settle_path(r);
+    r.setup();
+    r.connect_and_subscribe();
+    r.advance(20000);
+    const float before = r.gaps_truncated.state;
+
+    r.component.set_suspended(true);
+    auto frame = with_crc({0x24, 0x05, 0xF8, 0xE7, 0x0A, 0x01, 0x00, 0x00, 0x00});
+    r.notify(frame);                       // lands in the teardown window
+    r.disconnect(ESP_GATT_CONN_TERMINATE_LOCAL_HOST);
+    r.advance(20000);                      // long enough for any sample to publish
+
+    TEST_ASSERT(r.gaps_truncated.state == before,
+                "a notification arriving between the click and the disconnect "
+                "does not re-arm the sampler");
+  }
+
+  // Path B: an OPEN. BLEClientBase::disconnect() cannot close a link with no
+  // conn_id yet -- it sets want_disconnect_ and returns -- and the OPEN that
+  // then arrives is still dispatched to every node. Reachable whenever the
+  // switch is flipped between connections.
+  {
+    Rig r;
+    arm_the_settle_path(r);
+    r.setup();
+    r.connect_and_subscribe();
+    r.advance(20000);
+    r.disconnect(ESP_GATT_CONN_TIMEOUT);   // ordinary drop; sampler closed
+    // Let that drop's count PUBLISH before taking the baseline. The sensor only
+    // updates on a poll, so reading it straight after the disconnect captures a
+    // stale value and the assertion then measures publish timing rather than
+    // the counter -- which is how the first draft of this case "failed".
+    r.advance(20000);
+    const float before = r.gaps_truncated.state;
+
+    r.component.set_suspended(true);
+    r.open(ESP_GATT_OK);                   // the in-flight connection completes
+    r.disconnect(ESP_GATT_CONN_TERMINATE_LOCAL_HOST);
+    r.advance(20000);
+
+    TEST_ASSERT(r.gaps_truncated.state == before,
+                "an OPEN completing inside the suspension does not re-arm the "
+                "sampler either");
+  }
+}
+
+// A suspension is not a failed connection attempt.
+//
+// The disconnect handler counts one whenever the link had not yet carried a
+// frame -- which is where suspending a just-opened connection lands. Three of
+// them reach LINK_FAIL_K and Pump Link Status publishes "Reconnecting", which
+// an automation reads as a fault.
+void test_suspending_is_not_counted_as_a_failed_attempt() {
+  std::cout << "\n=== Suspending is not a failed connection attempt ==="
+            << std::endl;
+  Rig r;
+  arm_the_settle_path(r);
+  r.setup();
+
+  // Three cycles, each suspending a connection that opened but never carried a
+  // frame. Under the unguarded counter the third publishes "Reconnecting".
+  for (int i = 0; i < 3; i++) {
+    r.connect_and_subscribe();
+    r.component.set_suspended(true);
+    r.disconnect(ESP_GATT_CONN_TERMINATE_LOCAL_HOST);
+    r.advance(1000);
+    r.component.set_suspended(false);
+    r.advance(1000);
+  }
+
+  TEST_ASSERT(r.link_status.state != "Reconnecting",
+              "three suspend cycles do not accumulate into a Reconnecting "
+              "diagnosis about a pump that refused nothing");
+}
+
+// Releasing under an EXISTING fault must not silence the surface for good.
+//
+// clear_last_failure() empties the string. It has to clear the hold with it --
+// every other site that writes last_failure_ resets both, and failure_hold_admits()
+// refuses any later write while a hold outranking NONE is in force. Clearing only
+// the string leaves a surface that reads "None" and can never be written again,
+// because a DATA hold is released only by an inbound notification and a broken
+// link never delivers one.
+//
+// This is the common case rather than the rare one: a latched fault is usually
+// WHY the operator is suspending the link to go look at the pump with something
+// else.
+void test_releasing_under_a_held_fault_does_not_silence_the_surface() {
+  std::cout << "\n=== Release under a held fault leaves it writable ==="
+            << std::endl;
+  Rig r;
+  r.setup();
+  r.connect_and_subscribe();
+  TEST_ASSERT(r.run_until_ready(), "precondition: ready, so the latch is set");
+
+  // Go deaf and let the data watchdog latch its reason, at DATA rank.
+  // The surface shows a held reason only once the link is not healthy, so the
+  // watchdog's recycle has to land before the string is visible -- same shape
+  // as test_the_fault_is_visible_across_the_reconnect_it_describes().
+  r.answer_writes = false;
+  r.advance(120000, 120);
+  r.disconnect(ESP_GATT_CONN_TERMINATE_PEER_USER);
+  r.advance(30000, 30);
+  TEST_ASSERT(r.link_fault.state.find("No data") != std::string::npos,
+              "precondition: a DATA-rank fault is latched and on the surface");
+
+  // The operator suspends to go poke the pump with something else, then releases.
+  r.component.set_suspended(true);
+  r.advance(5000);
+  r.component.set_suspended(false);
+  r.advance(2000);
+
+  // The link keeps failing for real.
+  for (int i = 0; i < 3; i++) {
+    r.connect_and_subscribe();
+    r.advance(2000);
+    r.disconnect(ESP_GATT_CONN_TIMEOUT);
+    r.advance(2000);
+  }
+
+  TEST_ASSERT(r.link_fault.state != "None",
+              "a genuine fault after the release still reaches the surface -- "
+              "the release cleared the hold along with the string, rather than "
+              "leaving a surface nothing can ever write to again");
+
+  // ...and the stronger claim: the pre-existing diagnosis is not erased at all.
+  // Releasing clears only the local-host teardown this component caused. The
+  // worst case for getting this wrong is `Encryption Start Failed (0x61)`,
+  // which docs/configuration.md calls not recoverable over the air and whose
+  // remedy is to walk to the pump with the GO app -- so the switch is reached
+  // for exactly when that string is showing.
+  Rig r2;
+  r2.setup();
+  r2.connect_and_subscribe();
+  TEST_ASSERT(r2.run_until_ready(), "precondition: ready");
+  r2.answer_writes = false;
+  r2.advance(120000, 120);
+  r2.disconnect(ESP_GATT_CONN_TERMINATE_PEER_USER);
+  r2.advance(30000, 30);
+  const std::string latched = r2.link_fault.state;
+  TEST_ASSERT(latched.find("No data") != std::string::npos,
+              "precondition: a real diagnosis is on the surface");
+
+  r2.component.set_suspended(true);
+  r2.advance(5000);
+  r2.component.set_suspended(false);
+  r2.advance(5000);
+
+  TEST_ASSERT(r2.link_fault.state == latched,
+              "the diagnosis that was already showing survives the toggle -- "
+              "the release forgets its own teardown, not somebody else's fault");
+}
+
+// A connection that opens while suspended is torn down again, not adopted.
+//
+// ESPHome reads auto_connect only at advertisement match, and disconnect()
+// cannot close a link with no conn_id yet -- so an in-flight connect completes
+// and the OPEN reaches the component. Adopting it puts the session connected,
+// re-arms the watchdogs, resumes polling against a pump the operator believes
+// they have handed over, and leaves the status reading "Suspended" over a live
+// link: the exact failure the switch exists to prevent, with the UI asserting
+// the opposite.
+void test_an_open_during_a_suspension_is_torn_down_not_adopted() {
+  std::cout << "\n=== An open during a suspension is not adopted ==="
+            << std::endl;
+  Rig r;
+  arm_the_settle_path(r);
+  r.setup();
+  r.connect_and_subscribe();
+  TEST_ASSERT(r.run_until_ready(), "precondition: ready before we suspend");
+
+  r.component.set_suspended(true);
+  r.disconnect(ESP_GATT_CONN_TERMINATE_LOCAL_HOST);
+  r.advance(2000);
+  TEST_ASSERT(!r.ready_is_on(), "precondition: Pump Ready went off");
+
+  // The in-flight connect completes anyway.
+  const int disconnects_before = r.client.mock_disconnect_calls();
+  r.open(ESP_GATT_OK);
+  r.advance(60000, 60);
+
+  TEST_ASSERT(r.client.mock_disconnect_calls() > disconnects_before,
+              "the open is torn down again rather than adopted");
+  TEST_ASSERT(!r.ready_is_on(),
+              "  ...so the node does not come back READY against a pump it was "
+              "asked to let go of");
+  TEST_ASSERT(r.link_status.state == "Suspended",
+              "  ...and the status still says Suspended, which is true rather "
+              "than a claim made over a live link");
 }
 
 int main() {
@@ -1594,6 +1812,10 @@ int main() {
   test_releasing_inside_a_settle_window_does_not_reconnect_early();
   test_suspending_does_not_record_an_outage();
   test_suspending_a_ready_link_reports_immediately_and_once();
+  test_events_in_the_teardown_window_do_not_re_arm_the_sampler();
+  test_suspending_is_not_counted_as_a_failed_attempt();
+  test_releasing_under_a_held_fault_does_not_silence_the_surface();
+  test_an_open_during_a_suspension_is_torn_down_not_adopted();
   test_link_gap_baseline_is_published_once_at_zero();
   test_gap_counters_do_not_publish_on_every_tick();
   test_a_quiet_link_fills_the_rungs_end_to_end();

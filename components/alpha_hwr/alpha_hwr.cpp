@@ -111,6 +111,24 @@ void AlphaHwrComponent::setup() {
       });
 
   ble_manager_.set_connection_callback([this]() {
+    // A connection that opens while suspended is one we asked to go away and
+    // that arrived anyway. ESPHome reads auto_connect only at advertisement
+    // match, and BLEClientBase::disconnect() cannot close a link that has no
+    // conn_id yet -- it sets want_disconnect_ and returns -- so an in-flight
+    // connect completes and the OPEN is still dispatched to every node.
+    //
+    // Processing it is worse than useless: the session goes connected, the
+    // watchdogs re-arm, the gap sampler re-arms (defeating the disarm at the
+    // click), polling resumes against a pump the operator believes they have
+    // handed over, and the status still reads "Suspended" over a fully ready
+    // link. Tear it down again instead, and do not touch any of the state
+    // below (issue #243).
+    if (this->suspended_) {
+      ESP_LOGI(TAG, "Connection opened while suspended; tearing it down again");
+      if (this->parent_ != nullptr) this->parent_->set_auto_connect(false);
+      this->ble_manager_.suspend_link();
+      return;
+    }
     // A connection is opening; the settle hold-off (if any) is complete — clear
     // it and cancel any pending settle timer so nothing lingers.
     this->reconnect_settling_ = false;
@@ -135,7 +153,16 @@ void AlphaHwrComponent::setup() {
     // ...and start the gap sampler from the same stamp, so what it reports is
     // what the watchdog acts on. The interval that ends here is not sampled:
     // the link was down for it, and the watchdog does not run on a down link.
-    this->link_gap_.on_open(this->link_last_open_ms_);
+    // Not while suspended. Disarming at the click is not enough on its own,
+    // because ESPHome still dispatches an OPEN that arrives inside the async
+    // teardown window: BLEClientBase::disconnect() cannot close a link that has
+    // no conn_id yet, so it sets want_disconnect_ and returns, and the OPEN it
+    // then receives is still handed to every node. That re-arms the sampler,
+    // and the DISCONNECT behind it samples -- moving `truncated_`, the number
+    // the disarm exists to protect. Reachable exactly when the switch is
+    // flipped between connections, which is the reporter's stated case.
+    if (!this->suspended_)
+      this->link_gap_.on_open(this->link_last_open_ms_);
     this->evaluate_link_status();
   });
 
@@ -207,7 +234,13 @@ void AlphaHwrComponent::setup() {
     // clean drop of a good link (start fresh); otherwise it was a failed attempt.
     if (this->link_reached_ready_) {
       this->link_consecutive_failures_ = 0;
-    } else {
+    } else if (!this->suspended_) {
+      // ...but a suspension is not a failed attempt. Suspending a connection
+      // that opened and has not yet carried a frame -- which is where the
+      // want_disconnect_ path above lands -- counted as one, and three of them
+      // reach LINK_FAIL_K and publish "Reconnecting". An automation reads that
+      // as a fault, which is the thing issue #243 says a suspension must not
+      // be recorded as.
       this->link_consecutive_failures_++;
     }
     this->link_reached_ready_ = false;
@@ -306,7 +339,12 @@ void AlphaHwrComponent::setup() {
         // This feeds the whole distribution, not just the running maximum: the
         // per-threshold counters, how many intervals were cut short rather than
         // ending on their own, and the time they cover. See LinkGapSampler.
-        this->link_gap_.on_inbound(inbound_now);
+        // Same reason as on_open() above, by a second route: on_inbound()
+        // SELF-ARMS when it finds the sampler disarmed (deliberately, see its
+        // comment), so one notification arriving in the teardown window undoes
+        // the disarm and the disconnect behind it samples.
+        if (!this->suspended_)
+          this->link_gap_.on_inbound(inbound_now);
 
         // Data arrived, so whatever the link was doing, it is doing it again --
         // but only frames received while the session is READY count as that
@@ -818,10 +856,17 @@ void AlphaHwrComponent::publish_link_diagnostics_(uint32_t now_ms) {
 //                 failing before READY.
 //   Connecting    not ready, opened within 20s, fewer than 3 failures: a normal
 //                 in-progress attempt (including the first after a clean drop).
-// Diagnostic suspend (issue #243). Two calls and three guards; the guards are
-// the whole of it, because the component otherwise fights its own switch.
+// Diagnostic suspend (issue #243). Two calls; the guards around them are the
+// whole of it, because the component otherwise fights its own switch.
 void AlphaHwrComponent::set_suspended(bool suspended) {
-  if (suspended == this->suspended_) return;
+  // Asymmetric on purpose. RELEASING twice must be a no-op: clear_last_failure()
+  // and the link_last_open_ms_ stamp are both destructive on repeat. SUSPENDING
+  // twice must not be, because the teardown is fire-and-forget and can fail to
+  // take -- esp_ble_gattc_close() tears down the ACL only if no other client
+  // holds it, and can complete with no DISCONNECT at all. A second click is the
+  // operator retrying, and swallowing it leaves them with a switch that reads ON
+  // over a live link and no way to act from the UI (issue #243).
+  if (!suspended && !this->suspended_) return;
   this->suspended_ = suspended;
 
   if (suspended) {
@@ -840,14 +885,12 @@ void AlphaHwrComponent::set_suspended(bool suspended) {
     }
     this->ble_manager_.suspend_link();
   } else {
-    ESP_LOGI(TAG, "Releasing BLE suspend; reconnecting to the pump");
-    // Forget the teardown we asked for, rather than masking the surface until
-    // the pump is ready. Masking was the first cut and it hides too much: a
-    // failed reconnect, an authentication error or a readiness fault after the
-    // release would all read "None", indefinitely if recovery never succeeds.
-    // Clearing the ONE expected reason keeps the self-inflicted 0x16 off the
-    // surface across the reconnect without hiding what replaces it.
-    this->ble_manager_.clear_last_failure();
+    ESP_LOGI(TAG, "Releasing BLE suspend");
+    // Forget the teardown we asked for -- and ONLY that. See the method: masking
+    // until READY hides too much, and clearing unconditionally erases a fault
+    // that was already latched, which is usually the reason the operator
+    // suspended the link in the first place.
+    this->ble_manager_.clear_failure_if_local_teardown();
     // Restart the Unreachable clock. It is `now - link_last_open_ms_ >
     // LINK_UNREACHABLE_MS`, and that stamp only advances while the session is
     // READY -- so it stopped moving the moment we took the link down. Without
@@ -868,11 +911,19 @@ void AlphaHwrComponent::set_suspended(bool suspended) {
     // and being released inside someone else's settle window must not spend
     // that. The settle timer restores auto-connect when it is safe; with
     // suspended_ now false it will.
-    if (this->parent_ != nullptr && !this->reconnect_settling_) {
+    if (this->reconnect_settling_) {
+      // Same defect the settle timer's own log had: say what happens, not what
+      // was asked for. The node does NOT reconnect here -- it waits for an
+      // advertisement plus the settle window.
+      ESP_LOGI(TAG, "...but a reconnect-settle hold is in force; waiting for it "
+                    "rather than reconnecting now");
+    } else if (this->parent_ != nullptr) {
+      ESP_LOGI(TAG, "...reconnecting to the pump");
       this->parent_->set_auto_connect(true);
     }
-    // suspend_fault_mask_ deliberately stays up; see its declaration. It comes
-    // down when the pump is READY again, alongside link_pump_ready_seen_.
+    // Nothing is masked from here on: a genuine failure of this reconnect
+    // publishes normally. That was not true of the first cut, which held the
+    // surface at "None" until READY.
   }
   this->evaluate_link_status();
 }

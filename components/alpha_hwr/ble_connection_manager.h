@@ -123,12 +123,35 @@ class BLEConnectionManager {
   /// nothing about the pump's willingness to pair.
   void suspend_link();
 
-  /// Forget the latched failure reason. For the suspend release (issue #243):
-  /// the reason on the surface is the teardown we asked for, and leaving it
-  /// there would republish it across the reconnect -- while MASKING everything
-  /// until the pump is ready would hide a genuine failure of that reconnect.
-  /// Clearing the one expected reason does neither.
-  void clear_last_failure() { last_failure_.clear(); }
+  /// Forget the latched failure reason IF it is the teardown we asked for.
+  ///
+  /// For the suspend release (issue #243). Two failure modes bracket this, and
+  /// the first draft hit both:
+  ///
+  ///   - masking the surface until the pump is READY hides a failed reconnect,
+  ///     an auth error or a readiness fault -- indefinitely, if recovery never
+  ///     succeeds;
+  ///   - clearing unconditionally erases whatever was already latched. That is
+  ///     not the rare case: a latched fault is usually WHY the operator is
+  ///     suspending the link to go look at the pump with something else. The
+  ///     worst instance is `Encryption Start Failed (0x61)`, which
+  ///     docs/configuration.md calls "not recoverable over the air" and whose
+  ///     remedy is to walk to the pump with the GO app -- so the switch is
+  ///     reached for precisely when that string is showing, and erasing it
+  ///     removes the one diagnosis that names the cause.
+  ///
+  /// So: only the local-host teardown, which is the one this component caused.
+  /// Anything else -- pre-existing or newly arrived -- stays.
+  ///
+  /// The hold comes down with the string. Every other site that writes
+  /// last_failure_ resets both, and failure_hold_admits() refuses later writes
+  /// while a hold is in force, so clearing only the string leaves a surface
+  /// reading "None" that nothing can ever write to again.
+  void clear_failure_if_local_teardown() {
+    if (last_failure_.rfind("Local Host Terminated", 0) != 0) return;
+    last_failure_.clear();
+    failure_hold_ = FailureHold::NONE;
+  }
 
   /// Latch a failure reason WITHOUT touching the link.
   ///

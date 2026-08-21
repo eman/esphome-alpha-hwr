@@ -1226,9 +1226,9 @@ MUTATIONS=(
 "suspend-undone-by-the-reconnect-settle-timer|components/alpha_hwr/alpha_hwr.cpp|    // reading. Raised in review on #285.\n    if (this->suspended_) {|    // reading. Raised in review on #285.\n    if (false) {"
 # A link taken down on purpose is not Unreachable and not a fault. Both of these
 # are what an operator glancing at Home Assistant sees, and what an automation
-# reads -- the fault mask in particular outlasts the suspension deliberately, so
-# releasing does not republish the node's own 0x16 for the ~15 s it takes to get
-# back to Pump Ready.
+# reads -- releasing forgets the node's own 0x16 teardown and nothing else, so a fault
+# that was already showing survives the toggle and a genuine failure of the
+# reconnect still publishes.
 # Releasing a long suspension must restart the Unreachable clock. That rung is
 # `now - link_last_open_ms_ > LINK_UNREACHABLE_MS`, and the stamp only advances
 # while the session is READY, so it stops the moment the link goes down --
@@ -1244,15 +1244,42 @@ MUTATIONS=(
 # because a premature encryption request into a not-ready pump can fail with
 # 0x61 and make ESP-IDF erase the bond -- which strands the pump until someone
 # re-pairs at the pump itself.
-"suspend-release-bypasses-an-active-settle-hold|components/alpha_hwr/alpha_hwr.cpp|    if (this->parent_ != nullptr && !this->reconnect_settling_) {|    if (this->parent_ != nullptr) {"
+"suspend-release-bypasses-an-active-settle-hold|components/alpha_hwr/alpha_hwr.cpp|    if (this->reconnect_settling_) {|    if (false) {"
 # Clearing the ONE expected reason, rather than masking the surface until the
 # pump is ready. The mask was the first cut and it hides a failed reconnect, an
 # auth error or a readiness fault -- indefinitely, if recovery never succeeds.
-"suspend-release-leaves-its-own-teardown-on-the-fault-surface|components/alpha_hwr/alpha_hwr.cpp|    this->ble_manager_.clear_last_failure();|    // mutated: leave the reason latched"
+"suspend-release-leaves-its-own-teardown-on-the-fault-surface|components/alpha_hwr/alpha_hwr.cpp|    this->ble_manager_.clear_failure_if_local_teardown();|    // mutated: leave the reason latched"
 # A suspension is not an outage. on_disconnect() samples the interval up to an
 # involuntary drop deliberately; a suspension ends because someone clicked, so
 # recording it moves link_gaps_truncated -- the trust check on every other
 # number in that histogram -- once per suspend.
+# The clear must be CONDITIONAL. Unconditional erases whatever was already
+# latched -- and a latched fault is usually why the operator is suspending the
+# link. The worst instance is Encryption Start Failed (0x61), whose remedy is to
+# walk to the pump with the GO app, so the switch is reached for exactly when
+# that string is showing.
+"suspend-release-erases-somebody-elses-fault|components/alpha_hwr/ble_connection_manager.h|    if (last_failure_.rfind(\"Local Host Terminated\", 0) != 0) return;|    // mutated: clear whatever is latched"
+# ...and the hold has to come down with the string. Every other site that writes
+# last_failure_ resets both; failure_hold_admits() refuses later writes while a
+# hold stands, so clearing only the string leaves a surface reading "None" that
+# nothing can ever write to again.
+"suspend-release-leaves-the-failure-hold-standing|components/alpha_hwr/ble_connection_manager.h|    last_failure_.clear();\n    failure_hold_ = FailureHold::NONE;\n  }|    last_failure_.clear();\n  }"
+# A connection that opens while suspended must be torn down again, not adopted.
+# ESPHome reads auto_connect only at advertisement match and cannot close a link
+# with no conn_id yet, so an in-flight connect completes and the OPEN reaches the
+# component -- which would put the session connected, re-arm the watchdogs and
+# resume polling a pump the operator believes they handed over.
+"racing-open-adopted-during-a-suspension|components/alpha_hwr/alpha_hwr.cpp|    if (this->suspended_) {\n      ESP_LOGI(TAG, \"Connection opened while suspended|    if (false) {\n      ESP_LOGI(TAG, \"Connection opened while suspended"
+# Suspending twice must RETRY the teardown; releasing twice must not repeat its
+# destructive side effects.
+"suspend-swallows-the-operators-retry|components/alpha_hwr/alpha_hwr.cpp|  if (!suspended && !this->suspended_) return;|  if (suspended == this->suspended_) return;"
+# The sampler's ARMING sites, not just the disarm. on_inbound() self-arms by
+# design and a dispatched OPEN calls on_open(), either of which undoes the disarm
+# inside the asynchronous teardown window.
+"gap-sampler-re-armed-by-an-open-during-a-suspension|components/alpha_hwr/alpha_hwr.cpp|    if (!this->suspended_)\n      this->link_gap_.on_open(this->link_last_open_ms_);|    this->link_gap_.on_open(this->link_last_open_ms_);"
+# A suspension is not a failed connection attempt. Three of them reach
+# LINK_FAIL_K and publish "Reconnecting", which an automation reads as a fault.
+"suspend-counted-as-a-failed-attempt|components/alpha_hwr/alpha_hwr.cpp|    } else if (!this->suspended_) {|    } else {"
 "suspend-recorded-as-a-truncated-gap|components/alpha_hwr/alpha_hwr.cpp|    this->link_gap_.disarm();|    // mutated: sample it as an outage"
 "bridge-parse-failure-settles-rejected|components/alpha_hwr/api_bridge.cpp|  result.status = WriteStatus::INVALID;|  result.status = WriteStatus::REJECTED;"
 )
