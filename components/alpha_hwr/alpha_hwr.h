@@ -821,6 +821,27 @@ private:
   uint32_t link_last_open_ms_{0};
   uint32_t link_last_eval_ms_{0};
   uint16_t link_consecutive_failures_{0};
+  /// Diagnostic suspend (issue #243): the link is down because someone asked for
+  /// it, not because anything failed.
+  ///
+  /// The pump accepts ONE BLE connection at a time, so a bonded, connected node
+  /// owns it and nothing else can have it. Two things want it:
+  ///
+  ///   - the Grundfos GO app, which is how you unlock the pump's front panel,
+  ///     which is how you re-pair. The reporter logged six power cycles in one
+  ///     night to free the pump for it, with outages from 44 seconds to 40
+  ///     minutes;
+  ///   - another CLIENT, for bench work -- the Python implementation in the
+  ///     sibling alpha-hwr repo, or a throwaway probe. Protocol discovery and
+  ///     wire-level reads of objects this component does not implement yet both
+  ///     need something else on the link, and comparing the two implementations
+  ///     against the same pump needs to go back and forth. Before this, that
+  ///     meant flashing probe firmware and then flashing this back.
+  ///
+  /// Neither needs the bond cleared, which is the trap this replaces: clearing
+  /// the ESP's bond strands the pump until someone re-pairs at the pump itself.
+  bool suspended_{false};
+
   bool link_ever_opened_{false};
   bool link_reached_ready_{false};
   std::string link_last_status_;
@@ -1160,6 +1181,20 @@ public:
   // modes, cycling in temperature/cycle-time). Pure target/display logic lives
   // in pump_schedule_ux.h; the programmatic services (submit_set_enabled /
   // submit_set_schedule_enabled) stay raw and uncoupled for automations.
+
+  /// Drop the BLE link and stop reconnecting until released (issue #243).
+  ///
+  /// Not persisted: the flag initialises false, so a node coming back from a
+  /// power cut is connected. A node that refuses to talk to the pump because
+  /// someone flipped a switch a week ago is a worse failure than the
+  /// inconvenience this solves -- and it is also the only way out if the API is
+  /// unavailable, since there is no timeout and no auto-release.
+  ///
+  /// Suspending is NOT idempotent, deliberately: the teardown is fire-and-forget
+  /// and can fail to take, so a second call retries it. Releasing is, because
+  /// its side effects are destructive on repeat. See the guard.
+  void set_suspended(bool suspended);
+  bool is_suspended() const { return suspended_; }
 
   // "Engage Pump" switch: mode engaged continuously *now* = AUTO and not
   // schedule-gated. Returns false when either input is not yet cached (switch

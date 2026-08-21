@@ -153,20 +153,19 @@ capability, no bonding requirement and no key distribution, so nothing is set up
 to complete a bond. (ESPHome's own BLE client answers the pump's request
 regardless — this node cannot decline it — but answering is not bonding.)
 
-> **When the node does have to be stopped.** A node that is *bonded and
+> **When the node does have to give up the link.** A node that is *bonded and
 > connected* holds the pump's one connection, and the GO app cannot have it at
-> the same time — power the node down, or otherwise drop its link, before
-> connecting the app. That is a different situation from the one above, where
-> the node is unbonded and failing to connect, and where it has been observed
-> across about a dozen attempts not to interfere. An earlier version of this
-> page told you to stop the node in both cases; that was an inference from the
+> the same time. That is a different situation from the one above, where the
+> node is unbonded and failing to connect, and where it has been observed across
+> about a dozen attempts not to interfere. An earlier version of this page told
+> you to stop the node in both cases; that was an inference from the
 > one-connection constraint rather than something observed, and it was wrong for
 > the case this section is actually about.
 >
-> There is no built-in way to idle the link — no suspend switch that drops the
-> BLE connection and stops reconnecting until you release it. Powering the node
-> down is the workaround, which is easy on PoE and less so on USB beside the
-> pump.
+> **Turn on `Suspend Pump Link`** before connecting the app, and off again after.
+> The node drops the connection and stops reconnecting until you release it, so
+> the pump is free. See [Suspending the BLE link](#suspending-the-ble-link) —
+> it is not only for the GO app.
 
 Two caveats on the procedure. It is one owner's routine on one pump, not
 something this project has verified across models, and the panel-unlock step in
@@ -210,6 +209,79 @@ failed opens are not counted as cycles at all. They surface as `Failed To
 Establish (0x3e)` and, before long, as `Unreachable` on Pump Link Status. The
 stall needs connections that open and are then dropped, which is a different
 shape. So the third cause, if there is one, is still unnamed.
+
+### Suspending the BLE link
+
+The pump accepts **one BLE connection at a time**. While this node is bonded and
+connected it owns that connection, and nothing else can have it.
+
+`Suspend Pump Link` is a switch that drops the link and stops reconnecting
+until you turn it off. It sits in the same `Pump Link` family as the status and
+fault sensors it acts on, and it carries **no** `entity_category` — Home
+Assistant would otherwise leave it off auto-generated dashboards, which is the
+last place you want the control you need at that moment. Two uses, and the second is the one this
+project leans on hardest:
+
+**Handing the pump to the Grundfos GO app.** The app is how you unlock the
+pump's front panel, and the front panel is how you re-pair. Before this switch,
+the only way to give the app the pump was to remove power from the node — a
+remote action on PoE, and a walk to the pump on USB.
+
+**Handing the pump to another client for bench work.** Protocol discovery,
+wire-level reads of objects this component does not implement yet, and probing
+a behaviour before writing code for it all need something else talking to the
+pump — the Python client in the sibling `alpha-hwr` repo, or a throwaway probe.
+Suspend, run the probe, release, and the component picks the link back up. That
+turns "build and flash probe firmware, then flash the real thing back" into
+flipping a switch, and it makes going *back and forth* practical, which is what
+comparing the two implementations against the same pump actually requires.
+
+Neither use needs the bond cleared. **Do not clear the bond to free the pump** —
+clearing the ESP's bond strands it until someone re-pairs at the pump itself.
+
+While suspended, **Pump Link Status** reads `Suspended` and **Pump Link Fault**
+reads `None`. Neither is a fault.
+
+Releasing forgets the node's own `Local Host Terminated (0x16)` teardown, so it
+is not republished across the reconnect — but **only** that reason. A fault that
+was already showing when you suspended survives the toggle, which matters
+because a latched fault is often why you are reaching for the switch; and a
+genuine failure of the reconnect itself publishes normally rather than being
+suppressed.
+
+**Which package provides it.** The switch ships in `alpha_hwr_pairing.yaml`,
+alongside the link diagnostics it acts on.
+
+If you build from `alpha_hwr_base.yaml` instead you do not get it — and you
+still hold the pump, because it is the *connection* that holds it, not the bond.
+A base-only node connects, reaches `Pump Ready`, and denies the pump to
+everything else exactly as a bonded one does. Load the pairing package, or add
+the switch yourself:
+
+```yaml
+switch:
+  - platform: template
+    name: "Suspend Pump Link"
+    icon: "mdi:bluetooth-off"
+    optimistic: false
+    lambda: 'return id(pump).is_suspended();'
+    turn_on_action:
+      - lambda: 'id(pump).set_suspended(true);'
+    turn_off_action:
+      - lambda: 'id(pump).set_suspended(false);'
+```
+
+**The switch is the only way back.** There is no timeout and no auto-release, so
+if the Home Assistant API is unavailable while suspended, the way out is to
+restart the node — the flag is not persisted, so it comes back connected.
+
+**Not persisted.** A reboot comes back connected. A node that refuses to talk to
+the pump after a power cut, because of a switch flipped a week ago, is a worse
+failure than the inconvenience it solves.
+
+A stock `ble_client.disconnect` is **not** a substitute: the client reconnects
+from `IDLE` on the next matching advertisement, so the link is back within a
+scan interval.
 
 ### `ready_timeout`
 

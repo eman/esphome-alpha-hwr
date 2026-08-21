@@ -114,6 +114,45 @@ class BLEConnectionManager {
   ///             do. Pass the rank; do not assume it.
   void force_disconnect(const char *reason, FailureHold rank = FailureHold::DATA);
 
+  /// Drop the link for a diagnostic suspend (issue #243).
+  ///
+  /// force_disconnect() with a reason string would be wrong here twice over: it
+  /// logs at WARN, and it latches that string onto the fault surface. A suspend
+  /// is not a failure and must not read as one. What it DOES share is the
+  /// pairing-stall exemption -- this teardown is ours, so the cycle it ends says
+  /// nothing about the pump's willingness to pair.
+  void suspend_link();
+
+  /// Forget the latched failure reason IF it is the teardown we asked for.
+  ///
+  /// For the suspend release (issue #243). Two failure modes bracket this, and
+  /// the first draft hit both:
+  ///
+  ///   - masking the surface until the pump is READY hides a failed reconnect,
+  ///     an auth error or a readiness fault -- indefinitely, if recovery never
+  ///     succeeds;
+  ///   - clearing unconditionally erases whatever was already latched. That is
+  ///     not the rare case: a latched fault is usually WHY the operator is
+  ///     suspending the link to go look at the pump with something else. The
+  ///     worst instance is `Encryption Start Failed (0x61)`, which
+  ///     docs/configuration.md calls "not recoverable over the air" and whose
+  ///     remedy is to walk to the pump with the GO app -- so the switch is
+  ///     reached for precisely when that string is showing, and erasing it
+  ///     removes the one diagnosis that names the cause.
+  ///
+  /// So: only the local-host teardown, which is the one this component caused.
+  /// Anything else -- pre-existing or newly arrived -- stays.
+  ///
+  /// The hold comes down with the string. Every other site that writes
+  /// last_failure_ resets both, and failure_hold_admits() refuses later writes
+  /// while a hold is in force, so clearing only the string leaves a surface
+  /// reading "None" that nothing can ever write to again.
+  void clear_failure_if_local_teardown() {
+    if (last_failure_.rfind("Local Host Terminated", 0) != 0) return;
+    last_failure_.clear();
+    failure_hold_ = FailureHold::NONE;
+  }
+
   /// Latch a failure reason WITHOUT touching the link.
   ///
   /// force_disconnect() is this plus a teardown, and separating them is the

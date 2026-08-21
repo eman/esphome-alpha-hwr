@@ -1213,6 +1213,86 @@ MUTATIONS=(
 # -1 means "not known". Without the guard, -1 != 0 reads as true and a write
 # that never reached the pump reports a fabricated state.
 "bridge-state-fabricated-from-unknown-flags|components/alpha_hwr/api_bridge.cpp|      if (result.enabled >= 0 && result.sched_enabled >= 0) {|      if (true) {"
+# Issue #243: the diagnostic suspend. Two calls, and the guards are the whole of
+# it -- without them the component undoes its own switch, because the
+# reconnect-settle path turns auto-connect off on a disconnect and schedules a
+# timer that turns it back on. A suspend IS a disconnect, so it trips that path
+# with its own teardown.
+#
+# The timer guard is the load-bearing one. Its sibling in the disconnect handler
+# is deliberately not listed: removing it leaves the suspension intact, because
+# the timer still declines to act, so it is belt-and-braces rather than the fix
+# and no test can distinguish it. Verified by removing each in turn.
+"suspend-undone-by-the-reconnect-settle-timer|components/alpha_hwr/alpha_hwr.cpp|    // reading. Raised in review on #285.\n    if (this->suspended_) {|    // reading. Raised in review on #285.\n    if (false) {"
+# A link taken down on purpose is not Unreachable and not a fault. Both of these
+# are what an operator glancing at Home Assistant sees, and what an automation
+# reads -- releasing forgets the node's own 0x16 teardown and nothing else, so a fault
+# that was already showing survives the toggle and a genuine failure of the
+# reconnect still publishes.
+# Releasing a long suspension must restart the Unreachable clock. That rung is
+# `now - link_last_open_ms_ > LINK_UNREACHABLE_MS`, and the stamp only advances
+# while the session is READY, so it stops the moment the link goes down --
+# leaving any suspension past the threshold to resume through a spurious
+# Unreachable. Reported by the person who wrote the same bug in their own
+# implementation and caught it at 85 seconds.
+"suspend-release-leaves-the-unreachable-clock-stopped|components/alpha_hwr/alpha_hwr.cpp|    this->link_last_open_ms_ = millis();\n    // ...but NOT if a reconnect-settle hold is still in force.|    // mutated: clock left stopped\n    // ...but NOT if a reconnect-settle hold is still in force."
+"suspended-link-reads-as-a-failed-one|components/alpha_hwr/alpha_hwr.cpp|  if (this->suspended_) {\n    // Ahead of every other rung|  if (false) {\n    // Ahead of every other rung"
+"suspend-fault-mask-removed|components/alpha_hwr/alpha_hwr.cpp|    bool show_none = this->suspended_;|    bool show_none = false;"
+# Three more from the review on #285, all reproduced before fixing.
+#
+# Releasing must not spend an active reconnect-settle hold. That hold exists
+# because a premature encryption request into a not-ready pump can fail with
+# 0x61 and make ESP-IDF erase the bond -- which strands the pump until someone
+# re-pairs at the pump itself.
+"suspend-release-bypasses-an-active-settle-hold|components/alpha_hwr/alpha_hwr.cpp|    if (this->reconnect_settling_) {|    if (false) {"
+# Clearing the ONE expected reason, rather than masking the surface until the
+# pump is ready. The mask was the first cut and it hides a failed reconnect, an
+# auth error or a readiness fault -- indefinitely, if recovery never succeeds.
+"suspend-release-leaves-its-own-teardown-on-the-fault-surface|components/alpha_hwr/alpha_hwr.cpp|    this->ble_manager_.clear_failure_if_local_teardown();|    // mutated: leave the reason latched"
+# A suspension is not an outage. on_disconnect() samples the interval up to an
+# involuntary drop deliberately; a suspension ends because someone clicked, so
+# recording it moves link_gaps_truncated -- the trust check on every other
+# number in that histogram -- once per suspend.
+# The clear must be CONDITIONAL. Unconditional erases whatever was already
+# latched -- and a latched fault is usually why the operator is suspending the
+# link. The worst instance is Encryption Start Failed (0x61), whose remedy is to
+# walk to the pump with the GO app, so the switch is reached for exactly when
+# that string is showing.
+"suspend-release-erases-somebody-elses-fault|components/alpha_hwr/ble_connection_manager.h|    if (last_failure_.rfind(\"Local Host Terminated\", 0) != 0) return;|    // mutated: clear whatever is latched"
+# Deliberate absence: the `failure_hold_ = NONE` beside that clear. It was
+# load-bearing for one round -- verified, one failing assertion -- and stopped
+# being so when the clear became CONDITIONAL in the same round.
+#
+# The reachability argument: the clear now runs only when the latched string is
+# the local-host teardown, and that string can only BE latched when no hold
+# outranks it, because failure_hold_admits() would otherwise have refused to
+# write it. So by the time the reset runs, the hold is already NONE. Kept
+# because every other site that writes last_failure_ resets both, and a lone
+# exception is how the original defect got in.
+# A connection that opens while suspended must be torn down again, not adopted.
+# ESPHome reads auto_connect only at advertisement match and cannot close a link
+# with no conn_id yet, so an in-flight connect completes and the OPEN reaches the
+# component -- which would put the session connected, re-arm the watchdogs and
+# resume polling a pump the operator believes they handed over.
+"racing-open-adopted-during-a-suspension|components/alpha_hwr/alpha_hwr.cpp|    if (this->suspended_) {\n      ESP_LOGI(TAG, \"Connection opened while suspended|    if (false) {\n      ESP_LOGI(TAG, \"Connection opened while suspended"
+# Suspending twice must RETRY the teardown; releasing twice must not repeat its
+# destructive side effects.
+"suspend-swallows-the-operators-retry|components/alpha_hwr/alpha_hwr.cpp|  if (!suspended && !this->suspended_) return;|  if (suspended == this->suspended_) return;"
+# The sampler's ARMING sites, not just the disarm. on_inbound() self-arms by
+# design, so one notification in the asynchronous teardown window undoes the
+# disarm and the disconnect behind it samples. A notification needs no open, so
+# this is not covered by the racing-open guard.
+"gap-sampler-re-armed-by-a-notification-during-a-suspension|components/alpha_hwr/alpha_hwr.cpp|        if (!this->suspended_)\n          this->link_gap_.on_inbound(inbound_now);|        this->link_gap_.on_inbound(inbound_now);"
+# Deliberate absence: the matching `!suspended_` guard on link_gap_.on_open().
+# It became an equivalent mutant when the racing-open guard landed in the same
+# round -- that returns from the connection callback before on_open() is
+# reached, so no input distinguishes the inner term. Kept as defence in depth
+# against the outer guard moving; covered in spirit by
+# racing-open-adopted-during-a-suspension, which IS caught.
+# A suspension is not a failed connection attempt. Three of them reach
+# LINK_FAIL_K and publish "Reconnecting", which an automation reads as a fault.
+"suspend-counted-as-a-failed-attempt|components/alpha_hwr/alpha_hwr.cpp|    } else if (!this->suspended_) {|    } else {"
+"suspend-recorded-as-a-truncated-gap|components/alpha_hwr/alpha_hwr.cpp|    this->link_gap_.disarm();|    // mutated: sample it as an outage"
 "bridge-parse-failure-settles-rejected|components/alpha_hwr/api_bridge.cpp|  result.status = WriteStatus::INVALID;|  result.status = WriteStatus::REJECTED;"
 )
 

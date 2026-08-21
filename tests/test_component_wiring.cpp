@@ -1238,6 +1238,552 @@ void test_a_disconnect_does_not_publish_a_drift_reading() {
               "measured a drift");
 }
 
+// ── Diagnostic suspend (issue #243) ──────────────────────────────────────────
+//
+// The pump holds one BLE connection at a time, so a bonded, connected node owns
+// it and the Grundfos GO app cannot. Before this the only way to hand the pump
+// over was to remove power from the node.
+//
+// The two calls are trivial. What needs testing is the guards, because without
+// them the component undoes its own switch: the reconnect-settle path
+// (`reconnect_settle_time`, on by default) turns auto-connect off on a
+// disconnect and schedules a timer that turns it back on. A suspend is a
+// disconnect, so it trips that path with its own teardown and the flag comes
+// straight back. Reported from a node running the default window: suspended for
+// 2.3 seconds, all of it the window.
+
+/// Hand parse_device() an advertisement from the pump, which is what starts the
+/// settle timer once the pump reappears after a drop.
+static void advertise_pump(Rig &r) {
+  esphome::esp32_ble_tracker::ESPBTDevice dev;
+  dev.set_address(r.client.get_address());
+  r.component.parse_device(dev);
+}
+
+/// Put the rig in the state the guards are about, and PROVE it -- both defaults
+/// silently make these tests vacuous:
+///
+///   - the mock's `auto_connect_` starts FALSE, so "suspending clears it" passes
+///     against a component that does nothing at all. Real builds default the
+///     YAML option to true, which is what this restores.
+///   - `bond_device_num` starts 0, and the settle block is gated on
+///     `esp_ble_get_bond_device_num() > 0`, so the whole path the guards protect
+///     never executes. Both guards could be deleted with the suite still green;
+///     that is how the first draft of these tests scored.
+static void arm_the_settle_path(Rig &r) {
+  esp_gap_mock().bond_device_num = 1;
+  r.client.set_auto_connect(true);
+  r.component.set_reconnect_settle_time(2000);
+}
+
+void test_suspend_drops_the_link_and_stops_reconnecting() {
+  std::cout << "\n=== Suspend drops the link and does not reconnect ===" << std::endl;
+  Rig r;
+  arm_the_settle_path(r);
+  r.setup();
+  r.connect_and_subscribe();
+  r.advance(2000);
+  TEST_ASSERT(r.client.mock_auto_connect(),
+              "precondition: auto-connect is on, so clearing it can be seen");
+
+  const int before = r.client.mock_disconnect_calls();
+  r.component.set_suspended(true);
+
+  TEST_ASSERT(r.client.mock_disconnect_calls() == before + 1,
+              "suspending drops the BLE link");
+  TEST_ASSERT(!r.client.mock_auto_connect(),
+              "  ...and clears auto-connect, which is what makes it a suspend "
+              "rather than a disconnect the client undoes on the next advert");
+
+  // The disconnect the suspend just caused, then the pump advertising again --
+  // exactly the sequence that fed the settle timer and released the switch.
+  r.disconnect(ESP_GATT_CONN_TERMINATE_LOCAL_HOST);
+  advertise_pump(r);
+  r.advance(10000);
+
+  // Deliberately not "the settle path did not hand it back": with the
+  // disconnect-side guard in place the settle path is never armed here, so
+  // there is no timer to decline. What this pins is that NOTHING restored
+  // auto-connect over ten seconds and an advertisement.
+  TEST_ASSERT(!r.client.mock_auto_connect(),
+              "  ...and it is STILL suspended ten seconds and an advertisement "
+              "later; nothing handed auto-connect back");
+  TEST_ASSERT(r.component.is_suspended(), "  ...and the component says so");
+}
+
+void test_release_restores_the_link() {
+  std::cout << "\n=== Releasing the suspend reconnects ===" << std::endl;
+  Rig r;
+  arm_the_settle_path(r);
+  r.setup();
+  r.connect_and_subscribe();
+  r.advance(2000);
+
+  r.component.set_suspended(true);
+  r.disconnect(ESP_GATT_CONN_TERMINATE_LOCAL_HOST);
+  advertise_pump(r);
+  r.advance(5000);
+  TEST_ASSERT(!r.client.mock_auto_connect(), "suspended");
+
+  r.component.set_suspended(false);
+  TEST_ASSERT(r.client.mock_auto_connect(),
+              "releasing restores auto-connect, so the client reconnects on the "
+              "pump's next advertisement");
+  TEST_ASSERT(!r.component.is_suspended(), "  ...and the flag is down");
+}
+
+// The guard the first test cannot reach: a suspend arriving while the settle
+// timer is ALREADY running. Guard 1 stops the timer being armed during a
+// suspend; only guard 2 stops a timer armed before it from firing into one.
+void test_a_suspend_during_a_settle_window_is_not_undone_by_the_timer() {
+  std::cout << "\n=== A suspend mid-settle survives the timer ===" << std::endl;
+  Rig r;
+  arm_the_settle_path(r);
+  r.setup();
+  r.connect_and_subscribe();
+  r.advance(2000);
+
+  // An ordinary drop arms the settle path, and the pump reappearing starts the
+  // timer. No suspend yet.
+  r.disconnect(ESP_GATT_CONN_TIMEOUT);
+  advertise_pump(r);
+  TEST_ASSERT(!r.client.mock_auto_connect(),
+              "precondition: the settle path really is holding auto-connect "
+              "down, so the timer below has something to restore");
+
+  // Suspend lands inside the window, then the window elapses.
+  r.component.set_suspended(true);
+  r.advance(6000);
+
+  TEST_ASSERT(!r.client.mock_auto_connect(),
+              "the settle timer fired into a suspended link and left it alone");
+  TEST_ASSERT(r.component.is_suspended(), "  ...and it is still suspended");
+}
+
+void test_a_suspended_link_reads_as_suspended_not_as_a_fault() {
+  std::cout << "\n=== A suspended link is not a fault ===" << std::endl;
+  Rig r;
+  arm_the_settle_path(r);
+  r.setup();
+  r.connect_and_subscribe();
+  r.advance(2000);
+
+  r.component.set_suspended(true);
+  r.disconnect(ESP_GATT_CONN_TERMINATE_LOCAL_HOST);
+  r.advance(30000);   // well past the Unreachable threshold
+
+  TEST_ASSERT(r.link_status.state == "Suspended",
+              "Pump Link Status reads Suspended, not Unreachable -- a link we "
+              "took down on purpose is not a broken one");
+  TEST_ASSERT(r.link_fault.state == "None",
+              "  ...and Pump Link Fault reads None, not the node's own "
+              "Local Host Terminated");
+
+  // The mask outlasts the release. Between reconnecting and Pump Ready there is
+  // a ~15 s window in which the self-inflicted 0x16 would otherwise be
+  // republished -- which is precisely the window an automation watches.
+  r.component.set_suspended(false);
+  r.advance(3000);
+  TEST_ASSERT(r.link_fault.state == "None",
+              "  ...and it stays None across the reconnect, rather than "
+              "republishing the disconnect the suspend itself caused");
+}
+
+
+// Releasing a LONG suspension must not resume through a spurious "Unreachable".
+//
+// Reported by @jfriend00, who wrote the same bug and caught it on an 85 second
+// suspension. The Unreachable rung is `now - link_last_open_ms_ >
+// LINK_UNREACHABLE_MS`, and that stamp only advances while the session is
+// READY -- so it stops moving the moment the link goes down. Suspend for longer
+// than the threshold and the first status evaluation after release, in the half
+// second before the link reopens, lands on Unreachable.
+//
+// A short bench session cannot see it: the whole failure needs a suspension
+// longer than 20 s, which is exactly what this switch is for.
+void test_releasing_a_long_suspension_does_not_report_unreachable() {
+  std::cout << "\n=== A long suspension does not resume via Unreachable ==="
+            << std::endl;
+  Rig r;
+  arm_the_settle_path(r);
+  r.setup();
+  r.connect_and_subscribe();
+  r.advance(2000);
+
+  r.component.set_suspended(true);
+  r.disconnect(ESP_GATT_CONN_TERMINATE_LOCAL_HOST);
+  r.advance(85000);   // the reporter's figure, and well past LINK_UNREACHABLE_MS
+  TEST_ASSERT(r.link_status.state == "Suspended",
+              "precondition: still suspended after 85 s, so the Unreachable "
+              "clock has been stopped that whole time");
+
+  r.component.set_suspended(false);
+
+  // Named, not `!= "Unreachable"`. That form passes on five other strings
+  // including "Suspended" -- i.e. it would hold against a release that never
+  // updated the status at all, which is a different bug and a real one.
+  TEST_ASSERT(r.link_status.state == "Connecting",
+              "releasing restarts the unreachable clock and the status reads "
+              "Connecting -- the link was down on purpose, so the countdown "
+              "starts from the release, not from the last time the pump was "
+              "ready");
+}
+
+// A genuine failure AFTER the release must reach the surface.
+//
+// The first cut masked Pump Link Fault from suspension until the pump was READY
+// again, which keeps the self-inflicted 0x16 off the surface across the
+// reconnect -- and also hides a failed reconnect, an authentication error or a
+// readiness fault, indefinitely if recovery never succeeds. Raised in review.
+// Clearing the one expected reason instead does the first without the second.
+void test_a_failure_after_release_is_not_hidden() {
+  std::cout << "\n=== A failure after release still reports ===" << std::endl;
+  Rig r;
+  arm_the_settle_path(r);
+  r.setup();
+  r.connect_and_subscribe();
+  r.advance(2000);
+
+  r.component.set_suspended(true);
+  r.disconnect(ESP_GATT_CONN_TERMINATE_LOCAL_HOST);
+  r.advance(3000);
+  TEST_ASSERT(r.link_fault.state == "None",
+              "precondition: the teardown we asked for is not on the surface");
+
+  r.component.set_suspended(false);
+  // The link comes back and then drops on a supervision timeout -- a real
+  // fault, nothing to do with us, and exactly the kind the first cut hid.
+  r.connect_and_subscribe();
+  r.advance(1000);
+  r.disconnect(ESP_GATT_CONN_TIMEOUT);
+  r.advance(3000);
+
+  // The exact string, because `!= "None"` cannot tell the genuine new fault
+  // from the stale 0x16 we failed to clear -- both are non-None, and this file
+  // warns about that pattern elsewhere.
+  TEST_ASSERT(r.link_fault.state == "Connection Timeout (0x08)",
+              "a genuine drop after the release reports ITS OWN reason, rather "
+              "than being masked until a readiness that may never come -- or "
+              "showing the teardown we caused");
+}
+
+// Releasing must not spend someone else's reconnect-settle hold.
+//
+// That hold exists because a premature encryption request into a not-ready pump
+// can fail with 0x61 and make ESP-IDF erase the bond -- and an erased bond
+// strands the pump until someone re-pairs at the pump itself. Raised in review:
+// suspend and release inside an ordinary disconnect's settle window, and the
+// release was handing auto-connect straight back.
+void test_releasing_inside_a_settle_window_does_not_reconnect_early() {
+  std::cout << "\n=== Releasing respects an active settle hold ===" << std::endl;
+  Rig r;
+  arm_the_settle_path(r);
+  r.setup();
+  r.connect_and_subscribe();
+  r.advance(2000);
+
+  // An ordinary drop, nothing to do with the suspend, arms the hold.
+  r.disconnect(ESP_GATT_CONN_TIMEOUT);
+  TEST_ASSERT(!r.client.mock_auto_connect(),
+              "precondition: the settle hold is in force");
+
+  // Suspend and release, both inside the window.
+  r.component.set_suspended(true);
+  r.component.set_suspended(false);
+
+  TEST_ASSERT(!r.client.mock_auto_connect(),
+              "the release left the settle hold alone rather than reconnecting "
+              "into a pump that may not be ready");
+
+  // ...and the settle path still finishes the job on its own.
+  advertise_pump(r);
+  r.advance(6000);
+  TEST_ASSERT(r.client.mock_auto_connect(),
+              "  ...and the settle timer restores it when the window elapses");
+}
+
+// A suspension is not an outage, and must not contaminate the gap histogram.
+//
+// LinkGapSampler::on_disconnect() deliberately records the interval up to an
+// involuntary drop -- that interval is evidence about the link. A suspension is
+// not: it ends because someone clicked. Recording it moves link_gaps_truncated,
+// which is the trust check on every other number in that histogram. Raised in
+// review, against an issue requirement that said suspension must not read as an
+// outage.
+void test_suspending_does_not_record_an_outage() {
+  std::cout << "\n=== A suspension is not a gap sample ===" << std::endl;
+  Rig r;
+  arm_the_settle_path(r);
+  r.setup();
+  r.connect_and_subscribe();
+  r.advance(20000);   // real airtime, so the sampler is armed and running
+
+  const float truncated_before = r.gaps_truncated.state;
+
+  r.component.set_suspended(true);
+  r.disconnect(ESP_GATT_CONN_TERMINATE_LOCAL_HOST);
+  r.advance(3000);
+
+  TEST_ASSERT(r.gaps_truncated.state == truncated_before,
+              "the deliberate teardown is not counted as a truncated interval, "
+              "which is the statistic every other gap number is trusted "
+              "against");
+}
+
+// Three things none of the tests above reach.
+//
+// 1. `set_suspended()` ends with evaluate_link_status(), which is what makes
+//    the status flip on the CLICK rather than up to a poll interval later.
+//    Delete that call and every other test still passes, because they all
+//    advance time before reading.
+// 2. The `Suspended` rung sits ahead of every other rung INCLUDING the ready
+//    check. Move it below and the suite stays green, because every other test
+//    suspends a session that is not ready yet.
+// 3. The idempotence guard. Nothing double-suspends.
+void test_suspending_a_ready_link_reports_immediately_and_once() {
+  std::cout << "\n=== Suspending a READY link: immediate, and idempotent ==="
+            << std::endl;
+  Rig r;
+  arm_the_settle_path(r);
+  r.setup();
+  r.connect_and_subscribe();
+  TEST_ASSERT(r.run_until_ready(),
+              "precondition: the pump reached READY, so the ready rung would "
+              "otherwise win");
+  TEST_ASSERT(r.link_status.state == "Connected", "  ...and reads Connected");
+
+  const int before = r.client.mock_disconnect_calls();
+  r.component.set_suspended(true);
+
+  // No advance(), no loop(), no poll. Read it straight after the call.
+  TEST_ASSERT(r.link_status.state == "Suspended",
+              "the status flips on the click, and Suspended outranks the ready "
+              "rung -- the session is still READY at this instant");
+
+  // A second click RE-ISSUES the teardown. The first is fire-and-forget and can
+  // fail to take -- esp_ble_gattc_close() tears down the ACL only if no other
+  // client holds it, and can complete with no DISCONNECT at all -- so a switch
+  // that reads ON over a live link must still be actionable. Releasing twice is
+  // the case that must stay idempotent, and it is asserted below.
+  r.component.set_suspended(true);
+  TEST_ASSERT(r.client.mock_disconnect_calls() == before + 2,
+              "  ...and suspending again retries the teardown rather than "
+              "swallowing the click");
+
+  r.component.set_suspended(false);
+  const int after_release = r.client.mock_disconnect_calls();
+  r.component.set_suspended(false);
+  TEST_ASSERT(r.client.mock_disconnect_calls() == after_release,
+              "  ...while releasing twice is a no-op, because its side effects "
+              "are destructive on repeat");
+}
+
+// Disarming the gap sampler at the click is not enough on its own.
+//
+// Two events re-arm it inside the asynchronous teardown window, and the
+// DISCONNECT behind them then samples -- moving `truncated_`, which is the
+// trust check on every other number in the histogram and the exact statistic
+// the disarm exists to protect.
+void test_events_in_the_teardown_window_do_not_re_arm_the_sampler() {
+  std::cout << "\n=== A suspension survives events in its teardown window ==="
+            << std::endl;
+
+  // Path A: a notification. LinkGapSampler::on_inbound() SELF-ARMS when it
+  // finds the sampler disarmed, by design -- so one frame arriving between the
+  // click and the disconnect undoes the disarm.
+  {
+    Rig r;
+    arm_the_settle_path(r);
+    r.setup();
+    r.connect_and_subscribe();
+    r.advance(20000);
+    const float before = r.gaps_truncated.state;
+
+    r.component.set_suspended(true);
+    auto frame = with_crc({0x24, 0x05, 0xF8, 0xE7, 0x0A, 0x01, 0x00, 0x00, 0x00});
+    r.notify(frame);                       // lands in the teardown window
+    r.disconnect(ESP_GATT_CONN_TERMINATE_LOCAL_HOST);
+    r.advance(20000);                      // long enough for any sample to publish
+
+    TEST_ASSERT(r.gaps_truncated.state == before,
+                "a notification arriving between the click and the disconnect "
+                "does not re-arm the sampler");
+  }
+
+  // Path B: an OPEN. BLEClientBase::disconnect() cannot close a link with no
+  // conn_id yet -- it sets want_disconnect_ and returns -- and the OPEN that
+  // then arrives is still dispatched to every node. Reachable whenever the
+  // switch is flipped between connections.
+  {
+    Rig r;
+    arm_the_settle_path(r);
+    r.setup();
+    r.connect_and_subscribe();
+    r.advance(20000);
+    r.disconnect(ESP_GATT_CONN_TIMEOUT);   // ordinary drop; sampler closed
+    // Let that drop's count PUBLISH before taking the baseline. The sensor only
+    // updates on a poll, so reading it straight after the disconnect captures a
+    // stale value and the assertion then measures publish timing rather than
+    // the counter -- which is how the first draft of this case "failed".
+    r.advance(20000);
+    const float before = r.gaps_truncated.state;
+
+    r.component.set_suspended(true);
+    r.open(ESP_GATT_OK);                   // the in-flight connection completes
+    r.disconnect(ESP_GATT_CONN_TERMINATE_LOCAL_HOST);
+    r.advance(20000);
+
+    TEST_ASSERT(r.gaps_truncated.state == before,
+                "an OPEN completing inside the suspension does not re-arm the "
+                "sampler either");
+  }
+}
+
+// A suspension is not a failed connection attempt.
+//
+// The disconnect handler counts one whenever the link had not yet carried a
+// frame -- which is where suspending a just-opened connection lands. Three of
+// them reach LINK_FAIL_K and Pump Link Status publishes "Reconnecting", which
+// an automation reads as a fault.
+void test_suspending_is_not_counted_as_a_failed_attempt() {
+  std::cout << "\n=== Suspending is not a failed connection attempt ==="
+            << std::endl;
+  Rig r;
+  arm_the_settle_path(r);
+  r.setup();
+
+  // Three cycles, each suspending a connection that opened but never carried a
+  // frame. Under the unguarded counter the third publishes "Reconnecting".
+  for (int i = 0; i < 3; i++) {
+    r.connect_and_subscribe();
+    r.component.set_suspended(true);
+    r.disconnect(ESP_GATT_CONN_TERMINATE_LOCAL_HOST);
+    r.advance(1000);
+    r.component.set_suspended(false);
+    r.advance(1000);
+  }
+
+  TEST_ASSERT(r.link_status.state != "Reconnecting",
+              "three suspend cycles do not accumulate into a Reconnecting "
+              "diagnosis about a pump that refused nothing");
+}
+
+// Releasing under an EXISTING fault must not silence the surface for good.
+//
+// clear_last_failure() empties the string. It has to clear the hold with it --
+// every other site that writes last_failure_ resets both, and failure_hold_admits()
+// refuses any later write while a hold outranking NONE is in force. Clearing only
+// the string leaves a surface that reads "None" and can never be written again,
+// because a DATA hold is released only by an inbound notification and a broken
+// link never delivers one.
+//
+// This is the common case rather than the rare one: a latched fault is usually
+// WHY the operator is suspending the link to go look at the pump with something
+// else.
+void test_releasing_under_a_held_fault_does_not_silence_the_surface() {
+  std::cout << "\n=== Release under a held fault leaves it writable ==="
+            << std::endl;
+  Rig r;
+  r.setup();
+  r.connect_and_subscribe();
+  TEST_ASSERT(r.run_until_ready(), "precondition: ready, so the latch is set");
+
+  // Go deaf and let the data watchdog latch its reason, at DATA rank.
+  // The surface shows a held reason only once the link is not healthy, so the
+  // watchdog's recycle has to land before the string is visible -- same shape
+  // as test_the_fault_is_visible_across_the_reconnect_it_describes().
+  r.answer_writes = false;
+  r.advance(120000, 120);
+  r.disconnect(ESP_GATT_CONN_TERMINATE_PEER_USER);
+  r.advance(30000, 30);
+  TEST_ASSERT(r.link_fault.state.find("No data") != std::string::npos,
+              "precondition: a DATA-rank fault is latched and on the surface");
+
+  // The operator suspends to go poke the pump with something else, then releases.
+  r.component.set_suspended(true);
+  r.advance(5000);
+  r.component.set_suspended(false);
+  r.advance(2000);
+
+  // The link keeps failing for real.
+  for (int i = 0; i < 3; i++) {
+    r.connect_and_subscribe();
+    r.advance(2000);
+    r.disconnect(ESP_GATT_CONN_TIMEOUT);
+    r.advance(2000);
+  }
+
+  TEST_ASSERT(r.link_fault.state != "None",
+              "a genuine fault after the release still reaches the surface -- "
+              "the release cleared the hold along with the string, rather than "
+              "leaving a surface nothing can ever write to again");
+
+  // ...and the stronger claim: the pre-existing diagnosis is not erased at all.
+  // Releasing clears only the local-host teardown this component caused. The
+  // worst case for getting this wrong is `Encryption Start Failed (0x61)`,
+  // which docs/configuration.md calls not recoverable over the air and whose
+  // remedy is to walk to the pump with the GO app -- so the switch is reached
+  // for exactly when that string is showing.
+  Rig r2;
+  r2.setup();
+  r2.connect_and_subscribe();
+  TEST_ASSERT(r2.run_until_ready(), "precondition: ready");
+  r2.answer_writes = false;
+  r2.advance(120000, 120);
+  r2.disconnect(ESP_GATT_CONN_TERMINATE_PEER_USER);
+  r2.advance(30000, 30);
+  const std::string latched = r2.link_fault.state;
+  TEST_ASSERT(latched.find("No data") != std::string::npos,
+              "precondition: a real diagnosis is on the surface");
+
+  r2.component.set_suspended(true);
+  r2.advance(5000);
+  r2.component.set_suspended(false);
+  r2.advance(5000);
+
+  TEST_ASSERT(r2.link_fault.state == latched,
+              "the diagnosis that was already showing survives the toggle -- "
+              "the release forgets its own teardown, not somebody else's fault");
+}
+
+// A connection that opens while suspended is torn down again, not adopted.
+//
+// ESPHome reads auto_connect only at advertisement match, and disconnect()
+// cannot close a link with no conn_id yet -- so an in-flight connect completes
+// and the OPEN reaches the component. Adopting it puts the session connected,
+// re-arms the watchdogs, resumes polling against a pump the operator believes
+// they have handed over, and leaves the status reading "Suspended" over a live
+// link: the exact failure the switch exists to prevent, with the UI asserting
+// the opposite.
+void test_an_open_during_a_suspension_is_torn_down_not_adopted() {
+  std::cout << "\n=== An open during a suspension is not adopted ==="
+            << std::endl;
+  Rig r;
+  arm_the_settle_path(r);
+  r.setup();
+  r.connect_and_subscribe();
+  TEST_ASSERT(r.run_until_ready(), "precondition: ready before we suspend");
+
+  r.component.set_suspended(true);
+  r.disconnect(ESP_GATT_CONN_TERMINATE_LOCAL_HOST);
+  r.advance(2000);
+  TEST_ASSERT(!r.ready_is_on(), "precondition: Pump Ready went off");
+
+  // The in-flight connect completes anyway.
+  const int disconnects_before = r.client.mock_disconnect_calls();
+  r.open(ESP_GATT_OK);
+  r.advance(60000, 60);
+
+  TEST_ASSERT(r.client.mock_disconnect_calls() > disconnects_before,
+              "the open is torn down again rather than adopted");
+  TEST_ASSERT(!r.ready_is_on(),
+              "  ...so the node does not come back READY against a pump it was "
+              "asked to let go of");
+  TEST_ASSERT(r.link_status.state == "Suspended",
+              "  ...and the status still says Suspended, which is true rather "
+              "than a claim made over a live link");
+}
+
 int main() {
   std::cout << "===========================================================" << std::endl;
   std::cout << "  Component BLE Wiring Test Suite" << std::endl;
@@ -1257,6 +1803,19 @@ int main() {
   test_one_cache_is_not_enough_for_ready();
   test_ready_clears_on_disconnect();
   test_a_disconnect_does_not_publish_a_drift_reading();
+  test_suspend_drops_the_link_and_stops_reconnecting();
+  test_release_restores_the_link();
+  test_a_suspend_during_a_settle_window_is_not_undone_by_the_timer();
+  test_a_suspended_link_reads_as_suspended_not_as_a_fault();
+  test_releasing_a_long_suspension_does_not_report_unreachable();
+  test_a_failure_after_release_is_not_hidden();
+  test_releasing_inside_a_settle_window_does_not_reconnect_early();
+  test_suspending_does_not_record_an_outage();
+  test_suspending_a_ready_link_reports_immediately_and_once();
+  test_events_in_the_teardown_window_do_not_re_arm_the_sampler();
+  test_suspending_is_not_counted_as_a_failed_attempt();
+  test_releasing_under_a_held_fault_does_not_silence_the_surface();
+  test_an_open_during_a_suspension_is_torn_down_not_adopted();
   test_link_gap_baseline_is_published_once_at_zero();
   test_gap_counters_do_not_publish_on_every_tick();
   test_a_quiet_link_fills_the_rungs_end_to_end();

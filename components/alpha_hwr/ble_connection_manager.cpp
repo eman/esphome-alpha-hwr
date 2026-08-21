@@ -322,6 +322,20 @@ void BLEConnectionManager::force_disconnect(const char *reason, FailureHold rank
   }
 }
 
+void BLEConnectionManager::suspend_link() {
+  ESP_LOGI(TAG, "Suspending BLE link on request; the pump is free for another client");
+  // Same exemption force_disconnect() takes, for the same reason: a teardown we
+  // asked for is not evidence about the pump. Without it a few suspend cycles
+  // would accumulate toward a pairing-stall diagnosis.
+  pairing_stall_.note_local_teardown();
+  // Deliberately no note_failure(). The disconnect that follows reports
+  // ESP_GATT_CONN_TERMINATE_LOCAL_HOST (0x16), which pairing_stall.h already
+  // excludes from counting, and the component masks it off the fault surface.
+  if (client_ != nullptr) {
+    client_->disconnect();
+  }
+}
+
 void BLEConnectionManager::release_pairing_stall_hold_() {
   // The stall is the one held reason that is an inference from an absence, so
   // it is the one that can be refuted outright -- and when it is, it has to
