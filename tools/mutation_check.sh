@@ -1119,6 +1119,40 @@ MUTATIONS=(
 # across the window (a vacation), 0x02 Run turns it on. A pump that stored the
 # wrong kind settled ACCEPTED, so a vacation could be confirmed as set while
 # the pump was in fact scheduled to run for the whole week.
+# The local<->UTC shift at the ends of the uint32 the wire carries (issue #263).
+# Both directions used to wrap modulo 2^32, and the two wraps CANCELLED: the
+# confirm readback shifted back by the same offset, wrapped symmetrically,
+# compared equal, and settled the operation ACCEPTED for an event the pump had
+# stored at an instant nobody asked for. Low likelihood -- about a day's worth
+# of instants out of 136 years -- and a false success rather than an error,
+# which is the combination worth a guard.
+#
+# The two directions are guarded differently on purpose, so both halves are
+# pinned: encoding REFUSES (the caller named an instant this pump cannot store),
+# decoding SATURATES (the value is already on the pump; there is nothing to
+# refuse, and saturating keeps a pair ordered and its expiry answerable).
+"shift-encode-ceiling-wraps|components/alpha_hwr/schedule_service.h|  if (shifted > static_cast<int64_t>(UINT32_MAX))\n    return false;|  if (false)\n    return false;"
+"shift-encode-floor-wraps|components/alpha_hwr/schedule_service.h|  if (shifted < 1)\n    return false;|  if (false)\n    return false;"
+"shift-decode-floor-not-saturated|components/alpha_hwr/schedule_service.h|  if (shifted < 1)\n    return 1u;|  if (shifted < 1)\n    return 0u;"
+"shift-decode-ceiling-not-saturated|components/alpha_hwr/schedule_service.h|  if (shifted > static_cast<int64_t>(UINT32_MAX))\n    return UINT32_MAX;|  if (false)\n    return UINT32_MAX;"
+# The argument-level refusal, which settles ahead of the overview read so a
+# wrong argument is not reported as a link failure.
+"single-event-unrepresentable-window-accepted|components/alpha_hwr/write_operation_service.cpp|    const bool both_ends_fit = begin_fits && end_fits;|    const bool both_ends_fit = true;"
+# Deliberately absent: the same guard at the wire, in
+# ScheduleService::write_single_event_async(). An equivalent mutant, and by
+# construction rather than by experiment -- its sole caller is
+# WriteOperationService::write_single_event_(), every path to which runs the
+# argument check above on the same two timestamps first, and a CLEAR carries the
+# 0/0 sentinel, which always fits. The guard is kept as a choke point on a
+# public method; adding the entry only produced a survivor.
+#
+# This is the fourth time in three changes that tightening one bound made
+# another unreachable and turned its entry into an equivalent mutant. Worth
+# expecting rather than rediscovering.
+# 0 is the wire's disabled/cleared sentinel, never shifted in either direction,
+# so an enabled event beginning at 0 confirmed clean while describing a slot
+# that says "cleared".
+"epoch-field-accepts-the-cleared-sentinel|components/alpha_hwr/api_bridge.cpp|  if (!parse_int_field(s, 1, EPOCH_MAX_TS, &v)) return false;|  if (!parse_int_field(s, 0, EPOCH_MAX_TS, &v)) return false;"
 "single-event-confirm-ignores-the-action|components/alpha_hwr/write_operation_service.cpp|                                  actual.action == op->single_event_action;|                                  true;"
 # ...and the skip for a CLEAR must stay a skip: a cleared slot's window is
 # meaningless, so comparing it would reject every successful clear.
@@ -1228,7 +1262,7 @@ MUTATIONS=(
 "bridge-parser-accepts-leading-junk|components/alpha_hwr/api_bridge.cpp|  if (!starts_cleanly) return false;|  // mutated: let strtol skip whitespace and signs"
 # Timestamps are compared AFTER narrowing to the wire's 32 bits; comparing the
 # wider parse let an ordered pair reach the pump reversed.
-"bridge-epoch-range-not-checked|components/alpha_hwr/api_bridge.cpp|  if (!parse_int_field(s, 0, EPOCH_MAX_TS, &v)) return false;|  if (!parse_int_field(s, 0, 999999999999LL, &v)) return false;"
+"bridge-epoch-range-not-checked|components/alpha_hwr/api_bridge.cpp|  if (!parse_int_field(s, 1, EPOCH_MAX_TS, &v)) return false;|  if (!parse_int_field(s, 1, 999999999999LL, &v)) return false;"
 # The ceiling is the wire's uint32, not time_t's int32: ClockProgramSingleEvent
 # declares `begin` and `end` as uint32_t, so the pump holds instants up to 2106.
 # Stopping at 2147483647 would refuse dates the pump accepts (issue #255).

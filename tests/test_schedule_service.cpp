@@ -128,28 +128,94 @@ void test_schedule_write_payload() {
   }
 }
 
+/// utc_to_local_unix() for a value the caller has already reasoned is in range,
+/// so the sweeps below read as arithmetic rather than as error handling. The
+/// out-of-range half has its own test.
+static uint32_t to_wire(uint32_t utc, int32_t offset_s) {
+  uint32_t wire = 0;
+  if (!esphome::alpha_hwr::services::utc_to_local_unix(utc, offset_s, &wire))
+    return 0;  // the caller's assertion will fail on it, which is the point
+  return wire;
+}
+
 // Single-event timestamps live in the pump's LOCAL-Unix clock domain on the
 // wire, while our SingleEvent fields hold UTC. Verify the shift helpers.
 void test_single_event_tz_shift() {
-  using esphome::alpha_hwr::services::utc_to_local_unix;
   using esphome::alpha_hwr::services::local_unix_to_utc;
 
   const uint32_t utc = 1784908899;  // arbitrary real epoch
   const int32_t pdt = -25200;       // seconds east of UTC (PDT)
   const int32_t cet = 3600;         // a positive offset
 
-  TEST_ASSERT(utc_to_local_unix(utc, pdt) == utc - 25200,
+  TEST_ASSERT(to_wire(utc, pdt) == utc - 25200,
               "UTC->local shifts west by the offset (PDT)");
-  TEST_ASSERT(utc_to_local_unix(utc, cet) == utc + 3600,
+  TEST_ASSERT(to_wire(utc, cet) == utc + 3600,
               "UTC->local shifts east by the offset (CET)");
   // Round trip is exact for any offset (same offset both ways).
-  TEST_ASSERT(local_unix_to_utc(utc_to_local_unix(utc, pdt), pdt) == utc,
+  TEST_ASSERT(local_unix_to_utc(to_wire(utc, pdt), pdt) == utc,
               "UTC->local->UTC round-trips exactly (negative offset)");
-  TEST_ASSERT(local_unix_to_utc(utc_to_local_unix(utc, cet), cet) == utc,
+  TEST_ASSERT(local_unix_to_utc(to_wire(utc, cet), cet) == utc,
               "UTC->local->UTC round-trips exactly (positive offset)");
   // 0 is the disabled/cleared sentinel and is never shifted (in either dir).
-  TEST_ASSERT(utc_to_local_unix(0, pdt) == 0, "sentinel 0 not shifted (encode)");
+  TEST_ASSERT(to_wire(0, pdt) == 0, "sentinel 0 not shifted (encode)");
   TEST_ASSERT(local_unix_to_utc(0, pdt) == 0, "sentinel 0 not shifted (decode)");
+}
+
+// The shift used to wrap modulo 2^32 at both ends of the uint32 the wire
+// carries, and — the part that made it an issue rather than a footnote — the
+// two wraps CANCEL. The confirm readback shifts back by the same offset, wraps
+// symmetrically, compares equal, and settles the operation **accepted** for an
+// event stored at an instant nobody asked for (issue #263).
+//
+// The usable range is [|min_offset|, UINT32_MAX - max_offset], about a day out
+// of 136 years, so this is a low-likelihood failure that produces a false
+// success rather than an error. That is the combination worth a guard.
+void test_a_shift_that_cannot_be_represented_is_refused() {
+  using esphome::alpha_hwr::services::local_unix_to_utc;
+  using esphome::alpha_hwr::services::utc_to_local_unix;
+
+  const int32_t cet = 3600;     // east of UTC: pushes the ceiling down
+  const int32_t pdt = -25200;   // west of UTC: pushes the floor up
+  uint32_t wire = 0xDEADBEEF;
+
+  // --- the ceiling, and the reversal it used to produce -------------------
+  // A correctly ordered pair whose end is within the offset of UINT32_MAX came
+  // out REVERSED on the wire: 4294967295 + 3600 wrapped to 3599, which is less
+  // than the begin. Both the parser's ordering check and SingleEvent::is_valid()
+  // run on the UTC values, BEFORE the shift, so nothing looked after it.
+  TEST_ASSERT(!utc_to_local_unix(4294967295u, cet, &wire),
+              "a UTC instant within the offset of UINT32_MAX is refused");
+  TEST_ASSERT(wire == 0xDEADBEEF,
+              "...and the out parameter is untouched, so a caller ignoring the "
+              "return value cannot pick up a wrapped value");
+  TEST_ASSERT(utc_to_local_unix(4294967295u - 3600u, cet, &wire) && wire == 4294967295u,
+              "the last instant that DOES fit is still accepted");
+
+  // --- the floor ----------------------------------------------------------
+  // Below the offset the shift went negative and wrapped up into 2106. The
+  // inverse wrapped back, which is what made the confirm agree with itself.
+  TEST_ASSERT(!utc_to_local_unix(1u, pdt, &wire),
+              "a UTC instant below a westward offset is refused");
+  TEST_ASSERT(!utc_to_local_unix(25200u, pdt, &wire),
+              "...including the one that would land exactly on 0, the "
+              "disabled/cleared sentinel");
+  TEST_ASSERT(utc_to_local_unix(25201u, pdt, &wire) && wire == 1u,
+              "the first instant that does fit lands on 1, not on the sentinel");
+
+  // --- the decode saturates rather than refusing --------------------------
+  // The value is already on the pump — written by the GO app, or left by a
+  // firmware we never spoke to — so there is nothing to refuse. Saturating
+  // keeps a pair ordered and keeps "has this ended?" answerable; wrapping moved
+  // the instant 136 years and made an expired event read as live.
+  TEST_ASSERT(local_unix_to_utc(1u, cet) == 1u,
+              "a wire value below the offset saturates to 1, not to 2106");
+  TEST_ASSERT(local_unix_to_utc(4294967295u, pdt) == 4294967295u,
+              "a wire value above the ceiling saturates, not to 1970");
+  TEST_ASSERT(local_unix_to_utc(1u, cet) < local_unix_to_utc(2u, cet) ||
+                  local_unix_to_utc(2u, cet) == 1u,
+              "saturation never puts an end before its begin");
+  TEST_ASSERT(local_unix_to_utc(0u, cet) == 0u,
+              "and the sentinel still passes through unshifted");
 }
 
 // The round trip the component actually performs, across a DST boundary.
@@ -164,7 +230,6 @@ void test_single_event_tz_shift() {
 // the transition and came back an hour out, so the confirm comparator settled
 // the write REJECTED while the pump held exactly the right value.
 void test_single_event_tz_shift_across_dst() {
-  using esphome::alpha_hwr::services::utc_to_local_unix;
   using esphome::alpha_hwr::services::local_utc_offset_seconds;
   using esphome::alpha_hwr::services::local_unix_to_utc_resolved;
 
@@ -203,8 +268,7 @@ void test_single_event_tz_shift_across_dst() {
     R r{0, 0, 0};
     for (int32_t d = -12 * 3600; d <= 12 * 3600; d += 900) {
       const uint32_t utc = static_cast<uint32_t>(static_cast<int64_t>(base) + d);
-      const uint32_t wire =
-          utc_to_local_unix(utc, local_utc_offset_seconds((time_t) utc));
+      const uint32_t wire = to_wire(utc, local_utc_offset_seconds((time_t) utc));
       if (local_unix_to_utc_resolved(wire) != utc) {
         if (r.bad == 0) r.first = d;
         r.last = d;
@@ -255,8 +319,7 @@ void test_single_event_tz_shift_across_dst() {
   TEST_ASSERT(local_utc_offset_seconds((time_t) acst_ref) % 3600 != 0,
               "The fixture zone really does have a sub-hour offset");
   {
-    const uint32_t wire = utc_to_local_unix(
-        acst_ref, local_utc_offset_seconds((time_t) acst_ref));
+    const uint32_t wire = to_wire(acst_ref, local_utc_offset_seconds((time_t) acst_ref));
     TEST_ASSERT(local_unix_to_utc_resolved(wire) == acst_ref,
                 "A half-hour offset round-trips exactly — the minutes term of "
                 "the offset calculation is load-bearing");
@@ -279,8 +342,7 @@ void test_single_event_tz_shift_across_dst() {
     TEST_ASSERT(local_utc_offset_seconds(ref) == -28800,
                 "The offset across a year boundary is still -8 h, not off by a "
                 "day");
-    const uint32_t wire =
-        utc_to_local_unix(newyear, local_utc_offset_seconds(ref));
+    const uint32_t wire = to_wire(newyear, local_utc_offset_seconds(ref));
     TEST_ASSERT(local_unix_to_utc_resolved(wire) == newyear,
                 "...and the round trip is exact across it");
   }
@@ -475,6 +537,7 @@ int main() {
 
   test_schedule_write_payload();
   test_single_event_tz_shift();
+  test_a_shift_that_cannot_be_represented_is_refused();
   test_single_event_tz_shift_across_dst();
   test_state_change_callback_fires_only_on_change();
   test_the_layer_write_settles_on_its_ack_not_on_a_timeout();

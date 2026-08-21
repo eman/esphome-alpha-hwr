@@ -309,6 +309,43 @@
 
 ### Changed
 
+- **A single-event window the pump cannot store in local time is refused, not
+  wrapped** (issue #263). The pump's clock program stores single-event
+  begin/end as **local** Unix time, so every timestamp is shifted by the local
+  UTC offset on its way to the wire and back. That shift wrapped modulo 2^32 at
+  both ends of the range the wire carries.
+
+  What makes it an issue rather than a footnote is that the two wraps **cancel**.
+  The confirm readback shifts back by the same offset, wraps symmetrically, and
+  compares equal — so the operation settled **accepted** for an event the pump
+  had stored at an instant nobody asked for. A byte round trip is not behaviour,
+  and here the round trip was supplied by two wraps agreeing with each other.
+  There is a second failure at the ceiling: a correctly ordered pair whose end
+  is within the offset of `UINT32_MAX` arrives at the pump **reversed**, because
+  both the ordering check and `SingleEvent::is_valid()` run before the shift and
+  nothing looked after it.
+
+  The usable range is `[|min_offset|, UINT32_MAX - max_offset]` — at ±14 h, about
+  a day's worth of instants out of 136 years — so the likelihood is low. A
+  low-likelihood failure that reports success is still worth a guard.
+
+  The two directions are now guarded differently, on purpose. **Encoding
+  refuses**: the caller named an instant this pump cannot store in this zone, and
+  writing a nearby one instead is exactly the silent substitution above. The
+  refusal settles `invalid` ahead of the schedule-overview read, so an argument
+  that is wrong regardless of the device is not reported as a link failure.
+  **Decoding saturates**: the value is already on the pump — written by the GO
+  app, or left by a firmware we never spoke to — so there is nothing to refuse,
+  and the closest representable UTC keeps a pair ordered and keeps "has this
+  ended?" answerable, where wrapping moved the instant 136 years and made an
+  expired event read as live.
+
+  Settled in the same change: `0` is the wire's disabled/cleared sentinel and is
+  never shifted, so an enabled event whose begin was `0` confirmed clean while
+  describing a slot that says "cleared". The service argument parser now floors
+  both epoch fields at 1, and `set_single_event` with `0,4294967295` moves from
+  the accepted table to the rejected one.
+
 - **One accessor answers "what time is it", at one sanity floor** (issue #270).
   The component resolved the node's wall clock in five places, each with its own
   source and its own idea of when a clock is trustworthy: `TimeService` floored

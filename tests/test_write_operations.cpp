@@ -3436,6 +3436,98 @@ static void test_single_event_slot_past_the_protocol_limit_is_invalid() {
               "detail does not blame the link");
 }
 
+// Issue #263. The pump stores single-event windows in LOCAL Unix time, so an
+// instant within the zone's UTC offset of either end of the uint32 the wire
+// carries has no representation there. That shift used to wrap modulo 2^32 --
+// and the two wraps CANCELLED: the confirm readback shifted back by the same
+// offset, wrapped symmetrically, compared equal, and settled the operation
+// ACCEPTED for an event the pump had stored at an instant nobody asked for.
+//
+// This suite pins TZ=UTC, where the offset is zero and no instant can be out of
+// range, so the guard would be permanently unreachable here without a zone that
+// has one. These three tests un-pin it deliberately. (That the pin hides a
+// whole conversion layer, in general, is issue #268.)
+//
+// Fixed-offset zones, no DST: the subject is the arithmetic at the ends of the
+// range, and a transition rule would only add a second reason for a value to
+// move.
+static void test_a_window_past_the_wire_ceiling_is_refused() {
+  std::cout << "\n=== single event: a window the local clock cannot hold -> invalid ===" << std::endl;
+  setenv("TZ", "CET-1", 1);  // +3600, constant
+  tzset();
+  {
+    Harness h;
+    h.prime_cache();
+    h.sim.respond_overview_reads = false;  // the link cannot answer either
+
+    // Ordered in UTC, and 4294967295 + 3600 wrapped to 3599 -- BELOW its own
+    // begin, so the pair arrived at the pump reversed. Both the parser's
+    // ordering check and SingleEvent::is_valid() run on the UTC values, before
+    // the shift, so nothing looked after it.
+    h.write_op.submit_set_single_event(4294960000u, 4294967295u, "tz1");
+    h.advance(25000);
+
+    TEST_ASSERT(h.events_for("tz1") == 1, "exactly one terminal event");
+    const WriteResult *r = h.result_for("tz1");
+    TEST_ASSERT(r && r->status == WriteStatus::INVALID,
+                "an unrepresentable window is invalid, not accepted");
+    TEST_ASSERT(r && r->detail.find("local-time") != std::string::npos,
+                "detail names the local-time clock program as the reason");
+    TEST_ASSERT(r && r->detail.find("overview") == std::string::npos,
+                "detail does not blame the link, which is also down");
+    TEST_ASSERT(h.sim.single_events[0][0] == 0, "nothing reached the wire");
+  }
+  setenv("TZ", "UTC", 1);
+  tzset();
+}
+
+static void test_a_window_below_the_wire_floor_is_refused() {
+  std::cout << "\n=== single event: a window below a westward offset -> invalid ===" << std::endl;
+  setenv("TZ", "PST8", 1);  // -28800, constant
+  tzset();
+  {
+    Harness h;
+    h.prime_cache();
+
+    // 1 - 28800 goes negative and wrapped up into 2106. The inverse wrapped
+    // back, which is what made the confirm agree with itself.
+    h.write_op.submit_set_single_event(1u, 28800u, "tz2");
+    h.advance(25000);
+
+    const WriteResult *r = h.result_for("tz2");
+    TEST_ASSERT(h.events_for("tz2") == 1, "exactly one terminal event");
+    TEST_ASSERT(r && r->status == WriteStatus::INVALID,
+                "a window below the westward offset is invalid");
+    TEST_ASSERT(h.sim.single_events[0][0] == 0, "nothing reached the wire");
+  }
+  setenv("TZ", "UTC", 1);
+  tzset();
+}
+
+// The positive control, and it is not optional: a guard on the ends of a
+// 136-year range passes every negative case by refusing everything, and this
+// suite's other single-event tests all run at offset zero, where the guard
+// cannot fire at all. Same non-zero zone, an ordinary window.
+static void test_an_ordinary_window_still_writes_at_a_nonzero_offset() {
+  std::cout << "\n=== single event: an ordinary window is unaffected by the guard ===" << std::endl;
+  setenv("TZ", "CET-1", 1);
+  tzset();
+  {
+    Harness h;
+    h.prime_cache();
+
+    h.write_op.submit_set_single_event(EVENT_NEXT_WEEK_BEGIN, EVENT_NEXT_WEEK_END, "tz3");
+    h.advance(25000);
+
+    const WriteResult *r = h.result_for("tz3");
+    TEST_ASSERT(r && r->status == WriteStatus::ACCEPTED,
+                "a normal window at a +1 h offset still settles accepted");
+    TEST_ASSERT(h.sim.single_events[0][0] == 1, "and it reached the wire");
+  }
+  setenv("TZ", "UTC", 1);
+  tzset();
+}
+
 // The complement, and the honest limit of the split: a slot this *pump* lacks
 // but the protocol allows still reports the overview failure when the link is
 // down. Asserting "out of range (pump has N)" would mean claiming a count that
@@ -4772,6 +4864,9 @@ int main() {
   test_single_event_last_valid_slot_still_writes();
   test_set_single_event_explicit_slot_is_bounded();
   test_single_event_slot_past_the_protocol_limit_is_invalid();
+  test_a_window_past_the_wire_ceiling_is_refused();
+  test_a_window_below_the_wire_floor_is_refused();
+  test_an_ordinary_window_still_writes_at_a_nonzero_offset();
   test_device_range_defers_to_the_overview_failure();
   test_out_of_range_events_never_enter_the_cache();
   test_schedule_supersede_keys();

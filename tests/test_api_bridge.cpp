@@ -397,6 +397,13 @@ static void test_partially_numeric_arguments_are_rejected() {
       {"clear_schedule_entry", "0,", "an empty field is not a zero"},
       {"clear_schedule_entry", ",0", "...in either position"},
       {"set_single_event", "1000,", "an empty end timestamp is not a zero"},
+      // 0 is the wire's disabled/cleared sentinel, never shifted in either
+      // direction, so an enabled event beginning at 0 confirmed clean while
+      // describing a slot that says "cleared" (issue #263). This case used to
+      // sit in the accepted table.
+      {"set_single_event", "0,4294967295", "0 is the cleared sentinel, not a begin timestamp"},
+      {"set_single_event", "1000,0", "...and not an end timestamp either"},
+      {"set_vacation", "0,86400", "...for a vacation either"},
   };
 
   for (const auto &c : cases) {
@@ -453,7 +460,6 @@ static void test_well_formed_arguments_still_reach_the_operation_layer() {
       {"set_schedule_entry", "4,6,23,59,23,59"},
       {"set_schedule_entry", "0,0,0,0,0,0"},
       {"clear_schedule_entry", "4,6"},
-      {"set_single_event", "0,4294967295"},
       {"set_vacation", "1000,2000"},
       // Issue #255. On the device every one of these was refused, because the
       // parser's upper bound travelled as a `long` and 4294967295 narrowed to

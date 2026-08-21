@@ -909,11 +909,38 @@ void ScheduleService::write_single_event_async(
   // Shift UTC -> pump LOCAL-Unix before serializing (the pump's RTC is local
   // Unix time). Serialize a copy so the caller's event stays UTC. ts 0
   // (disabled/cleared) is left untouched by utc_to_local_unix.
+  //
+  // The last stop before an unrepresentable instant reaches the wire (issue
+  // #263). A pair that wrapped here settled ACCEPTED, because the confirm
+  // shifts back by the same offset and the two wraps cancel.
+  //
+  // Unreachable today, and belt-and-braces rather than a fix: the sole caller
+  // is WriteOperationService::write_single_event_(), every path to which runs
+  // run_single_event_()'s representability check first, on the same two
+  // timestamps -- and a CLEAR carries 0/0, the sentinel, which always fits. It
+  // is kept because this is a public method on ScheduleService and the shift is
+  // the only place the offset is known, so the choke point is real rather than
+  // argued. It is deliberately NOT covered by a mutation entry; see the
+  // deliberate absences in tools/mutation_check.sh.
   SingleEvent wire = event;
-  wire.begin_timestamp = utc_to_local_unix(
-      event.begin_timestamp, local_utc_offset_seconds((time_t) event.begin_timestamp));
-  wire.end_timestamp = utc_to_local_unix(
-      event.end_timestamp, local_utc_offset_seconds((time_t) event.end_timestamp));
+  const bool begin_fits = utc_to_local_unix(
+      event.begin_timestamp,
+      local_utc_offset_seconds((time_t) event.begin_timestamp),
+      &wire.begin_timestamp);
+  const bool end_fits = utc_to_local_unix(
+      event.end_timestamp,
+      local_utc_offset_seconds((time_t) event.end_timestamp),
+      &wire.end_timestamp);
+  const bool both_ends_fit = begin_fits && end_fits;
+  if (!both_ends_fit) {
+    ESP_LOGE(TAG,
+             "Single event %" PRIu32 "-%" PRIu32 " cannot be stored in local "
+             "time on this pump; not written",
+             event.begin_timestamp, event.end_timestamp);
+    if (on_complete)
+      on_complete(false);
+    return;
+  }
   wire.to_bytes(apdu + 11);
 
   // Awaited as the short Class 10 ACK it actually gets (issue #253) -- the same
