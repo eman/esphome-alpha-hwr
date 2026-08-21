@@ -183,9 +183,11 @@ std::string EventLogService::format_display() const {
     // here would treat the pump's local wall clock as though it were UTC and
     // move it by the offset a second time.
     //
-    // This also corrects the host side, where the old localtime_r() DID shift
-    // and was wrong. On the device localtime_r happened to be right, for the
-    // wrong reason: libc had no zone, so it shifted by zero.
+    // The old localtime_r() here shifted, and was wrong on BOTH targets -- on
+    // the device too, because ESPHome overrides localtime_r() to use its parsed
+    // zone (posix_tz.cpp), so it really did move these values. An earlier
+    // version of this comment said the device was right by accident; it was
+    // not. This is one of the two sites issue #289 genuinely fixed.
     const ESPTime lt = ESPTime::from_epoch_utc(static_cast<time_t>(e.timestamp));
 
     char buf[80];

@@ -1421,11 +1421,17 @@ public:
       return day <= max_day;
     };
     // Local calendar fields -> UTC epoch, through ESPTime rather than mktime()
-    // (issue #289). mktime() resolves against libc's zone, and on the ESP32
-    // libc has no zone -- ESPHome only calls tzset() under USE_HOST -- so this
-    // encoded the user's local wall clock as though it were UTC. Every window
-    // the schedule editor produced was out by the node's offset, and no host
-    // test could see it because the host build DOES set the zone.
+    // (issue #289). **This is the one site that was genuinely broken on the
+    // device.** ESPHome overrides localtime_r()/localtime() on embedded targets
+    // so libc callers get its parsed zone -- but it does NOT override mktime(),
+    // which therefore resolved against a libc with no zone at all and encoded
+    // the user's local wall clock as though it were UTC.
+    //
+    // Every window the schedule editor's "Add Single Event" and "Set Vacation"
+    // buttons produced was out by the node's UTC offset. Events submitted
+    // through the services with explicit epochs never came through here and
+    // were unaffected. No host test could see it, because the host build sets
+    // libc's zone and mktime() is correct there.
     //
     // recalc_timestamp_local() is ESPHome's own engine, correct on both
     // targets, and it resolves the DST-ambiguous hour the same way mktime's
@@ -1452,8 +1458,8 @@ public:
     // floor of its own (year 2020), which made it the loosest of the four
     // notions of "now" in the component: it accepted a clock TimeService would
     // have refused, and it accepted one in a build with no time component at
-    // all -- where libc has no zone loaded, so the anchoring year and every
-    // mktime() below it were resolved against UTC while the pump runs local.
+    // all -- where nothing has set a zone, so the anchoring year was resolved
+    // against UTC while the pump runs local.
     ESPTime local_now;
     if (!time_service_.current_time(local_now)) {
       ESP_LOGW(tag, "System time not synced yet — cannot set a dated event");

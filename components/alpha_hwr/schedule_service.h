@@ -134,33 +134,32 @@ inline uint32_t local_unix_to_utc(uint32_t local, int32_t offset_s) {
 /// Local UTC offset (seconds east of UTC) at the instant `ref`, e.g. -25200 for
 /// PDT, +3600 for CET. `ref` is a **UTC epoch**.
 ///
-/// ## Why this does not use libc (issue #289)
+/// ## Why this asks ESPTime rather than libc (issue #289)
 ///
-/// It used to, and on the ESP32 that made it **return 0** -- so the whole
-/// UTC<->local shift below was a no-op on the device this component ships to,
-/// while every host test passed.
+/// **Correction to what this comment first said.** It claimed the previous
+/// libc implementation returned 0 on the ESP32, making the whole shift below a
+/// no-op on hardware. That was wrong, and the error was reading only half of
+/// ESPHome's time code: `setenv("TZ")`/`tzset()` really are `USE_HOST`-only,
+/// but ESPHome then *overrides* `localtime_r()` and `localtime()` itself on
+/// embedded targets (posix_tz.cpp, `#ifndef USE_HOST`) so that libc callers get
+/// its parsed zone -- "without needing the TZ environment variable (which pulls
+/// in scanf bloat)". The old implementation here was therefore **already
+/// correct on the device**.
 ///
-/// ESPHome sets libc's timezone only on the host:
+/// What the same misreading did catch is real: `mktime()` is NOT among the
+/// functions ESPHome overrides, and build_event_window() in alpha_hwr.h used
+/// it. That one was genuinely broken.
 ///
-///     // esphome/components/time/real_time_clock.cpp
-///     #ifdef USE_HOST
-///       setenv("TZ", tz, 1);
-///       tzset();
-///     #endif
+/// This still asks ESPTime, for reasons that survive the correction: it is
+/// right on both targets without depending on a shim, it does not rest on which
+/// libc functions a future ESPHome chooses to override, and one answer to "what
+/// is local time" is the argument issue #270 makes for the wall clock.
 ///
-/// `USE_HOST` is not defined in the ESP32 build ("we eliminated
-/// setenv("TZ")/tzset() on embedded platforms to save flash" --
-/// esphome/core/time.cpp). ESPHome's own conversions use its parsed timezone
-/// instead and never consult libc, so on the device `localtime_r` is UTC while
-/// `ESPTime::from_epoch_local()` is correct. The old comment here was careful
-/// about which libc functions exist on newlib and never asked whether they had
-/// a zone to work with.
-///
-/// So: ask ESPTime, which is right on both targets. Take the local FIELDS at
-/// `ref`, re-encode them as though they were UTC, and the difference is the
-/// offset. That is also exactly the encoding the sibling Python library uses
-/// (`calendar.timegm()` on naive local fields), which is bench-confirmed -- so
-/// the two implementations now agree in execution as well as in design.
+/// Take the local FIELDS at `ref`, re-encode them as though they were UTC, and
+/// the difference is the offset. That is exactly the encoding the sibling
+/// Python library uses (`calendar.timegm()` on naive local fields), which is
+/// bench-confirmed -- so the two implementations agree in execution as well as
+/// in design.
 inline int32_t local_utc_offset_seconds(time_t ref) {
   ESPTime local_fields = ESPTime::from_epoch_local(ref);
   // Re-encode the local fields as if they were UTC. `false` skips day_of_year,
