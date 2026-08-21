@@ -1120,8 +1120,14 @@
   above 253. The 257 reading also contradicted this change's own floor, which is
   derived the other way.
 
-  Raising the ceiling to the true maximum has a consequence worth stating: the
-  reassembly-overflow branch **can no longer fire**. The expected length is
+  Two things follow from that, and both are worth stating because they make the
+  ceiling change smaller than it looks. What actually protects a legal frame is
+  not the ceiling but the completion test: a frame at its declared length has
+  already satisfied it and skips the overflow guard whatever the cap says. The
+  constant is corrected for what it *says* — a buffer bound naming 256 when a
+  GENI packet can be 259 is wrong documentation — rather than for what it does.
+
+  And the reassembly-overflow branch **can no longer fire**. The expected length is
   `data[1] + 4`, so at most 259, and the cap is now that same 259 — a buffer
   above the cap is therefore also at or past the expected length, which is the
   completion test. The branch was reachable only because the cap sat three bytes

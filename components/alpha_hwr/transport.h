@@ -604,6 +604,14 @@ class Transport {
   /// field as bounded by MAX_PDU_LEN rather than by DA + SA + MAX_PDU_LEN. See
   /// the note in frame_builder.h; the specification and the vendor's own builder
   /// both put the bound at 255, giving 259 on the wire.
+  ///
+  /// Kept for what it SAYS rather than for what it does. What actually protects
+  /// a legal frame is the `still_incomplete` term on the guard in
+  /// on_notification(): a frame at its declared length has already satisfied the
+  /// completion test and skips the guard whatever this value is. Set it back to
+  /// 256 with that term in place and a 259-byte frame still arrives intact. A
+  /// buffer bound naming 256 when a GENI packet can be 259 is wrong
+  /// documentation even when nothing reads it.
   static constexpr size_t MAX_PACKET_SIZE = protocol::MAX_TELEGRAM_LEN;
   /// How much of a frame goes into one GATT write. NOT a ceiling imposed by the
   /// negotiated MTU, whatever the name suggests, and the difference is the point:

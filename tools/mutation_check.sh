@@ -944,10 +944,21 @@ MUTATIONS=(
 # The two reachability defects a skeptic pass found in the same function.
 "lone-frame-start-never-learns-its-length|components/alpha_hwr/transport.cpp|    if (expected_packet_length_ == 0 && reassembly_buffer_.size() >= 2) {|    if (false) {"
 "complete-frame-discarded-as-an-overflow|components/alpha_hwr/transport.cpp|  if (reassembly_buffer_.size() > MAX_PACKET_SIZE && still_incomplete) {|  if (reassembly_buffer_.size() > MAX_PACKET_SIZE) {"
-# The ceiling is the largest telegram the specification permits: LENGTH 255 plus
-# the four bytes outside it. At the old 256 the three largest legal sizes were
-# discarded as overflows.
-"reassembly-ceiling-below-a-legal-frame|components/alpha_hwr/transport.h|  static constexpr size_t MAX_PACKET_SIZE = protocol::MAX_TELEGRAM_LEN;|  static constexpr size_t MAX_PACKET_SIZE = 256;"
+# Deliberate absence: MAX_PACKET_SIZE's VALUE. It is now inert, and the entry
+# that mutated it to 256 has been retired rather than left to survive.
+#
+# The ceiling is documented as the largest telegram the specification permits --
+# LENGTH 255 plus the four bytes outside it -- and at the old 256 the three
+# largest legal sizes were discarded as overflows. But what actually protects a
+# legal frame is not the ceiling: it is the `still_incomplete` term on the guard,
+# because a frame at its declared length has already satisfied the completion
+# test and skips the guard whatever the cap says. Set the cap back to 256 with
+# that term in place and a 259-byte frame still arrives intact.
+#
+# So the constant is kept for what it says rather than for what it does -- a
+# buffer bound naming 256 when a GENI packet can be 259 is wrong documentation
+# even when nothing reads it -- and the coverage lives on
+# complete-frame-discarded-as-an-overflow, which removes the term and IS caught.
 # Deliberate absence, as of issue #278: the inbound-overflow branch in
 # on_notification() is now UNREACHABLE, so its three entries have been removed
 # rather than left to survive. CI found all three surviving at once.
