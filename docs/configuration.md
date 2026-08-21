@@ -120,20 +120,27 @@ DST state and the protocol has no timezone field anywhere, so local is the only
 base it can be using. This component takes the timezone from your `time:`
 component and converts at the edge, because Home Assistant speaks UTC.
 
-Two things follow that are worth knowing:
+**`time_id` is what makes that conversion possible.** Without it the component
+refuses to date an event at all, rather than guessing.
 
-- **`time_id` is what makes that conversion possible.** Without it the component
-  refuses to date an event at all, rather than guessing.
-- **The conversion uses ESPHome's timezone engine, never libc.** That sounds like
-  an implementation detail and is not: ESPHome applies the timezone to libc only
-  on the host, so on an ESP32 `localtime()` answers UTC. Before v0.16 this
-  component used libc, and single events on a non-UTC node were stored — and run
-  — offset by the node's UTC offset (issue #289).
+All local-time conversions go through ESPHome's own timezone engine rather than
+libc. On an ESP32 that distinction is thinner than it looks — ESPHome overrides
+`localtime()` and `localtime_r()` to use its parsed zone, so libc callers do get
+local time — but `mktime()` is **not** overridden, and before v0.16 the schedule
+editor's dated-event helper used it. Windows entered through the editor's "Add
+Single Event" and "Set Vacation" buttons were therefore stored offset by the
+node's UTC offset (issue #289). Events submitted through the **services** with
+explicit epochs were unaffected, as was the weekly schedule, which is stored as
+day-and-minute-of-day rather than as an epoch.
 
-**If you stored vacations or one-time runs before v0.16, re-enter them.** They
-are on the pump at the wrong instant and are not rewritten automatically. The
-weekly schedule is unaffected: it is stored as day-and-minute-of-day, not as an
-epoch, so it never went through the conversion.
+Two displays were also wrong before v0.16: the **event log** and **cycle
+timestamps** render values that come off the wire raw and are already the pump's
+local clock, and they were being shifted a second time.
+
+**No action is needed on upgrade.** Events already stored on the pump are not
+rewritten and do not need to be — if any were entered through the schedule
+editor before v0.16 they are offset, and re-entering those specific ones is the
+only fix, but nothing else is affected.
 
 ### Daylight saving: the pump has its own rule
 
@@ -832,6 +839,87 @@ logger:
 
 and prefer keeping at most one extra subscriber attached beyond Home Assistant
 while you do. Watch `Free Heap` / `Min Free Heap` during long debug sessions.
+
+## Flow limiters
+
+The pump has **MaxFlow** and **MinFlow** limiters, set from the Grundfos GO app's
+per-mode screens and entirely separate from the setpoint. They constrain the pump
+*below* what it was asked for — and until this was read, nothing in this component
+could see them.
+
+That is the worst shape a diagnostic hole comes in, because every other signal
+says the write worked. Measured on a real installation with MaxFlow at 1.6 gpm,
+constant speed:
+
+| commanded | delivered | flow |
+| --- | --- | --- |
+| 1700 RPM | 1701 | 1.08 gpm |
+| 1900 RPM | 1903 | 1.59 gpm |
+| 2000 RPM | 1892 | 1.59 gpm |
+| 3000 RPM | 1883 | 1.59 gpm |
+
+Every one of those writes settled `accepted`, and the pump reported the commanded
+setpoint back as its own stored value each time. At 3000 RPM it delivered 63% of
+what was asked.
+
+Two optional entities make it visible:
+
+```yaml
+alpha_hwr:
+  flow_limiter:
+    name: "Pump Flow Limiter"
+  flow_limited:
+    name: "Pump Flow Limited"
+```
+
+**Pump Flow Limiter** reads one of three things, and the three are deliberately
+distinct:
+
+- `No limiter enabled` — both are off.
+- `MaxFlow enabled at 1.60 gpm (not limiting)` — switched on, but not currently
+  constraining the pump. It will start the moment the setpoint goes up, which is
+  why this is not reported as an all-clear.
+- `MaxFlow limiting at 1.60 gpm` — the pump is being held below what it was asked
+  for right now.
+- `unknown` — the pump has not answered, which is not the same as "no limiter".
+
+**Pump Flow Limited** is the same thing as one bit, for automations.
+
+The caps are reported in **gallons per minute**, because that is the unit they
+were entered in: the values land on the wire in m³/s, and every limit value seen
+on two pumps converts to an exact gpm figure.
+
+`alpha_hwr_pairing.yaml` declares both. The reads are only issued when at least
+one of them is configured — five frames per connection and three per control poll
+otherwise buy nothing.
+
+**Reading only.** Enabling or changing a limiter from here is not implemented:
+switching one on silently caps the pump, which is not a change to make as a side
+effect. Set them in the Grundfos GO app.
+
+## Cycle Flow: a control the vendor does not offer
+
+**Cycle Flow** sets the flow the pump targets during the ON periods of Cycle Time
+Control. It works — bench-measured within 1% across four setpoints, with motor
+speed moving to hold it — and **the Grundfos GO app has no equivalent control**.
+The manual is stronger than silent: §9.3.4 says the pump "operates at its maximum
+curve" in this mode, starting and stopping on time parameters, and mentions no
+flow setting at all.
+
+It is exposed anyway, deliberately. The register split is what the pump's own
+layout says — Object 91 Sub 421's first field is a flow setpoint and Sub 430 has
+no flow field — and being undocumented by the vendor is not a reason to remove
+something that regulates correctly.
+
+It is also **not** the MaxFlow limiter under another name. The limiter does not
+apply to this mode: 2.0 and 3.0 gpm cycle-flow runs were delivered in full with
+MaxFlow enabled at 1.4 and 1.6 gpm. Two mechanisms, two objects, different
+scopes.
+
+Why the vendor omits it is unknown. Shared firmware across the product family and
+a withdrawn feature are both consistent with what can be seen from outside, and
+they are indistinguishable from here. Treat it as a capability that happens to
+work rather than a supported one.
 
 ## Control State Polling
 

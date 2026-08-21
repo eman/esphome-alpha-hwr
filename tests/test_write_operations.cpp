@@ -236,7 +236,15 @@ struct PumpSim {
 
   int sub_for_mode() const {
     if (mode_byte == 0x02) return 13;
-    if (mode_byte == 0x00 || mode_byte == 0x01) return 15;
+    if (mode_byte == 0x00) return 15;  // constant pressure
+    // Proportional pressure keeps its setpoint at 86/17, not at constant
+    // pressure's 86/15. Both used to map here to 15, which was invisible while
+    // an out-of-range proportional setpoint was refused before the wire: the
+    // sim never had to store one. Once the pump does the clamping (issue #276)
+    // the two objects have to be distinct, or a proportional setpoint clamps
+    // against constant pressure's range -- and those two ranges do not even
+    // overlap (1.000-2.450 m against 2.599-4.569 m).
+    if (mode_byte == 0x01) return 17;
     if (mode_byte == 0x08) return 39;
     return -1;
   }
@@ -248,10 +256,46 @@ struct PumpSim {
   // passed. The whole #82/#85 settle-delay rationale survived only as a comment.
   // A pump that needs a moment is what makes the delay a claim a test can check.
   uint32_t setpoint_apply_delay_ms{1400};
+  /// The real pump does not REFUSE a setpoint outside its published range; it
+  /// takes it and clamps it. Measured on two pumps, constant speed:
+  ///
+  ///     4000 RPM -> stored 3671      600 RPM -> stored 1650
+  ///
+  /// Simulating that is what makes issue #276's whole design testable: let the
+  /// pump clamp, then explain what came back. Before this the sim stored
+  /// whatever it was handed, so the CLAMPED branch of confirm_setpoint_() was
+  /// reachable only by a `transform` hook nothing used for this.
+  bool clamp_to_range{true};
+
+  const FactoryRange *range_for_sub(int sub) const {
+    switch (sub) {
+      case 13: return &range_cs;
+      case 15: return &range_cp;
+      case 17: return &range_pp;
+      case 39: return &range_cf;
+      default: return nullptr;
+    }
+  }
+
   // Applied by the harness at clock_base_ms + this, via a deferred task.
   void apply_setpoint(int sub, float native) {
     if (!honor_setpoint_writes || sub < 0) return;
-    setpoints[sub] = transform ? transform(sub, native) : native;
+    float v = transform ? transform(sub, native) : native;
+    // Clamped against the range the pump PUBLISHES, whether or not it is
+    // answering reads of it. A pump that declines to publish its limits still
+    // has them -- which is exactly the case the "do not quote a range we did
+    // not read" rule exists for.
+    const FactoryRange *r = clamp_to_range ? range_for_sub(sub) : nullptr;
+    // A degenerate published range is not a limit the pump could be applying;
+    // a real one with an inverted or empty range still has real limits, it just
+    // reports them wrongly. Clamping against nonsense would make the sim invent
+    // a behaviour no pump has.
+    const bool range_is_usable = r != nullptr && r->hi > r->lo;
+    if (range_is_usable) {
+      if (v < r->lo) v = r->lo;
+      if (v > r->hi) v = r->hi;
+    }
+    setpoints[sub] = v;
   }
 };
 
@@ -1158,23 +1202,33 @@ static void test_setpoint_bounds_come_from_the_pump() {
 // inherited 500-4500 and the pump will not go below 1650. Refused up front,
 // naming the pump as the source -- a client can act on "the hardware cannot"
 // differently from "we have not looked".
-static void test_setpoint_below_the_pump_floor_is_refused() {
-  std::cout << "\n=== set_setpoint: below the pump's floor -> invalid, and it says whose floor ===" << std::endl;
+static void test_setpoint_below_the_pump_floor_is_clamped_not_refused() {
+  std::cout << "\n=== set_setpoint: below the pump's floor -> clamped, and it says whose floor ===" << std::endl;
   Harness h;
   h.sim.mode_byte = 0x02;
   h.prime_temp_limits();
 
+  // 1200 RPM: the pump will not go below 1650 and does not refuse being asked.
+  // It takes the value and stores 1650, which is what a user watching the
+  // slider snap back has always seen.
   h.write_op.submit_set_setpoint(ControlMode::CONSTANT_SPEED, 1200.0f, "pr2");
   h.advance(12000);
 
   const WriteResult *r = h.result_for("pr2");
   TEST_ASSERT(h.events_for("pr2") == 1, "exactly one terminal event");
-  TEST_ASSERT(r && r->status == WriteStatus::INVALID, "refused before anything reached the wire");
-  TEST_ASSERT(r && r->detail.find("pump's range") != std::string::npos,
-              "the detail attributes the bound to the pump");
-  TEST_ASSERT(r && r->detail.find("1650") != std::string::npos,
-              "and quotes the pump's actual floor");
-  TEST_ASSERT(h.frames_0601 == 0, "nothing was written");
+  TEST_ASSERT(r && r->status == WriteStatus::CLAMPED,
+              "the write goes out and the pump clamps it -- it is not refused "
+              "here on the strength of a range that is only the bound when no "
+              "limiter is enabled (issue #276)");
+  TEST_ASSERT(h.frames_0601 > 0, "...so something DID reach the wire");
+  TEST_ASSERT(r && std::fabs(r->value - 1650.0f) < 0.5f,
+              "the settled value is what the pump stored");
+  TEST_ASSERT(r && r->detail.find("1650") != std::string::npos &&
+                  r->detail.find("3671") != std::string::npos,
+              "and the detail quotes the pump's range as the EXPLANATION for "
+              "the clamp");
+  TEST_ASSERT(r && r->detail.find("RPM") != std::string::npos,
+              "with the unit, so the numbers mean something");
 }
 
 // Proportional pressure, whose VALUES had never been seen until they were read
@@ -1216,22 +1270,26 @@ static void test_proportional_pressure_has_its_own_range() {
 
   const WriteResult *r = h.result_for("pr3");
   TEST_ASSERT(h.events_for("pr3") == 1, "exactly one terminal event");
-  TEST_ASSERT(r && r->status == WriteStatus::INVALID,
-              "1.5 m is fine for constant pressure and impossible for proportional pressure");
-  TEST_ASSERT(r && r->detail.find("pump's range") != std::string::npos, "the pump is named as the bound");
+  TEST_ASSERT(r && r->status == WriteStatus::CLAMPED,
+              "1.5 m is fine for constant pressure and impossible for "
+              "proportional pressure, so the pump clamps it to its own floor");
+  TEST_ASSERT(r && r->detail.find("2.599") != std::string::npos,
+              "and the detail quotes THIS mode's floor, not constant pressure's");
 
   // A flow setpoint the pump can reach, against a range it reported in m³/s.
   h.write_op.submit_set_setpoint(ControlMode::CONSTANT_FLOW, 2.0f, "pr3f");
   h.advance(12000);
   const WriteResult *rf = h.result_for("pr3f");
   TEST_ASSERT(rf && rf->status == WriteStatus::ACCEPTED,
-              "2.0 m³/h is inside the pump's flow range and goes through");
-  // ...and one it cannot: 3.0 clears the 0.1-10.0 fallback and exceeds 2.4984.
+              "2.0 m³/h is inside the pump's flow range and goes through unclamped");
+  // ...and one it cannot: 3.0 exceeds the pump's 2.4984 ceiling.
   h.write_op.submit_set_setpoint(ControlMode::CONSTANT_FLOW, 3.0f, "pr3g");
   h.advance(12000);
   const WriteResult *rg = h.result_for("pr3g");
-  TEST_ASSERT(rg && rg->status == WriteStatus::INVALID,
-              "3.0 m³/h clears the fallback ceiling and not the pump's");
+  TEST_ASSERT(rg && rg->status == WriteStatus::CLAMPED,
+              "3.0 m³/h is past the pump's ceiling and comes back clamped");
+  TEST_ASSERT(rg && rg->detail.find("m³/h") != std::string::npos,
+              "reported in m³/h, the unit the range is kept in");
 }
 
 // A pump that will not answer leaves us on the fallback, and the fallback is
@@ -1256,16 +1314,23 @@ static void test_setpoint_falls_back_when_the_ranges_never_arrive() {
   h.write_op.submit_set_setpoint(ControlMode::CONSTANT_SPEED, 4400.0f, "pr4");
   h.advance(12000);
   const WriteResult *r = h.result_for("pr4");
-  TEST_ASSERT(r && r->status == WriteStatus::ACCEPTED,
-              "the fallback lets it through rather than guessing a limit");
+  // The pump still HAS limits whether or not it publishes them, so it still
+  // clamps -- 4400 stores as 3671.
+  TEST_ASSERT(r && r->status == WriteStatus::CLAMPED,
+              "the write goes out and the pump clamps it");
+  TEST_ASSERT(r && std::fabs(r->value - 3671.0f) < 0.5f, "settling at the pump's real ceiling");
 
-  // ...and past the fallback it is still refused, saying why the bound is ours.
-  h.write_op.submit_set_setpoint(ControlMode::CONSTANT_SPEED, 4600.0f, "pr5");
-  h.advance(12000);
-  const WriteResult *r5 = h.result_for("pr5");
-  TEST_ASSERT(r5 && r5->status == WriteStatus::INVALID, "past the fallback it is refused");
-  TEST_ASSERT(r5 && r5->detail.find("pump limits not read") != std::string::npos,
-              "and the detail admits the bound is ours, not the pump's");
+  // And this is the half that matters: with nothing read, the detail must NOT
+  // quote a range. The constants this code used to fall back on were wrong in
+  // both directions on all four modes, and printing one as though the pump had
+  // said it would turn an explanation into a fabrication (@jfriend00 on #276).
+  TEST_ASSERT(r && r->detail.find("range") == std::string::npos,
+              "no range is quoted, because none was read");
+  TEST_ASSERT(r && r->detail.find("4500") == std::string::npos &&
+                  r->detail.find("500") == std::string::npos,
+              "and specifically not the old hardcoded constants");
+  TEST_ASSERT(r && r->detail.find("3671") != std::string::npos,
+              "what it does report is what the pump stored, which is a fact");
 }
 
 // A pump that answers with a range that is not one. Taking max <= min at face
@@ -1288,11 +1353,32 @@ static void test_a_degenerate_range_is_not_used() {
   TEST_ASSERT(!h.control.setpoint_ranges_known(),
               "and the read refused it as a source, so the set is not complete");
 
+  // 2000 RPM is inside the pump's real range, so it stores verbatim. The point
+  // of the assertion is the DETAIL: a degenerate range was refused as a source,
+  // so nothing may be quoted from it -- an inverted "1650-200" in a settle
+  // event is worse than no explanation at all.
   h.write_op.submit_set_setpoint(ControlMode::CONSTANT_SPEED, 2000.0f, "pr6");
   h.advance(12000);
   const WriteResult *r = h.result_for("pr6");
   TEST_ASSERT(r && r->status == WriteStatus::ACCEPTED,
-              "the write proceeds on the fallback rather than being refused by nonsense");
+              "the write proceeds rather than being refused by nonsense");
+
+  // And when the pump does clamp, the nonsense range is still not quoted.
+  //
+  // The clamp is forced through the sim's `transform` hook rather than through
+  // its published range, because the published range here is the degenerate one
+  // under test and the sim deliberately does not clamp against nonsense. A real
+  // pump reporting an inverted range still has real limits; it just describes
+  // them wrongly, which is the whole situation being simulated.
+  h.sim.transform = [](int, float) { return 1650.0f; };
+  h.write_op.submit_set_setpoint(ControlMode::CONSTANT_SPEED, 400.0f, "pr6b");
+  h.advance(12000);
+  const WriteResult *r6b = h.result_for("pr6b");
+  TEST_ASSERT(r6b && r6b->status == WriteStatus::CLAMPED, "the pump clamps it");
+  TEST_ASSERT(r6b && r6b->detail.find("range") == std::string::npos,
+              "and the inverted range is not offered as the explanation -- a "
+              "settle event reading \"its range is 1650-200\" is worse than no "
+              "explanation at all");
 }
 
 // The ranges belong to the pump on the other end of the link. A reconnect may
@@ -1352,12 +1438,34 @@ static void test_a_mode_that_does_not_answer_does_not_shift_the_others() {
   TEST_ASSERT(r && r->status == WriteStatus::ACCEPTED,
               "a legitimate constant-pressure setpoint is not refused by another mode's numbers");
 
-  // ...while the mode that DID answer is still bounded by the pump.
+  // ...while the mode that DID answer can still explain its own clamp. This is
+  // the per-mode half of the contract: one silent object must not cost the
+  // others their explanation, and must not lend them its absence either.
   h.write_op.submit_set_setpoint(ControlMode::CONSTANT_SPEED, 1200.0f, "pr8");
   h.advance(12000);
   const WriteResult *r8 = h.result_for("pr8");
-  TEST_ASSERT(r8 && r8->status == WriteStatus::INVALID,
-              "and the mode that answered still uses the pump's floor");
+  TEST_ASSERT(r8 && r8->status == WriteStatus::CLAMPED, "the pump clamps it");
+  TEST_ASSERT(r8 && r8->detail.find("1650") != std::string::npos,
+              "and the mode that answered quotes the pump's floor");
+
+  // ...while the SILENT mode's own clamp quotes nothing. This has to be a
+  // clamped write: asserting it on the accepted 1.5 m result above passes
+  // trivially, because an accepted write's detail is empty either way, and the
+  // partial-range behaviour could regress with the test still green.
+  //
+  // 0.2 m is below constant pressure's real floor, so the sim clamps it --
+  // while get_setpoint_range() still refuses to offer a range for the mode
+  // whose object went unanswered.
+  h.write_op.submit_set_setpoint(ControlMode::CONSTANT_PRESSURE, 0.2f, "pr9");
+  h.advance(12000);
+  const WriteResult *r9 = h.result_for("pr9");
+  TEST_ASSERT(r9 && r9->status == WriteStatus::CLAMPED,
+              "the silent mode's setpoint is clamped by the pump");
+  TEST_ASSERT(r9 && r9->detail.find("range") == std::string::npos,
+              "and its detail quotes no range, because none was read for it");
+  TEST_ASSERT(r9 && !r9->detail.empty(),
+              "though it still reports what the pump stored, which is a fact "
+              "independent of the range");
 }
 
 // A disconnect while the range chain is in flight must not wedge it.
@@ -1817,17 +1925,24 @@ static void test_validation_invalid() {
   Harness h;
   h.prime_cache();
 
-  h.write_op.submit_set_setpoint(ControlMode::CONSTANT_SPEED, 9999.0f, "v1");
+  // A NaN setpoint and a mode with no scalar setpoint. Both are still refused
+  // before the wire, and neither is about range (issue #276): a NaN has nothing
+  // for the pump to clamp TO, and the all-ones float doubles as the
+  // SETPOINT_KEEP sentinel, so it would read as "leave the setpoint alone" -- a
+  // write that silently does nothing rather than one that fails.
+  //
+  // 9999 RPM used to be the third case here and is not a case any more. It goes
+  // out, and the pump stores 3671.
+  h.write_op.submit_set_setpoint(ControlMode::CONSTANT_SPEED, NAN, "v1");
   h.write_op.submit_set_setpoint(ControlMode::AUTO_ADAPT_RADIATOR, 2000.0f, "v2");
   h.advance(100);
 
   TEST_ASSERT(h.events_for("v1") == 1 && h.events_for("v2") == 1, "each got exactly one terminal event");
   const WriteResult *r1 = h.result_for("v1");
   const WriteResult *r2 = h.result_for("v2");
-  TEST_ASSERT(r1 && r1->status == WriteStatus::INVALID, "out-of-range value settles invalid");
-  TEST_ASSERT(r1 && r1->detail.find("range") != std::string::npos, "detail states the valid range");
-  TEST_ASSERT(r1 && std::fabs(r1->requested_value - 9999.0f) < 0.5f,
-              "event echoes the requested value");
+  TEST_ASSERT(r1 && r1->status == WriteStatus::INVALID, "a NaN setpoint settles invalid");
+  TEST_ASSERT(r1 && r1->detail.find("not a number") != std::string::npos,
+              "and says so, rather than reporting a range it did not apply");
   TEST_ASSERT(r2 && r2->status == WriteStatus::INVALID, "non-scalar mode settles invalid");
   TEST_ASSERT(h.frames_0601 == 0, "no write frames were sent");
 }
@@ -5101,7 +5216,7 @@ int main() {
   test_set_mode_rejected();
   test_set_setpoint_accepted();
   test_setpoint_bounds_come_from_the_pump();
-  test_setpoint_below_the_pump_floor_is_refused();
+  test_setpoint_below_the_pump_floor_is_clamped_not_refused();
   test_proportional_pressure_has_its_own_range();
   test_setpoint_falls_back_when_the_ranges_never_arrive();
   test_a_degenerate_range_is_not_used();

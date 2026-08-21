@@ -126,6 +126,8 @@ CONF_LINK_GAPS_TRUNCATED = "link_gaps_truncated"
 CONF_LINK_WATCH_TIME = "link_watch_time"
 CONF_PUMP_LAST_LINK_FAILURE = "pump_last_link_failure"
 CONF_PUMP_CLOCK_DST = "pump_clock_dst"
+CONF_FLOW_LIMITER = "flow_limiter"
+CONF_FLOW_LIMITED = "flow_limited"
 CONF_TIME_ID = "time_id"
 
 CONFIG_SCHEMA = (
@@ -438,6 +440,16 @@ CONFIG_SCHEMA = (
             cv.Optional(CONF_PUMP_CLOCK_DST): text_sensor.text_sensor_schema(
                 icon="mdi:sun-clock-outline",
             ),
+            # The pump's MaxFlow/MinFlow limiters (issue #274). Optional, and
+            # the reads are only issued when one of these is configured -- five
+            # frames per connection and three per control poll otherwise buy
+            # nothing.
+            cv.Optional(CONF_FLOW_LIMITER): text_sensor.text_sensor_schema(
+                icon="mdi:speedometer-slow",
+            ),
+            cv.Optional(CONF_FLOW_LIMITED): binary_sensor.binary_sensor_schema(
+                icon="mdi:speedometer-slow",
+            ),
         }
     )
     .extend(cv.COMPONENT_SCHEMA)
@@ -712,6 +724,13 @@ async def to_code(config):
     if CONF_PUMP_CLOCK_DST in config:
         sens = await text_sensor.new_text_sensor(config[CONF_PUMP_CLOCK_DST])
         cg.add(var.set_pump_clock_dst_text_sensor(sens))
+    if CONF_FLOW_LIMITER in config:
+        sens = await text_sensor.new_text_sensor(config[CONF_FLOW_LIMITER])
+        cg.add(var.set_flow_limiter_text_sensor(sens))
+
+    if CONF_FLOW_LIMITED in config:
+        bsens = await binary_sensor.new_binary_sensor(config[CONF_FLOW_LIMITED])
+        cg.add(var.set_flow_limiter_active_binary_sensor(bsens))
 
     # Set control state polling interval (fixes issue #54)
     if CONF_CONTROL_STATE_POLL_INTERVAL in config:

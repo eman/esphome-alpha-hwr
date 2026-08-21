@@ -232,6 +232,12 @@ public:
   void set_pump_clock_dst_text_sensor(text_sensor::TextSensor *sensor) {
     pump_clock_dst_text_sensor_ = sensor;
   }
+  void set_flow_limiter_text_sensor(text_sensor::TextSensor *sensor) {
+    flow_limiter_text_sensor_ = sensor;
+  }
+  void set_flow_limiter_active_binary_sensor(binary_sensor::BinarySensor *sensor) {
+    flow_limiter_active_binary_sensor_ = sensor;
+  }
   void set_pump_last_link_failure_text_sensor(text_sensor::TextSensor *sensor) {
     pump_last_link_failure_sensor_ = sensor;
   }
@@ -612,7 +618,11 @@ private:
   /// "Pump Clock DST" -- whether the pump's own DST rule matches this node's
   /// timezone (issue #286).
   text_sensor::TextSensor *pump_clock_dst_text_sensor_{nullptr};
+  /// "Pump Flow Limiter" -- which limiter is enabled or limiting (issue #274).
+  text_sensor::TextSensor *flow_limiter_text_sensor_{nullptr};
 #endif
+  /// "Pump Flow Limited" -- the one-bit form an automation can act on.
+  binary_sensor::BinarySensor *flow_limiter_active_binary_sensor_{nullptr};
 #ifdef USE_TIME
   time::RealTimeClock *time_id_{nullptr};
 #endif
@@ -709,6 +719,14 @@ private:
    *   practice that means the pump's state cache is not synchronized yet.
    */
   bool submit_clock_sync_(const char *reason);
+
+  /// True when a limiter entity is configured, so the reads are worth issuing.
+  /// A node that displays neither does not spend five frames per connection and
+  /// three per poll on a question nobody will read.
+  bool limiter_entities_wanted_() const;
+
+  /// Push the limiter state to whichever entities are attached.
+  void publish_limiter_state_();
 
   /**
    * @brief Publish the pump-vs-node clock drift, or say why it cannot be had.
@@ -1130,6 +1148,24 @@ public:
   }
   // Cycle-mode flow setpoint, m³/h (issue #107). Flow-only write: the op
   // layer resolves the on/off periods from its mandatory fresh read.
+  //
+  // **This control has no counterpart in the Grundfos GO app, and the manual
+  // says the mode has no flow parameter at all** (§9.3.4: the pump "operates at
+  // its maximum curve", starting and stopping on time). It is not vestigial and
+  // it is not a mistake in this port -- it is a real, working register that the
+  // vendor does not expose. Bench-measured (issue #280): commanded 1.400 gpm
+  // delivered 1.40 over 19 samples, commanded 1.202 delivered 1.20 over 10,
+  // with motor speed moving to hold it rather than sitting at one value.
+  //
+  // Nor is it the MaxFlow limiter under another name. The limiter does not
+  // apply to this mode: 2.0 and 3.0 gpm runs were delivered with MaxFlow
+  // enabled at 1.4 and 1.6. Two mechanisms, two objects, different scopes.
+  //
+  // Kept deliberately. The register split is what the pump's own layout says --
+  // Sub 421's first field is a flow setpoint, Sub 430 has no flow field -- and
+  // being undocumented by the vendor is not a reason to remove something that
+  // works. Recorded here so the next person to notice the discrepancy finds the
+  // answer rather than repeating the investigation.
   void set_cycle_flow(float value_m3h, std::function<void(bool)> callback) {
     if (!check_ready("set_cycle_flow")) { if (callback) callback(false); return; }
     write_op_service_.submit_set_cycle_times(0, 0, value_m3h, "", callback,
@@ -1407,11 +1443,17 @@ public:
       return day <= max_day;
     };
     // Local calendar fields -> UTC epoch, through ESPTime rather than mktime()
-    // (issue #289). mktime() resolves against libc's zone, and on the ESP32
-    // libc has no zone -- ESPHome only calls tzset() under USE_HOST -- so this
-    // encoded the user's local wall clock as though it were UTC. Every window
-    // the schedule editor produced was out by the node's offset, and no host
-    // test could see it because the host build DOES set the zone.
+    // (issue #289). **This is the one site that was genuinely broken on the
+    // device.** ESPHome overrides localtime_r()/localtime() on embedded targets
+    // so libc callers get its parsed zone -- but it does NOT override mktime(),
+    // which therefore resolved against a libc with no zone at all and encoded
+    // the user's local wall clock as though it were UTC.
+    //
+    // Every window the schedule editor's "Add Single Event" and "Set Vacation"
+    // buttons produced was out by the node's UTC offset. Events submitted
+    // through the services with explicit epochs never came through here and
+    // were unaffected. No host test could see it, because the host build sets
+    // libc's zone and mktime() is correct there.
     //
     // recalc_timestamp_local() is ESPHome's own engine, correct on both
     // targets, and it resolves the DST-ambiguous hour the same way mktime's
@@ -1438,8 +1480,8 @@ public:
     // floor of its own (year 2020), which made it the loosest of the four
     // notions of "now" in the component: it accepted a clock TimeService would
     // have refused, and it accepted one in a build with no time component at
-    // all -- where libc has no zone loaded, so the anchoring year and every
-    // mktime() below it were resolved against UTC while the pump runs local.
+    // all -- where nothing has set a zone, so the anchoring year was resolved
+    // against UTC while the pump runs local.
     ESPTime local_now;
     if (!time_service_.current_time(local_now)) {
       ESP_LOGW(tag, "System time not synced yet — cannot set a dated event");
