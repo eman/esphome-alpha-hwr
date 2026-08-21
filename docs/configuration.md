@@ -120,20 +120,27 @@ DST state and the protocol has no timezone field anywhere, so local is the only
 base it can be using. This component takes the timezone from your `time:`
 component and converts at the edge, because Home Assistant speaks UTC.
 
-Two things follow that are worth knowing:
+**`time_id` is what makes that conversion possible.** Without it the component
+refuses to date an event at all, rather than guessing.
 
-- **`time_id` is what makes that conversion possible.** Without it the component
-  refuses to date an event at all, rather than guessing.
-- **The conversion uses ESPHome's timezone engine, never libc.** That sounds like
-  an implementation detail and is not: ESPHome applies the timezone to libc only
-  on the host, so on an ESP32 `localtime()` answers UTC. Before v0.16 this
-  component used libc, and single events on a non-UTC node were stored — and run
-  — offset by the node's UTC offset (issue #289).
+All local-time conversions go through ESPHome's own timezone engine rather than
+libc. On an ESP32 that distinction is thinner than it looks — ESPHome overrides
+`localtime()` and `localtime_r()` to use its parsed zone, so libc callers do get
+local time — but `mktime()` is **not** overridden, and before v0.16 the schedule
+editor's dated-event helper used it. Windows entered through the editor's "Add
+Single Event" and "Set Vacation" buttons were therefore stored offset by the
+node's UTC offset (issue #289). Events submitted through the **services** with
+explicit epochs were unaffected, as was the weekly schedule, which is stored as
+day-and-minute-of-day rather than as an epoch.
 
-**If you stored vacations or one-time runs before v0.16, re-enter them.** They
-are on the pump at the wrong instant and are not rewritten automatically. The
-weekly schedule is unaffected: it is stored as day-and-minute-of-day, not as an
-epoch, so it never went through the conversion.
+Two displays were also wrong before v0.16: the **event log** and **cycle
+timestamps** render values that come off the wire raw and are already the pump's
+local clock, and they were being shifted a second time.
+
+**No action is needed on upgrade.** Events already stored on the pump are not
+rewritten and do not need to be — if any were entered through the schedule
+editor before v0.16 they are offset, and re-entering those specific ones is the
+only fix, but nothing else is affected.
 
 ### `enable_pairing`
 

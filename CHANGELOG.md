@@ -309,98 +309,41 @@
 
 ### Changed
 
-- **Local time now comes from ESPHome's timezone engine, not from libc — which
-  fixes single events firing at the wrong hour on every non-UTC node**
-  (issue #289).
+- **Local time conversions go through ESPHome's timezone engine, which fixes the
+  schedule editor's dated events and two timestamp displays** (issue #289).
 
-  **This is a behaviour change on live pumps. Read the migration note below.**
+  > **Correction.** An earlier draft of this entry claimed libc had no timezone
+  > at all on the ESP32, that the single-event wire shift was therefore a no-op,
+  > and that stored events needed re-entering. **All three were wrong.** ESPHome
+  > *does* supply local time to libc callers on embedded targets — it overrides
+  > `localtime_r()` and `localtime()` in `posix_tz.cpp` to use its parsed zone,
+  > precisely so that user lambdas calling `::localtime()` work without the `TZ`
+  > environment variable. What follows is the corrected account. **No stored
+  > event needs re-entering.**
 
-  ESPHome applies the configured timezone to libc **only on the host**:
+  What was actually broken is narrower, and it is what `mktime()` touches —
+  because `mktime()` is **not** among the functions ESPHome overrides, so on the
+  device it resolves against a libc that genuinely has no zone:
 
-  ```cpp
-  // esphome/components/time/real_time_clock.cpp
-  #ifdef USE_HOST
-    setenv("TZ", tz, 1);
-    tzset();
-  #endif
-  ```
+  - **`build_event_window()`** encoded local calendar fields as though they were
+    UTC. This is the schedule editor's "Add Single Event" and "Set Vacation"
+    buttons, so a window entered through them landed on the pump offset by the
+    node's UTC offset. Events submitted through the **services** with explicit
+    epochs were never affected.
+  - **The event-log and cycle-timestamp displays** were shifted twice. Those
+    timestamps come off the wire raw and are already the pump's local clock, so
+    rendering them "to local" moved them again by the offset.
 
-  `USE_HOST` is not defined in the ESP32 build — *"we eliminated
-  `setenv("TZ")`/`tzset()` on embedded platforms to save flash"*
-  (`esphome/core/time.cpp`). ESPHome's own `ESPTime` conversions use its parsed
-  timezone and never consult libc. So on the device **`localtime_r`, `mktime`
-  and `gmtime_r` all answer UTC**, while `ESPTime` is correct.
+  Everything else that used libc — the single-event wire shift
+  (`local_utc_offset_seconds()`), the vacation and single-event displays, and the
+  DST probe — was **already correct on the device**, via the override above. Those
+  sites moved to `ESPTime` anyway: it is the engine that is right on both targets
+  and does not depend on a shim, and having one answer to "what is local time"
+  is the same argument as issue #270's.
 
-  Two domains had to be told apart, and conflating them is the trap here. A
-  **cached single event** has already been through `local_unix_to_utc_resolved()`
-  on read, so it is a true UTC epoch and wants converting to local for display.
-  An **event-log or cycle timestamp** comes off the wire raw — nothing converts
-  it, because it is the pump's own clock, which runs local — so it must be
-  rendered verbatim. Shifting one of those "to local" moves a local wall clock by
-  the offset a second time. (That also fixes the host side of those two displays,
-  where the old `localtime_r` did shift and was wrong; on the device it was right
-  only because libc had no zone to shift by.)
-
-  This component used libc in five places. The one that mattered was
-  `local_utc_offset_seconds()`, which returned **0** on hardware — so the
-  UTC↔local shift that puts a single event on the pump's clock was a **no-op**.
-  The pump's clock is correctly set to local time, so an event asked for at
-  07:00 in `America/Los_Angeles` was stored at 07:00 UTC and the pump ran it at
-  **00:00**. The other four rendered the vacation, single-event, event-log and
-  cycle-timestamp displays in UTC.
-
-  **The pump's own clock was never affected.** The clock write, readback and
-  confirm already went through `ESPTime`, so they were correct on both targets —
-  which matters because the Grundfos GO app, this component and the sibling
-  Python library all write that clock and the pump cannot say which base a value
-  arrived in. All three write local wall-clock fields; none was fighting the
-  others.
-
-  The sibling library encodes the same way — `calendar.timegm()` on naive local
-  fields, numerically identical to a correct `utc_to_local_unix()` — and its
-  encoding is bench-confirmed. So the two implementations agreed on the design
-  all along; this makes them agree in execution.
-
-  **Why no test caught it, and what now can.** The host build *does* set libc's
-  zone, so on the host the two engines agree and every test passes either way.
-  The mock's `ESPTime` now models the embedded split: `MockZoneOverride` gives
-  ESPHome's zone an offset that deliberately disagrees with the process `TZ`, so
-  a conversion done through libc gives a visibly wrong answer. The new tests fail
-  with the old implementation restored — verified, not assumed.
-
-  **Migration.** Single events and vacations stored by a non-UTC node before this
-  release are on the pump at the wrong instant, offset by the node's UTC offset.
-  After updating they are *written* correctly, but **existing stored events are
-  not rewritten** and keep firing at their old hour until they are set again. If
-  you have vacations or one-time runs stored, re-enter them after updating. Nodes
-  in a UTC zone are unaffected, as are the weekly schedule and every other
-  control.
-
-- **The write-op suite now exercises the local↔UTC conversion at an offset that
-  is not zero** (issue #268). `tests/test_write_operations.cpp` pins `TZ=UTC`,
-  and under that pin `utc_to_local_unix()` and `local_unix_to_utc_resolved()` are
-  the identity — every single-event fixture round-trips bit for bit and the whole
-  conversion layer is invisible to the suite. A regression that left cached event
-  timestamps in the pump's local time would have passed.
-
-  The invariant is load-bearing: the single-event slot picker compares cached
-  `end_timestamp` values against the node's wall clock (#262), and the confirm
-  comparator compares a readback against the requested window. Both are correct
-  only because the read path converts.
-
-  Two tests un-pin the zone to `PST8PDT` — one asserting the cache holds UTC after
-  a read, one re-running the slot picker's expiry decision with its fixtures
-  seeded *through* the shift. The scope is deliberate and recorded in the file:
-  the conversion exists only at the edge, so the second leg belongs at the edge
-  rather than as a second run of all ~640 assertions, most of which have nothing
-  timezone-dependent in them.
-
-  Recorded in the file, because it is a property of the fixture rather than an
-  oversight: it models the **host's** zone, since that is what the conversion
-  reads. Whether the pump's own DST rule agrees with that zone is a separate
-  question and is not answered here — see issue #286. Nor does a host test
-  exercise the conversion the *device* performs; see issue #289, which is why
-  this leg is a test of the algorithm rather than of the shipped behaviour.
+  The mock's `ESPTime` gained an embedded mode (`MockZoneOverride`) so a
+  conversion done the wrong way is visible on the host, where otherwise both
+  engines agree and nothing can discriminate.
 
 - **A vacation that has already ended no longer shadows the live one**
   (issue #267). `find_vacation_slot()` returned the first enabled Stop
