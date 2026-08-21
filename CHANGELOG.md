@@ -309,6 +309,56 @@
 
 ### Changed
 
+- **A setpoint outside the pump's range is clamped by the pump and explained,
+  not refused before the wire** (issue #276). This takes back out the check
+  #273/#275 added, and the reason is worth recording because the bounds it
+  validated against were *correct*.
+
+  @jfriend00 found the flaw: **with a flow limiter enabled there is no maximum
+  speed.** The pump takes the setpoint and manages actual run speed to hold the
+  flow bound, and where it lands is a property of the loop's hydraulics rather
+  than of the pump. Measured on their installation, constant speed with MaxFlow
+  at 1.6 gpm:
+
+  | commanded | delivered |
+  | --- | --- |
+  | 1700 RPM | 1701 |
+  | 1900 RPM | 1903 |
+  | 2000 RPM | 1892 |
+  | 3000 RPM | 1883 |
+
+  1883 RPM is not in the type-301 range, not in the limiter record, and not
+  anywhere else — the pump discovers it by running the loop, and does not know it
+  in advance either. So there is no number to narrow to, and a check that *looks*
+  authoritative is worse than no check, because it is wrong in a way no client
+  can detect.
+
+  The type-301 range is therefore not "the bound"; it is "the bound in the
+  absence of a limiter". It now survives as an **explanation** rather than a
+  gate: when the pump clamps, the settle detail says so and quotes the range —
+
+  ```
+  clamped: pump stored 3671; its range for this mode is 1650-3671 RPM
+  ```
+
+  — and quotes it **only when the pump is the source**. The fallback constants
+  this code used to carry were wrong in both directions on all four modes, so
+  printing one as though the pump had said it would turn an explanation into a
+  fabrication.
+
+  This also settles the slider question the issue was filed for, by removing it:
+  if writes clamp instead of being refused, no slider offers a value that gets
+  refused, so nothing has to track the pump's bounds at runtime and the Home
+  Assistant entity-registry problem goes away with it. The behaviour a user sees
+  is the one that was there before #275 — drag the slider, watch it settle on
+  what the pump could do — with the settle event now saying why.
+
+  One thing is still refused before the wire, for a reason that is not about
+  range: a setpoint that is **not a number**. There is nothing for the pump to
+  clamp to, and the all-ones float doubles as the `SETPOINT_KEEP` sentinel on the
+  wire, so a NaN would read as "leave the setpoint alone" — a write that silently
+  does nothing rather than one that fails.
+
 - **Every Class 10 write now waits for its own acknowledgement** (issue #253).
   This finishes what #248 began. That change stopped a reply being handed to
   whichever write happened to be waiting; it did not stop replies being left with

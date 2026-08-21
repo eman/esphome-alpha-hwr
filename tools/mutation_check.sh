@@ -194,20 +194,25 @@ MUTATIONS=(
 # any test provoked one. This entry is the proof that net works: reversing the
 # fused control request's address turns it red.
 "control-request-addressed-sub-first|components/alpha_hwr/control_service.cpp|  apdu[2] = 0x56;  // Object id 86, the start/stop request\n  apdu[3] = 0x00;  // Sub-id high\n  apdu[4] = 0x06;  // Sub-id low -- 86/6, overall_operation_local_request_obj|  apdu[2] = 0x00;  // mutated: the sub-first layout the deleted write used\n  apdu[3] = 0x06;\n  apdu[4] = 0x00;"
-# Setpoint bounds come from the pump, not from the constants in our source
-# (issue #273). The fallback constants are inherited guesses, wrong in both
-# directions on every mode this pump has -- 500 RPM where it will not go below
-# 1650, 10 m3/h where its ceiling is 2.5, and 0.5 m for proportional pressure
-# where the floor is 2.6. Ignoring the pump's answer puts all of that back, and
-# the operation still settles ACCEPTED afterwards because the pump clamps, so
-# only a test that looks at the BOUND can see it.
-"setpoint-bounds-ignore-the-pump|components/alpha_hwr/write_operation_service.cpp|  const bool from_pump = control_.get_setpoint_range(op->mode, pump_lo, pump_hi);|  const bool from_pump = false;"
-# ...and the fallback has to stay reachable. Claiming the pump's range when none
-# was read hands the validation NAN bounds -- and every comparison against NAN
-# is false, so it ACCEPTS every setpoint, in a mode the pump never answered for.
-# The validation stops existing rather than becoming stricter, which is the
-# quieter of the two failures.
-"setpoint-bounds-claim-a-range-that-was-never-read|components/alpha_hwr/write_operation_service.cpp|  if (from_pump) {\n    lo = pump_lo;\n    hi = pump_hi;\n  }|  lo = pump_lo;\n  hi = pump_hi;"
+# The pump's published range EXPLAINS a clamp; it does not gate the write
+# (issue #276). #273/#275 made it a gate, against the pump's own type-301
+# min_set_point / max_set_point. The bounds were right and the gate was still
+# wrong: with a flow limiter enabled there is no maximum speed -- the pump takes
+# the setpoint and manages run speed to hold the flow bound, and where it lands
+# is a property of the loop's hydraulics. Measured, constant speed with MaxFlow
+# at 1.6 gpm: 3000 commanded, 1883 delivered. 1883 is not in the type-301 range,
+# not in the limiter record, and not anywhere else.
+#
+# So the range survives only in the settle detail, and only when the pump is the
+# source -- the constants this code used to fall back on were wrong in both
+# directions on all four modes, and printing one as though the pump had said it
+# turns an explanation into a fabrication.
+"setpoint-clamp-detail-drops-the-range|components/alpha_hwr/write_operation_service.cpp|      if (control_.get_setpoint_range(op->mode, pump_lo, pump_hi)) {|      if (false) {"
+"setpoint-clamp-detail-quotes-a-range-never-read|components/alpha_hwr/write_operation_service.cpp|      if (control_.get_setpoint_range(op->mode, pump_lo, pump_hi)) {|      if (true) {"
+# A NaN is still refused before the wire, and not for a reason about range: the
+# all-ones float doubles as the SETPOINT_KEEP sentinel, so a NaN reads as "leave
+# the setpoint alone" -- a write that silently does nothing rather than fails.
+"setpoint-nan-reaches-the-wire|components/alpha_hwr/write_operation_service.cpp|  if (std::isnan(op->value)) {|  if (false) {"
 # The range read must reject a degenerate answer rather than caching it, so that
 # setpoint_ranges_known() does not claim a complete set off the back of one.
 # Note what this does NOT do: get_setpoint_range() re-checks max > min on every

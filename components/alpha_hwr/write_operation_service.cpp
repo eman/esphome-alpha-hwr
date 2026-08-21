@@ -950,42 +950,43 @@ void WriteOperationService::run_set_setpoint_(uint32_t seq) {
             format_detail("%s has no scalar setpoint", ControlService::mode_to_string(op->mode)));
     return;
   }
-  // Range validation. The fallback constants below are guesses inherited from
-  // the legacy setters, and they are wrong in both directions on every mode
-  // this pump has: it will not go below 1650 RPM where they allow 500, and its
-  // constant-flow ceiling is 2.5 m³/h where they allow 10. Proportional
-  // pressure is the widest miss -- a floor of 2.6 m against their 0.5.
+  // A setpoint is NOT range-checked before the wire, and that is a decision
+  // rather than an omission (issue #276).
   //
-  // So the pump's own numbers are used when it has told us them. It publishes
-  // min_set_point / max_set_point per mode in the type-301 factory objects
-  // (86/13, 15, 17, 39), which is what the Grundfos app reads to bound its
-  // setpoint slider (issue #273).
+  // #273/#275 added exactly that check, against the pump's own published
+  // min_set_point / max_set_point (the type-301 factory objects at 86/13, 15,
+  // 17, 39). The bounds were right. The check was still wrong, and it was
+  // @jfriend00 who found why: **with a flow limiter enabled there is no maximum
+  // speed.** The pump takes the setpoint and manages actual run speed to hold
+  // the flow bound, and where it lands is a property of the loop's hydraulics,
+  // not of the pump. Measured on their installation, constant speed with
+  // MaxFlow at 1.6 gpm:
   //
-  // The constants stay as the fallback rather than being deleted, and the
-  // fallback is deliberately the wider range: with no reading from the pump the
-  // honest position is that we do not know the limit, and refusing a setpoint
-  // the pump would have accepted is worse than letting the pump clamp it -- the
-  // readback still reports what it stored, so nothing is claimed falsely
-  // either way.
-  float lo = 0.5f, hi = 10.0f;
-  const char *unit = "m";
-  if (op->mode == ControlMode::CONSTANT_SPEED) { lo = 500.0f; hi = 4500.0f; unit = "RPM"; }
-  if (op->mode == ControlMode::CONSTANT_FLOW) { lo = 0.1f; hi = 10.0f; unit = "m³/h"; }
-  float pump_lo = NAN, pump_hi = NAN;
-  const bool from_pump = control_.get_setpoint_range(op->mode, pump_lo, pump_hi);
-  if (from_pump) {
-    lo = pump_lo;
-    hi = pump_hi;
-  }
-  if (std::isnan(op->value) || op->value < lo || op->value > hi) {
-    // Say which bound refused, because the two mean different things to a
-    // client: the pump's is a fact about the hardware, ours is an admission
-    // that we have not read one yet.
-    finish_(seq, WriteStatus::INVALID,
-            from_pump
-                ? format_detail("value out of the pump's range %.4g-%.4g %s", lo, hi, unit)
-                : format_detail("value out of range %.1f-%.1f %s (pump limits not read)",
-                                lo, hi, unit));
+  //     commanded 1700 -> delivered 1701      (tracking)
+  //     commanded 1900 -> delivered 1903      (flow just at the cap)
+  //     commanded 2000 -> delivered 1892      (holding)
+  //     commanded 3000 -> delivered 1883      (63% of commanded)
+  //
+  // 1883 is not in the type-301 range, not in the limiter record, and not
+  // anywhere else: the pump discovers it by running the loop. So there is no
+  // number to narrow to, and a check that LOOKS authoritative is worse than no
+  // check, because it is wrong in a way no client can detect.
+  //
+  // The type-301 range is therefore not "the bound"; it is "the bound in the
+  // absence of a limiter". It survives as an EXPLANATION rather than a gate:
+  // confirm_setpoint_() quotes it when the pump clamps, and only when the pump
+  // is the one that told us it (see there). Letting the pump clamp is also what
+  // the pump itself does -- it does not reject an out-of-range setpoint, it
+  // takes it and clamps it -- so this restores the behaviour a user could
+  // already read off the slider snapping back.
+  //
+  // One thing is still refused here, for a reason that is not about range. A
+  // NaN has nothing for the pump to clamp to, and the all-ones float doubles as
+  // the SETPOINT_KEEP sentinel on the wire, so a NaN would read as "leave the
+  // setpoint alone" -- a write that silently does nothing rather than one that
+  // fails.
+  if (std::isnan(op->value)) {
+    finish_(seq, WriteStatus::INVALID, "setpoint is not a number");
     return;
   }
 
@@ -1069,7 +1070,21 @@ void WriteOperationService::confirm_setpoint_(uint32_t seq) {
     } else if (!std::isnan(op->pre_value) && std::fabs(stored - op->pre_value) <= eps) {
       finish_(seq, WriteStatus::REJECTED, format_detail("pump kept %.4g", stored));
     } else {
-      finish_(seq, WriteStatus::CLAMPED, format_detail("pump stored %.4g", stored));
+      // The clamp is where the pump's published range earns its keep (issue
+      // #276): it does not decide whether the write goes out, it explains what
+      // came back. Quoted ONLY when the pump is the source -- the fallback
+      // constants this code used to carry were wrong in both directions on all
+      // four modes, and printing one as though the pump had said it would turn
+      // an explanation into a fabrication.
+      float pump_lo = NAN, pump_hi = NAN;
+      if (control_.get_setpoint_range(op->mode, pump_lo, pump_hi)) {
+        finish_(seq, WriteStatus::CLAMPED,
+                format_detail("pump stored %.4g; its range for this mode is %.4g-%.4g %s",
+                              stored, pump_lo, pump_hi,
+                              ControlService::setpoint_unit(op->mode)));
+      } else {
+        finish_(seq, WriteStatus::CLAMPED, format_detail("pump stored %.4g", stored));
+      }
     }
   });
 }

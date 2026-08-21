@@ -313,6 +313,20 @@ float native_to_display(ControlMode mode, float native) {
 }
 }  // namespace
 
+const char *ControlService::setpoint_unit(ControlMode mode) {
+  switch (mode) {
+    case ControlMode::CONSTANT_SPEED:
+      return "RPM";
+    case ControlMode::CONSTANT_FLOW:
+      return "m³/h";
+    case ControlMode::CONSTANT_PRESSURE:
+    case ControlMode::PROPORTIONAL_PRESSURE:
+      return "m";
+    default:
+      return "";
+  }
+}
+
 bool ControlService::get_setpoint_range(ControlMode mode, float &min_out, float &max_out) const {
   const SetpointRange *r = nullptr;
   switch (mode) {

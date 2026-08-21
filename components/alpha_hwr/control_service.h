@@ -187,6 +187,17 @@ class ControlService {
    static const char *mode_to_string(ControlMode mode);
 
    /**
+    * Display unit for a mode's scalar setpoint.
+    *
+    * Lives here rather than beside its one caller because the same three units
+    * were spelled out inline in the range check issue #276 removed, and a unit
+    * string that disagrees with the number beside it is the kind of thing
+    * nobody notices in a settle detail. Modes with no scalar setpoint answer
+    * the empty string; is_scalar_mode_() has already refused those.
+    */
+   static const char *setpoint_unit(ControlMode mode);
+
+   /**
     * Parse a machine-readable mode identifier (see mode_to_string()).
     * @return True and sets out on a recognized identifier, false otherwise.
     */
