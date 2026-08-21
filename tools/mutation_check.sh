@@ -1153,6 +1153,38 @@ MUTATIONS=(
 # so an enabled event beginning at 0 confirmed clean while describing a slot
 # that says "cleared".
 "epoch-field-accepts-the-cleared-sentinel|components/alpha_hwr/api_bridge.cpp|  if (!parse_int_field(s, 1, EPOCH_MAX_TS, &v)) return false;|  if (!parse_int_field(s, 0, EPOCH_MAX_TS, &v)) return false;"
+# A window that has already ended (issue #269). It was written, confirmed by
+# readback and settled ACCEPTED, after which it was recyclable garbage in one of
+# five slots. A write that cannot do anything, reported as a success.
+"single-event-past-window-accepted|components/alpha_hwr/write_operation_service.cpp|    const bool refuse_as_past = clock_is_known && window_has_ended;|    const bool refuse_as_past = false;"
+# Only the END decides: a window that has BEGUN but not ended is legitimate and
+# must still run. Mutating the test to the begin refuses every "start now, stop
+# at six" request -- which is what the Lovelace card's Quick Run presets send.
+"single-event-past-window-tested-on-the-begin|components/alpha_hwr/write_operation_service.cpp|    const bool window_has_ended = op->end_ts <= now_ts;|    const bool window_has_ended = op->begin_ts <= now_ts;"
+#
+# Deliberately absent: `clock_is_known` on its own. With no clock now_ts is 0 and
+# `end_ts <= 0` is false for every window the parser admits (both epoch fields
+# floor at 1, and the ordering rule needs end > begin), so dropping the term
+# changes no reachable behaviour. It is written out because the rule -- a node
+# that cannot tell the time must not call somebody else's timestamp stale -- is
+# the point, not because the arithmetic needs it.
+
+# A vacation that has already ended (issue #267). find_vacation_slot() returned
+# the first enabled Stop in slot order with no clock, so a FINISHED vacation in
+# an early slot shadowed a live one later: clear_vacation cleared the finished
+# one and settled `accepted`, telling the user the vacation was over while the
+# pump was still holding itself off.
+"vacation-slot-ignores-the-window|components/alpha_hwr/schedule_service.cpp|    const bool covers_now =\n        ev.begin_timestamp <= now_ts && now_ts < ev.end_timestamp;|    const bool covers_now = true;"
+"vacation-slot-takes-the-furthest-out|components/alpha_hwr/schedule_service.cpp|          : ev.begin_timestamp < soonest_upcoming->begin_timestamp;|          : ev.begin_timestamp > soonest_upcoming->begin_timestamp;"
+# The third case, deliberate rather than by omission: an ended vacation is still
+# an enabled Stop holding one of five slots, so refusing to clear it would leave
+# no way to reclaim it.
+"vacation-slot-cannot-reclaim-a-finished-one|components/alpha_hwr/schedule_service.cpp|  if (latest_ended != nullptr) {\n    *when = VacationWhen::ENDED;|  if (false) {\n    *when = VacationWhen::ENDED;"
+# The second symptom of the same defect: the Vacation text sensor named a
+# finished vacation as THE vacation.
+"vacation-display-names-a-finished-one|components/alpha_hwr/schedule_service.cpp|  const bool nothing_to_show = ev == nullptr |  const bool nothing_to_show = ev == nullptr; //"
+# ...and that the caller hands it a real clock rather than the unknown sentinel.
+"vacation-slot-caller-passes-no-clock|components/alpha_hwr/write_operation_service.cpp|        int slot = schedule_service_.find_vacation_slot(time_service_.now_unix());|        int slot = schedule_service_.find_vacation_slot(0);"
 "single-event-confirm-ignores-the-action|components/alpha_hwr/write_operation_service.cpp|                                  actual.action == op->single_event_action;|                                  true;"
 # ...and the skip for a CLEAR must stay a skip: a cleared slot's window is
 # meaningless, so comparing it would reject every successful clear.

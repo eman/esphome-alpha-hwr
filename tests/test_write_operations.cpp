@@ -3234,6 +3234,84 @@ static void test_without_a_clock_no_slot_is_treated_as_expired() {
               "and no slot was overwritten");
 }
 
+// ── A window that has already ended (issue #269) ─────────────────────────────
+//
+// run_single_event_() validated only that end > begin, so a window entirely in
+// the past was written to the pump, confirmed by readback, and settled
+// ACCEPTED -- after which it was recyclable garbage occupying one of the five
+// slots this pump has. Observed on the bench while verifying #262: two events
+// written with yesterday's window both landed and both confirmed.
+//
+// Not destructive, and arguably harmless, since the pump simply never runs it.
+// But it is a write that cannot do anything, reported as a success: a client
+// with a timezone bug or a stale timestamp got `accepted` and no signal.
+static void test_a_window_that_has_already_ended_is_refused() {
+  std::cout << "\n=== set_single_event: a wholly-past window -> invalid ===" << std::endl;
+  Harness h;
+  h.prime_cache();
+  h.sim.respond_overview_reads = false;  // the link cannot answer either
+
+  h.write_op.submit_set_single_event(EVENT_ENDED_BEGIN, EVENT_ENDED_END, "past1");
+  h.advance(25000);
+
+  TEST_ASSERT(h.events_for("past1") == 1, "exactly one terminal event");
+  const WriteResult *r = h.result_for("past1");
+  TEST_ASSERT(r && r->status == WriteStatus::INVALID,
+              "a window that can never run is invalid, not accepted");
+  TEST_ASSERT(r && r->detail.find("already ended") != std::string::npos,
+              "the detail names the reason");
+  TEST_ASSERT(r && r->detail.find(std::to_string(EVENT_ENDED_END)) != std::string::npos,
+              "...and quotes the window's own end, so a client with a timezone "
+              "bug can see which timestamp it sent");
+  TEST_ASSERT(r && r->detail.find("overview") == std::string::npos,
+              "and does not blame the link, which is also down");
+  TEST_ASSERT(h.sim.single_events[0][0] == 0, "nothing reached the wire");
+}
+
+// Only the END decides. A window that has BEGUN but not ended is legitimate and
+// must still run -- refusing it would break every "start this now, stop it at
+// six" request, which is exactly what the Lovelace card's Quick Run presets
+// produce. Without this the test above passes against a check that refuses any
+// window touching the past at all.
+static void test_a_window_that_has_begun_but_not_ended_still_runs() {
+  std::cout << "\n=== set_single_event: a half-elapsed window still runs ===" << std::endl;
+  Harness h;
+  h.prime_cache();
+
+  // Began an hour ago, ends an hour from now.
+  h.write_op.submit_set_single_event(NODE_EPOCH_AT_BOOT - 3600, NODE_EPOCH_AT_BOOT + 3600,
+                                     "past2");
+  h.advance(60000);
+
+  const WriteResult *r = h.result_for("past2");
+  TEST_ASSERT(h.events_for("past2") == 1, "exactly one terminal event");
+  TEST_ASSERT(r && r->status == WriteStatus::ACCEPTED,
+              "a window with time left on it is accepted");
+  TEST_ASSERT(h.sim.single_events[0][0] == 1, "and it reached the pump");
+}
+
+// With no synced clock there is no honest answer to "is this in the past", so
+// the write is not refused on these grounds -- the same rule #262 established
+// for the slot picker, where 0 means "expire nothing" rather than "expire
+// everything". A node that cannot tell the time must not decide that somebody
+// else's timestamp is stale.
+static void test_without_a_clock_a_past_window_is_not_refused() {
+  std::cout << "\n=== set_single_event: no node clock -> no past-window refusal ===" << std::endl;
+  Harness h;
+  h.prime_cache();
+  h.set_node_time(0);  // never synced
+
+  h.write_op.submit_set_single_event(EVENT_ENDED_BEGIN, EVENT_ENDED_END, "past3");
+  h.advance(60000);
+
+  const WriteResult *r = h.result_for("past3");
+  TEST_ASSERT(h.events_for("past3") == 1, "exactly one terminal event");
+  TEST_ASSERT(r && r->status != WriteStatus::INVALID,
+              "the same window a clocked node refuses is not refused here");
+  TEST_ASSERT(r && r->detail.find("already ended") == std::string::npos,
+              "...and nothing claims it has ended, because nothing knows");
+}
+
 // The same pump with a clock: the five expired events are all reusable, so the
 // write lands. Without this the test above passes against a picker that refuses
 // everything, clock or no clock.
@@ -3602,7 +3680,7 @@ static void test_set_single_event_explicit_slot_is_bounded() {
   h.prime_cache();
   h.sim.max_single_events = 5;
 
-  h.write_op.submit_set_single_event(1000000, 2000000, "sb3", nullptr, 10,
+  h.write_op.submit_set_single_event(EVENT_NEXT_WEEK_BEGIN, EVENT_NEXT_WEEK_END, "sb3", nullptr, 10,
                                      WriteOrigin::ENTITY);
   h.advance(25000);
 
@@ -3620,7 +3698,7 @@ static void test_set_vacation_writes_stop_event() {
   h.prime_cache();
 
   // Multi-day range: begin 1000000, end 2000000.
-  h.write_op.submit_set_vacation(1000000, 2000000, "vac1");
+  h.write_op.submit_set_vacation(EVENT_NEXT_WEEK_BEGIN, EVENT_NEXT_WEEK_END, "vac1");
   h.advance(60000);
 
   TEST_ASSERT(h.events_for("vac1") == 1, "exactly one terminal event");
@@ -3645,7 +3723,7 @@ static void test_a_vacation_stored_as_a_run_event_is_rejected() {
   h.prime_cache();
   h.sim.force_single_event_action = 0x02;  // pump keeps everything else, flips the kind
 
-  h.write_op.submit_set_vacation(1000000, 2000000, "vac_bad");
+  h.write_op.submit_set_vacation(EVENT_NEXT_WEEK_BEGIN, EVENT_NEXT_WEEK_END, "vac_bad");
   h.advance(60000);
 
   TEST_ASSERT(h.events_for("vac_bad") == 1, "exactly one terminal event");
@@ -3667,7 +3745,7 @@ static void test_a_run_event_stored_as_a_stop_is_rejected() {
   h.prime_cache();
   h.sim.force_single_event_action = 0x01;
 
-  h.write_op.submit_set_single_event(1000000, 2000000, "run_bad");
+  h.write_op.submit_set_single_event(EVENT_NEXT_WEEK_BEGIN, EVENT_NEXT_WEEK_END, "run_bad");
   h.advance(60000);
 
   TEST_ASSERT(h.events_for("run_bad") == 1, "exactly one terminal event");
@@ -3684,7 +3762,7 @@ static void test_a_matching_action_still_settles_accepted() {
   Harness h;
   h.prime_cache();
 
-  h.write_op.submit_set_vacation(1000000, 2000000, "vac_ok");
+  h.write_op.submit_set_vacation(EVENT_NEXT_WEEK_BEGIN, EVENT_NEXT_WEEK_END, "vac_ok");
   h.advance(60000);
 
   const WriteResult *r = h.result_for("vac_ok");
@@ -3729,10 +3807,13 @@ static void test_clear_vacation_targets_stop_slot() {
   Harness h;
   h.prime_cache();
   // Slot 1 = a one-time RUN event (action Auto); slot 2 = a vacation (Stop).
-  h.sim.single_events[1][0] = 1; h.sim.single_events[1][1] = 0x02;
-  h.sim.single_events[1][9] = 0x40;  // some future end
-  h.sim.single_events[2][0] = 1; h.sim.single_events[2][1] = 0x01;  // Stop = vacation
-  h.sim.single_events[2][9] = 0x40;
+  // Both live. These used to be poked as `single_events[n][9] = 0x40`, called
+  // "some future end" -- byte 9 is the low byte of a big-endian end timestamp,
+  // so it actually said 1970-01-01 00:01:04. Nothing depended on the value
+  // until find_vacation_slot() learned to tell time (issue #267), and a fixture
+  // whose comment says the opposite of its bytes is a trap either way.
+  h.seed_single_event(1, 0x02, EVENT_TOMORROW_BEGIN, EVENT_TOMORROW_END);
+  h.seed_single_event(2, 0x01, EVENT_TOMORROW_BEGIN, EVENT_TOMORROW_END);
 
   h.write_op.submit_clear_vacation("vac2");
   h.advance(60000);
@@ -3750,8 +3831,7 @@ static void test_clear_vacation_none_active() {
   Harness h;
   h.prime_cache();
   // Only a RUN event present, no Stop event.
-  h.sim.single_events[0][0] = 1; h.sim.single_events[0][1] = 0x02;
-  h.sim.single_events[0][9] = 0x40;
+  h.seed_single_event(0, 0x02, EVENT_TOMORROW_BEGIN, EVENT_TOMORROW_END);
 
   h.write_op.submit_clear_vacation("vac3");
   h.advance(60000);
@@ -3760,6 +3840,127 @@ static void test_clear_vacation_none_active() {
   TEST_ASSERT(h.events_for("vac3") == 1, "exactly one terminal event");
   TEST_ASSERT(r && r->status == WriteStatus::ACCEPTED, "accepted (nothing to clear)");
   TEST_ASSERT(h.sim.single_events[0][0] == 1, "run event untouched");
+}
+
+// ── A vacation that has already ended (issue #267) ───────────────────────────
+//
+// find_vacation_slot() returned the first enabled Stop event in slot order with
+// no reference to a clock, so a FINISHED vacation in an early slot shadowed a
+// live one later: clear_vacation cleared the finished one and settled
+// `accepted`, telling the user the vacation was over while the pump was still
+// holding itself off. find_free_single_event_slot() one method up had always
+// been clocked; the asymmetry was the whole bug.
+static void test_clear_vacation_skips_one_that_has_ended() {
+  std::cout << "\n=== clear_vacation: a finished vacation does not shadow a live one ===" << std::endl;
+  Harness h;
+  h.prime_cache();
+  // The exact shape from the issue: finished in an early slot, live in a later
+  // one. Slot order alone picks 1; the clock picks 3.
+  h.seed_single_event(1, 0x01, EVENT_ENDED_BEGIN, EVENT_ENDED_END);
+  h.seed_single_event(3, 0x01, NODE_EPOCH_AT_BOOT - 3600, NODE_EPOCH_AT_BOOT + 86400);
+
+  h.write_op.submit_clear_vacation("vacx");
+  h.advance(60000);
+
+  const WriteResult *r = h.result_for("vacx");
+  TEST_ASSERT(h.events_for("vacx") == 1, "exactly one terminal event");
+  TEST_ASSERT(r && r->status == WriteStatus::ACCEPTED, "status is accepted");
+  TEST_ASSERT(r && r->slot == 3, "the LIVE vacation is the one cleared");
+  TEST_ASSERT(h.sim.single_events[3][0] == 0, "the pump is no longer held off");
+  TEST_ASSERT(h.sim.single_events[1][0] == 1,
+              "and the finished one is left where it was -- the user did not "
+              "ask to tidy history");
+}
+
+// With nothing covering now, the next vacation DUE is what the user means --
+// they booked it and are cancelling it. Soonest begin wins, not lowest slot.
+static void test_clear_vacation_prefers_the_next_one_due() {
+  std::cout << "\n=== clear_vacation: the next one due beats a finished one ===" << std::endl;
+  Harness h;
+  h.prime_cache();
+  h.seed_single_event(0, 0x01, EVENT_ENDED_BEGIN, EVENT_ENDED_END);
+  h.seed_single_event(1, 0x01, NODE_EPOCH_AT_BOOT + 30 * 86400,
+                      NODE_EPOCH_AT_BOOT + 37 * 86400);   // next month
+  h.seed_single_event(2, 0x01, EVENT_TOMORROW_BEGIN, EVENT_TOMORROW_END);  // sooner
+
+  h.write_op.submit_clear_vacation("vacy");
+  h.advance(60000);
+
+  const WriteResult *r = h.result_for("vacy");
+  TEST_ASSERT(r && r->status == WriteStatus::ACCEPTED, "status is accepted");
+  TEST_ASSERT(r && r->slot == 2,
+              "the vacation due soonest is cleared, not the lowest slot and "
+              "not the one furthest out");
+}
+
+// The third case, included deliberately rather than by omission. A vacation
+// that has ended is still an enabled Stop event occupying one of five slots, so
+// refusing to clear it would leave no way to reclaim it.
+static void test_clear_vacation_will_still_clear_a_finished_one() {
+  std::cout << "\n=== clear_vacation: a finished vacation is still reclaimable ===" << std::endl;
+  Harness h;
+  h.prime_cache();
+  h.seed_single_event(2, 0x01, EVENT_ENDED_BEGIN, EVENT_ENDED_END);
+
+  h.write_op.submit_clear_vacation("vacz");
+  h.advance(60000);
+
+  const WriteResult *r = h.result_for("vacz");
+  TEST_ASSERT(r && r->status == WriteStatus::ACCEPTED, "status is accepted");
+  TEST_ASSERT(r && r->slot == 2, "the only vacation there is, is the one cleared");
+  TEST_ASSERT(h.sim.single_events[2][0] == 0, "and its slot is reclaimed");
+}
+
+// No clock, no ranking. The picker answers the first stored vacation exactly as
+// it did before it could tell the time, rather than claiming one has ended --
+// the same rule find_free_single_event_slot() follows for expiry (#262).
+static void test_clear_vacation_without_a_clock_does_not_rank() {
+  std::cout << "\n=== clear_vacation: no node clock -> unranked, not wrong ===" << std::endl;
+  Harness h;
+  h.prime_cache();
+  h.set_node_time(0);
+  h.seed_single_event(1, 0x01, EVENT_ENDED_BEGIN, EVENT_ENDED_END);
+  h.seed_single_event(3, 0x01, NODE_EPOCH_AT_BOOT - 3600, NODE_EPOCH_AT_BOOT + 86400);
+
+  h.write_op.submit_clear_vacation("vacn");
+  h.advance(60000);
+
+  const WriteResult *r = h.result_for("vacn");
+  TEST_ASSERT(r && r->status == WriteStatus::ACCEPTED, "status is accepted");
+  TEST_ASSERT(r && r->slot == 1,
+              "with no clock the first stored vacation is returned unranked -- "
+              "a picker that cannot tell the time does not get to decide which "
+              "of these has ended");
+}
+
+// The second symptom of the same defect: format_vacation_display() had the same
+// shape, so the Vacation text sensor named a finished vacation as THE vacation.
+// The sensor answers "is the pump being held off, and until when"; a window
+// that closed last month answers that with "no".
+static void test_the_vacation_display_does_not_name_a_finished_one() {
+  std::cout << "\n=== vacation display: a finished vacation is not the vacation ===" << std::endl;
+  Harness h;
+  h.prime_cache();
+  h.seed_single_event(1, 0x01, EVENT_ENDED_BEGIN, EVENT_ENDED_END);
+  // Warm the cache the way the component does, through a read.
+  h.write_op.submit_refresh_single_events("disp1");
+  h.advance(60000);
+
+  const uint32_t now = static_cast<uint32_t>(NODE_EPOCH_AT_BOOT);
+  TEST_ASSERT(h.schedule.format_vacation_display(now) == "No vacation",
+              "an ended vacation is not presented as active");
+
+  // ...and a live one still is, or the assertion above passes against a
+  // formatter that says "No vacation" unconditionally.
+  Harness h2;
+  h2.prime_cache();
+  h2.seed_single_event(1, 0x01, NODE_EPOCH_AT_BOOT - 3600, NODE_EPOCH_AT_BOOT + 86400);
+  h2.write_op.submit_refresh_single_events("disp2");
+  h2.advance(60000);
+  TEST_ASSERT(h2.schedule.format_vacation_display(now) != "No vacation",
+              "a live vacation is still shown");
+  TEST_ASSERT(h2.schedule.format_vacation_display(now).find(" - ") != std::string::npos,
+              "...as a date range");
 }
 
 static void test_schedule_supersede_keys() {
@@ -4848,6 +5049,9 @@ int main() {
   test_a_far_future_event_does_not_evict_a_live_one();
   test_a_far_future_vacation_does_not_evict_a_live_event();
   test_without_a_clock_no_slot_is_treated_as_expired();
+  test_a_window_that_has_already_ended_is_refused();
+  test_a_window_that_has_begun_but_not_ended_still_runs();
+  test_without_a_clock_a_past_window_is_not_refused();
   test_with_a_clock_the_same_expired_slots_are_reusable();
   test_single_event_prefers_an_empty_slot_to_an_expired_one();
   test_a_pool_of_live_events_is_a_full_pool();
@@ -4858,6 +5062,11 @@ int main() {
   test_a_matching_action_still_settles_accepted();
   test_clear_single_event_ignores_stale_content_in_a_disabled_slot();
   test_clear_vacation_targets_stop_slot();
+  test_clear_vacation_skips_one_that_has_ended();
+  test_clear_vacation_prefers_the_next_one_due();
+  test_clear_vacation_will_still_clear_a_finished_one();
+  test_clear_vacation_without_a_clock_does_not_rank();
+  test_the_vacation_display_does_not_name_a_finished_one();
   test_clear_vacation_none_active();
   test_clear_single_event();
   test_single_event_slot_bounded_by_pump_capacity();

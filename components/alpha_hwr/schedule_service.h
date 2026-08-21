@@ -497,14 +497,44 @@ public:
    */
   int find_free_single_event_slot(uint32_t now_ts) const;
 
-  /**
-   * Slot index of the active vacation — the first enabled single-event whose
-   * action is Stop (0x01) — or -1 if none. A vacation is a Stop single-event.
-   */
-  int find_vacation_slot() const;
+  /// Where a stored vacation sits relative to now. Returned alongside the
+  /// event, because the two callers below want different things from an
+  /// ENDED one: `clear_vacation` should still be able to reclaim its slot,
+  /// while the Vacation sensor must not present it as the vacation.
+  enum class VacationWhen {
+    NONE,           ///< No enabled Stop single-event is cached.
+    COVERS_NOW,     ///< begin <= now < end.
+    UPCOMING,       ///< begin > now.
+    ENDED,          ///< end <= now.
+    UNKNOWN_CLOCK,  ///< One exists; with no clock we cannot say which of the above.
+  };
 
-  /** Human-readable active vacation range, or "No vacation". */
-  std::string format_vacation_display() const;
+  /**
+   * Slot index of the vacation a caller means, or -1 if none is stored.
+   *
+   * A vacation is an enabled Stop (0x01) single-event. This used to return the
+   * first one in slot order with no reference to a clock, so a FINISHED
+   * vacation in an early slot shadowed a live one later: `clear_vacation`
+   * cleared the finished one and settled `accepted`, telling the user the
+   * vacation was ended while the pump was still holding itself off (issue
+   * #267). `find_free_single_event_slot()` one method up had always been
+   * clocked; the asymmetry was the whole bug.
+   *
+   * Preference order: one whose window covers now, then the next one due
+   * (soonest begin), then the most recently ended one — the last included
+   * deliberately rather than by omission, since an ended vacation is still an
+   * enabled Stop event occupying one of five slots and refusing to clear it
+   * would leave no way to reclaim it. It just says so in the log.
+   *
+   * @param now_ts The node's wall clock, or 0 for "this node cannot tell the
+   *   time" — in which case the first enabled Stop is returned, unranked, the
+   *   same rule as `find_free_single_event_slot()`: a picker that cannot tell
+   *   the time does not get to claim one event has ended and another has not.
+   */
+  int find_vacation_slot(uint32_t now_ts) const;
+
+  /** Human-readable vacation range, or "No vacation". @see find_vacation_slot */
+  std::string format_vacation_display(uint32_t now_ts) const;
 
   /**
    * Get cached single events.
@@ -680,6 +710,20 @@ public:
   bool send_configuration_commit();
 
 protected:
+  /**
+   * The one ranking behind find_vacation_slot() and format_vacation_display().
+   *
+   * Shared rather than written twice: both used to walk the cache picking the
+   * first enabled Stop, and having the same wrong rule in two places is why
+   * issue #267 showed up as two symptoms -- a clear that targeted the wrong
+   * slot, and a sensor naming an expired vacation as the current one.
+   *
+   * @param now_ts Wall clock, 0 meaning unknown.
+   * @param when Receives where the returned event sits relative to now.
+   * @return The chosen event, or nullptr when none is stored / the cache is cold.
+   */
+  const SingleEvent *pick_vacation_(uint32_t now_ts, VacationWhen *when) const;
+
   // -------------------------------------------------------------------------
   // Internal Helper Methods
   // -------------------------------------------------------------------------

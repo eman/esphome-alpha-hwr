@@ -504,7 +504,8 @@ void AlphaHwrComponent::setup() {
         if (applied && this->vacation_text_sensor_ != nullptr) {
           publish_text_sensor_if_changed(
               this->vacation_text_sensor_,
-              schedule_service_.format_vacation_display());
+              schedule_service_.format_vacation_display(
+                  time_service_.now_unix()));
         }
 #endif
         break;

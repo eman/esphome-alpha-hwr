@@ -1313,7 +1313,8 @@ public:
             if (this->vacation_text_sensor_) {
               publish_text_sensor_if_changed(
                   this->vacation_text_sensor_,
-                  schedule_service_.format_vacation_display());
+                  schedule_service_.format_vacation_display(
+                      time_service_.now_unix()));
             }
 #endif
           }

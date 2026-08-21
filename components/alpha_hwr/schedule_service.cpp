@@ -1059,36 +1059,132 @@ std::string ScheduleService::format_single_events_display() const {
   return result;
 }
 
-int ScheduleService::find_vacation_slot() const {
+const SingleEvent *ScheduleService::pick_vacation_(uint32_t now_ts,
+                                                  VacationWhen *when) const {
+  *when = VacationWhen::NONE;
   if (!single_events_cached_)
-    return -1;
+    return nullptr;
+
+  const SingleEvent *covering = nullptr;
+  const SingleEvent *soonest_upcoming = nullptr;
+  const SingleEvent *latest_ended = nullptr;
+  const SingleEvent *first_stored = nullptr;
+
   for (const auto &ev : cached_single_events_) {
-    if (ev.enabled && ev.action == 0x01)  // Stop = vacation
-      return ev.index;
+    // Only Stop (0x01) events are vacations; a Run event is an ordinary
+    // one-time run and has nothing to do with this.
+    const bool is_vacation = ev.enabled && ev.action == 0x01;
+    if (!is_vacation)
+      continue;
+    if (first_stored == nullptr)
+      first_stored = &ev;
+    if (now_ts == 0)
+      continue;  // ranked below; with no clock there is nothing to rank by
+
+    const bool covers_now =
+        ev.begin_timestamp <= now_ts && now_ts < ev.end_timestamp;
+    if (covers_now) {
+      if (covering == nullptr)
+        covering = &ev;
+      continue;
+    }
+
+    const bool not_begun = ev.begin_timestamp > now_ts;
+    if (not_begun) {
+      // Split in two so each has a pipe-free line to anchor a mutation to;
+      // tools/mutation_check.sh splits its entries on that character.
+      const bool first_upcoming = soonest_upcoming == nullptr;
+      const bool due_sooner =
+          first_upcoming ? false
+                         : ev.begin_timestamp < soonest_upcoming->begin_timestamp;
+      if (first_upcoming || due_sooner)
+        soonest_upcoming = &ev;
+      continue;
+    }
+
+    // Over. Keep the one that ended most recently -- of several finished
+    // vacations it is the likeliest to be the one somebody means.
+    const bool first_ended = latest_ended == nullptr;
+    const bool ended_later =
+        first_ended ? false : ev.end_timestamp > latest_ended->end_timestamp;
+    if (first_ended || ended_later)
+      latest_ended = &ev;
   }
-  return -1;
+
+  if (now_ts == 0) {
+    // A picker that cannot tell the time does not get to claim one vacation has
+    // ended and another has not -- the same rule find_free_single_event_slot()
+    // follows for expiry (issue #262). It answers the first stored one, exactly
+    // as this did before it was clocked at all, and says that is what happened.
+    if (first_stored == nullptr)
+      return nullptr;
+    *when = VacationWhen::UNKNOWN_CLOCK;
+    return first_stored;
+  }
+  if (covering != nullptr) {
+    *when = VacationWhen::COVERS_NOW;
+    return covering;
+  }
+  if (soonest_upcoming != nullptr) {
+    *when = VacationWhen::UPCOMING;
+    return soonest_upcoming;
+  }
+  if (latest_ended != nullptr) {
+    *when = VacationWhen::ENDED;
+    return latest_ended;
+  }
+  return nullptr;
 }
 
-std::string ScheduleService::format_vacation_display() const {
+int ScheduleService::find_vacation_slot(uint32_t now_ts) const {
+  VacationWhen when = VacationWhen::NONE;
+  const SingleEvent *ev = pick_vacation_(now_ts, &when);
+  if (ev == nullptr)
+    return -1;
+  // Every case returns a slot -- including a vacation that is over, which is
+  // still an enabled Stop event holding one of five slots, so refusing to clear
+  // it would leave no way to reclaim it. The two inexact cases say so rather
+  // than passing silently.
+  if (when == VacationWhen::ENDED) {
+    ESP_LOGI(TAG,
+             "No live or upcoming vacation; targeting slot %d, whose vacation "
+             "ended (%" PRIu32 "-%" PRIu32 ")",
+             ev->index, ev->begin_timestamp, ev->end_timestamp);
+  } else if (when == VacationWhen::UNKNOWN_CLOCK) {
+    ESP_LOGW(TAG,
+             "Node clock is not set, so vacation slot %d was chosen without "
+             "considering whether it has ended",
+             ev->index);
+  }
+  return ev->index;
+}
+
+std::string ScheduleService::format_vacation_display(uint32_t now_ts) const {
   if (!single_events_cached_)
     return "unknown";
-  for (const auto &ev : cached_single_events_) {
-    if (!ev.enabled || ev.action != 0x01)  // only Stop events are vacations
-      continue;
-    time_t begin_t = (time_t) ev.begin_timestamp;
-    time_t end_t = (time_t) ev.end_timestamp;
-    struct tm begin_tm, end_tm;
-    localtime_r(&begin_t, &begin_tm);
-    localtime_r(&end_t, &end_tm);
-    char buf[96];
-    snprintf(buf, sizeof(buf), "%04d-%02d-%02d %02d:%02d - %04d-%02d-%02d %02d:%02d",
-             begin_tm.tm_year + 1900, begin_tm.tm_mon + 1, begin_tm.tm_mday,
-             begin_tm.tm_hour, begin_tm.tm_min,
-             end_tm.tm_year + 1900, end_tm.tm_mon + 1, end_tm.tm_mday,
-             end_tm.tm_hour, end_tm.tm_min);
-    return std::string(buf);
-  }
-  return "No vacation";
+
+  VacationWhen when = VacationWhen::NONE;
+  const SingleEvent *ev = pick_vacation_(now_ts, &when);
+  // A vacation that has ENDED is not presented as the vacation. This sensor
+  // answers "is the pump being held off, and until when"; a window that closed
+  // last month answers that with "no", and saying so as a date range was the
+  // second symptom of issue #267.
+  const bool nothing_to_show = ev == nullptr || when == VacationWhen::ENDED;
+  if (nothing_to_show)
+    return "No vacation";
+
+  time_t begin_t = (time_t) ev->begin_timestamp;
+  time_t end_t = (time_t) ev->end_timestamp;
+  struct tm begin_tm, end_tm;
+  localtime_r(&begin_t, &begin_tm);
+  localtime_r(&end_t, &end_tm);
+  char buf[96];
+  snprintf(buf, sizeof(buf), "%04d-%02d-%02d %02d:%02d - %04d-%02d-%02d %02d:%02d",
+           begin_tm.tm_year + 1900, begin_tm.tm_mon + 1, begin_tm.tm_mday,
+           begin_tm.tm_hour, begin_tm.tm_min,
+           end_tm.tm_year + 1900, end_tm.tm_mon + 1, end_tm.tm_mday,
+           end_tm.tm_hour, end_tm.tm_min);
+  return std::string(buf);
 }
 
 // -------------------------------------------------------------------------

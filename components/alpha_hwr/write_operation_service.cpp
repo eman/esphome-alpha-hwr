@@ -1791,6 +1791,35 @@ void WriteOperationService::run_single_event_(uint32_t seq) {
               "program at this timezone offset");
       return;
     }
+
+    // A window that has already ENDED can never run (issue #269). It was
+    // written, confirmed by readback and settled ACCEPTED, after which it was
+    // recyclable garbage occupying one of the five slots this pump has. Not
+    // destructive, and arguably harmless -- the pump simply never runs it --
+    // but it is a write that cannot do anything, reported as a success, and a
+    // client with a timezone bug or a stale timestamp got `accepted` and no
+    // signal.
+    //
+    // Only the END decides. A window that has BEGUN but not ended is
+    // legitimate and still runs: refusing it would break every "start this
+    // now, stop it at six" request.
+    //
+    // With no synced clock there is no honest answer, so the write is not
+    // refused on these grounds -- the same rule issue #262 established for the
+    // slot picker, where 0 means "expire nothing" rather than "expire
+    // everything". A node that cannot tell the time must not decide that
+    // somebody else's timestamp is in the past.
+    const uint32_t now_ts = time_service_.now_unix();
+    const bool clock_is_known = now_ts != 0;
+    const bool window_has_ended = op->end_ts <= now_ts;
+    const bool refuse_as_past = clock_is_known && window_has_ended;
+    if (refuse_as_past) {
+      finish_(seq, WriteStatus::INVALID,
+              format_detail("window has already ended (ends %" PRIu32
+                            ", node clock reads %" PRIu32 ")",
+                            op->end_ts, now_ts));
+      return;
+    }
   }
 
   // A slot at or past SINGLE_EVENT_SLOT_LIMIT is not a single-event slot on any
@@ -1829,8 +1858,13 @@ void WriteOperationService::run_single_event_(uint32_t seq) {
       Operation *op = find_(seq);
       if (op == nullptr || op->phase == Phase::DONE) return;
       if (op->clear_by_vacation) {
-        // clear_vacation: target the active Stop (vacation) single-event.
-        int slot = schedule_service_.find_vacation_slot();
+        // clear_vacation: target the Stop (vacation) single-event the caller
+        // means. Which one that is is a question about NOW: this used to take
+        // the first enabled Stop in slot order, so a FINISHED vacation in an
+        // early slot shadowed a live one later and the call reported success
+        // while the pump stayed off (issue #267). Same clock and same 0-means-
+        // unknown sentinel as the free-slot picker below.
+        int slot = schedule_service_.find_vacation_slot(time_service_.now_unix());
         if (slot < 0) {
           finish_(seq, WriteStatus::ACCEPTED, "no active vacation");
           return;

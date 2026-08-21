@@ -309,6 +309,54 @@
 
 ### Changed
 
+- **A vacation that has already ended no longer shadows the live one**
+  (issue #267). `find_vacation_slot()` returned the first enabled Stop
+  single-event in the cache, in slot order, with no reference to a clock. With a
+  finished vacation in slot 1 and a live one in slot 3, `clear_vacation` cleared
+  slot 1 and settled `accepted` — the user was told the vacation was ended while
+  the pump was still holding itself off. `find_free_single_event_slot()` one
+  method up had always been clocked; the asymmetry was the whole bug.
+
+  `format_vacation_display()` had the same shape, which is why the same defect
+  showed up twice: the **Vacation** text sensor named an expired vacation as *the*
+  vacation. Both now go through one ranking, so the rule cannot drift apart
+  again.
+
+  The preference is: a vacation whose window covers now, then the next one due
+  (soonest begin, not lowest slot), then the one that ended most recently. The
+  third case is included deliberately rather than by omission — an ended
+  vacation is still an enabled Stop event occupying one of the five slots this
+  pump has, and refusing to clear it would leave no way to reclaim it. It logs
+  that it fell back. The **Vacation** sensor does not show that case at all: the
+  sensor answers "is the pump being held off, and until when", and a window that
+  closed last month answers that with "no".
+
+  With no synced clock the first stored vacation is returned unranked, as before
+  — a picker that cannot tell the time does not get to decide which of two
+  vacations has ended.
+
+- **A single-event window that has already ended is refused** (issue #269).
+  `run_single_event_()` validated only that the end was after the begin, so a
+  window entirely in the past was written to the pump, confirmed by readback,
+  and settled `accepted` — after which it was recyclable garbage occupying one
+  of five slots. Observed on the bench while verifying #262: two events written
+  with yesterday's window both landed and both confirmed.
+
+  Not destructive, and arguably harmless, since the pump simply never runs it.
+  But it is a write that cannot do anything, reported as a success: a client with
+  a timezone bug or a stale timestamp got `accepted` and no signal.
+
+  Only the **end** decides. A window that has begun but not ended is legitimate
+  and still runs — refusing it would break every "start this now, stop it at six"
+  request, which is what the Lovelace card's Quick Run presets send. With no
+  synced clock the write is not refused on these grounds; the same rule #262
+  established for the slot picker, where an unknown clock expires nothing rather
+  than everything.
+
+  The refusal settles `invalid` ahead of the schedule-overview read and quotes
+  both the window's end and the node's clock, so a client with a timezone bug can
+  see which timestamp it sent.
+
 - **A single-event window the pump cannot store in local time is refused, not
   wrapped** (issue #263). The pump's clock program stores single-event
   begin/end as **local** Unix time, so every timestamp is shifted by the local
