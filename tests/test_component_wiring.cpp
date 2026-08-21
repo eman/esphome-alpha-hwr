@@ -213,6 +213,22 @@ struct Rig {
   bool limiter_limiting{false};
   int limiter_reads{0};
 
+  /// Answer every limiter sub-id except this one (0 = answer all). Models the
+  /// pump that goes quiet part-way through a chain, which is what the
+  /// stop-at-first-failure rule exists for.
+  uint16_t fail_limiter_sub{0};
+
+  /// Which limiter sub-ids were actually requested, in order. The chain's
+  /// stopping is not visible in the entity -- a half-read family reads
+  /// "unknown" either way -- so what it asks for next is the observable.
+  std::vector<uint16_t> limiter_subs_seen;
+
+  bool limiter_sub_was_requested(uint16_t sub) const {
+    for (uint16_t s : limiter_subs_seen)
+      if (s == sub) return true;
+    return false;
+  }
+
   /// Attach both limiter entities, which is what makes the reads happen at all.
   void attach_limiter_entities() {
     component.set_flow_limiter_text_sensor(&flow_limiter);
@@ -304,7 +320,10 @@ void Rig::answer_outstanding_writes() {
         // limiting state. Type 895 v1 (config, 18 bytes) and 896 v1 (status,
         // 6 bytes), whose replies carry the type high half at bytes 6-7.
         limiter_reads++;
-        if (!answer_limiters) {
+        limiter_subs_seen.push_back(sub);
+        if (sub == fail_limiter_sub) {
+          // deliberately unanswered: this is the read that times out
+        } else if (!answer_limiters) {
           // fall through: nothing answers, which is a pump without the family
         } else if (sub == 600) {
           const uint8_t enable_byte = limiter_max_flow_enabled ? 0x01 : 0x00;
@@ -1397,8 +1416,10 @@ void test_the_limiter_status_is_re_read_as_the_load_changes() {
   const int reads_after_connect = r.limiter_reads;
 
   // The load rises and the cap starts biting, with nothing written by us.
+  // Fine-grained for the same reason as above: at the default step size a 3 s
+  // command timeout expires between ticks and nothing is ever answered.
   r.limiter_limiting = true;
-  r.advance(120000);
+  r.advance(300000, 600);
 
   TEST_ASSERT(r.limiter_reads > reads_after_connect,
               "the status was re-read rather than left at its connect value");
@@ -1432,6 +1453,78 @@ void test_a_disconnect_drops_the_limiter_state() {
   TEST_ASSERT(r.flow_limiter.state == "unknown",
               "and the text falls back to unknown rather than showing the last "
               "connection's answer as though it were current");
+}
+
+// The chains stop at the first failure, and this is the observable that shows
+// it. A reply carries no request identifier, and the two config records share a
+// type code (895 v1) while the three status records share another (896 v1) --
+// so a read that has timed out and whose reply arrives late satisfies the NEXT
+// request in the chain. Carrying on is not merely wasteful: a late 86/600 reply
+// gets cached as MinFlow, and the entity reports a cap against the wrong
+// limiter.
+//
+// Asserted on what was REQUESTED rather than on the entity, because a half-read
+// family reads "unknown" whether the chain stopped or shifted -- which is
+// exactly why CI's mutation sweep found this uncovered.
+void test_the_config_chain_stops_at_the_first_failure() {
+  std::cout << "\n=== A failed config read stops the chain ===" << std::endl;
+  Rig r;
+  r.attach_limiter_entities();
+  r.fail_limiter_sub = 600;  // MaxFlow goes unanswered; everything else would answer
+  r.setup();
+  r.connect_and_subscribe();
+  r.run_until_ready();
+
+  TEST_ASSERT(r.limiter_sub_was_requested(600), "86/600 was asked for");
+  TEST_ASSERT(!r.limiter_sub_was_requested(601),
+              "and 86/601 was NOT -- a late 600 reply would have been cached as "
+              "MinFlow, so the chain stops rather than carrying on into an "
+              "ambiguous reply stream");
+}
+
+void test_the_status_chain_stops_at_the_first_failure() {
+  std::cout << "\n=== A failed status read stops the chain ===" << std::endl;
+  Rig r;
+  r.attach_limiter_entities();
+  r.fail_limiter_sub = 640;  // the first status record goes unanswered
+  r.setup();
+  r.connect_and_subscribe();
+  r.run_until_ready();
+
+  TEST_ASSERT(r.limiter_sub_was_requested(600) && r.limiter_sub_was_requested(601),
+              "the config pair completed, so the status chain was reached");
+  TEST_ASSERT(r.limiter_sub_was_requested(640), "86/640 was asked for");
+  TEST_ASSERT(!r.limiter_sub_was_requested(641),
+              "and 86/641 was NOT, so a late 640 reply cannot be consumed as "
+              "MinFlow's status");
+  TEST_ASSERT(!r.limiter_sub_was_requested(660),
+              "...nor can the records shift down into the manager slot");
+}
+
+// The control: with nothing failing, all five are read. Without this the two
+// above pass against a component that reads 86/600 and gives up.
+void test_a_healthy_pump_is_read_all_the_way_through() {
+  std::cout << "\n=== A pump that answers is read all the way through ===" << std::endl;
+  Rig r;
+  r.attach_limiter_entities();
+  r.setup();
+  r.connect_and_subscribe();
+  r.run_until_ready();
+  // The five reads queue behind the ordinary telemetry and control polls, so
+  // the chain takes minutes of mock time to drain rather than seconds.
+  //
+  // The step count matters and is not padding: advance() divides the interval
+  // into `steps` ticks, and the pump is only allowed to answer at a tick
+  // boundary. At the default 20 steps this would be 15 s per tick, so every
+  // command's 3 s transport timeout would expire inside a single step and
+  // nothing could ever be answered. 600 steps is 500 ms a tick.
+  r.advance(300000, 600);
+
+  const uint16_t expected[5] = {600, 601, 640, 641, 660};
+  bool all_seen = true;
+  for (uint16_t sub : expected)
+    if (!r.limiter_sub_was_requested(sub)) all_seen = false;
+  TEST_ASSERT(all_seen, "all five addresses were read");
 }
 
 // The restraint that keeps this optional rather than a tax: five frames per
@@ -2031,6 +2124,9 @@ int main() {
   test_a_limiter_actively_limiting_raises_the_binary_sensor();
   test_a_pump_without_the_limiter_family_reports_unknown();
   test_the_limiter_status_is_re_read_as_the_load_changes();
+  test_the_config_chain_stops_at_the_first_failure();
+  test_the_status_chain_stops_at_the_first_failure();
+  test_a_healthy_pump_is_read_all_the_way_through();
   test_a_disconnect_drops_the_limiter_state();
   test_a_node_without_limiter_entities_does_not_read_them();
   test_link_gap_baseline_is_published_once_at_zero();

@@ -225,8 +225,16 @@ MUTATIONS=(
 # identifier and the records within each family share a type code, so a late
 # reply to a timed-out read satisfies the NEXT request -- caching MaxFlow's cap
 # as MinFlow's.
-"limiter-config-chain-continues-past-a-failure|components/alpha_hwr/control_service.cpp|      ESP_LOGD(TAG, \"Limiter config chain stopped at 86/600\");\n      if (callback) callback(false);\n      return;|      ESP_LOGD(TAG, \"Limiter config chain stopped at 86/600\");"
-"limiter-status-chain-continues-past-a-failure|components/alpha_hwr/control_service.cpp|      ESP_LOGD(TAG, \"Limiter status chain stopped at 86/640\");\n      if (callback) callback(false);\n      return;|      ESP_LOGD(TAG, \"Limiter status chain stopped at 86/640\");"
+"limiter-config-chain-continues-past-a-failure|components/alpha_hwr/control_service.cpp|      ESP_LOGD(TAG, \"Limiter config chain stopped at 86/600\");\n      limiters_reading_ = false;\n      if (callback) callback(false);\n      return;|      ESP_LOGD(TAG, \"Limiter config chain stopped at 86/600\");\n      limiters_reading_ = false;"
+"limiter-status-chain-continues-past-a-failure|components/alpha_hwr/control_service.cpp|      ESP_LOGD(TAG, \"Limiter status chain stopped at 86/640\");\n      limiters_reading_ = false;\n      if (callback) callback(false);\n      return;|      ESP_LOGD(TAG, \"Limiter status chain stopped at 86/640\");\n      limiters_reading_ = false;"
+# One limiter chain at a time. The connect read is five requests and the control
+# poll starts another three; without the guard the two overlap, and every record
+# within a family shares a type code, so the poll's reply satisfies whichever
+# request is at the head of the queue. Found by a host test asserting all five
+# addresses are read on a healthy pump -- they were not, the poll's chain cut
+# the connect chain off after its third read, every time.
+"limiter-overlapping-chains-allowed|components/alpha_hwr/control_service.cpp|  if (limiters_reading_) {\n    ESP_LOGD(TAG, \"Limiter read already in flight; skipping this poll\");|  if (false) {\n    ESP_LOGD(TAG, \"Limiter read already in flight; skipping this poll\");"
+
 # The family belongs to the pump we were talking to. Left standing across a
 # disconnect the entities reported the previous connection's caps indefinitely.
 "limiter-state-survives-a-disconnect|components/alpha_hwr/control_service.h|     limiters_ = LimiterState{};|     // mutated: the previous pump's limiters stay"

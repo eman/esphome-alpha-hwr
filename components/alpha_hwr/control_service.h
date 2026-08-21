@@ -367,6 +367,12 @@ class ControlService {
      // link was down would have been reported wrongly for as long as the node
      // stayed up.
      limiters_ = LimiterState{};
+     // ...and the in-flight flag with it. Transport::reset() fails what it
+     // abandons (issue #259), so the chain's own callbacks would clear this --
+     // but clearing it here as well is what issue #273 learned the hard way,
+     // when a stuck flag left a read permanently answering "already in flight"
+     // for the life of the node.
+     limiters_reading_ = false;
      if (on_limiter_update_)
        on_limiter_update_();
      // ...and the in-flight flag with them.
@@ -504,6 +510,22 @@ class ControlService {
     /// poll_limiter_status().
     LimiterState limiters_{};
     std::function<void()> on_limiter_update_{};
+
+    /// True while a limiter chain is in flight.
+    ///
+    /// One chain at a time, and this is not tidiness. The connect-time read is
+    /// five requests and the control poll starts another three, so without a
+    /// guard the two overlap -- and every record within a family shares a type
+    /// code, so an overlapping chain's reply satisfies whichever request is at
+    /// the head of the queue. That is the same positional-correlation hazard
+    /// the stop-at-first-failure rule exists for, arriving from the other
+    /// direction: not a late reply to a dead request, but a live reply to the
+    /// wrong one of two live requests.
+    ///
+    /// Found by a host test asserting all five addresses are read on a healthy
+    /// pump. They were not: the poll's chain cut the connect chain off after
+    /// its third read, every time.
+    bool limiters_reading_{false};
 
    public:
     /// Has the pump's own on/off-time LIMITS block been read back yet?
@@ -800,6 +822,10 @@ class ControlService {
   /// decoder and which type expectation to use.
   void read_one_limiter_(uint16_t sub, bool is_config,
                          std::function<void(bool)> callback);
+
+  /// The 640 -> 641 -> 660 half, shared by read_limiters() and
+  /// poll_limiter_status(). Assumes `limiters_reading_` is already held.
+  void read_status_chain_(std::function<void(bool)> callback);
 
   void read_one_setpoint_range_(ControlMode mode, uint16_t sub,
                                 std::function<void(bool)> callback);

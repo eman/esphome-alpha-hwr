@@ -409,6 +409,12 @@ void ControlService::read_one_limiter_(uint16_t sub, bool is_config,
 }
 
 void ControlService::read_limiters(std::function<void(bool)> callback) {
+  if (limiters_reading_) {
+    ESP_LOGD(TAG, "Limiter read already in flight");
+    if (callback) callback(false);
+    return;
+  }
+  limiters_reading_ = true;
   // Configuration first, then status. Sequential, and **stopping at the first
   // failure** -- the same rule read_setpoint_ranges() follows, for the same
   // reason, which I documented here and then did not implement.
@@ -423,40 +429,58 @@ void ControlService::read_limiters(std::function<void(bool)> callback) {
   read_one_limiter_(SUB_LIMITER_CONFIG_MAX_FLOW, true, [this, callback](bool ok) {
     if (!ok) {
       ESP_LOGD(TAG, "Limiter config chain stopped at 86/600");
+      limiters_reading_ = false;
       if (callback) callback(false);
       return;
     }
     read_one_limiter_(SUB_LIMITER_CONFIG_MIN_FLOW, true, [this, callback](bool ok2) {
       if (!ok2) {
         ESP_LOGD(TAG, "Limiter config chain stopped at 86/601");
+        limiters_reading_ = false;
         if (callback) callback(false);
         return;
       }
-      poll_limiter_status(callback);
+      // Straight into the status chain, without releasing the flag: the two
+      // are one chain from the caller's point of view, and releasing between
+      // them would let the poll in exactly where the overlap hurts.
+      read_status_chain_(callback);
     });
   });
 }
 
 void ControlService::poll_limiter_status(std::function<void(bool)> callback) {
+  if (limiters_reading_) {
+    ESP_LOGD(TAG, "Limiter read already in flight; skipping this poll");
+    if (callback) callback(false);
+    return;
+  }
+  limiters_reading_ = true;
+  read_status_chain_(callback);
+}
+
+void ControlService::read_status_chain_(std::function<void(bool)> callback) {
   // Same rule, same reason: all three expect type 896 v1, so a late 86/640
   // reply would be consumed as 86/641 and the records would shift down the
   // chain into the manager slot.
   read_one_limiter_(SUB_LIMITER_STATUS_MAX_FLOW, false, [this, callback](bool ok) {
     if (!ok) {
       ESP_LOGD(TAG, "Limiter status chain stopped at 86/640");
+      limiters_reading_ = false;
       if (callback) callback(false);
       return;
     }
     read_one_limiter_(SUB_LIMITER_STATUS_MIN_FLOW, false, [this, callback](bool ok2) {
       if (!ok2) {
         ESP_LOGD(TAG, "Limiter status chain stopped at 86/641");
+        limiters_reading_ = false;
         if (callback) callback(false);
         return;
       }
-      read_one_limiter_(SUB_LIMITATION_MANAGER, false, [callback](bool ok3) {
+      read_one_limiter_(SUB_LIMITATION_MANAGER, false, [this, callback](bool ok3) {
         // The manager is the last read, so a failure here shifts nothing.
         // Its absence costs the name of the binding limiter and no more --
         // LimiterState falls back to the per-limiter records for that.
+        limiters_reading_ = false;
         if (callback) callback(ok3);
       });
     });
