@@ -927,6 +927,27 @@ MUTATIONS=(
 # failure this change exists to fix. The tests now pin the count exactly.
 "abandon-drain-cap-stops-it-dead|components/alpha_hwr/transport.h|  static constexpr size_t MAX_ABANDON_STEPS = 512;|  static constexpr size_t MAX_ABANDON_STEPS = 0;"
 "abandon-drain-cap-too-small-for-a-real-chain|components/alpha_hwr/transport.h|  static constexpr size_t MAX_ABANDON_STEPS = 512;|  static constexpr size_t MAX_ABANDON_STEPS = 8;"
+# Issue #278: what the receiver will accept as a frame at all. The length field
+# is bounded from both ends and the delimiter from one, and each bound has been
+# got wrong at least once -- including while writing this change, where a floor
+# taken from the capture corpus (5) rejected the 8-byte Unknown Class refusal
+# that only ever appears in traffic the corpus does not contain.
+"inbound-frame-accepts-the-request-delimiter|components/alpha_hwr/transport.cpp|  return byte == FRAME_START_RESPONSE;|  return byte == FRAME_START_RESPONSE || byte == FRAME_START_REQUEST;"
+"frame-start-length-floor-removed|components/alpha_hwr/transport.cpp|  if (len >= 2) declares_a_possible_frame = data[1] >= protocol::MIN_LENGTH_FIELD;|  // mutated: no floor on the declared length"
+# The floor must be exactly 4, and BOTH directions need an entry -- the first cut
+# of this shipped only the "too high" one, and a skeptic set MIN_LENGTH_FIELD to
+# 3 and to 2 with the whole suite staying green. At 5 the Unknown Class refusal
+# stops being a frame; at 3 a fragment declaring 3 arms reassembly and swallows
+# the frame behind it.
+"frame-start-length-floor-excludes-a-refusal|components/alpha_hwr/frame_builder.h|static const uint8_t MIN_LENGTH_FIELD = 4;|static const uint8_t MIN_LENGTH_FIELD = 5;"
+"frame-start-length-floor-too-low|components/alpha_hwr/frame_builder.h|static const uint8_t MIN_LENGTH_FIELD = 4;|static const uint8_t MIN_LENGTH_FIELD = 3;"
+# The two reachability defects a skeptic pass found in the same function.
+"lone-frame-start-never-learns-its-length|components/alpha_hwr/transport.cpp|    if (expected_packet_length_ == 0 && reassembly_buffer_.size() >= 2) {|    if (false) {"
+"complete-frame-discarded-as-an-overflow|components/alpha_hwr/transport.cpp|  if (reassembly_buffer_.size() > MAX_PACKET_SIZE && still_incomplete) {|  if (reassembly_buffer_.size() > MAX_PACKET_SIZE) {"
+# The ceiling is the largest telegram the specification permits: LENGTH 255 plus
+# the four bytes outside it. At the old 256 the three largest legal sizes were
+# discarded as overflows.
+"reassembly-ceiling-below-a-legal-frame|components/alpha_hwr/transport.h|  static constexpr size_t MAX_PACKET_SIZE = protocol::MAX_TELEGRAM_LEN;|  static constexpr size_t MAX_PACKET_SIZE = 256;"
 # Deliberate absence, as of issue #278: the inbound-overflow branch in
 # on_notification() is now UNREACHABLE, so its three entries have been removed
 # rather than left to survive. CI found all three surviving at once.
@@ -1195,6 +1216,14 @@ fi
 # but only after the better part of an hour, and only for the entries a filter
 # happened to select. This answers the same question in about seven seconds, for
 # all of them, without building anything.
+#
+# What it does NOT answer, and neither does the sweep: whether an entry has gone
+# MISSING. Both check the entries that are here against the code; nothing checks
+# the code against the entries. A range delete in this file removed seven entries
+# as collateral while retiring three, and every remaining entry still matched, so
+# --verify passed at 258 and the sweep would have passed too. The only symptom
+# was a filtered run printing "No mutation name contains ...", which is easy to
+# read as a typo. If you delete entries, count them.
 #
 # It exists because retargeting entries after a refactor is easy to half-do:
 # issue #259 moved three failure paths behind one helper and left three entries
