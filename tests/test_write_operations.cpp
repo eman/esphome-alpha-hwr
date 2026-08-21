@@ -1447,8 +1447,25 @@ static void test_a_mode_that_does_not_answer_does_not_shift_the_others() {
   TEST_ASSERT(r8 && r8->status == WriteStatus::CLAMPED, "the pump clamps it");
   TEST_ASSERT(r8 && r8->detail.find("1650") != std::string::npos,
               "and the mode that answered quotes the pump's floor");
-  TEST_ASSERT(r && r->detail.find("range") == std::string::npos,
-              "while the silent mode's own clamp quotes nothing");
+
+  // ...while the SILENT mode's own clamp quotes nothing. This has to be a
+  // clamped write: asserting it on the accepted 1.5 m result above passes
+  // trivially, because an accepted write's detail is empty either way, and the
+  // partial-range behaviour could regress with the test still green.
+  //
+  // 0.2 m is below constant pressure's real floor, so the sim clamps it --
+  // while get_setpoint_range() still refuses to offer a range for the mode
+  // whose object went unanswered.
+  h.write_op.submit_set_setpoint(ControlMode::CONSTANT_PRESSURE, 0.2f, "pr9");
+  h.advance(12000);
+  const WriteResult *r9 = h.result_for("pr9");
+  TEST_ASSERT(r9 && r9->status == WriteStatus::CLAMPED,
+              "the silent mode's setpoint is clamped by the pump");
+  TEST_ASSERT(r9 && r9->detail.find("range") == std::string::npos,
+              "and its detail quotes no range, because none was read for it");
+  TEST_ASSERT(r9 && !r9->detail.empty(),
+              "though it still reports what the pump stored, which is a fact "
+              "independent of the range");
 }
 
 // A disconnect while the range chain is in flight must not wedge it.

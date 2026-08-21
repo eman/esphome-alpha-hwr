@@ -216,6 +216,20 @@ MUTATIONS=(
 # finishes: a reconnect mid-chain resets the transport and drops the rest, which
 # left the entities empty even though most of the family had been read.
 "limiter-published-only-on-chain-completion|components/alpha_hwr/control_service.cpp|        } else if (on_limiter_update_) {|        } else if (false) {"
+# ...which is exactly why an all-clear needs BOTH configuration records. One
+# enabled limiter is enough to say "a limiter is enabled"; saying "no limiter is
+# enabled" is a claim about both, and a link that drops between 86/600 and
+# 86/601 must not produce it.
+"limiter-half-read-config-reads-as-all-clear|components/alpha_hwr/limiter.h|  if (!s.config_complete())\n    return \"unknown\";|  if (false)\n    return \"unknown\";"
+# The read chains stop at the first failure. A reply carries no request
+# identifier and the records within each family share a type code, so a late
+# reply to a timed-out read satisfies the NEXT request -- caching MaxFlow's cap
+# as MinFlow's.
+"limiter-config-chain-continues-past-a-failure|components/alpha_hwr/control_service.cpp|      ESP_LOGD(TAG, \"Limiter config chain stopped at 86/600\");\n      if (callback) callback(false);\n      return;|      ESP_LOGD(TAG, \"Limiter config chain stopped at 86/600\");"
+"limiter-status-chain-continues-past-a-failure|components/alpha_hwr/control_service.cpp|      ESP_LOGD(TAG, \"Limiter status chain stopped at 86/640\");\n      if (callback) callback(false);\n      return;|      ESP_LOGD(TAG, \"Limiter status chain stopped at 86/640\");"
+# The family belongs to the pump we were talking to. Left standing across a
+# disconnect the entities reported the previous connection's caps indefinitely.
+"limiter-state-survives-a-disconnect|components/alpha_hwr/control_service.h|     limiters_ = LimiterState{};|     // mutated: the previous pump's limiters stay"
 
 # The pump's published range EXPLAINS a clamp; it does not gate the write
 # (issue #276). #273/#275 made it a gate, against the pump's own type-301

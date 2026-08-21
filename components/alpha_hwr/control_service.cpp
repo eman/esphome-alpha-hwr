@@ -409,28 +409,56 @@ void ControlService::read_one_limiter_(uint16_t sub, bool is_config,
 }
 
 void ControlService::read_limiters(std::function<void(bool)> callback) {
-  // Configuration first, then status. Sequential rather than fired together:
-  // the two config records share one type code and the three status records
-  // share another, so an overlapping read hands one reply to the wrong request
-  // -- the same hazard read_setpoint_ranges() documents, where carrying on past
-  // a failure bounds constant pressure by constant speed's numbers.
-  read_one_limiter_(SUB_LIMITER_CONFIG_MAX_FLOW, true, [this, callback](bool) {
-    read_one_limiter_(SUB_LIMITER_CONFIG_MIN_FLOW, true, [this, callback](bool) {
+  // Configuration first, then status. Sequential, and **stopping at the first
+  // failure** -- the same rule read_setpoint_ranges() follows, for the same
+  // reason, which I documented here and then did not implement.
+  //
+  // A reply carries no request identifier. The two config records share one
+  // type code (895 v1) and the three status records share another (896 v1), so
+  // a read that has timed out and whose reply arrives late satisfies the NEXT
+  // request in the chain. Carrying on past a failure is therefore not merely
+  // wasteful: a late 86/600 reply gets cached as MinFlow, and the entity
+  // reports a cap against the wrong limiter. Stopping is what keeps positional
+  // correlation honest.
+  read_one_limiter_(SUB_LIMITER_CONFIG_MAX_FLOW, true, [this, callback](bool ok) {
+    if (!ok) {
+      ESP_LOGD(TAG, "Limiter config chain stopped at 86/600");
+      if (callback) callback(false);
+      return;
+    }
+    read_one_limiter_(SUB_LIMITER_CONFIG_MIN_FLOW, true, [this, callback](bool ok2) {
+      if (!ok2) {
+        ESP_LOGD(TAG, "Limiter config chain stopped at 86/601");
+        if (callback) callback(false);
+        return;
+      }
       poll_limiter_status(callback);
     });
   });
 }
 
 void ControlService::poll_limiter_status(std::function<void(bool)> callback) {
-  read_one_limiter_(SUB_LIMITER_STATUS_MAX_FLOW, false, [this, callback](bool a) {
-    read_one_limiter_(SUB_LIMITER_STATUS_MIN_FLOW, false, [this, callback, a](bool b) {
-      read_one_limiter_(SUB_LIMITATION_MANAGER, false,
-                        [callback, a, b](bool c) {
-                          // Any one of the three is enough to answer "is a
-                          // limiter active"; the manager alone names which.
-                          const bool any = a || b || c;
-                          if (callback) callback(any);
-                        });
+  // Same rule, same reason: all three expect type 896 v1, so a late 86/640
+  // reply would be consumed as 86/641 and the records would shift down the
+  // chain into the manager slot.
+  read_one_limiter_(SUB_LIMITER_STATUS_MAX_FLOW, false, [this, callback](bool ok) {
+    if (!ok) {
+      ESP_LOGD(TAG, "Limiter status chain stopped at 86/640");
+      if (callback) callback(false);
+      return;
+    }
+    read_one_limiter_(SUB_LIMITER_STATUS_MIN_FLOW, false, [this, callback](bool ok2) {
+      if (!ok2) {
+        ESP_LOGD(TAG, "Limiter status chain stopped at 86/641");
+        if (callback) callback(false);
+        return;
+      }
+      read_one_limiter_(SUB_LIMITATION_MANAGER, false, [callback](bool ok3) {
+        // The manager is the last read, so a failure here shifts nothing.
+        // Its absence costs the name of the binding limiter and no more --
+        // LimiterState falls back to the per-limiter records for that.
+        if (callback) callback(ok3);
+      });
     });
   });
 }

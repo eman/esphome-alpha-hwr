@@ -360,6 +360,15 @@ class ControlService {
      // The ranges belong to the pump we were talking to, not to the next one.
      cs_range_ = cp_range_ = pp_range_ = cf_range_ = SetpointRange{};
      setpoint_ranges_valid_ = false;
+     // ...and so does the limiter family (issue #274). Left standing, the
+     // entities went on reporting the previous connection's caps, and a
+     // reconnect whose reads failed kept showing them indefinitely rather than
+     // falling back to "unknown". A limiter changed in the GO app while the
+     // link was down would have been reported wrongly for as long as the node
+     // stayed up.
+     limiters_ = LimiterState{};
+     if (on_limiter_update_)
+       on_limiter_update_();
      // ...and the in-flight flag with them.
      //
      // This was load-bearing when it was written (issue #273):

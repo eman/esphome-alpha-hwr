@@ -1393,11 +1393,24 @@ void AlphaHwrComponent::update() {
         // (1000ms delay to avoid collision with schedule poll at 500ms)
         this->set_timeout("control_state_poll", 1000, [this]() {
           ESP_LOGD(TAG, "Polling control state to detect out-of-band changes (issue #54)");
-          control_service_.get_mode_async([](bool success, services::ControlMode mode) {
+          control_service_.get_mode_async([this](bool success, services::ControlMode mode) {
             if (success) {
               ESP_LOGD(TAG, "Control state poll succeeded (mode=%d)", static_cast<uint8_t>(mode));
             } else {
               ESP_LOGW(TAG, "Control state poll failed");
+            }
+            // Whether a limiter is *limiting* changes with the load, so it
+            // belongs on the poll rather than being read once at connect
+            // (issue #274). Whether one is *enabled* changes only when somebody
+            // edits it in the GO app, so the configuration records are NOT
+            // re-read here -- three frames per poll rather than five.
+            //
+            // Without this the entities froze at their connection-time state
+            // and never showed a limiter starting or stopping, which is most of
+            // what they exist for.
+            if (this->limiter_entities_wanted_()) {
+              control_service_.poll_limiter_status(
+                  [this](bool) { this->publish_limiter_state_(); });
             }
           });
         });

@@ -241,6 +241,18 @@ struct LimiterState {
     const bool min_on = min_flow.valid && min_flow.enabled;
     return max_on || min_on;
   }
+
+  /// True when BOTH configuration records have been read.
+  ///
+  /// The all-clear needs this and `any_enabled()` does not, and the asymmetry
+  /// is the point. One enabled limiter is enough to say "a limiter is enabled";
+  /// saying "no limiter is enabled" is a claim about *both*, so reading MaxFlow
+  /// as disabled and never reaching MinFlow must not produce it. Records are
+  /// published as they land (a five-read chain does not always complete), so
+  /// that half-read state is reachable on any link that drops mid-chain --
+  /// and a false all-clear is the exact reassurance issue #274 exists to
+  /// remove.
+  bool config_complete() const { return max_flow.valid && min_flow.valid; }
 };
 
 /**
@@ -258,6 +270,12 @@ inline std::string format_limiter_state(const LimiterState &s) {
   char buf[128];
   if (s.limiting()) {
     const LimiterName who = s.limiting_name();
+    // The manager can report that something is limiting without naming it, and
+    // "none limiting" is not a sentence. Say what is known -- the pump IS being
+    // held down -- and be explicit that which limiter is doing it was not
+    // reported, rather than printing the NONE enum's own name.
+    if (who == LimiterName::NONE)
+      return "A limiter is active (which one is not reported)";
     const LimiterConfig &cfg =
         (who == LimiterName::MIN_FLOW) ? s.min_flow : s.max_flow;
     if (cfg.valid && cfg.enabled) {
@@ -287,6 +305,10 @@ inline std::string format_limiter_state(const LimiterState &s) {
     return out + " (not limiting)";
   }
 
+  // Nothing is enabled among what we HAVE read. That is only an all-clear if
+  // both records arrived; otherwise the unread one could be the enabled one.
+  if (!s.config_complete())
+    return "unknown";
   return "No limiter enabled";
 }
 

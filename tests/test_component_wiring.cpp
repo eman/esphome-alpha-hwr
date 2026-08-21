@@ -1377,6 +1377,63 @@ void test_a_pump_without_the_limiter_family_reports_unknown() {
   TEST_ASSERT(!r.flow_limited.state, "the binary sensor does not assert limiting either");
 }
 
+// Whether a limiter is LIMITING changes with the load, so it has to be re-read.
+// This is the one the reviewer on #288 caught: the poll call was written, the
+// edit that placed it never landed, and every test here only exercised the
+// connect-time read -- so the entities froze at their connection-time state and
+// nothing noticed. Which is most of what they exist for.
+void test_the_limiter_status_is_re_read_as_the_load_changes() {
+  std::cout << "\n=== A limiter that starts limiting is noticed on the poll ===" << std::endl;
+  Rig r;
+  r.attach_limiter_entities();
+  r.limiter_max_flow_enabled = true;
+  r.limiter_limiting = false;
+  r.component.set_control_state_poll_interval(30000);
+  r.setup();
+  r.connect_and_subscribe();
+  r.run_until_ready();
+
+  TEST_ASSERT(!r.flow_limited.state, "not limiting at connect");
+  const int reads_after_connect = r.limiter_reads;
+
+  // The load rises and the cap starts biting, with nothing written by us.
+  r.limiter_limiting = true;
+  r.advance(120000);
+
+  TEST_ASSERT(r.limiter_reads > reads_after_connect,
+              "the status was re-read rather than left at its connect value");
+  TEST_ASSERT(r.flow_limited.state,
+              "and the entity followed the pump, which is the whole point of "
+              "polling it");
+  TEST_ASSERT(r.flow_limiter.state.find("limiting") != std::string::npos,
+              "the text sensor moved too");
+}
+
+// The limiter family belongs to the pump we were talking to. Left standing
+// across a disconnect, the entities went on reporting the previous
+// connection's caps -- and a limiter changed in the GO app while the link was
+// down would have been reported wrongly for as long as the node stayed up.
+void test_a_disconnect_drops_the_limiter_state() {
+  std::cout << "\n=== A disconnect drops the limiter state ===" << std::endl;
+  Rig r;
+  r.attach_limiter_entities();
+  r.limiter_max_flow_enabled = true;
+  r.limiter_limiting = true;
+  r.setup();
+  r.connect_and_subscribe();
+  r.run_until_ready();
+  TEST_ASSERT(r.flow_limited.state, "limiting while connected");
+
+  r.disconnect(ESP_GATT_CONN_TIMEOUT);
+  r.advance(2000);
+
+  TEST_ASSERT(!r.flow_limited.state,
+              "the link is gone, so we no longer claim the pump is limiting");
+  TEST_ASSERT(r.flow_limiter.state == "unknown",
+              "and the text falls back to unknown rather than showing the last "
+              "connection's answer as though it were current");
+}
+
 // The restraint that keeps this optional rather than a tax: five frames per
 // connection and three per control poll, on a node that displays neither.
 void test_a_node_without_limiter_entities_does_not_read_them() {
@@ -1973,6 +2030,8 @@ int main() {
   test_an_enabled_limiter_reaches_the_entities();
   test_a_limiter_actively_limiting_raises_the_binary_sensor();
   test_a_pump_without_the_limiter_family_reports_unknown();
+  test_the_limiter_status_is_re_read_as_the_load_changes();
+  test_a_disconnect_drops_the_limiter_state();
   test_a_node_without_limiter_entities_does_not_read_them();
   test_link_gap_baseline_is_published_once_at_zero();
   test_gap_counters_do_not_publish_on_every_tick();

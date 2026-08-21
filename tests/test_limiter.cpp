@@ -232,8 +232,54 @@ static void test_a_manager_with_no_name_still_reports_limiting() {
   s.manager = decode_limiter_status(anon, 6);
   TEST_ASSERT(s.limiting(), "the pump is limiting");
   TEST_ASSERT(s.limiting_name() == LimiterName::NONE, "and we cannot say which");
-  TEST_ASSERT(format_limiter_state(s).find("limiting") != std::string::npos,
+  const std::string text = format_limiter_state(s);
+  TEST_ASSERT(text.find("A limiter is active") != std::string::npos,
               "the entity reports the limiting rather than the missing name");
+  TEST_ASSERT(text.find("none") == std::string::npos,
+              "and does not print the NONE enum's own name -- \"none limiting\" "
+              "is not a sentence, and it reads as an all-clear");
+  TEST_ASSERT(text.find("not reported") != std::string::npos,
+              "it says the name is missing, which is a different fact from "
+              "there being no limiter");
+}
+
+// A half-read configuration must not produce an all-clear. If MaxFlow reads
+// disabled and the MinFlow read times out, the unread record could be the
+// enabled one -- and records publish as they land, so this state is reachable
+// on any link that drops mid-chain.
+static void test_a_half_read_configuration_is_not_an_all_clear() {
+  std::cout << "\n=== One config record read is not 'no limiter' ===" << std::endl;
+  LimiterState s{};
+  uint8_t off[18];
+  memcpy(off, MAXFLOW_ON_3_5_GPM, sizeof(off));
+  off[1] = 0x00;  // MaxFlow read, and disabled
+  s.max_flow = decode_limiter_config(off, 18);
+  // min_flow deliberately never read
+
+  TEST_ASSERT(s.known(), "something was read");
+  TEST_ASSERT(!s.any_enabled(), "and nothing we read is enabled");
+  TEST_ASSERT(!s.config_complete(), "but the configuration is not complete");
+  TEST_ASSERT(format_limiter_state(s) == "unknown",
+              "so the entity says unknown rather than claiming no limiter is "
+              "enabled -- the unread record could be the enabled one");
+
+  // The control: complete the pair and the all-clear appears.
+  s.min_flow = decode_limiter_config(MINFLOW_OFF_2_5_GPM, 18);
+  TEST_ASSERT(s.config_complete(), "both records are in");
+  TEST_ASSERT(format_limiter_state(s) == "No limiter enabled",
+              "and now the all-clear is a claim we can make");
+}
+
+// ...but a limiter that is actively limiting is reported whatever the
+// configuration read managed, because that is a fact about the pump right now.
+static void test_limiting_is_reported_even_on_a_half_read_configuration() {
+  std::cout << "\n=== Limiting is reported even without the config ===" << std::endl;
+  LimiterState s{};
+  s.max_flow_status = decode_limiter_status(STATUS_LIMITING, 6);
+  TEST_ASSERT(!s.config_complete(), "no configuration record was read");
+  TEST_ASSERT(s.limiting(), "the pump is still being held down");
+  TEST_ASSERT(format_limiter_state(s).find("MaxFlow limiting") != std::string::npos,
+              "and the entity says so, without a cap it never read");
 }
 
 int main() {
@@ -252,6 +298,8 @@ int main() {
   test_actively_limiting_is_named();
   test_the_per_limiter_records_are_a_fallback_for_the_manager();
   test_a_manager_with_no_name_still_reports_limiting();
+  test_a_half_read_configuration_is_not_an_all_clear();
+  test_limiting_is_reported_even_on_a_half_read_configuration();
 
   std::cout << "\n==========================================" << std::endl;
   std::cout << "Results: " << tests_passed << " passed, " << tests_failed

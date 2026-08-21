@@ -28,6 +28,13 @@
   values land on the wire in m³/s and every limit value seen on two pumps
   converts to an exact gpm figure.
 
+  The configuration is read once per connection; the status is re-read on the
+  control poll, because whether a limiter is *limiting* changes with the load
+  while whether one is *enabled* changes only when somebody edits it in the app.
+  The whole family is dropped on a disconnect — it describes the pump we were
+  talking to, and a limiter changed in the app while the link was down would
+  otherwise be reported wrongly for as long as the node stayed up.
+
   Six addresses are read — 86/600, 601 (config), 640, 641 (status) and 660 (the
   manager, which names *which* limiter is binding) — and **not a sweep**. The
   profile declares twenty slots per family; all fifty-four others answer a
