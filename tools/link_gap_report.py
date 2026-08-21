@@ -105,6 +105,12 @@ MAX_TRUNCATED_PER_DAY = 2.0
 GAP_RE = re.compile(r"gaps?\s+over\s+(\d+)\s*s", re.IGNORECASE)
 TRUNCATED_RE = re.compile(r"gaps?\s+truncated", re.IGNORECASE)
 WATCH_RE = re.compile(r"watched\s+time", re.IGNORECASE)
+# Bad-CRC drops (issue #260). A passenger on this trip rather than part of the
+# gap measurement: it costs nothing extra to collect, and it separates the two
+# failures that look identical from outside -- a link that went quiet and a link
+# whose answers arrived corrupted. Optional everywhere below; a node that does
+# not declare it simply has no rate to report, which is not a defect in the run.
+CRC_RE = re.compile(r"crc\s+drops?", re.IGNORECASE)
 
 
 def die(msg: str) -> None:
@@ -147,6 +153,7 @@ async def read_node(host: str, key: str) -> dict[str, Any]:
     over: dict[str, float] = {}
     truncated: float | None = None
     watched: float | None = None
+    crc_drops: float | None = None
     for entity_key, state in seen.items():
         name = names.get(entity_key, "")
         value = getattr(state, "state", None)
@@ -159,6 +166,8 @@ async def read_node(host: str, key: str) -> dict[str, Any]:
             truncated = value
         elif WATCH_RE.search(name):
             watched = value
+        elif CRC_RE.search(name):
+            crc_drops = value
 
     record: dict[str, Any] = {
         "host": host,
@@ -166,6 +175,11 @@ async def read_node(host: str, key: str) -> dict[str, Any]:
         "over": over,
         "truncated": truncated,
         "watched_s": watched,
+        # None, not 0, when the entity is absent: a node that never declared it
+        # has no reading, and recording a zero would make an uninstrumented node
+        # indistinguishable from a clean one -- which is the exact confusion this
+        # counter exists to end.
+        "crc_drops": crc_drops,
     }
     if watched is None:
         # Only when discovery found nothing, and only to make that diagnosable:
@@ -236,6 +250,16 @@ class NodeTotals:
         self.reported: set[int] = set()
         self.truncated = 0.0
         self.watched_s = 0.0
+        self.crc_drops = 0.0
+        self.crc_reported = False
+        # Watched time the CRC counter was actually COVERING, which is not the
+        # same as watched_s. link_crc_drops is optional and can be declared
+        # part-way through a run, so a log spanning that change has hours in
+        # watched_s that no counter was watching. Dividing drops by the whole
+        # run understates the rate and -- worse -- tightens the zero-event
+        # confidence bound with hours that never had the instrument in them.
+        self.crc_watched_s = 0.0
+        self._crc_seen = False
         self.resets = 0
         self.ambiguous = 0
         self.snapshots = 0
@@ -248,6 +272,9 @@ class NodeTotals:
         self.snapshots += 1
         current: dict[str, float] = {"watched_s": float(record["watched_s"])}
         current["truncated"] = float(record.get("truncated") or 0.0)
+        if record.get("crc_drops") is not None:
+            current["crc_drops"] = float(record["crc_drops"])
+            self.crc_reported = True
         for key, value in (record.get("over") or {}).items():
             current[f"over{int(key)}"] = float(value)
             self.reported.add(int(key))
@@ -281,6 +308,7 @@ class NodeTotals:
             if at - self._prev_at > self._prev.get("watched_s", 0.0):
                 self.ambiguous += 1
 
+        watched_delta = 0.0
         for field, value in current.items():
             previous = 0.0 if reset else self._prev.get(field, 0.0)
             delta = value - previous
@@ -288,10 +316,29 @@ class NodeTotals:
                 delta = value  # a counter that reset on its own
             if field == "watched_s":
                 self.watched_s += delta
+                watched_delta = delta
             elif field == "truncated":
                 self.truncated += delta
+            elif field == "crc_drops":
+                self.crc_drops += delta
             else:
                 self.over[int(field[4:])] += delta
+
+        # The watched time this snapshot's CRC delta actually covers.
+        #
+        # Three cases, mirroring the delta rule above exactly. A snapshot that
+        # does not report the counter contributes nothing. The FIRST one that
+        # does -- and the first after a reboot -- carries a since-boot count, so
+        # the time it covers is the whole since-boot watched_s rather than the
+        # interval since the last snapshot. Every one after that contributes its
+        # interval, like any other differenced field.
+        if "crc_drops" in current:
+            first_covered = reset or not self._crc_seen
+            if first_covered:
+                self.crc_watched_s += current["watched_s"]
+            else:
+                self.crc_watched_s += watched_delta
+        self._crc_seen = "crc_drops" in current
 
         # Merge rather than replace. read_node() writes a snapshot after a
         # timeout even when only some states arrived, and replacing wholesale
@@ -474,6 +521,64 @@ def print_caveats() -> None:
     print("    totals are a lower bound.")
 
 
+def print_crc_drops(nodes: dict[str, NodeTotals]) -> None:
+    """Bad-CRC frame drops as a rate per watched hour (issue #260).
+
+    A rate, not a count, because a raw count answers nothing: the one occurrence
+    on record was "one in roughly 5,900 log lines across three bench sessions",
+    which is uninterpretable with no baseline and no denominator. Watched time is
+    a denominator that is exactly known, and the same one the gap rungs use.
+
+    Per HOUR rather than per day, unlike everything else here, and deliberately.
+    The rungs are counting an event whose tolerable rate is under one a month, so
+    a per-day figure is the readable one; this is counting a radio, where a
+    healthy link reads zero and an unhealthy one can shed frames steadily. An
+    hourly figure keeps a real rate out of the third decimal place.
+
+    Prints nothing when no node declared the entity. It is optional and separate
+    from the #223 measurement, so its absence is not a defect in the run and must
+    not read as one.
+    """
+    instrumented = [n for n in nodes.values() if n.crc_reported]
+    if not instrumented:
+        return
+    print("\nBAD-CRC FRAME DROPS  (issue #260)")
+    print(f"  {'node':<24} {'watched':>10} {'drops':>8} {'/hour':>10}")
+    for node in instrumented:
+        # crc_watched_s, never watched_s: a run that predates the counter has
+        # hours in the latter that no counter was watching.
+        hours = node.crc_watched_s / 3600.0
+        rate = node.crc_drops / hours if hours > 0 else float("inf")
+        print(f"  {node.host:<24} {hours / 24.0:>9.2f}d {int(node.crc_drops):>8} {rate:>10.4f}")
+    total_drops = sum(n.crc_drops for n in instrumented)
+    total_hours = sum(n.crc_watched_s for n in instrumented) / 3600.0
+    pooled = total_drops / total_hours if total_hours > 0 else float("inf")
+    print(f"  {'pooled':<24} {total_hours / 24.0:>9.2f}d {int(total_drops):>8} {pooled:>10.4f}")
+
+    missing = [n.host for n in nodes.values() if not n.crc_reported]
+    if missing:
+        print(f"  not reporting this counter: {', '.join(missing)}")
+
+    # Say so when the counter covers less of the run than the gap entities do,
+    # rather than leaving a reader to work out why this table's watched column
+    # disagrees with COVERAGE above.
+    uninstrumented = sum(n.watched_s - n.crc_watched_s for n in instrumented)
+    if uninstrumented > 3600.0:
+        print(f"  {uninstrumented / 86400.0:.2f}d of watched link predates this counter and is excluded from the rate")
+    if total_drops == 0:
+        # Say what zero does and does not establish, because the first report of
+        # a zero on this issue had to be withdrawn for claiming more than it
+        # showed. With no events the 95% upper bound on the rate is 3/N, and N
+        # here is watched hours rather than frames -- the tighter denominator the
+        # firmware does not publish -- so this bounds the rate per hour and says
+        # nothing about the rate per frame.
+        bound = 3.0 / total_hours if total_hours > 0 else float("inf")
+        print(
+            f"  zero events: consistent with a clean link and with a rate up to "
+            f"~{bound:.4f}/hour at 95%. It does not separate the two."
+        )
+
+
 def cmd_report(log_path: str, budget_s: float | None) -> int:
     records: list[dict[str, Any]] = []
     try:
@@ -493,6 +598,7 @@ def cmd_report(log_path: str, budget_s: float | None) -> int:
     if silent:
         print(f"  not instrumented, excluded: {', '.join(silent)}")
     print_survival(nodes, reported)
+    print_crc_drops(nodes)
     passing = print_budgets(nodes, reported)
     problems = refusals(nodes, reported, budget_s)
     if silent:

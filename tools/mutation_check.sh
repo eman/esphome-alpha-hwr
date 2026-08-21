@@ -1028,12 +1028,38 @@ MUTATIONS=(
 # OPERATION_FAILED, named by the GO app's decoder (GeniAPDU.CLASS10_ACK_*, read
 # from raw[apdu_offset + 2]) and present in the captures with exactly those three
 # values and no others.
-"class10-ack-byte-ignored|components/alpha_hwr/transport.cpp|      const bool success = protocol::class10_reply_is_ok(data[5], has_payload, class10_ack);|      const bool success = protocol::apdu_ack_is_ok(data[5]);"
+# Retargeted when the decode moved into response_match.h so the read-refusal
+# branch (issue #283) could share it instead of copying it. Same guarantee, one
+# layer down and now covering both callers.
+"class10-ack-byte-ignored|components/alpha_hwr/response_match.h|  reply.ok = class10_reply_is_ok(head, reply.has_payload, reply.class10_ack);|  reply.ok = apdu_ack_is_ok(head);"
 "class10-ack-only-busy-rejected|components/alpha_hwr/response_match.h|  return first_payload == static_cast<uint8_t>(Class10Ack::OK);|  return first_payload != static_cast<uint8_t>(Class10Ack::BUSY);"
 # The payload byte exists only on a 9-byte frame. At `len >= 7` an 8-byte
 # CRC-valid frame declaring one payload byte has its CRC HIGH BYTE read as the
 # Class 10 status -- and that byte now decides the verdict, not just a log line.
-"class10-ack-reads-the-crc-byte|components/alpha_hwr/transport.cpp|      const bool has_payload = protocol::apdu_payload_len(data[5]) == 1 && len >= 9;|      const bool has_payload = protocol::apdu_payload_len(data[5]) == 1 && len >= 7;"
+"class10-ack-reads-the-crc-byte|components/alpha_hwr/response_match.h|  reply.has_payload = apdu_payload_len(head) == 1 && frame_len >= 9;|  reply.has_payload = apdu_payload_len(head) == 1 && frame_len >= 7;"
+# ---------------------------------------------------------------------------
+# A reply's type and version decode at the real byte boundary (issue #281)
+#
+# The pair form the matcher holds splits the reply's [00][TypeH][TypeL][Version]
+# header ONE BYTE OFF that boundary. Correct for matching, and meaningless to
+# read: printed as an Object ID it gave `Object 55809 SubID 0` for a type that is
+# ClockProgramOverview, which is verbatim the line quoted in #253 while a real
+# bug was being chased. These pin the decode the logs now go through.
+# ---------------------------------------------------------------------------
+"reply-type-low-byte-taken-from-the-wrong-half|components/alpha_hwr/response_match.h|  const uint16_t type_lsb = static_cast<uint16_t>(type_low_ver >> 8);|  const uint16_t type_lsb = static_cast<uint16_t>(type_low_ver & 0xFF);"
+"reply-version-is-the-high-byte|components/alpha_hwr/response_match.h|  return static_cast<uint8_t>(type_low_ver & 0xFF);|  return static_cast<uint8_t>(type_low_ver >> 8);"
+# ---------------------------------------------------------------------------
+# The control readback logs at INFO only when something moved (issue #265)
+# ---------------------------------------------------------------------------
+# The first reading after a connect. mode_valid_ is false until the pump has been
+# read once, so without this the state is gated away against a cache nothing
+# populated and never reaches the log at INFO at all.
+"readback-gate-ignores-the-first-reading|components/alpha_hwr/control_service.h|  if (!had_prior_mode) return true;|  // mutated: a first reading is not a change"
+# NAN is a value here, not a missing one. get_setpoint_for_mode() returns it for
+# every mode with no scalar setpoint, and NAN != NAN -- so without this the gate
+# reports a change on every poll of exactly those modes and reinstates the defect
+# for a pump sitting in AutoAdapt or temperature-range control.
+"readback-gate-compares-nan-with-not-equal|components/alpha_hwr/control_service.h|  if (std::isnan(prior_setpoint)) return false;|  // mutated: let NAN != NAN decide"
 # Deliberately absent: a mutation on class10_reply_is_ok()'s `!has_payload` early
 # return. Its only caller passes 0 for the status byte when there is none, so
 # dropping the guard still compares 0 == OK and every outcome is unchanged -- an
@@ -1063,8 +1089,44 @@ MUTATIONS=(
 # so the suppressed command times out, records a SECOND debt, and one late reply
 # costs every acknowledgement after it. This is the cascade that failed 4 writes
 # out of 4 against a healthy pump.
-"stale-reply-debt-never-paid|components/alpha_hwr/transport.cpp|      if (this->owed_replies_ > 0) this->owed_replies_--;|      // mutated: leave the debt standing"
+# Retargeted into consume_owed_reply_(), which both short-Class-10 branches now
+# call -- a SET acknowledgement and a declined READ (issue #283) are the same
+# nine bytes, so the payment rule has one home rather than two copies.
+"stale-reply-debt-never-paid|components/alpha_hwr/transport.cpp|  if (this->owed_replies_ > 0) this->owed_replies_--;|  // mutated: leave the debt standing"
 "stale-reply-suppressed-command-rearms|components/alpha_hwr/transport.cpp|  if (already_suppressed) return;|  // mutated: count it again"
+# ---------------------------------------------------------------------------
+# A Class 10 READ the pump declines (issue #283)
+#
+# The pump answers a read it cannot fulfil with the same nine bytes a write
+# acknowledgement uses, so every term below is what keeps the branch from
+# claiming a frame that is not its answer. #279 shipped this without them and
+# was withdrawn after a skeptic pass reproduced three failures.
+# ---------------------------------------------------------------------------
+# The caller's declaration. Without it, an orphaned refusal to one of
+# TelemetryService's callback-less reads completes an innocent read as a
+# failure -- and does so most on the pumps the branch was written for, since a
+# pump that refuses reads is a pump that generates these orphans.
+"read-refusal-needs-no-declaration|components/alpha_hwr/transport.cpp|        cmd.expect_short_read_refusal && cmd.packet.size() > 5 &&|        cmd.packet.size() > 5 &&"
+# The upper length bound. Byte 5 is the FIRST APDU's length on a multi-APDU
+# telegram (#226), so without a ceiling any Class 10 telegram of any size whose
+# first APDU declared 0 or 1 payload bytes reads as a refusal -- and App C.17
+# makes "first APDU errored, second carries the answer" a documented case.
+"read-refusal-has-no-upper-length-bound|components/alpha_hwr/transport.cpp|        queued_class == 0x0A && data[4] == 0x0A && len >= 8 && len <= 9 &&|        queued_class == 0x0A && data[4] == 0x0A && len >= 8 &&"
+# GET, not "not a SET". There are three operations, and the negation also
+# catches INFO -- the log then says "read declined" about one.
+"read-refusal-admits-info|components/alpha_hwr/transport.cpp|        protocol::apdu_op(cmd.packet[5]) == protocol::ApduOp::GET;|        !protocol::apdu_is_set(cmd.packet[5]);"
+# And the requirement that the reply actually said NOT-OK. A head-only frame
+# whose acknowledges are both ok is byte-identical to a legitimate one-byte data
+# reply; failing a read on it trades three seconds for a lie.
+"read-refusal-claims-an-ok-frame|components/alpha_hwr/transport.cpp|      const bool declined = !reply.ok;|      const bool declined = true;"
+# ---------------------------------------------------------------------------
+# A bad-CRC frame drop is counted (issue #260)
+#
+# Without the count the drop leaves one log line and nothing else, which is the
+# state that made a link shedding frames indistinguishable from a component that
+# occasionally times out for no reason.
+# ---------------------------------------------------------------------------
+"crc-drops-not-counted|components/alpha_hwr/transport.cpp|       if (this->crc_drops_ < 0xFFFFFFFFu) this->crc_drops_++;|       // mutated: dropped silently, as before"
 # And the window, which bounds how long an unpaid debt lingers.
 "stale-reply-window-never-expires|components/alpha_hwr/transport.cpp|  if (millis() - this->owed_since_ms_ >= STALE_REPLY_WINDOW_MS) {|  if (false) {"
 "stale-reply-window-too-short-for-the-tail|components/alpha_hwr/transport.h|  static constexpr uint32_t STALE_REPLY_WINDOW_MS = 500;|  static constexpr uint32_t STALE_REPLY_WINDOW_MS = 60;"

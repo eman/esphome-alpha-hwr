@@ -54,6 +54,7 @@ using esphome::alpha_hwr::core::Session;
 using esphome::alpha_hwr::core::Transport;
 using esphome::alpha_hwr::services::ControlMode;
 using esphome::alpha_hwr::services::ControlService;
+using esphome::alpha_hwr::services::control_readback_changed;
 
 namespace {
 
@@ -188,6 +189,60 @@ static void test_setpoint_cached_per_mode() {
 // ---------------------------------------------------------------------------
 // Issue #43: the setpoint on the wire is the one asked for, not a default
 
+// ---------------------------------------------------------------------------
+// Issue #265: the readback log fires at INFO only when something moved
+// ---------------------------------------------------------------------------
+//
+// The predicate rather than the log line, because the mock ESP_LOGx macros
+// compile to nothing on the host -- there is no log level to observe. What is
+// testable, and what the defect actually was, is the decision behind it.
+static void test_readback_change_gate() {
+  std::cout << "\n=== Readback change gate (#265) ===" << std::endl;
+
+  // The steady state the issue describes: the #54 poll re-reading the same mode
+  // and the same setpoint at 30 s intervals, indefinitely. This is the case that
+  // produced ~2,880 identical INFO lines a day.
+  TEST_ASSERT(!control_readback_changed(true, ControlMode::CONSTANT_SPEED,
+                                        ControlMode::CONSTANT_SPEED, 1650.0f, 1650.0f),
+              "#265: an unchanged poll does not count as a change");
+
+  // A real transition still does.
+  TEST_ASSERT(control_readback_changed(true, ControlMode::CONSTANT_SPEED,
+                                       ControlMode::CONSTANT_PRESSURE, 1650.0f, 3.0f),
+              "#265: a mode change counts");
+  TEST_ASSERT(control_readback_changed(true, ControlMode::CONSTANT_SPEED,
+                                       ControlMode::CONSTANT_SPEED, 1650.0f, 1800.0f),
+              "#265: a setpoint change in the same mode counts");
+
+  // The first reading after a connect. mode_valid_ is false until the pump has
+  // been read once, so this is what keeps the state visible at INFO once per
+  // link instead of being gated away against a cache nothing populated.
+  TEST_ASSERT(control_readback_changed(false, ControlMode::NONE,
+                                       ControlMode::CONSTANT_SPEED, NAN, 1650.0f),
+              "#265: the first reading after a connect counts as a change");
+
+  // NAN is a value here, not a missing one. get_setpoint_for_mode() returns it
+  // for every mode with no scalar setpoint, and NAN != NAN -- so a plain `!=`
+  // would report a change on every poll of exactly those modes and reinstate the
+  // defect for a pump sitting in AutoAdapt or temperature-range control.
+  TEST_ASSERT(!control_readback_changed(true, ControlMode::AUTO_ADAPT,
+                                        ControlMode::AUTO_ADAPT, NAN, NAN),
+              "#265: NAN == NAN for this comparison; a setpointless mode is quiet");
+  TEST_ASSERT(control_readback_changed(true, ControlMode::TEMPERATURE_RANGE,
+                                       ControlMode::TEMPERATURE_RANGE, NAN, 3.0f),
+              "#265: NAN -> a value is a change");
+  TEST_ASSERT(control_readback_changed(true, ControlMode::CONSTANT_SPEED,
+                                       ControlMode::CONSTANT_SPEED, 1650.0f, NAN),
+              "#265: a value -> NAN is a change");
+
+  // Same mode, same setpoint, but no prior reading: the had_prior_mode term has
+  // to win over the two equalities, or a reconnect onto an unchanged pump goes
+  // unreported.
+  TEST_ASSERT(control_readback_changed(false, ControlMode::CONSTANT_SPEED,
+                                       ControlMode::CONSTANT_SPEED, 1650.0f, 1650.0f),
+              "#265: no prior reading outranks an unchanged comparison");
+}
+
 int main() {
   std::cout << "==========================================" << std::endl;
   std::cout << "ControlService State Tests (real service)" << std::endl;
@@ -197,6 +252,7 @@ int main() {
   test_notification_operation_modes();
   test_control_source_drives_remote_state();
   test_setpoint_cached_per_mode();
+  test_readback_change_gate();
 
   std::cout << "\n==========================================" << std::endl;
   std::cout << "Results: " << tests_passed << " passed, " << tests_failed

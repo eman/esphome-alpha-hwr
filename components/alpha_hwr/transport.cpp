@@ -92,8 +92,21 @@ void Transport::loop() {
             this->state_ = State::AWAITING_RESPONSE;
             cmd.timestamp_ms = now;
             cmd.waiting_for_response = true;
-            ESP_LOGV(TAG, "Command sent, waiting for response (Obj %d Sub %d)", 
-                     cmd.expect_type_low_ver, cmd.expect_type_high);
+            // The expectation named as a type and a version, not as the two
+            // byte-pairs it is stored as (issue #281). The pair is correct for
+            // matching and meaningless to read: printed as an Object ID it
+            // gives numbers no profile contains.
+            //
+            // A wildcard expectation is 0/0 and decodes to "type 0 v0", which
+            // names nothing either -- so it gets its own arm rather than a
+            // number that looks like an answer.
+            if (cmd.expect_type_low_ver == 0 && cmd.expect_type_high == 0) {
+              ESP_LOGV(TAG, "Command sent, awaiting any reply of the queued class");
+            } else {
+              ESP_LOGV(TAG, "Command sent, awaiting a reply of type %u v%u",
+                       (unsigned) protocol::apdu_object_type(cmd.expect_type_high, cmd.expect_type_low_ver),
+                       (unsigned) protocol::apdu_object_version(cmd.expect_type_low_ver));
+            }
           } else {
             ESP_LOGV(TAG, "Command sent (no response expected)");
             this->command_queue_.pop_front();
@@ -139,11 +152,19 @@ void Transport::loop() {
           // window", which was a story told about a schedule layer write that
           // was waiting for a reply the protocol forbids (issue #253).
           // quiet_timeout means "do not log this at warning" and nothing more.
-          ESP_LOGD(TAG, "Command timeout (unanswered; the readback decides) for Obj %d Sub %d (now=%" PRIu32 ", timestamp=%" PRIu32 ", timeout=%" PRIu32 ")",
-                   cmd.expect_type_low_ver, cmd.expect_type_high, now, cmd.timestamp_ms, cmd.timeout_ms);
+          ESP_LOGD(TAG, "Command timeout (unanswered; the readback decides) awaiting type %u v%u (now=%" PRIu32 ", timestamp=%" PRIu32 ", timeout=%" PRIu32 ")",
+                   (unsigned) protocol::apdu_object_type(cmd.expect_type_high, cmd.expect_type_low_ver),
+                   (unsigned) protocol::apdu_object_version(cmd.expect_type_low_ver),
+                   now, cmd.timestamp_ms, cmd.timeout_ms);
         } else {
-          ESP_LOGW(TAG, "Command timeout waiting for Obj %d Sub %d (now=%" PRIu32 ", timestamp=%" PRIu32 ", timeout=%" PRIu32 ")",
-                   cmd.expect_type_low_ver, cmd.expect_type_high, now, cmd.timestamp_ms, cmd.timeout_ms);
+          // This is the line #253 quoted as `Command timeout waiting for
+          // Obj 55809 Sub 0` while a real bug was being chased. 0xDA01 is the
+          // type byte-pair for ClockProgramOverview -- type 218 v1 -- and there
+          // is no Object 55809 to go and look up (issue #281).
+          ESP_LOGW(TAG, "Command timeout awaiting type %u v%u (now=%" PRIu32 ", timestamp=%" PRIu32 ", timeout=%" PRIu32 ")",
+                   (unsigned) protocol::apdu_object_type(cmd.expect_type_high, cmd.expect_type_low_ver),
+                   (unsigned) protocol::apdu_object_version(cmd.expect_type_low_ver),
+                   now, cmd.timestamp_ms, cmd.timeout_ms);
         }
         // A command that gave up is not a command whose reply cannot arrive
         // (issue #248). Nothing cancels a request in GENIbus, so the pump still
@@ -171,7 +192,8 @@ void Transport::loop() {
 
 void Transport::send_command(const std::vector<uint8_t>& packet, uint16_t expect_type_low_ver,
                              uint16_t expect_type_high, CommandCallback callback, uint32_t timeout_ms,
-                             bool allow_register_read, bool expect_short_ack, bool quiet_timeout) {
+                             bool allow_register_read, bool expect_short_ack, bool quiet_timeout,
+                             bool expect_short_read_refusal) {
   Command cmd;
   cmd.packet = packet;
   cmd.expect_type_low_ver = expect_type_low_ver;
@@ -181,6 +203,7 @@ void Transport::send_command(const std::vector<uint8_t>& packet, uint16_t expect
   cmd.allow_register_read = allow_register_read;
   cmd.expect_short_ack = expect_short_ack;
   cmd.quiet_timeout = quiet_timeout;
+  cmd.expect_short_read_refusal = expect_short_read_refusal;
 
   this->command_queue_.push_back(cmd);
   ESP_LOGV(TAG, "Command queued (queue size: %zu)", this->command_queue_.size());
@@ -190,7 +213,7 @@ void Transport::send_apdu_command(const uint8_t* apdu, size_t apdu_len,
                                   uint16_t expect_type_low_ver, uint16_t expect_type_high,
                                   CommandCallback callback, uint32_t timeout_ms,
                                   bool allow_register_read, bool expect_short_ack,
-                                  bool quiet_timeout) {
+                                  bool quiet_timeout, bool expect_short_read_refusal) {
   // Sized to the protocol's maximum telegram, not to a round number. A GENIbus
   // telegram is at most 259 bytes (App. Prog. Manual, "Short form technical
   // specification"): start delimiter, length, DA, SA, up to MAX_PDU_LEN of PDU,
@@ -217,7 +240,9 @@ void Transport::send_apdu_command(const uint8_t* apdu, size_t apdu_len,
 
   std::vector<uint8_t> packet(packet_raw, packet_raw + packet_len);
   
-  this->send_command(packet, expect_type_low_ver, expect_type_high, callback, timeout_ms, allow_register_read, expect_short_ack, quiet_timeout);
+  this->send_command(packet, expect_type_low_ver, expect_type_high, callback, timeout_ms,
+                     allow_register_read, expect_short_ack, quiet_timeout,
+                     expect_short_read_refusal);
 }
 
 void Transport::note_reply_owed_(bool already_suppressed) {
@@ -228,6 +253,17 @@ void Transport::note_reply_owed_(bool already_suppressed) {
   if (this->owed_replies_ < 0xFF) this->owed_replies_++;
   this->owed_pending_ = true;
   this->owed_since_ms_ = millis();
+}
+
+void Transport::consume_owed_reply_(Command &cmd) {
+  // Pay one owed reply with this frame, and mark the live command as having had
+  // a frame withheld so its own timeout does not record a second debt (issue
+  // #248). Both short-Class-10 branches in try_dispatch_response() end up here:
+  // a SET acknowledgement and a declined READ are the same nine bytes, so a late
+  // one of either is unattributable in exactly the same way.
+  if (this->owed_replies_ > 0) this->owed_replies_--;
+  if (this->owed_replies_ == 0) this->owed_pending_ = false;
+  cmd.suppressed_a_frame = true;
 }
 
 bool Transport::stale_reply_possible_() {
@@ -457,7 +493,43 @@ void Transport::on_notification(const uint8_t* data, size_t len) {
      // mid-frame fragment, or any radio corruption, could satisfy the
      // class/object match and be taken for the answer to a queued command.
      if (!protocol::frame_crc_valid(reassembly_buffer_.data(), frame_len)) {
-       ESP_LOGW(TAG, "Dropping %u-byte frame with a bad CRC", (unsigned) frame_len);
+       // Counted, not just logged (issue #260). A drop used to leave exactly one
+       // ESP_LOGW behind: no counter, no entity, nothing in Home Assistant -- so
+       // a link quietly shedding frames was indistinguishable, from outside,
+       // from a component that occasionally times out for no reason, and there
+       // was no way to collect a baseline to compare a sighting against.
+       //
+       // A lifetime count, deliberately not cleared by reset(): a disconnect
+       // says nothing about how many frames the radio has corrupted, and the
+       // entity is total_increasing so that Home Assistant's long-term
+       // statistics carry a run across the reboots it will certainly meet.
+       //
+       // This is the only inbound-discard path with a counter. There are others
+       // -- the reassembly overflow above, the runt length floor, the
+       // "not a frame start" fall-through, and the staleness expiry -- and they
+       // mean different things: a bad CRC is a noisy link, a runt length is a
+       // peer generating frames wrong. If more of them are ever exposed they
+       // want to be separate counters rather than one collapsed "drops", or a
+       // framing bug reads as radio interference.
+       if (this->crc_drops_ < 0xFFFFFFFFu) this->crc_drops_++;
+       // What was RECEIVED against what the frame DECLARED, plus the leading
+       // bytes. The received figure is the pre-trim buffer size, and it has to
+       // be: `frame_len` is the trimmed length, and the completion test is `>=`
+       // with expected_packet_length_ never below 4, so frame_len ALWAYS equals
+       // the declared length by the time this line runs. Printing it against
+       // the declaration would have been two names for one number -- caught in
+       // review on the first cut of this.
+       //
+       // The two differ when a notification carried bytes past the end of this
+       // frame, which is the misassembly case worth telling apart from radio
+       // corruption: a bit-flip in the payload preserves the frame length, so
+       // received == declared with a bad CRC points at the radio, while
+       // received > declared points at framing.
+       ESP_LOGW(TAG,
+                "Dropping frame with a bad CRC (received=%u, declared=%u, head=%02X %02X %02X %02X)",
+                (unsigned) reassembly_buffer_.size(), (unsigned) expected_packet_length_,
+                reassembly_buffer_[0], reassembly_buffer_[1], reassembly_buffer_[2],
+                reassembly_buffer_[3]);
        reassembling_ = false;
        reassembly_buffer_.clear();
        expected_packet_length_ = 0;
@@ -751,9 +823,7 @@ bool Transport::try_dispatch_response(const uint8_t* data, size_t len) {
       ESP_LOGD(TAG, "Short Class 10 frame consumed as the reply owed to an "
                     "abandoned command (%u still owed)",
                (unsigned) this->owed_replies_);
-      if (this->owed_replies_ > 0) this->owed_replies_--;
-      if (this->owed_replies_ == 0) this->owed_pending_ = false;
-      cmd.suppressed_a_frame = true;
+      this->consume_owed_reply_(cmd);
       return false;
     }
 
@@ -773,14 +843,15 @@ bool Transport::try_dispatch_response(const uint8_t* data, size_t len) {
       // 459 captured replies. Reading only the head reported success for 39 of
       // them: every "busy" and every "operation failed" the pump has ever sent
       // us. Issue #208's defect, one layer further down.
-      // len >= 9, not 7. A real short ACK is `24 05 F8 E7 0A 01 PL CRC CRC` --
-      // nine bytes -- so the payload byte exists only at that length. At `>= 7`
-      // an eight-byte CRC-valid frame whose head declares one payload byte makes
-      // data[6] the CRC HIGH BYTE, and that byte now decides the write's verdict
-      // rather than just the wording of a log line.
-      const bool has_payload = protocol::apdu_payload_len(data[5]) == 1 && len >= 9;
-      const uint8_t class10_ack = has_payload ? data[6] : 0;
-      const bool success = protocol::class10_reply_is_ok(data[5], has_payload, class10_ack);
+      //
+      // Both readings, and the length rule that decides whether the status byte
+      // exists at all, live in decode_short_class10_reply(). The read-refusal
+      // branch below needs the identical decode, and a copy of it there is how
+      // the two readings of that byte drift apart.
+      const protocol::ShortClass10Reply reply =
+          protocol::decode_short_class10_reply(data[5], len >= 7 ? data[6] : 0, len);
+      const uint8_t class10_ack = reply.class10_ack;
+      const bool success = reply.ok;
       if (success) {
         ESP_LOGI(TAG, "Matched short Class 10 ACK (head 0x%02X, ok) for Class 10 SET write", data[5]);
       } else if (protocol::apdu_ack_is_ok(data[5])) {
@@ -813,6 +884,103 @@ bool Transport::try_dispatch_response(const uint8_t* data, size_t len) {
       this->complete_front_command_(success, data, len);
       this->state_ = State::IDLE;
       return true;
+    }
+
+    // A READ the pump declines is answered with the same nine bytes a write
+    // acknowledgement uses (issue #283):
+    //
+    //     24 05 F8 E7 0A 01 04 EE 26   head acknowledge OK, OPERATION_FAILED below
+    //
+    // That frame matched nothing. `short_ack_shape` above requires
+    // apdu_is_set(cmd.packet[5]) and a GET head is 0x03, so it fails; the
+    // `len < 11` floor below then dropped it. The read waited out its whole
+    // timeout and the log said "no response" about a pump that answered in
+    // milliseconds -- #208's defect, one operation across. Measured on the bench
+    // through the sibling client: an answered read costs 0.06 s and a declined
+    // one costs the full 3.00 s, and a range walk pays it per sub-id (54 of them
+    // in the limiter sweep, ~2.7 minutes of dead link).
+    //
+    // The seconds are the smaller half. A declined read and a silent pump
+    // produced the same result, and reading 54 declined sub-ids as "the pump
+    // ignores these" is a wrong conclusion that reached a bench note.
+    //
+    // Every term here is a constraint #279 was withdrawn for missing:
+    //
+    //   - `cmd.expect_short_read_refusal` -- the caller declares it. See the
+    //     field's own note for the failure this closes.
+    //   - `len <= 9` -- an upper bound, which #279 had none of. Byte 5 is the
+    //     FIRST APDU's length on a multi-APDU telegram (#226), so without a
+    //     ceiling any Class 10 telegram of any size whose first APDU declared 0
+    //     or 1 payload bytes read as a refusal. App C.17 is explicit that
+    //     "errors in one APDU will in no way influence the reply to sound
+    //     APDU's", so a telegram whose first APDU errored and whose second
+    //     carries the answer is a documented case. It also collides with #278's
+    //     ceiling: a 253-byte PDU cannot be a single APDU (the length field is
+    //     six bits, max 63), so the longest telegram that change teaches the
+    //     reassembler to accept is necessarily multi-APDU. The hardware refusal
+    //     is 9 bytes and the Unknown Class refusal is 8; nothing longer is one.
+    //   - `apdu_op(...) == GET`, not `!apdu_is_set(...)`. There are three
+    //     operations, and the negation also catches INFO -- the log would then
+    //     say "read declined" about one.
+    //
+    // And one this branch adds: it fires only when the reply actually says
+    // NOT-OK. A head-only frame whose acknowledges are both OK is not a refusal;
+    // it is byte-identical to a legitimate one-byte data reply, and there is
+    // nothing in it to tell the two apart. Those fall through to the floor below
+    // exactly as they did before, because failing a read on an ambiguous frame
+    // is the trade this issue explicitly refuses -- three seconds for a lie.
+    const bool short_read_refusal_shape =
+        queued_class == 0x0A && data[4] == 0x0A && len >= 8 && len <= 9 &&
+        cmd.expect_short_read_refusal && cmd.packet.size() > 5 &&
+        protocol::apdu_op(cmd.packet[5]) == protocol::ApduOp::GET;
+
+    if (short_read_refusal_shape) {
+      const protocol::ApduAck ack = protocol::apdu_ack(data[5]);
+      // The same decode the SET branch above uses, which is the point of it
+      // being shared: when the head's acknowledge is NOT ok, the byte after it
+      // is the offending Data Item's ID and not a Class 10 status, and
+      // decode_short_class10_reply() is where that rule is stated once. The
+      // withdrawn #279 branch read that byte unconditionally as a status.
+      const protocol::ShortClass10Reply reply =
+          protocol::decode_short_class10_reply(data[5], data[6], len);
+      const bool head_ok = reply.head_ok;
+      const uint8_t class10_ack = reply.class10_ack;
+      const bool declined = !reply.ok;
+
+      if (declined) {
+        // Settle any debt owed to a command that already gave up BEFORE
+        // claiming this frame, for the reason the short-ACK branch above gives:
+        // a frame that merely falls through leaves the debt standing and this
+        // command's own timeout records a second one, so one late reply costs
+        // every match that follows it (issue #248).
+        if (this->stale_reply_possible_()) {
+          ESP_LOGD(TAG, "Short Class 10 refusal consumed as the reply owed to an "
+                        "abandoned command (%u still owed)",
+                   (unsigned) this->owed_replies_);
+          this->consume_owed_reply_(cmd);
+          return false;
+        }
+
+        if (head_ok) {
+          ESP_LOGW(TAG, "Class 10 read declined: head 0x%02X, %s (code 0x%02X)",
+                   data[5], protocol::class10_ack_name(class10_ack), class10_ack);
+        } else if (protocol::apdu_payload_len(data[5]) == 1 && len >= 9) {
+          ESP_LOGW(TAG, "Class 10 read refused: head 0x%02X (%s), offending item ID 0x%02X",
+                   data[5], protocol::apdu_ack_name(ack), data[6]);
+        } else {
+          ESP_LOGW(TAG, "Class 10 read refused: head 0x%02X (%s)", data[5],
+                   protocol::apdu_ack_name(ack));
+        }
+        // The frame, not nullptr. A timeout completes through
+        // fail_front_command_(), which passes (false, nullptr, 0) -- so a caller
+        // that cares can tell "the pump declined" from "the pump said nothing"
+        // by whether it was handed any bytes, with no change to the callback
+        // signature. That distinction is the point of the fix; the seconds saved
+        // are the lesser half.
+        this->complete_front_command_(false, data, len);
+        this->state_ = State::IDLE;
+        return true;
+      }
     }
   }
 
@@ -887,8 +1055,24 @@ bool Transport::try_dispatch_response(const uint8_t* data, size_t len) {
   // Log incoming packets at verbose level when waiting for a command response
   if (this->state_ == State::AWAITING_RESPONSE && !this->command_queue_.empty()) {
     auto &cmd = this->command_queue_.front();
-    ESP_LOGV(TAG, "[AWAITING] Packet received: len=%zu, Class=%02X, OpSpec=%02X, Sub=%d, Obj=%d (waiting for Obj %d Sub %d)",
-             len, data[4], opspec, packet_type_high, packet_type_low_ver, cmd.expect_type_low_ver, cmd.expect_type_high);
+    // Same two arms as the send-side line above, and for the same reason: a
+    // wildcard expectation decodes to "type 0 v0", which is another number that
+    // names nothing (issue #281).
+    if (cmd.expect_type_low_ver == 0 && cmd.expect_type_high == 0) {
+      ESP_LOGV(TAG, "[AWAITING] Packet received: len=%zu, Class=%02X, OpSpec=%02X, type %u v%u "
+                    "(awaiting any reply of the queued class)",
+               len, data[4], opspec,
+               (unsigned) protocol::apdu_object_type(packet_type_high, packet_type_low_ver),
+               (unsigned) protocol::apdu_object_version(packet_type_low_ver));
+    } else {
+      ESP_LOGV(TAG, "[AWAITING] Packet received: len=%zu, Class=%02X, OpSpec=%02X, type %u v%u "
+                    "(awaiting type %u v%u)",
+               len, data[4], opspec,
+               (unsigned) protocol::apdu_object_type(packet_type_high, packet_type_low_ver),
+               (unsigned) protocol::apdu_object_version(packet_type_low_ver),
+               (unsigned) protocol::apdu_object_type(cmd.expect_type_high, cmd.expect_type_low_ver),
+               (unsigned) protocol::apdu_object_version(cmd.expect_type_low_ver));
+    }
   }
 
   // 1. Check if we are waiting for a command response
@@ -1129,13 +1313,26 @@ bool Transport::try_dispatch_response(const uint8_t* data, size_t len) {
   packet_type_low_ver = (data[6] << 8) | data[7];
   packet_type_high = (data[8] << 8) | data[9];
 
-  ESP_LOGV(TAG, "DataObject response: OpSpec=0x%02X, Object %d SubID %d (checking %d handlers)",
-           opspec, packet_type_low_ver, packet_type_high, pending_handlers_.size());
+  // The three log lines in this path are relabelled for the reason in issue
+  // #281 -- `Object %d SubID %d` named neither, and the numbers were not a type
+  // either. Note the decode below reads the two slots in the OPPOSITE order to
+  // the dispatch path, because this path fills them in the opposite order: here
+  // `packet_type_low_ver` holds bytes 6-7 (TypeH) and `packet_type_high` holds
+  // bytes 8-9 ((TypeL << 8) | Version). The assignment is left alone per the
+  // note above; only what is printed changes.
+  const uint16_t handler_type =
+      protocol::apdu_object_type(packet_type_low_ver, packet_type_high);
+  const uint8_t handler_version = protocol::apdu_object_version(packet_type_high);
+
+  ESP_LOGV(TAG, "DataObject response: OpSpec=0x%02X, type %u v%u (checking %d handlers)",
+           opspec, (unsigned) handler_type, (unsigned) handler_version,
+           pending_handlers_.size());
 
   // Search for matching handler
   for (auto it = pending_handlers_.begin(); it != pending_handlers_.end(); ++it) {
     if (it->object_id == packet_type_low_ver && it->sub_id == packet_type_high) {
-      ESP_LOGV(TAG, "Response handler matched for Object %d SubID %d", packet_type_low_ver, packet_type_high);
+      ESP_LOGV(TAG, "Response handler matched for type %u v%u", (unsigned) handler_type,
+               (unsigned) handler_version);
 
       // Invoke callback with payload (protocol header has already been stripped earlier in try_dispatch_response())
       if (it->callback) {
@@ -1151,7 +1348,8 @@ bool Transport::try_dispatch_response(const uint8_t* data, size_t len) {
     }
   }
 
-  ESP_LOGV(TAG, "No matching response handler for Object %d SubID %d", packet_type_low_ver, packet_type_high);
+  ESP_LOGV(TAG, "No matching response handler for type %u v%u", (unsigned) handler_type,
+           (unsigned) handler_version);
   return false;  // No matching handler found
 }
 
