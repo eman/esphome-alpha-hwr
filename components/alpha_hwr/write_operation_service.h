@@ -569,8 +569,8 @@ class WriteOperationService {
   //
   // What the margin actually belongs to: settle is 0.7-0.8 s even at a 50 ms
   // delay, because the write sequence itself is several round trips (mode
-  // request SET, limits-tail read, Obj 91 SET, commit) at ~120 ms an
-  // acknowledgement. The measurement cannot separate "the pump applies
+  // request SET, limits-tail read, Obj 91 SET, commit), each acknowledgement
+  // taking ~120 ms. The measurement cannot separate "the pump applies
   // instantly" from "the sequence is long enough that this delay is
   // irrelevant" -- so if the sequence is ever shortened, the margin does not
   // automatically carry over and this wants re-measuring.
