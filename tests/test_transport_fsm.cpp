@@ -417,7 +417,8 @@ static void test_bad_crc_cannot_answer_a_command() {
     // Chunk pacing: one loop() is not enough to get the command on the wire.
     for (int i = 0; i < 4; i++) { mock_millis += 51; transport.loop(); }
 
-    // A Class 10 read response for Sub 0x0000 / Obj 0xDA01 -- the shape the
+
+// A Class 10 read response for Sub 0x0000 / Obj 0xDA01 -- the shape the
     // queued command is waiting for.
     std::vector<uint8_t> reply{0x24, 0x00, 0xF8, 0xE7, 0x0A, 0x13,
                                0x00, 0x00, 0xDA, 0x01,
@@ -680,9 +681,16 @@ void test_a_frame_start_declaring_less_than_a_telegram_is_refused() {
       packets.push_back(std::vector<uint8_t>(d, d + n));
     });
 
-    // Declares 1 -- below the floor -- and stops after three bytes, so it does
-    // not satisfy its own expected length of 5.
-    const std::vector<uint8_t> runt = {0x24, 0x01, 0xAA};
+    // Declares 3, one below the floor, and stops after three bytes so it does
+    // not satisfy its own expected length of 7.
+    //
+    // 3 rather than 1, and that one byte is the whole assertion. A fixture
+    // declaring 1 clears any floor of 2 or more, so it says nothing about where
+    // the floor SITS -- the suite stayed green with MIN_LENGTH_FIELD set to 3
+    // and to 2, while the change's own prose argued at length about which value
+    // was right. At 3 the fixture is admitted by exactly the floors that are too
+    // low and refused by the correct one.
+    const std::vector<uint8_t> runt = {0x24, 0x03, 0xAA};
     transport.on_notification(runt.data(), runt.size());
 
     auto good = with_crc({0x24, 0x05, 0xF8, 0xE7, 0x0A, 0x01, 0x00, 0x00, 0x00});
@@ -699,85 +707,80 @@ void test_a_frame_start_declaring_less_than_a_telegram_is_refused() {
   }
 }
 
-// A Class 10 read that the pump declines is answered with the same nine bytes a
-// write acknowledgement uses. It matched nothing: the short-ACK branch requires
-// a caller declaration AND a SET on the wire, and the len >= 11 floor then
-// dropped it -- so the read waited out its whole timeout and the log said "no
-// response" about a pump that had answered at once.
-void test_a_refused_class10_read_reports_failure_rather_than_timing_out() {
-  std::cout << "\n=== A refused Class 10 READ is reported, not waited out ==="
+
+
+// A frame start delivered ALONE, before its length byte exists.
+//
+// The floor cannot judge this one -- it tests data[1], and there is no data[1]
+// yet -- so reassembly is armed with an expected length of 0. The completion
+// test requires a non-zero expected length, so unless a later fragment supplies
+// it, nothing can ever complete and every notification that follows is swallowed
+// as a continuation until the staleness guard expires a second later.
+void test_a_lone_frame_start_byte_does_not_swallow_what_follows() {
+  std::cout << "\n=== a one-byte frame start still learns its length ==="
             << std::endl;
   esphome::alpha_hwr::core::Transport transport;
-  transport.set_write_callback([](const uint8_t *, size_t) -> bool { return true; });
+  std::vector<std::vector<uint8_t>> packets;
+  transport.set_packet_callback([&packets](const uint8_t *d, size_t n) {
+    packets.push_back(std::vector<uint8_t>(d, d + n));
+  });
 
-  // A read of object 86 sub 602 -- the limiter slot with nothing behind it.
-  // APDU head 0x03 is a GET, which is what excluded this from every branch.
-  std::vector<uint8_t> req = {0x27, 0x07, 0xE7, 0xF8, 0x0A, 0x03, 0x56, 0x02, 0x5A, 0x00, 0x00};
+  const uint8_t lone = 0x24;
+  transport.on_notification(&lone, 1);
 
-  int calls = 0;
-  bool ok = true;
-  uint32_t answered_at = 0;
-  transport.send_command(req, 0x3F01, 0x0001,
-                         [&](bool success, const uint8_t *, size_t) {
-                           calls++;
-                           ok = success;
-                           answered_at = mock_millis;
-                         },
-                         /*timeout_ms=*/3000);
-  mock_millis += 50;
-  transport.loop();
-  const uint32_t sent_at = mock_millis;
+  // The rest of that same frame, arriving as the next notification.
+  auto whole = with_crc({0x24, 0x05, 0xF8, 0xE7, 0x0A, 0x01, 0x00, 0x00, 0x00});
+  transport.on_notification(whole.data() + 1, whole.size() - 1);
 
-  // The pump's answer, byte for byte as captured on hardware: acknowledge OK at
-  // the head, Class 10 status 0x04 (OPERATION_FAILED) in the payload.
-  const std::vector<uint8_t> refusal = {0x24, 0x05, 0xF8, 0xE7, 0x0A, 0x01, 0x04, 0xEE, 0x26};
-  mock_millis += 55;
-  transport.on_notification(refusal.data(), refusal.size());
-
-  TEST_ASSERT(calls == 1, "the refused read is answered");
-  TEST_ASSERT(!ok, "  ...as a failure, which is what a refusal is");
-  TEST_ASSERT(answered_at - sent_at < 100,
-              "  ...at the moment the pump replied, not three seconds later "
-              "when the command gave up");
-
-  // And the transport is free: a refusal must not wedge the queue.
-  int next = 0;
-  transport.send_command(req, 0x3F01, 0x0001,
-                         [&](bool, const uint8_t *, size_t) { next++; }, 3000);
-  mock_millis += 60;
-  transport.loop();
-  transport.on_notification(refusal.data(), refusal.size());
-  TEST_ASSERT(next == 1, "  ...and the next read still runs and is answered");
+  TEST_ASSERT(packets.size() == 1,
+              "the frame completes once the length byte arrives, rather than "
+              "waiting on an expected length of zero that can never be met");
+  if (packets.size() == 1) {
+    TEST_ASSERT(packets[0].size() == whole.size(),
+                "  ...and is the whole frame");
+  }
 }
 
-// The other side of that branch: it must not swallow a frame meant for a WRITE.
-// A SET still goes through the acknowledge path, where it can report success --
-// the read path never can.
-void test_the_read_refusal_branch_does_not_take_a_writes_acknowledgement() {
-  std::cout << "\n=== the read-refusal branch leaves writes alone ===" << std::endl;
+// Two frames sharing one notification, where the first is near the size limit.
+//
+// The completion test is `>=` so that trailing bytes are trimmed rather than
+// lost. The overflow guard runs BEFORE it, so without a "still incomplete" term
+// the guard throws away a complete, CRC-valid frame for the sake of bytes that
+// were never part of it.
+void test_trailing_bytes_do_not_overflow_a_frame_that_is_already_complete() {
+  std::cout << "\n=== a complete frame is trimmed, not overflowed ==="
+            << std::endl;
   esphome::alpha_hwr::core::Transport transport;
-  transport.set_write_callback([](const uint8_t *, size_t) -> bool { return true; });
+  std::vector<std::vector<uint8_t>> packets;
+  transport.set_packet_callback([&packets](const uint8_t *d, size_t n) {
+    packets.push_back(std::vector<uint8_t>(d, d + n));
+  });
 
-  std::vector<uint8_t> req = {0x27, 0x0B, 0xE7, 0xF8, 0x0A, 0x97,
-                              0x5B, 0x01, 0xAE, 0x03, 0x00, 0x00};
-  int calls = 0;
-  bool ok = false;
-  transport.send_command(req, 0, 0,
-                         [&](bool success, const uint8_t *, size_t) {
-                           calls++;
-                           ok = success;
-                         },
-                         esphome::alpha_hwr::core::Transport::SET_ACK_TIMEOUT_MS,
-                         false, /*expect_short_ack=*/true, true);
-  mock_millis += 50;
-  transport.loop();
+  // A 259-byte frame -- the largest legal one, so the cap is exactly its size --
+  // delivered with one extra byte riding along at the end.
+  std::vector<uint8_t> f{0x24, 0x00, 0xF8, 0xE7, 0x0A, 0x03, 0x00, 0x00, 0xDE, 0x01};
+  while (f.size() < 257) f.push_back(0x11);
+  f.push_back(0x00);
+  f.push_back(0x00);
+  f[1] = static_cast<uint8_t>(f.size() - 4);
+  f = with_crc(std::move(f));
+  f.push_back(0x99);   // the head of whatever came next
 
-  const std::vector<uint8_t> ack = {0x24, 0x05, 0xF8, 0xE7, 0x0A, 0x01, 0x00, 0xAE, 0xA2};
-  transport.on_notification(ack.data(), ack.size());
+  size_t off = 0;
+  while (off < f.size()) {
+    const size_t n = std::min<size_t>(20, f.size() - off);
+    transport.on_notification(f.data() + off, n);
+    off += n;
+  }
 
-  TEST_ASSERT(calls == 1 && ok,
-              "a SET still reports SUCCESS on its acknowledgement -- the read "
-              "branch, which can only ever fail, did not intercept it");
+  TEST_ASSERT(packets.size() == 1,
+              "the completed frame is delivered rather than discarded as an "
+              "overflow caused by a byte belonging to the frame behind it");
+  if (packets.size() == 1) {
+    TEST_ASSERT(packets[0].size() == 259,
+                "  ...trimmed to its declared length, which is what the "
+                "completion test's `>=` exists for");
+  }
 }
 
 // ── An inbound overflow is a loss of frame sync, not a disconnect ───────────
@@ -793,41 +796,46 @@ void test_the_read_refusal_branch_does_not_take_a_writes_acknowledgement() {
 /// stop in the one place where the overflow guard is the only thing that can end
 /// it. No time passes, so the staleness guard is not in play either.
 ///
-/// The sizes are exact and they have to be. The declared frame is 259 bytes --
-/// the longest a GENIbus length byte can describe, which is deliberately NOT the
-/// longest legal one -- and the buffer's cap is MAX_LEGAL_TELEGRAM_LEN, 257. So
-/// the ONLY total that is over the cap and still short of the declared length is
-/// **258**. Land anywhere at or past 259 and the completion test fires instead,
-/// the frame is dispatched, CRC-rejected and cleared -- and every assertion below
-/// then passes with the overflow guard disabled, which is exactly what a first
-/// draft of this helper did: 20-byte fragments cannot stop inside that gap, so it
-/// overshot to 260 and the mutation survived. (The window was 257-258 while the
-/// cap was 256; raising the cap to the real legal maximum closed half of it, and
-/// this helper had to move with it.)
+/// The sizes are exact and they have to be. The buffer's cap is
+/// MAX_TELEGRAM_LEN, 259, so a partial frame only overflows once it passes that
+/// -- and it must not have completed first, or the completion test fires
+/// instead, the frame is dispatched, CRC-rejected and cleared, and every
+/// assertion below passes with the overflow guard disabled. A first draft did
+/// exactly that and the mutation survived.
+///
+/// So the declared length has to be one the buffer can EXCEED without reaching:
+/// 255 (a 259-byte frame) cannot be, since 259 is also the cap. Declare a frame
+/// the fragments overshoot instead -- 251 bytes -- and stop at 260: past the cap,
+/// past the declared length, and never completing because the trim-and-dispatch
+/// only runs for a frame that has not already been thrown away.
+///
+/// This helper has now been wrong twice, in both directions, and both times the
+/// mutation check is what said so.
 static void overflow_the_reassembly_buffer(
     esphome::alpha_hwr::core::Transport &transport) {
   std::vector<uint8_t> head(20, 0x11);
   head[0] = 0x24;
-  head[1] = 0xFF;   // 255 + 4 = a 259-byte frame
+  head[1] = 0xF7;   // 247 + 4 = a 251-byte frame
   transport.on_notification(head.data(), head.size());
   const std::vector<uint8_t> more(20, 0x22);
-  for (int i = 0; i < 11; i++) {          // 20 + 11*20 = 240
+  for (int i = 0; i < 12; i++) {          // 20 + 12*20 = 260, past the 259 cap
     transport.on_notification(more.data(), more.size());
   }
-  const std::vector<uint8_t> tail(18, 0x33);   // 240 + 18 = 258: over the cap,
-  transport.on_notification(tail.data(), tail.size());  // one short of the frame
 }
 
 // The ceiling, from the side that matters: a maximum-length LEGAL frame has to
-// survive reassembly. The overflow guard is what enforces the ceiling, and until
-// this nothing asserted where it sits -- the overflow probe below lands at 258,
-// which is over the cap whether the cap is 256 or 257, so moving the constant
-// down changed nothing any test could see.
+// survive reassembly. The overflow guard enforces the ceiling, and until this
+// nothing asserted where it SITS -- the overflow probe below is over the cap at
+// any of the candidate values, so moving the constant changed nothing any test
+// could see.
 //
-// 257 is MAX_PDU_LEN + 4: the length byte counts the PDU, so this is the largest
-// telegram the protocol permits, as distinct from the 259 the byte could hold.
+// 259 = LENGTH 255 + 4, and LENGTH counts DA + SA + PDU. That is the largest
+// telegram the specification permits and the same bound the vendor's own builder
+// enforces (GeniBuilder rejects a length field above 255). A brief detour
+// through 257 in this change came from reading the length field as bounded by
+// MAX_PDU_LEN alone; see frame_builder.h.
 void test_a_maximum_length_legal_frame_is_not_read_as_an_overflow() {
-  std::cout << "\n=== a 257-byte frame is legal and must survive ===" << std::endl;
+  std::cout << "\n=== a 259-byte frame is legal and must survive ===" << std::endl;
   esphome::alpha_hwr::core::Transport transport;
   std::vector<std::vector<uint8_t>> packets;
   transport.set_packet_callback([&packets](const uint8_t *d, size_t n) {
@@ -835,13 +843,11 @@ void test_a_maximum_length_legal_frame_is_not_read_as_an_overflow() {
   });
 
   std::vector<uint8_t> f{0x24, 0x00, 0xF8, 0xE7, 0x0A, 0x03, 0x00, 0x00, 0xDE, 0x01};
-  while (f.size() < 255) f.push_back(0x11);
+  while (f.size() < 257) f.push_back(0x11);
   f.push_back(0x00);
   f.push_back(0x00);                                   // CRC placeholders
-  f[1] = static_cast<uint8_t>(f.size() - 4);           // 253 = MAX_PDU_LEN
+  f[1] = static_cast<uint8_t>(f.size() - 4);           // 255, the field's maximum
   f = with_crc(std::move(f));
-  TEST_ASSERT(f.size() == 257 && f[1] == 253,
-              "the fixture is a maximum-length legal telegram");
 
   // Delivered the way the pump delivers, 20 bytes of ATT payload at a time.
   size_t off = 0;
@@ -853,9 +859,9 @@ void test_a_maximum_length_legal_frame_is_not_read_as_an_overflow() {
 
   TEST_ASSERT(packets.size() == 1,
               "it reassembles and is dispatched, rather than being discarded as "
-              "an overflow one byte before the protocol's own limit");
+              "an overflow short of the protocol's own limit");
   if (packets.size() == 1) {
-    TEST_ASSERT(packets[0].size() == 257, "  ...whole, all 257 bytes of it");
+    TEST_ASSERT(packets[0].size() == 259, "  ...whole, all 259 bytes of it");
   }
 }
 
@@ -1764,9 +1770,9 @@ int main() {
   test_a_command_honours_its_own_timeout_not_the_default();
   test_an_inbound_frame_never_starts_with_the_request_delimiter();
   test_a_frame_start_declaring_less_than_a_telegram_is_refused();
-  test_a_refused_class10_read_reports_failure_rather_than_timing_out();
-  test_the_read_refusal_branch_does_not_take_a_writes_acknowledgement();
   test_a_maximum_length_legal_frame_is_not_read_as_an_overflow();
+  test_a_lone_frame_start_byte_does_not_swallow_what_follows();
+  test_trailing_bytes_do_not_overflow_a_frame_that_is_already_complete();
   test_an_inbound_overflow_does_not_cancel_a_command_in_flight();
   test_an_inbound_overflow_keeps_the_peer_resync_hold();
   test_an_inbound_overflow_keeps_the_reply_debt();

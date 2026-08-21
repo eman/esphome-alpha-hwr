@@ -1091,47 +1091,45 @@
 
 ### Fixed
 
-- **The receiver accepted a frame start the pump never sends, and refused one it
-  does** (issue #278). Four bounds on what counts as a frame, three of them
-  latent and one confirmed on hardware.
+- **The receiver accepted a frame start the pump never sends, and bounded the
+  length field wrongly at both ends** (issue #278). All latent — the largest
+  frame in the corpus is 61 bytes and the reported fragment was caught by the
+  CRC either way — but each is a way into the phantom-reassembly path issue #259
+  is about.
 
   `is_frame_start()` accepted `0x27` as well as `0x24`, justified by a comment
   calling it "Request frame (client → pump, also echoed back)". The captures
   refute the echo: across 44,200 CRC-valid frames, all 22,138 phone→pump frames
   begin `0x27` and all 22,062 pump→phone frames begin `0x24`, with none of the
   latter beginning `0x27`. `on_notification()` is fed GATT notifications only,
-  so it never sees our own writes — and `0x27` is the byte issue #259's corrupt
-  fragment begins with. The claim turned out to be *inherited* rather than
-  derived; the Python client carried the same test with the same wording.
+  so it never sees our own writes. The claim turned out to be *inherited* rather
+  than derived — the Python client carried the same test with the same wording —
+  and it was written down in five places here, not one.
 
-  A declared length below the protocol's floor no longer starts a frame either.
-  The fragment in #259 declared `0`, giving an expected length of 4, which the
-  completion test satisfies from any notification at all — so it was trimmed to
-  four bytes, failed CRC, and was discarded having consumed the frame-start
-  slot, leaving the real frame's continuations with nowhere to go.
+  A declared length below the floor no longer starts a frame. **The floor is 4,
+  not 5.** 5 is the corpus minimum, but no frame in that corpus is refused at
+  the APDU head, and the zero-payload shape occurs only in such a refusal — so a
+  floor taken from the corpus rejects the 8-byte `Unknown Class` this project
+  handles deliberately. That mistake was made and caught by the suite.
 
-  The floor is **4, not 5**, and the difference is worth recording. 5 is what
-  the corpus says. But the corpus is the phone app's traffic and the app is
-  never refused, so its minimum is a minimum over non-refusal frames — and the
-  zero-payload shape occurs only in a refusal. A floor of 5 rejects the 8-byte
-  `Unknown Class`, which this project handles deliberately. That mistake was
-  made here and caught by the suite.
+  The ceiling moved from 256 to **259**, the largest telegram the specification
+  permits. It was briefly set to 257 here, from reading the length field as
+  bounded by `MAX_PDU_LEN` alone; the specification puts DA and SA outside the
+  PDU bracket, so the field counts `2 + PDU ≤ 255` and the telegram is `≤ 259` —
+  and the Grundfos GO app's own builder rejects a length field above 255, not
+  above 253. The 257 reading also contradicted this change's own floor, which is
+  derived the other way.
 
-  The ceiling moved the other way, from 256 to the largest *legal* telegram,
-  257 (`MAX_PDU_LEN` + 4). 259 is what the length byte can hold, which is the
-  right bound for a buffer and the wrong one for "is this a frame"; 256 was
-  neither, and sat one byte under the only legal size above it.
-
-  And a Class 10 **read** the pump declines is now reported instead of waited
-  out. It is answered with the same nine bytes a write acknowledgement uses, and
-  matched nothing: that branch requires both a caller declaration and a SET on
-  the wire, and the `len >= 11` floor below then dropped it. So the read waited
-  out its full timeout while the log said "no response" about a pump that had
-  answered in milliseconds — issue #208's defect, one operation across. Two
-  implementations hit it independently walking the limiter family (#274), at two
-  three-second timeouts per probe run. The new branch can only ever report
-  failure, never satisfy a read, so a misattributed frame can at worst end early
-  a read those bytes could not have answered.
+  Two further defects in the same function, both found by an adversarial pass
+  and both reproduced. A frame start delivered as a **one-byte notification**
+  armed reassembly before its length byte existed, and nothing recomputed the
+  expected length afterwards — so the completion test could never fire and every
+  notification that followed was swallowed for a second, up to ~18 replies at
+  the corpus's median latency. And the overflow guard ran ahead of the
+  completion test while testing the accumulated size rather than the declared
+  one, so a **complete, CRC-valid frame delivered with trailing bytes** was
+  discarded for the sake of bytes that were never part of it — the exact case
+  the completion test's `>=` and the trim below it exist to handle.
 
 - **A read in flight when the link dropped was never told, and one corrupt
   inbound fragment could do the same thing to a live link** (issue #259).

@@ -47,47 +47,49 @@ static const uint8_t FRAME_START = 0x27;
 static const uint8_t SERVICE_ID_HIGH = 0xE7;
 static const uint8_t SOURCE_ADDRESS = 0xF8;
 
-/// The protocol's own size ceilings (App. Prog. Manual, "Short form technical
-/// specification"). A telegram is at most 259 bytes on the wire and its PDU --
-/// DA + SA + APDUs -- at most 253. build_geni_packet() refuses anything larger;
-/// note that MAX_TELEGRAM_LEN exceeds the 256-byte buffers callers declare,
-/// which is why the refusal is on the PDU bound and not on what the length byte
-/// can hold.
+/// The protocol's own size ceilings (GENIbus Protocol Specification fig. 2).
+///
+/// The length field is "the number of following bytes excluding the Check
+/// Value", and the PDU bracket in fig. 2 covers the APDUs and the optional RFS
+/// byte ONLY -- DA and SA sit in the head of the telegram, outside it. So
+///
+///     LENGTH   = DA + SA + PDU  <=  2 + 253 = 255
+///     TELEGRAM = LENGTH + 4     <=  259
+///
+/// which is the one reading under which the specification's own two numbers are
+/// consistent. The Grundfos GO app agrees, in the only place it could:
+/// GeniBuilder.calculateAndAppendCRC() computes the length as `top - 2` -- DA,
+/// SA and the APDUs -- and rejects it above 255, not above 253.
+///
+/// This file previously glossed the PDU as "DA + SA + APDUs", which made its own
+/// MAX_TELEGRAM_LEN unreachable and would put the largest legal telegram at 257.
+/// Issue #278 briefly promoted that misreading into a named constant before the
+/// specification settled it. There is no gap: the largest legal telegram is
+/// MAX_TELEGRAM_LEN.
 static const size_t MAX_TELEGRAM_LEN = 259;
 static const size_t MAX_PDU_LEN = 253;
 
-/// The largest telegram that is LEGAL, as opposed to the largest the length
-/// byte can describe. MAX_TELEGRAM_LEN is the second of those -- 255 + 4 -- and
-/// it is the right bound for a buffer, because a peer can put 255 in that byte
-/// whether or not it is allowed to. It is the wrong bound for "is this a frame":
-/// the length field counts the PDU, the PDU is capped at MAX_PDU_LEN, so nothing
-/// legal exceeds 253 + 4.
-///
-/// The two were conflated in the receiver's overflow guard, which sat at 256 and
-/// so discarded the one legal size between them (issue #278).
-static const size_t MAX_LEGAL_TELEGRAM_LEN = MAX_PDU_LEN + 4;
-
-/// The floor on the same field: DA + SA + the shortest APDU, which is a head
-/// byte and a class byte and nothing else.
+/// The floor on the same field, derived the same way: DA + SA + the shortest
+/// APDU, and an APDU header is two bytes (class, then `0booLLLLLL`).
 ///
 ///     24 04 F8 E7 0A 40 CRC CRC     an Unknown Class refusal, 8 bytes
 ///     24 05 F8 E7 0A 01 00 AE A2    a Class 10 acknowledge,   9 bytes
 ///
 /// **4, not 5, and the difference is a lesson worth keeping.** 5 is what the
 /// capture corpus says: the smallest length byte in either direction across all
-/// 44,200 frames. But resources/traffic_capture is the phone app's traffic and
-/// the app is never refused -- all 459 short replies in it carry acknowledge OK
-/// -- and the zero-payload shape occurs ONLY in a refusal. So the corpus minimum
-/// is a minimum over non-refusal traffic, and a floor set from it rejects
-/// `0x40` Unknown Class, which is a real frame this project has captured
-/// elsewhere and handles deliberately (issue #208).
+/// 44,200 frames. But no frame in that corpus is refused AT THE APDU HEAD --
+/// all 22,062 inbound frames carry acknowledge OK there, whatever the Class 10
+/// status byte below it says -- and the zero-payload shape occurs only in a
+/// head-level refusal. So the corpus minimum is a minimum over head-OK traffic,
+/// and a floor set from it rejects `0x40` Unknown Class, whose format App C.17
+/// gives and which this project handles deliberately (issue #208). That mistake
+/// was made here and caught by the suite.
 ///
-/// That mistake was made here and caught by the suite, which is the second time
-/// this field has been bounded from one end in a way that broke the other. The
-/// same eight-and-nine-byte frames are what any `len >= 11` gate excludes --
-/// see the read-refusal branch in Transport::try_dispatch_response().
+/// Not the protocol's absolute floor: fig. 2 says a PDU may consist of ZERO
+/// APDUs, so LENGTH 2 is legal and describes a 6-byte telegram carrying nothing.
+/// 4 is the floor for a telegram that carries something, which is the useful
+/// bound for a receiver -- refusing an empty telegram loses nothing dispatchable.
 static const uint8_t MIN_LENGTH_FIELD = 4;
-static const size_t MIN_TELEGRAM_LEN = MIN_LENGTH_FIELD + 4;
 
 static const uint8_t CLASS_10 = 0x0A;
 
