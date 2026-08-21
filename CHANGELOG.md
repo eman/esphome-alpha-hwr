@@ -4,6 +4,60 @@
 
 ### Added
 
+- **The pump's own daylight-saving rule is read and checked against the node's
+  timezone** (`Pump Clock DST`, issue #286). The pump keeps a DST rule of its own
+  and applies it to its own clock, twice a year, independently of anything the
+  node believes. `DaylightSavingTime` (Object 94 SubID 102, type 323 v1), read
+  from the bench unit: enabled, second Sunday of March to first Sunday of
+  November at 02:00, 60-minute offset — the US rule.
+
+  Schedule windows are stored in the pump's **local** time, and
+  `utc_to_local_unix()` takes that offset from the **host's** zone. The
+  conversion preserves the user's wall clock across a transition — an 07:00
+  event stays at 07:00 — but only while the two rules agree. They can differ
+  without anyone doing anything strange: a pump shipped for one market and
+  installed in another (the rule is stored per unit and is writable), a node
+  whose `time_id` zone is not the pump's locale, or a pump with DST disabled on a
+  node whose zone observes it. That last one moves every stored event by an hour
+  relative to the pump's clock, twice a year, silently.
+
+  The failure is the same shape as #263 — an event stored at an instant nobody
+  asked for, confirming clean, because the confirm applies the same wrong offset
+  in reverse. #263 fixed the case where the arithmetic *wraps*; this is the case
+  where it is against the wrong rule, and an hour is comfortably inside every
+  bound the component has.
+
+  The new `Pump Clock DST` text sensor reads `OK` with the rule spelled out when
+  they agree, and names **both** rules when they do not — "my schedule moved an
+  hour in November" shows up months after the cause, so a bare "mismatch" would
+  leave the user no closer to it. The node's own rule is derived by observation
+  (sample the year, bisect for the transition) rather than by parsing a TZ
+  string, because there is no portable way to ask libc for its rule.
+
+  **Reported, never corrected.** The Grundfos GO app, this component and the
+  Python library all write this pump's clock, and the pump cannot say which base
+  a value arrived in — a component that silently rewrote the pump's rule would be
+  the third party in a fight the user cannot see. Whether the component should
+  ever write 94/102 is left open deliberately.
+
+  The read is only issued when the entity is configured, so a node that does not
+  display it does not spend a round trip per connection on it.
+
+  **Rebuilt after review before shipping.** The first implementation was
+  withdrawn from #287 with two claimed defect classes, of which **one was real**:
+  it named the wrong day whenever a transition fell at local midnight — 212 start-side wrong answers across the timezone database,
+  affecting Havana, Cairo, Beirut, the Azores, Santiago and Nuuk. The probe now
+  derives the date and the hour from one reading, advanced together.
+
+  The second claimed defect — that reading libc made it inert on the device —
+  was **wrong**: ESPHome overrides `localtime_r()` there, so the old probe
+  worked. It samples through `ESPTime` now regardless, for the reasons in #289's
+  correction, but that part was tidiness rather than a fix. It also refuses to emit half a rule for a year with a
+  single transition (a country adopting or abolishing DST), and keys transition
+  ordering on the offset *direction* rather than an `is_dst` flag, so a zone
+  redefinition that flips the flag without moving the clock is not read as a
+  shift. Verified against Python's `zoneinfo` for the six previously-wrong zones
+  plus two controls.
 - **The pump's flow limiters are read and surfaced** (`Pump Flow Limiter` and
   `Pump Flow Limited`, issue #274). The pump has MaxFlow and MinFlow limiters,
   set from the Grundfos GO app and entirely separate from the setpoint. This
@@ -370,6 +424,39 @@
 
 ### Changed
 
+- **A single-event window that has already ended is refused** (issue #269).
+  `run_single_event_()` validated only that the end was after the begin, so a
+  window entirely in the past was written to the pump, confirmed by readback,
+  and settled `accepted` — after which it was recyclable garbage occupying one
+  of five slots. Observed on the bench while verifying #262: two events written
+  with yesterday's window both landed and both confirmed.
+
+  Not destructive, and arguably harmless, since the pump simply never runs it.
+  But it is a write that cannot do anything, reported as a success: a client with
+  a timezone bug or a stale timestamp got `accepted` and no signal.
+
+  Only the **end** decides. A window that has begun but not ended is legitimate
+  and still runs — refusing it would break every "start this now, stop it at six"
+  request, which is what the Lovelace card's Quick Run presets send. With no
+  synced clock the write is not refused on these grounds; the same rule #262
+  established for the slot picker, where an unknown clock expires nothing rather
+  than everything.
+
+  The refusal settles `invalid` ahead of the schedule-overview read and quotes
+  both the window's end and the node's clock, so a client with a timezone bug can
+  see which timestamp it sent.
+
+  **Withdrawn from #287 and restored here.** The check was correct; its inputs
+  were not. `op->end_ts` can come from `build_event_window()`, which used
+  `mktime()` — which ESPHome does **not** override on the ESP32 (unlike
+  `localtime_r`; see #289 and its correction), so that timestamp and
+  `now_unix()` were in different bases and every window ending inside the node's
+  UTC offset was refused. #289 put both on `ESPTime`; the check needed no
+  change, only a floor to stand on.
+
+- **Local time now comes from ESPHome's timezone engine, not from libc — which
+  fixes single events firing at the wrong hour on every non-UTC node**
+  (issue #289).
 - **Local time conversions go through ESPHome's timezone engine, which fixes the
   schedule editor's dated events and two timestamp displays** (issue #289).
 

@@ -79,7 +79,7 @@ LINK = $(CXX) $(CXXFLAGS) $^ -o $@ $(LDFLAGS)
 -include $(shell find $(OBJDIR) -name '*.d' 2>/dev/null)
 
 # Test executables
-TESTS = test_protocol test_frame_parser test_read_chain_lifetime test_control_service test_control_state test_dhw_demand_logic test_dhw_demand_component test_transport_matching test_transport_fsm test_schedule_service test_write_operations test_schedule_codec test_telemetry_units test_pump_schedule_ux test_publish_gate test_dhw_publish_gate test_link_watchdog test_readiness_watchdog test_sensor_publisher test_telemetry_service test_device_info_service test_initial_read_retry test_subscribe_outcome test_failure_hold test_pairing_stall test_gap_security_policy test_clock_sync_gate test_session test_component_wiring test_api_bridge test_time_service test_time_service_no_time test_limiter
+TESTS = test_protocol test_frame_parser test_read_chain_lifetime test_control_service test_control_state test_dhw_demand_logic test_dhw_demand_component test_transport_matching test_transport_fsm test_schedule_service test_write_operations test_schedule_codec test_telemetry_units test_pump_schedule_ux test_publish_gate test_dhw_publish_gate test_link_watchdog test_readiness_watchdog test_sensor_publisher test_telemetry_service test_device_info_service test_initial_read_retry test_subscribe_outcome test_failure_hold test_pairing_stall test_gap_security_policy test_clock_sync_gate test_session test_component_wiring test_api_bridge test_time_service test_time_service_no_time test_dst_rule test_limiter
 
 # Objects are keyed by flags, but the BINARIES are not -- test_protocol is one
 # path whichever variant produced it. So switching variants leaves executables
@@ -240,6 +240,12 @@ test_gap_security_policy: $(call objs,sw,test_gap_security_policy.cpp)
 test_clock_sync_gate: $(call objs,sw,test_clock_sync_gate.cpp)
 	$(LINK)
 
+# dst_rule.h is a header, but it now leans on ESPTime -- which is the point of
+# issue #289 -- so it is built in the `time` group and linked against nothing
+# else. The zone it reads is the mock's, not libc's.
+test_dst_rule: $(call objs,time,test_dst_rule.cpp)
+	$(LINK)
+
 
 # The same source as test_time_service, built WITHOUT -DUSE_TIME. That branch is
 # otherwise compiled by no target at all, and replacing its body with a libc
@@ -353,6 +359,7 @@ test: $(TESTS)
 	@./test_clock_sync_gate
 	@./test_time_service
 	@./test_time_service_no_time
+	@./test_dst_rule
 	@./test_limiter
 	@./test_session
 	@./test_component_wiring

@@ -30,6 +30,7 @@ static const char* TAG = "alpha_hwr.time";
 static const uint16_t OBJECT_ID_RTC = 94;
 static const uint16_t SUB_ID_DATETIME_ACTUAL = 101;  // Read current time
 static const uint16_t SUB_ID_DATETIME_CONFIG = 100;  // Set time
+static const uint16_t SUB_ID_DAYLIGHT_SAVING = 102;  // The pump's own DST rule
 
 void TimeService::get_clock_async(std::function<void(ESPTime)> callback) {
   ESP_LOGD(TAG, "Reading pump clock (Object 94, Sub 101)...");
@@ -72,6 +73,49 @@ void TimeService::get_clock_async(std::function<void(ESPTime)> callback) {
     },
     5000  // 5 second timeout for clock read
   );
+}
+
+void TimeService::get_dst_rule_async(std::function<void(DstRule)> callback) {
+  ESP_LOGD(TAG, "Reading pump DST rule (Object 94, Sub 102)...");
+
+  // Same Class 10 GET shape as the clock read above.
+  uint8_t apdu[5];
+  apdu[0] = 0x0A;  // Class 10
+  apdu[1] = 0x03;  // OpSpec: GET, 3 payload bytes
+  apdu[2] = OBJECT_ID_RTC & 0xFF;
+  apdu[3] = (SUB_ID_DAYLIGHT_SAVING >> 8) & 0xFF;
+  apdu[4] = SUB_ID_DAYLIGHT_SAVING & 0xFF;
+
+  transport_->send_apdu_command(
+      apdu, sizeof(apdu), 0, 0,
+      [callback](bool success, const uint8_t *data, size_t len) {
+        if (!success || data == nullptr) {
+          ESP_LOGW(TAG, "DST rule read timeout or failed");
+          callback(DstRule{});  // valid == false: not read, as against not set
+          return;
+        }
+        // The callback receives the object body from the size header onwards,
+        // exactly as parse_clock_response() does, so the rule starts at +3.
+        if (len < 3 + DST_RULE_BODY_LEN) {
+          ESP_LOGW(TAG, "DST rule response too short: %zu bytes (expected >= %zu)",
+                   len, 3 + DST_RULE_BODY_LEN);
+          callback(DstRule{});
+          return;
+        }
+        ESP_LOGD(TAG, "Raw DST rule: %s", format_hex_pretty(data, len).c_str());
+        const DstRule rule = decode_dst_rule(data + 3, len - 3);
+        if (!rule.valid) {
+          ESP_LOGW(TAG, "DST rule could not be decoded");
+        } else if (rule.enabled) {
+          ESP_LOGI(TAG, "Pump DST rule: %s to %s, +%u min",
+                   format_dst_transition(rule.start).c_str(),
+                   format_dst_transition(rule.end).c_str(), rule.offset_minutes);
+        } else {
+          ESP_LOGI(TAG, "Pump does not observe daylight saving");
+        }
+        callback(rule);
+      },
+      5000);
 }
 
 bool TimeService::resolve_wall_clock_(ESPTime &out) const {

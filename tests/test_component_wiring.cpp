@@ -86,6 +86,10 @@ struct Rig {
   // Pump Clock Drift. Attached by default because the only way to see that a
   // disconnect publishes to it is to have it wired (issue #259).
   esphome::sensor::Sensor clock_drift;
+  // "Pump Clock DST" (issue #286). NOT attached by default: the component only
+  // issues the 94/102 read when somebody is asking, and that restraint is
+  // itself pinned below.
+  esphome::text_sensor::TextSensor clock_dst;
   // The node's own wall clock. NOT attached in the constructor: an unattached
   // time_id is the sentinel case for every clock caller (issue #270), and it is
   // the state every test in this file ran in before the clock had a fixture at
@@ -218,6 +222,12 @@ struct Rig {
   /// (issue #259), and because every test written before this fixture existed
   /// ran against a pump that never answered it.
   bool answer_clock{false};
+
+  /// Attach the Pump Clock DST entity, so the 94/102 read is issued at all.
+  void attach_dst_sensor() { component.set_pump_clock_dst_text_sensor(&clock_dst); }
+
+  /// How many times the component asked for the pump's DST rule.
+  int dst_reads{0};
 
   /// Give the node a synced wall clock reading @p epoch.
   void attach_node_clock(time_t epoch) {
@@ -386,6 +396,16 @@ void Rig::answer_outstanding_writes() {
                          0x42, 0x0C, 0x00, 0x00,   // 35.0
                          0x42, 0x1B, 0x99, 0x9A,   // 38.9
                          0x00, 0x00, 0x00, 0x00}));
+      } else if (obj == 94 && sub == 102) {
+        // DaylightSavingTime (Obj 94 Sub 102), type 323 v1 -- the bench unit's
+        // own ten bytes: enabled, second Sunday of March to first Sunday of
+        // November at 02:00, +60 minutes. The US rule.
+        dst_reads++;
+        if (answer_clock) {
+          const uint8_t rule[10] = {0x01, 0x03, 0x07, 0x02, 0x02,
+                                    0x0b, 0x07, 0x01, 0x02, 0x3c};
+          notify(data_object_frame(0x01, 0x43, rule, sizeof(rule)));
+        }
       } else if (obj == 94 && sub == 101 && answer_clock) {
         // DateTimeActual (Obj 94 Sub 101), type 322 v1. The body is the bench
         // capture recorded in time_service.cpp -- 2026-08-15 20:38:55, with the
@@ -1455,6 +1475,58 @@ void test_a_manual_clock_read_without_a_node_clock_answers_unknown() {
               "node simply cannot say how far out it is");
 }
 
+// ── The pump's own DST rule against the node's timezone (issue #286) ─────────
+//
+// The pump shifts its own clock twice a year by its own stored rule, and
+// schedule windows are stored in its LOCAL time -- but utc_to_local_unix()
+// takes that offset from the HOST's zone. The conversion preserves the user's
+// wall clock across a transition only while the two agree.
+//
+// The rule comparison itself is pinned in tests/test_dst_rule.cpp, across US,
+// EU, no-DST and southern-hemisphere zones. What is pinned here is the wiring:
+// that the read is issued, that the answer reaches the entity, and that a node
+// which does not ask does not pay for it.
+void test_a_pump_dst_rule_that_disagrees_reaches_the_entity() {
+  std::cout << "\n=== A DST rule disagreeing with the node's zone reaches the entity ==="
+            << std::endl;
+  Rig r;
+  r.answer_clock = true;
+  r.attach_dst_sensor();
+  // The suite runs under TZ=UTC, which never shifts, against a pump whose rule
+  // says it does. That is a real installation shape -- a US pump on a node
+  // whose timezone was left unset -- and it is the disagreement, not a
+  // contrivance.
+  r.attach_node_clock(1786104000);  // 2026-08-07
+  r.setup();
+  r.connect_and_subscribe();
+  r.run_until_ready();
+
+  TEST_ASSERT(r.dst_reads > 0, "the component asked the pump for its DST rule");
+  TEST_ASSERT(r.clock_dst.has_state(), "and published a verdict");
+  TEST_ASSERT(r.clock_dst.state.find("Mismatch") != std::string::npos,
+              "which names the disagreement rather than staying quiet");
+  TEST_ASSERT(r.clock_dst.state.find("the pump shifts") != std::string::npos,
+              "...and says which side shifts, so the user knows what to change");
+}
+
+// The restraint that makes the entity optional rather than a tax: a node
+// without it configured does not spend a BLE round trip per connection asking a
+// question nobody will read.
+void test_a_node_without_the_dst_entity_does_not_ask_for_the_rule() {
+  std::cout << "\n=== No DST entity, no DST read ===" << std::endl;
+  Rig r;
+  r.answer_clock = true;
+  r.attach_node_clock(1786104000);
+  // deliberately no attach_dst_sensor()
+  r.setup();
+  r.connect_and_subscribe();
+  r.run_until_ready();
+
+  TEST_ASSERT(r.dst_reads == 0,
+              "nothing asked for the rule, so the read costs nothing on a node "
+              "that does not display it");
+}
+
 // ── build_event_window(): the schedule editor's dated-event helper ───────────
 
 void test_build_event_window_refuses_without_a_node_clock() {
@@ -1569,6 +1641,51 @@ void test_the_vacation_display_is_rendered_in_local_time() {
     TEST_ASSERT(shown.hour == 16 && shown.day_of_month == 31 && shown.month == 5,
                 "ESPTime renders it as 16:00 on May 31 local, which is what a "
                 "user in that zone should see");
+  }
+}
+
+// The comparison that #269's past-window check actually makes, pinned at a
+// non-zero offset.
+//
+// This is the defect that got #269 withdrawn from #287: build_event_window()
+// encoded with mktime() and the check compared its output against now_unix().
+// On the ESP32 libc has no timezone, so those two were in DIFFERENT BASES and
+// every window ending inside the node's offset was refused as "already ended"
+// -- including every Quick Run preset. Issue #289 put both on ESPTime.
+//
+// Asserted as the relationship rather than as a status, because a status test
+// would pass under a consistent-but-wrong pair as easily as a correct one.
+void test_a_built_window_is_in_the_same_base_as_the_node_clock() {
+  std::cout << "\n=== A built window and the node clock share one base ===" << std::endl;
+  setenv("TZ", "UTC", 1);
+  tzset();
+  Rig r;
+  const time_t node_epoch = 1655294400;  // 2022-06-15 12:00:00 UTC
+  r.attach_node_clock(node_epoch);
+  r.setup();
+  {
+    esphome::MockZoneOverride pst(-8 * 3600);  // libc says UTC, ESPHome says PST
+
+    // 12:00 UTC is 04:00 local in a UTC-8 zone. Build a window for 05:00-06:00
+    // LOCAL -- one hour from "now" as the node understands it.
+    const esphome::ESPTime local_now = esphome::ESPTime::from_epoch_local(node_epoch);
+    TEST_ASSERT(local_now.hour == 4,
+                "the fixture's local hour is 04:00, so 05:00 local is one hour out");
+
+    uint32_t begin = 0, end = 0;
+    TEST_ASSERT(r.component.build_event_window("test", local_now.month,
+                                               local_now.day_of_month, 5, 0,
+                                               local_now.month,
+                                               local_now.day_of_month, 6, 0,
+                                               &begin, &end),
+                "the window is built");
+
+    TEST_ASSERT(begin == static_cast<uint32_t>(node_epoch) + 3600u,
+                "a window one hour ahead in LOCAL terms is one hour ahead of "
+                "the node clock in UTC terms -- the two are in the same base");
+    TEST_ASSERT(end > static_cast<uint32_t>(node_epoch),
+                "so the past-window check sees it as future, which is what it "
+                "is; before #289 it was eight hours behind and refused");
   }
 }
 
@@ -2446,9 +2563,12 @@ int main() {
   test_the_drift_leg_publishes_the_drift_it_measured();
   test_the_drift_leg_leaves_a_good_reading_alone();
   test_a_manual_clock_read_without_a_node_clock_answers_unknown();
+  test_a_pump_dst_rule_that_disagrees_reaches_the_entity();
+  test_a_node_without_the_dst_entity_does_not_ask_for_the_rule();
   test_build_event_window_refuses_without_a_node_clock();
   test_build_event_window_anchors_to_the_node_clock();
   test_build_event_window_refuses_an_unsynced_clock();
+  test_a_built_window_is_in_the_same_base_as_the_node_clock();
   test_build_event_window_does_not_encode_through_libc();
   test_the_vacation_display_is_rendered_in_local_time();
 

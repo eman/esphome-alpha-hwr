@@ -142,6 +142,55 @@ rewritten and do not need to be — if any were entered through the schedule
 editor before v0.16 they are offset, and re-entering those specific ones is the
 only fix, but nothing else is affected.
 
+### Daylight saving: the pump has its own rule
+
+`time_id` above keeps the pump's clock set. It does not make the pump agree with
+you about when the clock should *change*.
+
+The pump stores a daylight-saving rule of its own and applies it to its own
+clock, twice a year, whatever the node believes. On the bench unit it reads
+enabled, second Sunday of March to first Sunday of November at 02:00, with a
+60-minute shift — the US rule.
+
+That matters because schedule windows are stored in the pump's **local** time.
+The component converts your (UTC) request into pump-local time using **this
+node's** timezone offset, which is what keeps a 07:00 event at 07:00 across a
+transition — as long as both sides transition on the same day. If they do not,
+every stored window is an hour out on one side of the boundary. Three ways to end
+up there, none of them exotic:
+
+- a pump shipped for one market and installed in another (the rule is stored per
+  unit and is writable, so a previous owner or an installer may have set it);
+- a node whose `time:` zone is not the pump's locale;
+- **DST disabled on the pump** while your zone observes it — the node shifts
+  twice a year and the pump never does.
+
+The symptom appears months after the cause and looks like "my schedule moved an
+hour in November", so the component checks on every connection and reports it:
+
+```yaml
+text_sensor:
+  - platform: alpha_hwr
+    pump_clock_dst:
+      name: "Pump Clock DST"
+```
+
+It reads `OK (Mar Sun#2 02:00 - Nov Sun#1 02:00, +60 min)` when the two agree,
+and names both rules when they do not.
+
+`alpha_hwr_pairing.yaml` declares it. **On `alpha_hwr_base.yaml` and on
+hand-written blocks you have to add it**, and adding it is the only way to get
+the check at all: the 94/102 read is skipped entirely when the entity is absent,
+so there is no log warning to fall back on either. That is the same
+"don't pay for what you didn't ask for" rule the other optional reads follow —
+but it does mean the diagnostic is opt-in rather than on by default.
+
+**Nothing is corrected automatically.** The Grundfos GO app, this component and
+the sibling Python library all write this pump's clock, and the pump cannot say
+which base a value arrived in — two clients disagreeing is worse than either
+being wrong alone. If the rules disagree, change the one that is wrong: the
+pump's rule through the GO app, or the node's zone in your `time:` block.
+
 ### `enable_pairing`
 
 Pairing is initiated by the pump, not by this node. On an unbonded connection

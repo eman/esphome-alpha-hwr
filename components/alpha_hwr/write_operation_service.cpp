@@ -1806,6 +1806,43 @@ void WriteOperationService::run_single_event_(uint32_t seq) {
               "program at this timezone offset");
       return;
     }
+
+    // A window that has already ENDED can never run (issue #269). It was
+    // written, confirmed by readback and settled ACCEPTED, after which it was
+    // recyclable garbage occupying one of the five slots this pump has. Not
+    // destructive, and arguably harmless -- the pump simply never runs it --
+    // but it is a write that cannot do anything, reported as a success, and a
+    // client with a timezone bug or a stale timestamp got `accepted` and no
+    // signal.
+    //
+    // Only the END decides. A window that has BEGUN but not ended is
+    // legitimate and still runs: refusing it would break every "start this
+    // now, stop it at six" request.
+    //
+    // With no synced clock there is no honest answer, so the write is not
+    // refused on these grounds -- the same rule issue #262 established for the
+    // slot picker, where 0 means "expire nothing" rather than "expire
+    // everything". A node that cannot tell the time must not decide that
+    // somebody else's timestamp is in the past.
+    //
+    // Withdrawn from #287 and restored here, because it was correct on the
+    // host and wrong on the device for a reason outside this check: op->end_ts
+    // may come from build_event_window(), which used mktime() -- and on the
+    // ESP32 libc has no timezone, so that timestamp and now_unix() were in
+    // different bases and every window ending inside the node's UTC offset was
+    // refused. Issue #289 put both in the same base; the check needed no
+    // change, only a floor to stand on.
+    const uint32_t now_ts = time_service_.now_unix();
+    const bool clock_is_known = now_ts != 0;
+    const bool window_has_ended = op->end_ts <= now_ts;
+    const bool refuse_as_past = clock_is_known && window_has_ended;
+    if (refuse_as_past) {
+      finish_(seq, WriteStatus::INVALID,
+              format_detail("window has already ended (ends %" PRIu32
+                            ", node clock reads %" PRIu32 ")",
+                            op->end_ts, now_ts));
+      return;
+    }
   }
 
   // A slot at or past SINGLE_EVENT_SLOT_LIMIT is not a single-event slot on any
