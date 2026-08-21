@@ -243,6 +243,60 @@ inline uint8_t resolve_transition_day(const DstTransition &d, int year) {
 }
 
 /**
+ * Turn what the sampler found into a rule.
+ *
+ * Separated from probe_host_dst_rule() so the counts it rejects can be tested
+ * directly. They cannot be reached reliably through a timezone: a POSIX TZ
+ * string always describes exactly two transitions a year, and the real zones
+ * that have one (a country adopting or abolishing DST) or three (Morocco's
+ * Ramadan rule) depend on which tzdata the machine happens to ship. A test
+ * written against those passes or fails by accident -- CI's mutation sweep
+ * caught exactly that, with this guard surviving because the fixture zone had
+ * two transitions on the runner.
+ *
+ * @param count Transitions the sampler saw across the year.
+ * @param found The first two of them.
+ * @param delta Each one's offset change, in seconds.
+ */
+inline DstRule assemble_probed_rule(int count, const DstTransition *found,
+                                    const int32_t *delta) {
+  DstRule r{};
+
+  // A zone that never shifts. Honest and comparable: the pump may say the same.
+  if (count == 0) {
+    r.valid = true;
+    r.enabled = false;
+    return r;
+  }
+
+  // Anything other than a clean pair is a rule this comparison cannot express,
+  // and saying so beats emitting half of one. A year in which a country adopts
+  // or abolishes DST has ONE transition, and the old code left the other half
+  // {0,0,0,0} while claiming `enabled` -- printed to the user as "? ?#0 00:00"
+  // (Brazil 2019, Fiji 2021, Apia 2021, Montevideo 2015). Morocco has THREE,
+  // for Ramadan, and the third was silently dropped. `valid` stays false, so
+  // compare_dst_rules() answers UNKNOWN and the entity says "unknown" rather
+  // than accusing the user's timezone.
+  if (count != 2)
+    return r;
+
+  r.valid = true;
+  r.enabled = true;
+
+  // Order them the way the pump does: `start` is the shift ONTO daylight time.
+  // Keyed on the offset DIRECTION, not on an is_dst flag -- a zone redefinition
+  // can flip is_dst without moving the clock (America/Grand_Turk 2018), and
+  // reading that as a transition reported "+0" with start and end reversed.
+  const bool first_is_the_spring_shift = delta[0] > 0;
+  r.start = first_is_the_spring_shift ? found[0] : found[1];
+  r.end = first_is_the_spring_shift ? found[1] : found[0];
+
+  const int32_t magnitude = delta[0] < 0 ? -delta[0] : delta[0];
+  r.offset_minutes = static_cast<uint16_t>(magnitude / 60);
+  return r;
+}
+
+/**
  * Derive the node timezone's own DST rule, by observation rather than by
  * parsing a TZ string.
  *
@@ -341,39 +395,8 @@ inline DstRule probe_host_dst_rule(int year) {
     prev_offset = offset;
   }
 
-  // A zone that never shifts. Honest and comparable: the pump may say the same.
-  if (transitions_found == 0) {
-    r.valid = true;
-    r.enabled = false;
-    (void) first_offset;
-    return r;
-  }
-
-  // Anything other than a clean pair is a rule this comparison cannot express,
-  // and saying so beats emitting half of one. A year in which a country adopts
-  // or abolishes DST has ONE transition, and the old code left the other half
-  // {0,0,0,0} while claiming `enabled` -- printed to the user as "? ?#0 00:00"
-  // (Brazil 2019, Fiji 2021, Apia 2021, Montevideo 2015). Morocco has THREE,
-  // for Ramadan, and the third was silently dropped. `valid` stays false, so
-  // compare_dst_rules() answers UNKNOWN and the entity says "unknown" rather
-  // than accusing the user's timezone.
-  if (transitions_found != 2)
-    return r;
-
-  r.valid = true;
-  r.enabled = true;
-
-  // Order them the way the pump does: `start` is the shift ONTO daylight time.
-  // Keyed on the offset DIRECTION, not on an is_dst flag -- a zone redefinition
-  // can flip is_dst without moving the clock (America/Grand_Turk 2018), and
-  // reading that as a transition reported "+0" with start and end reversed.
-  const bool first_is_the_spring_shift = delta[0] > 0;
-  r.start = first_is_the_spring_shift ? found[0] : found[1];
-  r.end = first_is_the_spring_shift ? found[1] : found[0];
-
-  const int32_t magnitude = delta[0] < 0 ? -delta[0] : delta[0];
-  r.offset_minutes = static_cast<uint16_t>(magnitude / 60);
-  return r;
+  (void) first_offset;
+  return assemble_probed_rule(transitions_found, found, delta);
 }
 
 /// True when two transition rules land on the same instant in @p year.

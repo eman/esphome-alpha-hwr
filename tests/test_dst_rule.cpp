@@ -24,6 +24,7 @@
 
 #include "../components/alpha_hwr/dst_rule.h"
 
+using esphome::alpha_hwr::services::assemble_probed_rule;
 using esphome::alpha_hwr::services::compare_dst_rules;
 using esphome::alpha_hwr::services::resolve_transition_day;
 using esphome::alpha_hwr::services::transitions_coincide;
@@ -221,27 +222,53 @@ static void test_a_transition_at_local_midnight_names_the_right_day() {
 // pump side. Reachable whenever a country adopts or abolishes DST: Brazil 2019,
 // Fiji 2021, Apia 2021, Montevideo 2015.
 static void test_a_year_with_one_transition_is_not_expressible() {
-  std::cout << "\n=== A single-transition year reports unknown, not half a rule ===" << std::endl;
-  // Brazil abolished DST in February 2019: the year has one transition, off.
-  with_tz("<-03>3<-02>,M11.1.0/0,M2.3.0/0", []() {
-    const DstRule h = probe_host_dst_rule(2019);
-    // Whatever this zone does, the answer must never be a half-filled rule.
-    const bool half_a_rule = h.valid && h.enabled &&
-                             (h.start.month == 0 || h.end.month == 0);
-    TEST_ASSERT(!half_a_rule,
-                "no half-filled rule is ever emitted -- a month of 0 printed as "
-                "'?' is worse than saying we cannot tell");
-  });
+  std::cout << "\n=== A year without a clean pair of transitions is inexpressible ===" << std::endl;
 
-  // Built directly, since which years are single-transition depends on the
-  // tzdata the machine happens to ship. A rule with a zero half must compare
-  // as UNKNOWN rather than as a mismatch.
-  DstRule half{};
-  half.valid = false;  // what the probe now returns for an inexpressible year
-  DstRule pump = decode_dst_rule(BENCH_RULE, sizeof(BENCH_RULE));
-  TEST_ASSERT(compare_dst_rules(pump, half, 2026) == DstAgreement::UNKNOWN,
-              "an inexpressible host rule answers UNKNOWN, so the entity says "
-              "'unknown' rather than accusing the user's timezone");
+  // Driven through assemble_probed_rule() rather than through a timezone.
+  //
+  // A POSIX TZ string always describes exactly two transitions a year, and the
+  // real zones that have one (a country adopting or abolishing DST) or three
+  // (Morocco's Ramadan rule) depend on which tzdata the machine happens to
+  // ship. My first version of this test used a Brazil TZ string and CI's
+  // mutation sweep caught it: the guard survived, because the runner's tzdata
+  // gave that zone two transitions. A test that passes or fails by accident is
+  // not a test.
+  const DstTransition spring{3, 7, 2, 2};
+  const DstTransition autumn{11, 7, 1, 2};
+  const DstTransition found[2] = {spring, autumn};
+  const int32_t delta[2] = {3600, -3600};
+
+  // The shape the old code emitted: `enabled`, one half left {0,0,0,0}.
+  const DstTransition one_only[2] = {spring, DstTransition{}};
+  const int32_t one_delta[2] = {3600, 0};
+  const DstRule single = assemble_probed_rule(1, one_only, one_delta);
+  TEST_ASSERT(!single.valid,
+              "one transition is not a rule this can express, so it is invalid "
+              "rather than half-filled");
+  TEST_ASSERT(!(single.enabled && single.end.month == 0),
+              "and specifically never `enabled` with a zero half, which printed "
+              "'? ?#0 00:00' at the user");
+
+  const DstRule three = assemble_probed_rule(3, found, delta);
+  TEST_ASSERT(!three.valid,
+              "three transitions -- Morocco's Ramadan rule -- is not expressible "
+              "either, rather than silently dropping the third");
+
+  // The two counts that ARE expressible, so the assertions above are about the
+  // count and not about assemble_probed_rule() refusing everything.
+  const DstRule none = assemble_probed_rule(0, found, delta);
+  TEST_ASSERT(none.valid && !none.enabled,
+              "zero transitions is a valid answer: the zone does not shift");
+  const DstRule pair = assemble_probed_rule(2, found, delta);
+  TEST_ASSERT(pair.valid && pair.enabled && pair.start.month == 3 &&
+                  pair.end.month == 11 && pair.offset_minutes == 60,
+              "and a clean pair builds the rule it describes");
+
+  // An inexpressible host rule must compare as UNKNOWN, not as a mismatch --
+  // the entity says "unknown" rather than accusing the user's timezone.
+  const DstRule pump = decode_dst_rule(BENCH_RULE, sizeof(BENCH_RULE));
+  TEST_ASSERT(compare_dst_rules(pump, single, 2026) == DstAgreement::UNKNOWN,
+              "so the verdict is UNKNOWN");
 }
 
 // 3. An is_dst flip with NO offset change is not a transition.

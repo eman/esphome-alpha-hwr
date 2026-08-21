@@ -645,7 +645,7 @@ MUTATIONS=(
 # Anything but a clean pair is a rule this cannot express. Emitting half of one
 # printed "? ?#0 00:00" to the user for any year a country adopts or abolishes
 # DST (Brazil 2019, Fiji 2021, Montevideo 2015).
-"dst-half-a-rule-emitted|components/alpha_hwr/dst_rule.h|  if (transitions_found != 2)\n    return r;|  if (false)\n    return r;"
+"dst-half-a-rule-emitted|components/alpha_hwr/dst_rule.h|  if (count != 2)\n    return r;|  if (false)\n    return r;"
 # The zone comes from ESPHome, not libc (issue #289) -- the half that made this
 # feature inert on the device, finding no transitions and reporting a mismatch
 # for every user in a DST zone.
