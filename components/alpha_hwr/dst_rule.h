@@ -175,20 +175,27 @@ inline DstRule probe_host_dst_rule(int year) {
     return off + day_delta * 86400;
   };
 
-  // Midnight UTC on 1 January of `year`, without mktime (which resolves against
-  // the local zone and would move the sampling grid with it).
-  struct tm jan {};
-  jan.tm_year = year - 1900;
-  jan.tm_mon = 0;
-  jan.tm_mday = 1;
-  const time_t year_start = timegm(&jan);
-  struct tm nextjan {};
-  nextjan.tm_year = year - 1900 + 1;
-  nextjan.tm_mon = 0;
-  nextjan.tm_mday = 1;
-  const time_t year_end = timegm(&nextjan);
-  if (year_start <= 0 || year_end <= year_start)
+  // Midnight UTC on 1 January of `year`, computed arithmetically.
+  //
+  // NOT timegm(): ESP-IDF's newlib does not provide it, and the host build
+  // hides that completely -- glibc and Apple libc both have it, so this
+  // compiled and passed every host test while failing the firmware build. And
+  // NOT mktime() either: on ESP-IDF that does not apply the TZ to a UTC-field
+  // tm, which is the same trap local_utc_offset_seconds() in
+  // schedule_service.h documents. Days-since-epoch is portable arithmetic and
+  // has neither problem.
+  if (year < 1970 || year > 2100)
     return r;  // valid stays false
+  int64_t days = 0;
+  for (int y = 1970; y < year; y++) {
+    const bool leap = (y % 4 == 0 && y % 100 != 0) || (y % 400 == 0);
+    days += leap ? 366 : 365;
+  }
+  const bool this_year_is_leap =
+      (year % 4 == 0 && year % 100 != 0) || (year % 400 == 0);
+  const time_t year_start = static_cast<time_t>(days * 86400);
+  const time_t year_end =
+      year_start + static_cast<time_t>((this_year_is_leap ? 366 : 365) * 86400);
 
   r.valid = true;
 

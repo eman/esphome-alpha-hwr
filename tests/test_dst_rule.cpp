@@ -247,6 +247,47 @@ static void test_last_and_fourth_occurrence_are_not_a_mismatch() {
   TEST_ASSERT(!(last == second), "but the second Sunday is still a different rule");
 }
 
+// Same dates, different AMOUNT. Every zone tested above shifts by 60 minutes,
+// so the offset comparison was never exercised by any of them -- CI's mutation
+// sweep caught that the comparison could be deleted with the suite still green.
+//
+// Not a hypothetical: Lord Howe Island shifts by 30 minutes, and the pump's
+// `time_offset` field is a whole byte of minutes, so it can carry any of this.
+// A pump shifting an hour where the node shifts half an hour is a half-hour
+// error in every stored window for part of the year -- smaller than the
+// wrong-dates case and just as silent.
+//
+// Built from structs rather than from a TZ fixture on purpose: the point is the
+// comparison, and routing it through a zone would make it depend on which
+// half-hour zones the CI image happens to ship.
+static void test_the_same_dates_with_a_different_shift_is_a_mismatch() {
+  std::cout << "\n=== Same dates, different shift -> mismatch ===" << std::endl;
+  DstRule pump{};
+  pump.valid = true;
+  pump.enabled = true;
+  pump.start = DstTransition{10, 7, 1, 2};
+  pump.end = DstTransition{4, 7, 1, 3};
+  pump.offset_minutes = 60;
+
+  DstRule host = pump;      // identical in every respect...
+  host.offset_minutes = 30; // ...except how far it moves
+
+  TEST_ASSERT(pump.start == host.start && pump.end == host.end,
+              "the two rules transition on exactly the same instants");
+  const DstAgreement a = compare_dst_rules(pump, host);
+  TEST_ASSERT(a == DstAgreement::RULES_DIFFER,
+              "and they still disagree, because the amount is part of the rule");
+  const std::string s = format_dst_agreement(a, pump, host);
+  TEST_ASSERT(s.find("+60") != std::string::npos && s.find("+30") != std::string::npos,
+              "the entity quotes both shifts, since the dates alone look identical");
+
+  // The control: make the amounts agree and they agree.
+  host.offset_minutes = 60;
+  TEST_ASSERT(compare_dst_rules(pump, host) == DstAgreement::AGREE,
+              "with the same shift they agree, so the assertion above is about "
+              "the offset and not about something else");
+}
+
 static void test_an_unread_rule_is_unknown_not_a_mismatch() {
   std::cout << "\n=== An unread rule is unknown, not an accusation ===" << std::endl;
   DstRule unread{};  // valid == false, as before the read lands
@@ -296,6 +337,7 @@ int main() {
   test_a_pump_that_shifts_in_a_zone_that_does_not();
   test_two_zones_that_both_shift_on_different_dates();
   test_last_and_fourth_occurrence_are_not_a_mismatch();
+  test_the_same_dates_with_a_different_shift_is_a_mismatch();
   test_an_unread_rule_is_unknown_not_a_mismatch();
   test_neither_shifting_is_agreement();
 
