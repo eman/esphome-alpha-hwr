@@ -288,11 +288,20 @@ void test_no_string_is_rewritten_after_decoding() {
 //
 // string_len is `len - HEADER_LEN - CRC_LEN` in size_t arithmetic, so a frame
 // shorter than 8 bytes would wrap it to ~1.8e19 and the copy loop would read
-// ~127 bytes past the frame. transport.cpp dispatches Class 3/7 responses on
-// `len >= 5`, so 5-, 6- and 7-byte frames really do reach this callback.
+// ~127 bytes past the frame. A skeptic pass found the guard load-bearing but
+// untested: relaxing it to `len < 5` left the whole suite green.
 //
-// A skeptic pass found this guard was load-bearing but untested: relaxing it to
-// `len < 5` left the whole suite green.
+// What this case proves has since MOVED, and the comment is corrected rather
+// than left to rot. It used to say "transport.cpp dispatches Class 3/7 on
+// `len >= 5`, so 5-, 6- and 7-byte frames really do reach this callback". Since
+// issue #278 they do not: on_notification() refuses a frame start whose length
+// byte is below 4 -- the structural floor, since the field counts DA + SA +
+// APDU -- so nothing under 8 bytes reaches any service at all.
+//
+// So these three frames are now stopped one layer out, and this case asserts the
+// OUTCOME rather than which guard produced it. That is still worth having: it is
+// the regression test for anyone who lowers the transport's floor, and it is why
+// the service's own guard stays even though no input can now distinguish it.
 void test_runt_frames_are_rejected_before_the_length_arithmetic() {
   std::cout << "\n=== Frames too short to hold a string are rejected ==="
             << std::endl;

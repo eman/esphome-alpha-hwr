@@ -37,6 +37,7 @@
 #pragma once
 
 #include "esphome/core/component.h"
+#include "frame_builder.h"
 #include <vector>
 #include <deque>
 #include <functional>
@@ -55,7 +56,7 @@ namespace core {
  * Key Features:
  * - Automatic packet reassembly for fragmented BLE notifications
  * - Automatic packet splitting for writes exceeding 20-byte MTU
- * - Frame start detection (0x24/0x27)
+ * - Frame start detection (0x24 inbound; 0x27 is outbound only)
  * - Length-based completion checking
  * - Buffer overflow protection
  * - Callback mechanism for complete packets
@@ -76,10 +77,16 @@ namespace core {
  * 
  * Frame Start Bytes:
  * ------------------
- * 0x24 = Response frame (pump -> client)
- * 0x27 = Request frame (client -> pump, also echoed back)
+ * 0x24 = Response frame (pump -> client). The only one this receiver accepts.
+ * 0x27 = Request frame (client -> pump). What WE send, and never seen inbound:
+ *        across 44,200 CRC-valid frames in the capture corpus, all 22,062
+ *        pump->phone frames begin 0x24 and not one begins 0x27. This file used
+ *        to gloss 0x27 as "also echoed back"; nothing supports that, and
+ *        accepting it admitted a byte that cannot start an inbound frame
+ *        (issue #278).
  * 
- * These bytes indicate a new packet is starting, not a continuation.
+ * A frame start begins a new packet only when reassembly is not already under
+ * way -- mid-frame, these are ordinary payload bytes.
  * 
  * Example Usage:
  * --------------
@@ -281,7 +288,8 @@ class Transport {
    * a complete packet is ready.
    * 
    * Packet Reassembly Logic:
-   * 1. If data[0] is 0x24 or 0x27 (frame start), start new packet
+   * 1. If data[0] is 0x24 (frame start) and its length byte could describe a
+   *    telegram, start a new packet
    * 2. Otherwise, append to current buffer
    * 3. Check if complete: buffer_size >= (length_field + 4)
    * 4. If complete, invoke callback and clear buffer
@@ -406,8 +414,8 @@ class Transport {
    * Check if buffer contains a frame start byte.
    * 
    * Frame start bytes:
-   *   0x24 = Response frame
-   *   0x27 = Request frame (echo)
+   *   0x24 = Response frame -- the only byte that starts an inbound frame
+   *   0x27 = Request frame -- outbound only (issue #278)
    * 
    * @param data First byte of notification
    * @return true if this is a frame start byte
@@ -586,7 +594,25 @@ class Transport {
   std::vector<PendingHandler> pending_handlers_;  ///< Registered response handlers
 
   // Constants
-  static constexpr size_t MAX_PACKET_SIZE = 256;  ///< Maximum GENI packet size (safety limit)
+  /// The reassembly ceiling: the largest telegram the protocol permits, which is
+  /// protocol::MAX_TELEGRAM_LEN (259). It was 256 -- a round number three bytes
+  /// under a legal frame, so the three largest legal sizes were discarded as
+  /// overflows (issue #278). Latent, since the largest frame in the corpus is 61
+  /// bytes, but wrong in the direction that drops good data.
+  ///
+  /// 257 was briefly wrong here in the other direction, from reading the length
+  /// field as bounded by MAX_PDU_LEN rather than by DA + SA + MAX_PDU_LEN. See
+  /// the note in frame_builder.h; the specification and the vendor's own builder
+  /// both put the bound at 255, giving 259 on the wire.
+  ///
+  /// Kept for what it SAYS rather than for what it does. What actually protects
+  /// a legal frame is the `still_incomplete` term on the guard in
+  /// on_notification(): a frame at its declared length has already satisfied the
+  /// completion test and skips the guard whatever this value is. Set it back to
+  /// 256 with that term in place and a 259-byte frame still arrives intact. A
+  /// buffer bound naming 256 when a GENI packet can be 259 is wrong
+  /// documentation even when nothing reads it.
+  static constexpr size_t MAX_PACKET_SIZE = protocol::MAX_TELEGRAM_LEN;
   /// How much of a frame goes into one GATT write. NOT a ceiling imposed by the
   /// negotiated MTU, whatever the name suggests, and the difference is the point:
   /// **this pump ignores a frame that is not split into 20-byte writes**,
@@ -600,7 +626,10 @@ class Transport {
   /// transport limit of ours.
   static constexpr size_t BLE_MTU_LIMIT = 20;
   static constexpr uint8_t FRAME_START_RESPONSE = 0x24;  ///< Response frame start byte
-  static constexpr uint8_t FRAME_START_REQUEST = 0x27;   ///< Request frame start byte (echo)
+  /// The delimiter WE put on outgoing telegrams. Named because it appears in
+  /// every request this component builds, and deliberately NOT part of
+  /// is_frame_start(): no inbound frame begins with it (issue #278).
+  static constexpr uint8_t FRAME_START_REQUEST = 0x27;
   static constexpr size_t MAX_PENDING_HANDLERS = 10;     ///< Maximum pending response handlers
 };
 

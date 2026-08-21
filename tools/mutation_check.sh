@@ -415,12 +415,29 @@ MUTATIONS=(
 # fixtures are transcribed from a capture now, which is what makes this mutation
 # fail rather than merely shift both sides together.
 "class7-header-length|components/alpha_hwr/device_info_service.cpp|      static const size_t HEADER_LEN = 6;|      static const size_t HEADER_LEN = 7;"
-# The length guard is the only thing standing between a runt frame and an
-# unsigned underflow: string_len is size_t, so a frame under 8 bytes wraps it to
-# ~1.8e19 and the copy loop reads ~127 bytes past the frame. transport.cpp
-# dispatches Class 3/7 on len >= 5, so 5-, 6- and 7-byte frames do reach the
-# callback. A skeptic pass found this relaxation left the whole suite green.
-"class7-runt-guard-relaxed|components/alpha_hwr/device_info_service.cpp|      static const size_t MIN_FRAME_LEN = HEADER_LEN + CRC_LEN;|      static const size_t MIN_FRAME_LEN = 5;"
+# The length guard stands between a runt frame and an unsigned underflow:
+# string_len is size_t, so a frame under 8 bytes wraps it to ~1.8e19 and the copy
+# loop reads ~127 bytes past the frame.
+#
+# It used to be mutated by RELAXING it (to `len < 5`), because transport.cpp
+# dispatched Class 3/7 on len >= 5 and 5-, 6- and 7-byte frames really did reach
+# this callback. Issue #278 closed that: on_notification() now refuses a frame
+# start whose length byte is below 4, and 4 is the structural floor -- the field
+# counts DA + SA + APDU, so 1 + 1 + 2. Every frame that now reaches a service is
+# therefore at least 8 bytes, which is exactly what this guard checks, and the
+# relaxation became an equivalent mutant: CI found it surviving at 266/267.
+#
+# The guard stays. It is a memory-safety check in a unit that should not have to
+# assume anything about the transport's floor, and the two protections masking
+# each other's mutations is a reason to document the redundancy, not to delete
+# half of it. What replaces the entry is the mutation the redundancy does NOT
+# mask: a guard set too HIGH rejects the 9-byte captured frames the decode tests
+# use, which nothing else would catch.
+#
+# Proving the guard is not too LOW now needs the parser reachable without a
+# transport in front of it. That is a real gap, and it is filed rather than
+# papered over.
+"class7-runt-guard-too-strict|components/alpha_hwr/device_info_service.cpp|      static const size_t MIN_FRAME_LEN = HEADER_LEN + CRC_LEN;|      static const size_t MIN_FRAME_LEN = 20;"
 "response-crc-enforcement|components/alpha_hwr/transport.cpp|if (!protocol::frame_crc_valid(reassembly_buffer_.data(), frame_len)) {|if (false) {"
 "response-crc-trim|components/alpha_hwr/transport.cpp|if (expected_packet_length_ >= 4 && frame_len > expected_packet_length_) {|if (false) {"
 "register-read-vetoes-type-match|components/alpha_hwr/transport.cpp|bool wildcard_command = (cmd.expect_type_low_ver == 0x0000 && cmd.expect_type_high == 0x0000);|bool wildcard_command = true;"
@@ -910,21 +927,59 @@ MUTATIONS=(
 # failure this change exists to fix. The tests now pin the count exactly.
 "abandon-drain-cap-stops-it-dead|components/alpha_hwr/transport.h|  static constexpr size_t MAX_ABANDON_STEPS = 512;|  static constexpr size_t MAX_ABANDON_STEPS = 0;"
 "abandon-drain-cap-too-small-for-a-real-chain|components/alpha_hwr/transport.h|  static constexpr size_t MAX_ABANDON_STEPS = 512;|  static constexpr size_t MAX_ABANDON_STEPS = 8;"
-# The inbound overflow is the other half. It runs on a LIVE link -- a corrupt
-# fragment declaring a long frame is enough -- and it used to reach reset(), so
-# one bad fragment cancelled every read in flight with nothing telling any
-# caller. Two entries: the guard has to fire, and firing it must not cancel
-# commands the pump may still answer.
-"inbound-overflow-never-drops-the-partial|components/alpha_hwr/transport.cpp|  if (reassembly_buffer_.size() > MAX_PACKET_SIZE) {|  if (false) {"
-"inbound-overflow-cancels-the-queue|components/alpha_hwr/transport.cpp|  if (reassembly_buffer_.size() > MAX_PACKET_SIZE) {|  if (reassembly_buffer_.size() > MAX_PACKET_SIZE) { reset(); return; } if (false) {"
-# And the reply debt survives it. This is the one genuine REVERSAL in the
-# overflow half of the change -- the old path cleared the debt deliberately, on
-# the argument that clearing was "the safer of the two errors". It is not:
-# clearing lets a reply owed by an abandoned command be taken for the next
-# write's acknowledgement, which is the misattribution issue #248 exists to
-# prevent. It shipped with no test until a skeptic put the old clear back and
-# watched all 31 binaries pass.
-"inbound-overflow-forgives-the-reply-debt|components/alpha_hwr/transport.cpp|    reassembling_ = false;\n    reassembly_buffer_.clear();\n    expected_packet_length_ = 0;\n    return;|    reassembling_ = false;\n    reassembly_buffer_.clear();\n    expected_packet_length_ = 0;\n    owed_pending_ = false;\n    owed_replies_ = 0;\n    return;"
+# Issue #278: what the receiver will accept as a frame at all. The length field
+# is bounded from both ends and the delimiter from one, and each bound has been
+# got wrong at least once -- including while writing this change, where a floor
+# taken from the capture corpus (5) rejected the 8-byte Unknown Class refusal
+# that only ever appears in traffic the corpus does not contain.
+"inbound-frame-accepts-the-request-delimiter|components/alpha_hwr/transport.cpp|  return byte == FRAME_START_RESPONSE;|  return byte == FRAME_START_RESPONSE || byte == FRAME_START_REQUEST;"
+"frame-start-length-floor-removed|components/alpha_hwr/transport.cpp|  if (len >= 2) declares_a_possible_frame = data[1] >= protocol::MIN_LENGTH_FIELD;|  // mutated: no floor on the declared length"
+# The floor must be exactly 4, and BOTH directions need an entry -- the first cut
+# of this shipped only the "too high" one, and a skeptic set MIN_LENGTH_FIELD to
+# 3 and to 2 with the whole suite staying green. At 5 the Unknown Class refusal
+# stops being a frame; at 3 a fragment declaring 3 arms reassembly and swallows
+# the frame behind it.
+"frame-start-length-floor-excludes-a-refusal|components/alpha_hwr/frame_builder.h|static const uint8_t MIN_LENGTH_FIELD = 4;|static const uint8_t MIN_LENGTH_FIELD = 5;"
+"frame-start-length-floor-too-low|components/alpha_hwr/frame_builder.h|static const uint8_t MIN_LENGTH_FIELD = 4;|static const uint8_t MIN_LENGTH_FIELD = 3;"
+# The two reachability defects a skeptic pass found in the same function.
+"lone-frame-start-never-learns-its-length|components/alpha_hwr/transport.cpp|    if (expected_packet_length_ == 0 && reassembly_buffer_.size() >= 2) {|    if (false) {"
+"complete-frame-discarded-as-an-overflow|components/alpha_hwr/transport.cpp|  if (reassembly_buffer_.size() > MAX_PACKET_SIZE && still_incomplete) {|  if (reassembly_buffer_.size() > MAX_PACKET_SIZE) {"
+# Deliberate absence: MAX_PACKET_SIZE's VALUE. It is now inert, and the entry
+# that mutated it to 256 has been retired rather than left to survive.
+#
+# The ceiling is documented as the largest telegram the specification permits --
+# LENGTH 255 plus the four bytes outside it -- and at the old 256 the three
+# largest legal sizes were discarded as overflows. But what actually protects a
+# legal frame is not the ceiling: it is the `still_incomplete` term on the guard,
+# because a frame at its declared length has already satisfied the completion
+# test and skips the guard whatever the cap says. Set the cap back to 256 with
+# that term in place and a 259-byte frame still arrives intact.
+#
+# So the constant is kept for what it says rather than for what it does -- a
+# buffer bound naming 256 when a GENI packet can be 259 is wrong documentation
+# even when nothing reads it -- and the coverage lives on
+# complete-frame-discarded-as-an-overflow, which removes the term and IS caught.
+# Deliberate absence, as of issue #278: the inbound-overflow branch in
+# on_notification() is now UNREACHABLE, so its three entries have been removed
+# rather than left to survive. CI found all three surviving at once.
+#
+# Why. expected_packet_length_ is `data[1] + 4`, at most 259, and MAX_PACKET_SIZE
+# is now that same 259 -- it was 256, three bytes under a legal frame, and that
+# gap is what the branch existed to paper over. A buffer above the cap is
+# therefore also at or past the expected length, which is the completion test, so
+# the frame leaves through there instead. The only escape is an expected length
+# of 0, which holds solely while the buffer has one byte in it.
+#
+# The branch stays as a backstop -- see the comment at the site -- but nothing
+# can prove it, and pretending otherwise is what these entries were doing. The
+# properties they asserted (losing frame sync must not touch the command queue,
+# the peer-resync hold or the reply debt) are still tested, through the CRC-drop
+# path that IS reachable. What is no longer claimed is that an overflow does it.
+#
+# The entry that remains on this ground is complete-frame-discarded-as-an-overflow,
+# which is not about the branch firing: it removes the `still_incomplete` term and
+# so makes the guard fire on a COMPLETE frame arriving with trailing bytes,
+# destroying it. That is reachable, and caught.
 # Reporting the failure is only half of it. The chain now reaches its terminal
 # branch on the abandoned exit too, and that branch is where the display cache is
 # written -- so both of these services need the readiness gate they already open
@@ -1173,6 +1228,14 @@ fi
 # happened to select. This answers the same question in about seven seconds, for
 # all of them, without building anything.
 #
+# What it does NOT answer, and neither does the sweep: whether an entry has gone
+# MISSING. Both check the entries that are here against the code; nothing checks
+# the code against the entries. A range delete in this file removed seven entries
+# as collateral while retiring three, and every remaining entry still matched, so
+# --verify passed at 258 and the sweep would have passed too. The only symptom
+# was a filtered run printing "No mutation name contains ...", which is easy to
+# read as a typo. If you delete entries, count them.
+#
 # It exists because retargeting entries after a refactor is easy to half-do:
 # issue #259 moved three failure paths behind one helper and left three entries
 # anchored on the code it replaced. One was noticed, and two were found by the
@@ -1181,9 +1244,23 @@ fi
 # Run always, not just under --verify: a filtered run is exactly where a stale
 # entry hides, because the filter selects around it.
 verify_entries() {
-  local rc=0 m name file search count
+  local rc=0 m name file search rest count
   for m in "${MUTATIONS[@]}"; do
-    IFS='|' read -r name file search _ <<< "$m"
+    IFS='|' read -r name file search rest <<< "$m"
+    # A '|' anywhere in the search text truncates the entry mid-field, and the
+    # truncation is INVISIBLE to the match check below: the shortened string
+    # usually still matches exactly once. So test for it first. This is the one
+    # entry defect that reaches a full sweep even with --verify in place, which
+    # it did -- `len < 2 || data[1] >= ...` scored "malformed" an hour in.
+    case "$rest" in
+      "|"*)
+        echo -e "${RED}✗ $name: the search field contains a '|' and was truncated${NC}" >&2
+        echo "    Anchor on a neighbouring line, or hoist the predicate so the" >&2
+        echo "    line it targets has no '|' in it." >&2
+        rc=1
+        continue
+        ;;
+    esac
     if [ ! -f "$PROJECT_DIR/$file" ]; then
       echo -e "${RED}✗ $name: no such file: $file${NC}" >&2
       rc=1

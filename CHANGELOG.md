@@ -1091,6 +1091,63 @@
 
 ### Fixed
 
+- **The receiver accepted a frame start the pump never sends, and bounded the
+  length field wrongly at both ends** (issue #278). All latent — the largest
+  frame in the corpus is 61 bytes and the reported fragment was caught by the
+  CRC either way — but each is a way into the phantom-reassembly path issue #259
+  is about.
+
+  `is_frame_start()` accepted `0x27` as well as `0x24`, justified by a comment
+  calling it "Request frame (client → pump, also echoed back)". The captures
+  refute the echo: across 44,200 CRC-valid frames, all 22,138 phone→pump frames
+  begin `0x27` and all 22,062 pump→phone frames begin `0x24`, with none of the
+  latter beginning `0x27`. `on_notification()` is fed GATT notifications only,
+  so it never sees our own writes. The claim turned out to be *inherited* rather
+  than derived — the Python client carried the same test with the same wording —
+  and it was written down in five places here, not one.
+
+  A declared length below the floor no longer starts a frame. **The floor is 4,
+  not 5.** 5 is the corpus minimum, but no frame in that corpus is refused at
+  the APDU head, and the zero-payload shape occurs only in such a refusal — so a
+  floor taken from the corpus rejects the 8-byte `Unknown Class` this project
+  handles deliberately. That mistake was made and caught by the suite.
+
+  The ceiling moved from 256 to **259**, the largest telegram the specification
+  permits. It was briefly set to 257 here, from reading the length field as
+  bounded by `MAX_PDU_LEN` alone; the specification puts DA and SA outside the
+  PDU bracket, so the field counts `2 + PDU ≤ 255` and the telegram is `≤ 259` —
+  and the Grundfos GO app's own builder rejects a length field above 255, not
+  above 253. The 257 reading also contradicted this change's own floor, which is
+  derived the other way.
+
+  Two things follow from that, and both are worth stating because they make the
+  ceiling change smaller than it looks. What actually protects a legal frame is
+  not the ceiling but the completion test: a frame at its declared length has
+  already satisfied it and skips the overflow guard whatever the cap says. The
+  constant is corrected for what it *says* — a buffer bound naming 256 when a
+  GENI packet can be 259 is wrong documentation — rather than for what it does.
+
+  And the reassembly-overflow branch **can no longer fire**. The expected length is
+  `data[1] + 4`, so at most 259, and the cap is now that same 259 — a buffer
+  above the cap is therefore also at or past the expected length, which is the
+  completion test. The branch was reachable only because the cap sat three bytes
+  under a legal frame. It stays as a backstop, documented as unreachable, but
+  the three tests and three mutation entries that exercised it have been re-aimed
+  at the CRC-drop path, which is a route into the same state that actually
+  exists. Unbounded growth is bounded by the completion test and by
+  `REASSEMBLY_TIMEOUT_MS` regardless.
+
+  Two further defects in the same function, both found by an adversarial pass
+  and both reproduced. A frame start delivered as a **one-byte notification**
+  armed reassembly before its length byte existed, and nothing recomputed the
+  expected length afterwards — so the completion test could never fire and every
+  notification that followed was swallowed for a second, up to ~18 replies at
+  the corpus's median latency. And the overflow guard ran ahead of the
+  completion test while testing the accumulated size rather than the declared
+  one, so a **complete, CRC-valid frame delivered with trailing bytes** was
+  discarded for the sake of bytes that were never part of it — the exact case
+  the completion test's `>=` and the trim below it exist to handle.
+
 - **A read in flight when the link dropped was never told, and one corrupt
   inbound fragment could do the same thing to a live link** (issue #259).
   `Transport::reset()` cleared the command queue without invoking the queued

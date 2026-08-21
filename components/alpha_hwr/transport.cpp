@@ -245,7 +245,20 @@ bool Transport::stale_reply_possible_() {
 }
 
 bool Transport::is_frame_start(uint8_t byte) {
-  return (byte == FRAME_START_RESPONSE || byte == FRAME_START_REQUEST);
+  // 0x24 only. This used to accept 0x27 as well, on the strength of a comment
+  // calling it "Request frame (client -> pump, also echoed back)" -- and the
+  // captures do not support the echo. Across the 44,200 CRC-valid frames of
+  // resources/traffic_capture, reassembled from ATT fragments and
+  // de-duplicated, all 22,138 phone->pump frames begin 0x27 and all 22,062
+  // pump->phone frames begin 0x24. Not one inbound frame begins 0x27.
+  //
+  // on_notification() is fed GATT notifications and nothing else, so it never
+  // sees our own writes; accepting 0x27 admitted a byte that cannot legitimately
+  // start a frame here. It is also the byte that begins the corrupt fragment in
+  // issue #259's report, where it was taken for a frame start and cost that read
+  // its answer. The claim was inherited rather than derived -- the Python client
+  // carried the same test with the same justification (issue #278).
+  return byte == FRAME_START_RESPONSE;
 }
 
 uint16_t Transport::calculate_expected_length() const {
@@ -266,7 +279,7 @@ void Transport::on_notification(const uint8_t* data, size_t len) {
   ESP_LOGV(TAG, "BLE notification: %d bytes", len);
 
   // Check if this is the start of a new packet
-  // Frame start bytes: 0x24 (response) or 0x27 (request/echo)
+  // Frame start byte: 0x24. 0x27 is what WE send; see is_frame_start().
   // A continuation fragment may legitimately begin with 0x24/0x27 -- those are
   // ordinary payload bytes mid-frame. Treating such a fragment as a new packet
   // discards the frame being reassembled and dispatches the fragment as a runt
@@ -285,7 +298,32 @@ void Transport::on_notification(const uint8_t* data, size_t len) {
     expected_packet_length_ = 0;
   }
 
-  if (is_frame_start(data[0]) && !reassembling_) {
+  // A frame start is only a frame start if what follows it could be a telegram.
+  // The length field counts DA + SA + PDU and an APDU header is two bytes, so
+  // the smallest value that describes a telegram carrying anything is 4 -- an
+  // 8-byte Unknown Class refusal. (5 is the minimum OBSERVED in the corpus, in
+  // both directions, and taking the floor from that was this change's first
+  // attempt: no frame in the corpus is refused at the APDU head, so its minimum
+  // excludes the one shape that only appears in such a refusal.)
+  //
+  // Without this, a fragment declaring 0 gave an expected length of 4, which the
+  // completion test below satisfies immediately from any notification at all:
+  // the frame is trimmed to four bytes, fails CRC, and is discarded -- having
+  // consumed the frame-start slot, so the real frame's continuations arrive with
+  // nowhere to go. That is exactly what issue #259's report shows happening.
+  // Judged only when the byte is actually present; a one-byte notification says
+  // nothing either way.
+  // Written as two statements rather than `len < 2 || data[1] >= ...` because a
+  // `|` in a line cannot be anchored by tools/mutation_check.sh: its entries are
+  // split on that character, so the search field is truncated mid-expression.
+  // The entry for this line was written as a one-liner first and came back
+  // "malformed", which is the script telling the truth loudly -- restructuring
+  // the code for it is the right trade, since an entry that cannot be written is
+  // a hole that reads as covered.
+  bool declares_a_possible_frame = true;
+  if (len >= 2) declares_a_possible_frame = data[1] >= protocol::MIN_LENGTH_FIELD;
+
+  if (is_frame_start(data[0]) && declares_a_possible_frame && !reassembling_) {
     // New packet starting
     ESP_LOGV(TAG, "New packet detected (frame start: 0x%02X)", data[0]);
 
@@ -302,16 +340,65 @@ void Transport::on_notification(const uint8_t* data, size_t len) {
   } else if (reassembling_) {
     // Continuation of existing packet
     reassembly_buffer_.insert(reassembly_buffer_.end(), data, data + len);
+    // The length byte may only have arrived now. A frame start delivered as a
+    // ONE-byte notification arms reassembly before the length is knowable, and
+    // the branch above computes it only under `size() >= 2` -- so without this
+    // recomputation expected_packet_length_ stays 0, the completion test can
+    // never fire (it requires > 0), and every subsequent notification is
+    // swallowed as a continuation until the staleness guard expires a second
+    // later. At the corpus's 55 ms median reply latency that is up to ~18
+    // replies lost to a single stray byte.
+    //
+    // It is also the case the length floor cannot catch: the floor is judged
+    // against data[1], and at len == 1 there is no data[1] to judge.
+    if (expected_packet_length_ == 0 && reassembly_buffer_.size() >= 2) {
+      expected_packet_length_ = calculate_expected_length();
+      ESP_LOGV(TAG, "Expected packet length (from a later fragment): %d bytes",
+               expected_packet_length_);
+    }
     ESP_LOGV(TAG, "Packet reassembly: %d/%d bytes", 
              reassembly_buffer_.size(), expected_packet_length_);
+  } else if (!reassembling_ && is_frame_start(data[0]) && !declares_a_possible_frame) {
+    // Distinguished from the generic line below because it is a different fact:
+    // this DID look like a frame start and was refused on its length byte. A log
+    // that says only "not frame start" about it sends the next person looking at
+    // the wrong byte.
+    ESP_LOGW(TAG, "Ignoring a frame start declaring %u bytes; the shortest telegram is %u",
+             (unsigned) data[1], (unsigned) protocol::MIN_LENGTH_FIELD);
+    return;
   } else {
     // Unexpected data (not a frame start, not reassembling)
-    ESP_LOGW(TAG, "Unexpected notification data (not frame start, not reassembling)");
+    ESP_LOGW(TAG,
+             "Unexpected notification data (leading byte 0x%02X is not a frame "
+             "start, and nothing is being reassembled)",
+             data[0]);
     return;
   }
 
-  // Safety: Check buffer overflow
-  if (reassembly_buffer_.size() > MAX_PACKET_SIZE) {
+  // Safety: buffer overflow. A backstop that, as the code stands, CANNOT FIRE --
+  // and saying so is the point of this comment, because it used to be able to
+  // and the tests that exercised it are gone with the reachability.
+  //
+  // The arithmetic: expected_packet_length_ is `data[1] + 4`, so it is at most
+  // 259, and MAX_PACKET_SIZE is now that same 259 (issue #278 -- it was 256,
+  // three bytes under a legal frame, which is what made this guard reachable).
+  // A buffer above the cap is therefore also at or above the expected length,
+  // which is the completion test below, so the frame is dispatched or dropped
+  // there instead. The only escape is expected_packet_length_ == 0, and that
+  // holds solely while the buffer has a single byte in it.
+  //
+  // It stays because the two things that make it redundant are the length
+  // arithmetic and the value of one constant, and neither is guaranteed by
+  // anything but this comment. Unbounded growth is bounded elsewhere anyway:
+  // by the completion test for a frame that arrives, and by
+  // REASSEMBLY_TIMEOUT_MS for one that does not.
+  //
+  // Note it never bounded a single oversized NOTIFICATION -- the insert above
+  // has already happened -- so a 600-byte delivery briefly holds 600 bytes
+  // whatever this says. The real bound there is the negotiated ATT payload.
+  const bool still_incomplete =
+      expected_packet_length_ == 0 || reassembly_buffer_.size() < expected_packet_length_;
+  if (reassembly_buffer_.size() > MAX_PACKET_SIZE && still_incomplete) {
     ESP_LOGW(TAG, "Reassembly buffer overflow (%d bytes); dropping the partial frame",
              (int) reassembly_buffer_.size());
     // Inbound frame sync, and nothing else. This used to call reset(), which

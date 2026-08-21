@@ -2,6 +2,7 @@
 #include <vector>
 #include <cstdint>
 #include <string>
+#include <algorithm>
 #include <functional>
 #include "fixture_crc.h"
 #include "../components/alpha_hwr/transport.h"
@@ -416,7 +417,8 @@ static void test_bad_crc_cannot_answer_a_command() {
     // Chunk pacing: one loop() is not enough to get the command on the wire.
     for (int i = 0; i < 4; i++) { mock_millis += 51; transport.loop(); }
 
-    // A Class 10 read response for Sub 0x0000 / Obj 0xDA01 -- the shape the
+
+// A Class 10 read response for Sub 0x0000 / Obj 0xDA01 -- the shape the
     // queued command is waiting for.
     std::vector<uint8_t> reply{0x24, 0x00, 0xF8, 0xE7, 0x0A, 0x13,
                                0x00, 0x00, 0xDA, 0x01,
@@ -573,6 +575,214 @@ void test_a_command_honours_its_own_timeout_not_the_default() {
               "shows the caller's value was the one in force");
 }
 
+// ── What the receiver will accept as a frame at all (issue #278) ────────────
+
+// 0x27 begins every frame we SEND and no frame the pump sends. Across the 44,200
+// CRC-valid frames of the capture corpus, all 22,138 phone->pump frames begin
+// 0x27 and all 22,062 pump->phone frames begin 0x24; not one inbound frame
+// begins 0x27. on_notification() is fed GATT notifications only, so it never
+// sees our own writes.
+//
+// It used to accept it, on the strength of a comment calling 0x27 "also echoed
+// back". That is the byte issue #259's corrupt fragment begins with.
+void test_an_inbound_frame_never_starts_with_the_request_delimiter() {
+  std::cout << "\n=== 0x27 does not begin an inbound frame ===" << std::endl;
+  esphome::alpha_hwr::core::Transport transport;
+  std::vector<std::vector<uint8_t>> packets;
+  transport.set_packet_callback([&packets](const uint8_t *d, size_t n) {
+    packets.push_back(std::vector<uint8_t>(d, d + n));
+  });
+
+  // A frame that is valid in every other respect -- real length, real CRC --
+  // and differs from an acceptable one only in its delimiter.
+  std::vector<uint8_t> f{0x27, 0x00, 0xF8, 0xE7, 0x0A, 0x03, 0x00, 0x00, 0xDE, 0x01};
+  while (f.size() < 22) f.push_back(0x11);
+  f.push_back(0x00);
+  f.push_back(0x00);
+  f[1] = static_cast<uint8_t>(f.size() - 4);
+  f = with_crc(std::move(f));
+
+  transport.on_notification(f.data(), f.size());
+
+  TEST_ASSERT(packets.empty(),
+              "a CRC-valid frame arriving with the request delimiter is not "
+              "reassembled -- the pump does not send that byte first");
+  TEST_ASSERT(!transport.is_reassembling(),
+              "  ...and it does not leave reassembly armed for whatever "
+              "arrives next");
+}
+
+// The length byte bounds the same field from below. The floor is 4, not 5:
+// 5 is the corpus minimum, but the corpus is the phone app's traffic and the app
+// is never refused, so its minimum is a minimum over non-refusal frames only.
+// A zero-payload Unknown Class refusal declares 4.
+void test_a_frame_start_declaring_less_than_a_telegram_is_refused() {
+  std::cout << "\n=== a length byte below the floor does not start a frame ==="
+            << std::endl;
+
+  // The exact first fragment from issue #259's report. Its length byte is 0, so
+  // the expected length came out as 4, the 20-byte notification satisfied the
+  // completion test immediately, the frame was trimmed to four bytes and failed
+  // CRC -- having consumed the frame-start slot, so the two real continuations
+  // behind it had nowhere to go.
+  const std::vector<uint8_t> reported_fragment = {
+      0x27, 0x00, 0x11, 0xFF, 0xFF, 0x00, 0x07, 0x00, 0x83, 0xFF,
+      0xFF, 0x00, 0x0D, 0x00, 0xB3, 0x00, 0xB3, 0x11, 0x43, 0x34};
+
+  for (uint8_t lead : {(uint8_t) 0x24, (uint8_t) 0x27}) {
+    esphome::alpha_hwr::core::Transport transport;
+    std::vector<std::vector<uint8_t>> packets;
+    transport.set_packet_callback([&packets](const uint8_t *d, size_t n) {
+      packets.push_back(std::vector<uint8_t>(d, d + n));
+    });
+
+    std::vector<uint8_t> frag = reported_fragment;
+    frag[0] = lead;   // 0x24 too, so this is about the LENGTH and not the byte
+    transport.on_notification(frag.data(), frag.size());
+
+    // Hoisted rather than written as a ternary inside the macro: TEST_ASSERT
+    // does not parenthesise its argument, so `<< a == b ? x : y` binds as
+    // `(cout << a) == b`.
+    const char *what = (lead == 0x24)
+                           ? "a declared length of 0 does not start a frame (0x24)"
+                           : "a declared length of 0 does not start a frame (0x27)";
+    TEST_ASSERT(packets.empty() && !transport.is_reassembling(), what);
+  }
+
+  // ...and the floor stops exactly where the protocol does. An 8-byte Unknown
+  // Class refusal declares 4 and must still be received: it is the shape that
+  // only ever appears in a refusal, which is why the corpus does not contain it.
+  {
+    esphome::alpha_hwr::core::Transport transport;
+    std::vector<std::vector<uint8_t>> packets;
+    transport.set_packet_callback([&packets](const uint8_t *d, size_t n) {
+      packets.push_back(std::vector<uint8_t>(d, d + n));
+    });
+    auto refusal = with_crc({0x24, 0x04, 0xF8, 0xE7, 0x0A, 0x40, 0x00, 0x00});
+    transport.on_notification(refusal.data(), refusal.size());
+    TEST_ASSERT(packets.size() == 1,
+                "  ...and a length of 4 -- an 8-byte Unknown Class refusal -- is "
+                "still a frame, which is where a floor of 5 would have broken it");
+  }
+
+  // The cost of having no floor, which is NOT visible on the fragment itself.
+  //
+  // A sub-minimum declaration that arrives complete is caught by the CRC a
+  // moment later either way, so the two behaviours are indistinguishable there
+  // -- which is why the assertions above pass with the floor deleted, and why
+  // this case has to exist. The damage is to the frame BEHIND it: a short
+  // notification declaring a length it has not reached leaves reassembly armed,
+  // and the next real frame is appended to it as a continuation. Two frames are
+  // then lost rather than one, and the second was perfectly good.
+  {
+    esphome::alpha_hwr::core::Transport transport;
+    std::vector<std::vector<uint8_t>> packets;
+    transport.set_packet_callback([&packets](const uint8_t *d, size_t n) {
+      packets.push_back(std::vector<uint8_t>(d, d + n));
+    });
+
+    // Declares 3, one below the floor, and stops after three bytes so it does
+    // not satisfy its own expected length of 7.
+    //
+    // 3 rather than 1, and that one byte is the whole assertion. A fixture
+    // declaring 1 clears any floor of 2 or more, so it says nothing about where
+    // the floor SITS -- the suite stayed green with MIN_LENGTH_FIELD set to 3
+    // and to 2, while the change's own prose argued at length about which value
+    // was right. At 3 the fixture is admitted by exactly the floors that are too
+    // low and refused by the correct one.
+    const std::vector<uint8_t> runt = {0x24, 0x03, 0xAA};
+    transport.on_notification(runt.data(), runt.size());
+
+    auto good = with_crc({0x24, 0x05, 0xF8, 0xE7, 0x0A, 0x01, 0x00, 0x00, 0x00});
+    transport.on_notification(good.data(), good.size());
+
+    TEST_ASSERT(packets.size() == 1,
+                "the frame arriving behind a sub-minimum declaration is "
+                "received -- without the floor it is swallowed as that "
+                "declaration's continuation");
+    if (packets.size() == 1) {
+      TEST_ASSERT(packets[0].size() == good.size(),
+                  "  ...whole, rather than as the tail of something else");
+    }
+  }
+}
+
+
+
+// A frame start delivered ALONE, before its length byte exists.
+//
+// The floor cannot judge this one -- it tests data[1], and there is no data[1]
+// yet -- so reassembly is armed with an expected length of 0. The completion
+// test requires a non-zero expected length, so unless a later fragment supplies
+// it, nothing can ever complete and every notification that follows is swallowed
+// as a continuation until the staleness guard expires a second later.
+void test_a_lone_frame_start_byte_does_not_swallow_what_follows() {
+  std::cout << "\n=== a one-byte frame start still learns its length ==="
+            << std::endl;
+  esphome::alpha_hwr::core::Transport transport;
+  std::vector<std::vector<uint8_t>> packets;
+  transport.set_packet_callback([&packets](const uint8_t *d, size_t n) {
+    packets.push_back(std::vector<uint8_t>(d, d + n));
+  });
+
+  const uint8_t lone = 0x24;
+  transport.on_notification(&lone, 1);
+
+  // The rest of that same frame, arriving as the next notification.
+  auto whole = with_crc({0x24, 0x05, 0xF8, 0xE7, 0x0A, 0x01, 0x00, 0x00, 0x00});
+  transport.on_notification(whole.data() + 1, whole.size() - 1);
+
+  TEST_ASSERT(packets.size() == 1,
+              "the frame completes once the length byte arrives, rather than "
+              "waiting on an expected length of zero that can never be met");
+  if (packets.size() == 1) {
+    TEST_ASSERT(packets[0].size() == whole.size(),
+                "  ...and is the whole frame");
+  }
+}
+
+// Two frames sharing one notification, where the first is near the size limit.
+//
+// The completion test is `>=` so that trailing bytes are trimmed rather than
+// lost. The overflow guard runs BEFORE it, so without a "still incomplete" term
+// the guard throws away a complete, CRC-valid frame for the sake of bytes that
+// were never part of it.
+void test_trailing_bytes_do_not_overflow_a_frame_that_is_already_complete() {
+  std::cout << "\n=== a complete frame is trimmed, not overflowed ==="
+            << std::endl;
+  esphome::alpha_hwr::core::Transport transport;
+  std::vector<std::vector<uint8_t>> packets;
+  transport.set_packet_callback([&packets](const uint8_t *d, size_t n) {
+    packets.push_back(std::vector<uint8_t>(d, d + n));
+  });
+
+  // A 259-byte frame -- the largest legal one, so the cap is exactly its size --
+  // delivered with one extra byte riding along at the end.
+  std::vector<uint8_t> f{0x24, 0x00, 0xF8, 0xE7, 0x0A, 0x03, 0x00, 0x00, 0xDE, 0x01};
+  while (f.size() < 257) f.push_back(0x11);
+  f.push_back(0x00);
+  f.push_back(0x00);
+  f[1] = static_cast<uint8_t>(f.size() - 4);
+  f = with_crc(std::move(f));
+  f.push_back(0x99);   // the head of whatever came next
+
+  size_t off = 0;
+  while (off < f.size()) {
+    const size_t n = std::min<size_t>(20, f.size() - off);
+    transport.on_notification(f.data() + off, n);
+    off += n;
+  }
+
+  TEST_ASSERT(packets.size() == 1,
+              "the completed frame is delivered rather than discarded as an "
+              "overflow caused by a byte belonging to the frame behind it");
+  if (packets.size() == 1) {
+    TEST_ASSERT(packets[0].size() == 259,
+                "  ...trimmed to its declared length, which is what the "
+                "completion test's `>=` exists for");
+  }
+}
+
 // ── An inbound overflow is a loss of frame sync, not a disconnect ───────────
 // on_notification() gives up on a partial frame once it passes MAX_PACKET_SIZE.
 // That call used to be reset(), which cancels the command queue -- so a single
@@ -582,34 +792,72 @@ void test_a_command_honours_its_own_timeout_not_the_default() {
 // outstanding, the pump may still answer them, and if it does not, each one's
 // own timeout says so.
 
-/// Feed a partial frame that declares more bytes than the buffer will hold, and
-/// stop in the one place where the overflow guard is the only thing that can end
-/// it. No time passes, so the staleness guard is not in play either.
+/// Lose inbound frame sync the way a live link actually can: deliver a frame
+/// that completes and then fails its CRC, so the reassembler throws away what it
+/// has and starts over.
 ///
-/// The sizes are exact and they have to be. The declared frame is 259 bytes (the
-/// longest a GENIbus length byte can describe) and the buffer's cap is 256, so
-/// the ONLY totals that are over the cap and still short of the declared length
-/// are 257 and 258. Land anywhere at or past 259 and the completion test fires
-/// instead, the frame is dispatched, CRC-rejected and cleared -- and every
-/// assertion below then passes with the overflow guard disabled, which is
-/// exactly what a first draft of this helper did: 20-byte fragments cannot stop
-/// between 256 and 259, so it overshot to 260 and the mutation survived.
-static void overflow_the_reassembly_buffer(
-    esphome::alpha_hwr::core::Transport &transport) {
-  std::vector<uint8_t> head(20, 0x11);
-  head[0] = 0x24;
-  head[1] = 0xFF;   // 255 + 4 = a 259-byte frame
-  transport.on_notification(head.data(), head.size());
-  const std::vector<uint8_t> more(20, 0x22);
-  for (int i = 0; i < 11; i++) {          // 20 + 11*20 = 240
-    transport.on_notification(more.data(), more.size());
-  }
-  const std::vector<uint8_t> tail(17, 0x33);   // 240 + 17 = 257: over the cap,
-  transport.on_notification(tail.data(), tail.size());  // two short of the frame
+/// This used to drive the buffer past MAX_PACKET_SIZE instead. That route is
+/// gone, and its absence is the point. The cap is now the largest telegram the
+/// length byte can describe, so a buffer above the cap is also at or past the
+/// expected length -- which is the completion test -- and the overflow branch
+/// cannot be reached at all. Keeping the old helper would have left three tests
+/// asserting the properties of a branch nothing can enter; they passed, because
+/// the CRC drop clears the same state.
+///
+/// The properties below are worth pinning either way: losing frame sync, by
+/// whatever route, must not touch the command queue, the peer-resync hold or the
+/// reply debt.
+static void lose_frame_sync(esphome::alpha_hwr::core::Transport &transport) {
+  // Declares 5, arrives whole, and the CRC is deliberately wrong.
+  const std::vector<uint8_t> bad = {0x24, 0x05, 0xF8, 0xE7, 0x0A,
+                                    0x01, 0x00, 0xDE, 0xAD};
+  transport.on_notification(bad.data(), bad.size());
 }
 
-void test_an_inbound_overflow_does_not_cancel_a_command_in_flight() {
-  std::cout << "\n=== an inbound overflow leaves the queue alone ===" << std::endl;
+// The ceiling, from the side that matters: a maximum-length LEGAL frame has to
+// survive reassembly. The overflow guard enforces the ceiling, and until this
+// nothing asserted where it SITS -- the overflow probe below is over the cap at
+// any of the candidate values, so moving the constant changed nothing any test
+// could see.
+//
+// 259 = LENGTH 255 + 4, and LENGTH counts DA + SA + PDU. That is the largest
+// telegram the specification permits and the same bound the vendor's own builder
+// enforces (GeniBuilder rejects a length field above 255). A brief detour
+// through 257 in this change came from reading the length field as bounded by
+// MAX_PDU_LEN alone; see frame_builder.h.
+void test_a_maximum_length_legal_frame_is_not_read_as_an_overflow() {
+  std::cout << "\n=== a 259-byte frame is legal and must survive ===" << std::endl;
+  esphome::alpha_hwr::core::Transport transport;
+  std::vector<std::vector<uint8_t>> packets;
+  transport.set_packet_callback([&packets](const uint8_t *d, size_t n) {
+    packets.push_back(std::vector<uint8_t>(d, d + n));
+  });
+
+  std::vector<uint8_t> f{0x24, 0x00, 0xF8, 0xE7, 0x0A, 0x03, 0x00, 0x00, 0xDE, 0x01};
+  while (f.size() < 257) f.push_back(0x11);
+  f.push_back(0x00);
+  f.push_back(0x00);                                   // CRC placeholders
+  f[1] = static_cast<uint8_t>(f.size() - 4);           // 255, the field's maximum
+  f = with_crc(std::move(f));
+
+  // Delivered the way the pump delivers, 20 bytes of ATT payload at a time.
+  size_t off = 0;
+  while (off < f.size()) {
+    const size_t n = std::min<size_t>(20, f.size() - off);
+    transport.on_notification(f.data() + off, n);
+    off += n;
+  }
+
+  TEST_ASSERT(packets.size() == 1,
+              "it reassembles and is dispatched, rather than being discarded as "
+              "an overflow short of the protocol's own limit");
+  if (packets.size() == 1) {
+    TEST_ASSERT(packets[0].size() == 259, "  ...whole, all 259 bytes of it");
+  }
+}
+
+void test_losing_frame_sync_does_not_cancel_a_command_in_flight() {
+  std::cout << "\n=== losing frame sync leaves the queue alone ===" << std::endl;
   esphome::alpha_hwr::core::Transport transport;
   transport.set_write_callback([](const uint8_t *, size_t) -> bool { return true; });
 
@@ -624,14 +872,14 @@ void test_an_inbound_overflow_does_not_cancel_a_command_in_flight() {
   mock_millis += 50;
   transport.loop();   // on the wire, awaiting a response
 
-  overflow_the_reassembly_buffer(transport);
+  lose_frame_sync(transport);
   transport.loop();
 
   TEST_ASSERT(cb_calls == 0,
               "the command is still outstanding -- losing inbound frame sync "
               "says nothing about whether the pump will answer it");
   TEST_ASSERT(!transport.is_reassembling() && transport.get_buffer_size() == 0,
-              "  ...and the partial frame itself is gone, which is the part "
+              "  ...and the frame that lost sync is gone, which is the part "
               "that had to happen");
 
   // And it still has the timeout it always had, which is how its caller finds
@@ -657,8 +905,8 @@ void test_an_inbound_overflow_does_not_cancel_a_command_in_flight() {
 //
 // Without this the mutation is invisible: a skeptic put the old clear back into
 // the overflow branch and all 31 test binaries passed.
-void test_an_inbound_overflow_keeps_the_reply_debt() {
-  std::cout << "\n=== an inbound overflow does not forgive the reply debt ==="
+void test_losing_frame_sync_keeps_the_reply_debt() {
+  std::cout << "\n=== losing frame sync does not forgive the reply debt ==="
             << std::endl;
   esphome::alpha_hwr::core::Transport transport;
   transport.set_write_callback([](const uint8_t *, size_t) -> bool { return true; });
@@ -678,7 +926,7 @@ void test_an_inbound_overflow_keeps_the_reply_debt() {
   transport.loop();
   TEST_ASSERT(first == 1, "the first write gave up, so a reply is owed");
 
-  overflow_the_reassembly_buffer(transport);
+  lose_frame_sync(transport);
 
   // The next write, and an acknowledgement arriving well inside the window.
   int second = 0;
@@ -707,8 +955,8 @@ void test_an_inbound_overflow_keeps_the_reply_debt() {
               "than hanging");
 }
 
-void test_an_inbound_overflow_keeps_the_peer_resync_hold() {
-  std::cout << "\n=== an inbound overflow does not release the resync hold ==="
+void test_losing_frame_sync_keeps_the_peer_resync_hold() {
+  std::cout << "\n=== losing frame sync does not release the resync hold ==="
             << std::endl;
   esphome::alpha_hwr::core::Transport transport;
 
@@ -725,7 +973,7 @@ void test_an_inbound_overflow_keeps_the_peer_resync_hold() {
   for (int i = 0; i < 2; i++) { mock_millis += 51; transport.loop(); }
   TEST_ASSERT(chunks == 2, "the second chunk failed, so the hold is armed");
 
-  overflow_the_reassembly_buffer(transport);
+  lose_frame_sync(transport);
 
   // Same boundary as test_partial_write_holds_off_so_the_peer_can_resync(), for
   // the same reason. The old code reached this through reset(), which clears the
@@ -1511,9 +1759,14 @@ int main() {
   test_first_chunk_failure_does_not_hold_off();
   test_missing_write_callback_drops_the_command();
   test_a_command_honours_its_own_timeout_not_the_default();
-  test_an_inbound_overflow_does_not_cancel_a_command_in_flight();
-  test_an_inbound_overflow_keeps_the_peer_resync_hold();
-  test_an_inbound_overflow_keeps_the_reply_debt();
+  test_an_inbound_frame_never_starts_with_the_request_delimiter();
+  test_a_frame_start_declaring_less_than_a_telegram_is_refused();
+  test_a_maximum_length_legal_frame_is_not_read_as_an_overflow();
+  test_a_lone_frame_start_byte_does_not_swallow_what_follows();
+  test_trailing_bytes_do_not_overflow_a_frame_that_is_already_complete();
+  test_losing_frame_sync_does_not_cancel_a_command_in_flight();
+  test_losing_frame_sync_keeps_the_peer_resync_hold();
+  test_losing_frame_sync_keeps_the_reply_debt();
   test_reset_fails_a_pending_command_instead_of_dropping_it();
   test_reset_fails_a_command_that_never_went_out();
   test_reset_takes_the_commands_its_own_callbacks_queue();
