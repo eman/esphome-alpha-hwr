@@ -930,7 +930,7 @@ MUTATIONS=(
 # taken from the capture corpus (5) rejected the 8-byte Unknown Class refusal
 # that only ever appears in traffic the corpus does not contain.
 "inbound-frame-accepts-the-request-delimiter|components/alpha_hwr/transport.cpp|  return byte == FRAME_START_RESPONSE;|  return byte == FRAME_START_RESPONSE || byte == FRAME_START_REQUEST;"
-"frame-start-length-floor-removed|components/alpha_hwr/transport.cpp|      len < 2 || data[1] >= protocol::MIN_LENGTH_FIELD;|      true;"
+"frame-start-length-floor-removed|components/alpha_hwr/transport.cpp|  if (len >= 2) declares_a_possible_frame = data[1] >= protocol::MIN_LENGTH_FIELD;|  // mutated: no floor on the declared length"
 # The floor must be exactly 4. At 5 the Unknown Class refusal stops being a
 # frame; at 3 a fragment declaring 3 starts a phantom the completion test
 # satisfies from the next notification.
@@ -1204,9 +1204,23 @@ fi
 # Run always, not just under --verify: a filtered run is exactly where a stale
 # entry hides, because the filter selects around it.
 verify_entries() {
-  local rc=0 m name file search count
+  local rc=0 m name file search rest count
   for m in "${MUTATIONS[@]}"; do
-    IFS='|' read -r name file search _ <<< "$m"
+    IFS='|' read -r name file search rest <<< "$m"
+    # A '|' anywhere in the search text truncates the entry mid-field, and the
+    # truncation is INVISIBLE to the match check below: the shortened string
+    # usually still matches exactly once. So test for it first. This is the one
+    # entry defect that reaches a full sweep even with --verify in place, which
+    # it did -- `len < 2 || data[1] >= ...` scored "malformed" an hour in.
+    case "$rest" in
+      "|"*)
+        echo -e "${RED}✗ $name: the search field contains a '|' and was truncated${NC}" >&2
+        echo "    Anchor on a neighbouring line, or hoist the predicate so the" >&2
+        echo "    line it targets has no '|' in it." >&2
+        rc=1
+        continue
+        ;;
+    esac
     if [ ! -f "$PROJECT_DIR/$file" ]; then
       echo -e "${RED}✗ $name: no such file: $file${NC}" >&2
       rc=1

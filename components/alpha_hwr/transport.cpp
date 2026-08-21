@@ -310,8 +310,15 @@ void Transport::on_notification(const uint8_t* data, size_t len) {
   // nowhere to go. That is exactly what issue #259's report shows happening.
   // Judged only when the byte is actually present; a one-byte notification says
   // nothing either way.
-  const bool declares_a_possible_frame =
-      len < 2 || data[1] >= protocol::MIN_LENGTH_FIELD;
+  // Written as two statements rather than `len < 2 || data[1] >= ...` because a
+  // `|` in a line cannot be anchored by tools/mutation_check.sh: its entries are
+  // split on that character, so the search field is truncated mid-expression.
+  // The entry for this line was written as a one-liner first and came back
+  // "malformed", which is the script telling the truth loudly -- restructuring
+  // the code for it is the right trade, since an entry that cannot be written is
+  // a hole that reads as covered.
+  bool declares_a_possible_frame = true;
+  if (len >= 2) declares_a_possible_frame = data[1] >= protocol::MIN_LENGTH_FIELD;
 
   if (is_frame_start(data[0]) && declares_a_possible_frame && !reassembling_) {
     // New packet starting

@@ -2,6 +2,7 @@
 #include <vector>
 #include <cstdint>
 #include <string>
+#include <algorithm>
 #include <functional>
 #include "fixture_crc.h"
 #include "../components/alpha_hwr/transport.h"
@@ -779,6 +780,47 @@ static void overflow_the_reassembly_buffer(
   }
   const std::vector<uint8_t> tail(18, 0x33);   // 240 + 18 = 258: over the cap,
   transport.on_notification(tail.data(), tail.size());  // one short of the frame
+}
+
+// The ceiling, from the side that matters: a maximum-length LEGAL frame has to
+// survive reassembly. The overflow guard is what enforces the ceiling, and until
+// this nothing asserted where it sits -- the overflow probe below lands at 258,
+// which is over the cap whether the cap is 256 or 257, so moving the constant
+// down changed nothing any test could see.
+//
+// 257 is MAX_PDU_LEN + 4: the length byte counts the PDU, so this is the largest
+// telegram the protocol permits, as distinct from the 259 the byte could hold.
+void test_a_maximum_length_legal_frame_is_not_read_as_an_overflow() {
+  std::cout << "\n=== a 257-byte frame is legal and must survive ===" << std::endl;
+  esphome::alpha_hwr::core::Transport transport;
+  std::vector<std::vector<uint8_t>> packets;
+  transport.set_packet_callback([&packets](const uint8_t *d, size_t n) {
+    packets.push_back(std::vector<uint8_t>(d, d + n));
+  });
+
+  std::vector<uint8_t> f{0x24, 0x00, 0xF8, 0xE7, 0x0A, 0x03, 0x00, 0x00, 0xDE, 0x01};
+  while (f.size() < 255) f.push_back(0x11);
+  f.push_back(0x00);
+  f.push_back(0x00);                                   // CRC placeholders
+  f[1] = static_cast<uint8_t>(f.size() - 4);           // 253 = MAX_PDU_LEN
+  f = with_crc(std::move(f));
+  TEST_ASSERT(f.size() == 257 && f[1] == 253,
+              "the fixture is a maximum-length legal telegram");
+
+  // Delivered the way the pump delivers, 20 bytes of ATT payload at a time.
+  size_t off = 0;
+  while (off < f.size()) {
+    const size_t n = std::min<size_t>(20, f.size() - off);
+    transport.on_notification(f.data() + off, n);
+    off += n;
+  }
+
+  TEST_ASSERT(packets.size() == 1,
+              "it reassembles and is dispatched, rather than being discarded as "
+              "an overflow one byte before the protocol's own limit");
+  if (packets.size() == 1) {
+    TEST_ASSERT(packets[0].size() == 257, "  ...whole, all 257 bytes of it");
+  }
 }
 
 void test_an_inbound_overflow_does_not_cancel_a_command_in_flight() {
@@ -1688,6 +1730,7 @@ int main() {
   test_a_frame_start_declaring_less_than_a_telegram_is_refused();
   test_a_refused_class10_read_reports_failure_rather_than_timing_out();
   test_the_read_refusal_branch_does_not_take_a_writes_acknowledgement();
+  test_a_maximum_length_legal_frame_is_not_read_as_an_overflow();
   test_an_inbound_overflow_does_not_cancel_a_command_in_flight();
   test_an_inbound_overflow_keeps_the_peer_resync_hold();
   test_an_inbound_overflow_keeps_the_reply_debt();
