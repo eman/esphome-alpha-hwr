@@ -204,6 +204,19 @@ alpha_hwr:
      name: "Pump Link Status"
    pump_last_link_failure:
      name: "Pump Link Fault"
+   # The pump keeps its OWN daylight-saving rule and applies it to its own
+   # clock, twice a year (issue #286). Schedule windows are stored in the
+   # pump's local time and converted using THIS node's timezone offset, so the
+   # two rules have to agree or every stored window is an hour out on one side
+   # of a transition -- and the symptom shows up months after the cause, as
+   # "my schedule moved an hour in November".
+   #
+   # Reads "OK (...)" with the rule spelled out when they agree, and names both
+   # rules when they do not. Nothing is corrected automatically: the GO app,
+   # this component and the Python library all write this pump's clock, and the
+   # pump cannot say which base a value arrived in.
+   pump_clock_dst:
+     name: "Pump Clock DST"
 
 
    # Link recycle counter and the longest quiet interval seen since boot
