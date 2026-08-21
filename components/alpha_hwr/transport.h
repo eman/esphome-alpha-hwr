@@ -37,6 +37,7 @@
 #pragma once
 
 #include "esphome/core/component.h"
+#include "frame_builder.h"
 #include <vector>
 #include <deque>
 #include <functional>
@@ -586,7 +587,13 @@ class Transport {
   std::vector<PendingHandler> pending_handlers_;  ///< Registered response handlers
 
   // Constants
-  static constexpr size_t MAX_PACKET_SIZE = 256;  ///< Maximum GENI packet size (safety limit)
+  /// The reassembly ceiling: the largest telegram the protocol permits, which is
+  /// protocol::MAX_LEGAL_TELEGRAM_LEN (257 = MAX_PDU_LEN + 4). It was 256, a
+  /// round number sitting one byte under the only legal size above it, so a
+  /// maximum-length frame was discarded as an overflow (issue #278). Latent --
+  /// the largest frame in the corpus is 61 bytes -- but wrong, and wrong in the
+  /// direction that drops good data.
+  static constexpr size_t MAX_PACKET_SIZE = protocol::MAX_LEGAL_TELEGRAM_LEN;
   /// How much of a frame goes into one GATT write. NOT a ceiling imposed by the
   /// negotiated MTU, whatever the name suggests, and the difference is the point:
   /// **this pump ignores a frame that is not split into 20-byte writes**,

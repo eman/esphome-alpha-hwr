@@ -845,7 +845,7 @@ MUTATIONS=(
 # The payload byte exists only on a 9-byte frame. At `len >= 7` an 8-byte
 # CRC-valid frame declaring one payload byte has its CRC HIGH BYTE read as the
 # Class 10 status -- and that byte now decides the verdict, not just a log line.
-"class10-ack-reads-the-crc-byte|components/alpha_hwr/transport.cpp|      const bool has_payload = protocol::apdu_payload_len(data[5]) == 1 && len >= 9;|      const bool has_payload = protocol::apdu_payload_len(data[5]) == 1 && len >= 7;"
+"class10-ack-reads-the-crc-byte|components/alpha_hwr/transport.cpp|        short_class10_frame && protocol::apdu_payload_len(data[5]) == 1 && len >= 9;|        short_class10_frame && protocol::apdu_payload_len(data[5]) == 1 && len >= 7;"
 # Deliberately absent: a mutation on class10_reply_is_ok()'s `!has_payload` early
 # return. Its only caller passes 0 for the status byte when there is none, so
 # dropping the guard still compares 0 == OK and every outcome is unchanged -- an
@@ -924,6 +924,29 @@ MUTATIONS=(
 # write's acknowledgement, which is the misattribution issue #248 exists to
 # prevent. It shipped with no test until a skeptic put the old clear back and
 # watched all 31 binaries pass.
+# Issue #278: what the receiver will accept as a frame at all. The length field
+# is bounded from both ends and the delimiter from one, and each bound has been
+# got wrong at least once -- including while writing this change, where a floor
+# taken from the capture corpus (5) rejected the 8-byte Unknown Class refusal
+# that only ever appears in traffic the corpus does not contain.
+"inbound-frame-accepts-the-request-delimiter|components/alpha_hwr/transport.cpp|  return byte == FRAME_START_RESPONSE;|  return byte == FRAME_START_RESPONSE || byte == FRAME_START_REQUEST;"
+"frame-start-length-floor-removed|components/alpha_hwr/transport.cpp|      len < 2 || data[1] >= protocol::MIN_LENGTH_FIELD;|      true;"
+# The floor must be exactly 4. At 5 the Unknown Class refusal stops being a
+# frame; at 3 a fragment declaring 3 starts a phantom the completion test
+# satisfies from the next notification.
+"frame-start-length-floor-excludes-a-refusal|components/alpha_hwr/frame_builder.h|static const uint8_t MIN_LENGTH_FIELD = 4;|static const uint8_t MIN_LENGTH_FIELD = 5;"
+# The ceiling is the LEGAL maximum, not what the length byte can hold. At the old
+# 256 the one legal size above it was discarded as an overflow.
+"reassembly-ceiling-below-a-legal-frame|components/alpha_hwr/frame_builder.h|static const size_t MAX_LEGAL_TELEGRAM_LEN = MAX_PDU_LEN + 4;|static const size_t MAX_LEGAL_TELEGRAM_LEN = 256;"
+# A Class 10 read the pump declines is answered with the same nine bytes a write
+# acknowledgement uses, and matched nothing: the short-ACK branch wants a caller
+# declaration AND a SET on the wire, and the len >= 11 floor then dropped it. Two
+# implementations hit it walking the limiter family (#274), at a full read
+# timeout each and a log line saying "no response" about a pump that answered.
+"refused-read-falls-through-to-a-timeout|components/alpha_hwr/transport.cpp|    if (short_read_refusal) {|    if (false) {"
+# ...and the branch must not take a WRITE's acknowledgement, which it could
+# satisfy but never should: it reports failure unconditionally.
+"read-refusal-branch-swallows-a-write-ack|components/alpha_hwr/transport.cpp|        cmd.packet.size() > 5 && !protocol::apdu_is_set(cmd.packet[5]);|        cmd.packet.size() > 5;"
 "inbound-overflow-forgives-the-reply-debt|components/alpha_hwr/transport.cpp|    reassembling_ = false;\n    reassembly_buffer_.clear();\n    expected_packet_length_ = 0;\n    return;|    reassembling_ = false;\n    reassembly_buffer_.clear();\n    expected_packet_length_ = 0;\n    owed_pending_ = false;\n    owed_replies_ = 0;\n    return;"
 # Reporting the failure is only half of it. The chain now reaches its terminal
 # branch on the abandoned exit too, and that branch is where the display cache is
@@ -988,13 +1011,13 @@ MUTATIONS=(
 "builder-cap-is-the-length-byte-not-the-pdu|components/alpha_hwr/frame_builder.cpp|  if (length > protocol::MAX_PDU_LEN) {|  if (length > 255) {"
 # The pre-#208 match condition. A 0xC1 or 0x41 refusal fails this test, falls
 # past the len >= 11 floor, and dies by 3 s timeout instead of being reported.
-"short-ack-matches-only-the-two-known-heads|components/alpha_hwr/transport.cpp|protocol::apdu_payload_len(data[5]) <= 1 &&|(data[5] == 0x01 || data[5] == 0x81) &&"
+"short-ack-matches-only-the-two-known-heads|components/alpha_hwr/transport.cpp|        protocol::apdu_payload_len(data[5]) <= 1;|        (data[5] == 0x01 || data[5] == 0x81);"
 # Unknown Class declares a ZERO-length payload, so its head is 0x40 and its
 # frame is 8 bytes. `== 1` admits 0x41 -- which App C.17's format table says
 # cannot occur -- while rejecting the 0x40 that does, leaving it to die by 3 s
 # timeout. The first cut of #208 shipped exactly that; an adversarial review
 # caught it, not the suite. This entry is what makes the suite catch it.
-"short-ack-misses-the-zero-length-refusal|components/alpha_hwr/transport.cpp|protocol::apdu_payload_len(data[5]) <= 1 &&|protocol::apdu_payload_len(data[5]) == 1 &&"
+"short-ack-misses-the-zero-length-refusal|components/alpha_hwr/transport.cpp|        protocol::apdu_payload_len(data[5]) <= 1;|        protocol::apdu_payload_len(data[5]) == 1;"
 # A refusal must be reported as ANSWERED to the config-write callers.
 #
 # It originally guarded their no-readback short-circuit, which would have turned

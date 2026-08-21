@@ -55,6 +55,40 @@ static const uint8_t SOURCE_ADDRESS = 0xF8;
 /// can hold.
 static const size_t MAX_TELEGRAM_LEN = 259;
 static const size_t MAX_PDU_LEN = 253;
+
+/// The largest telegram that is LEGAL, as opposed to the largest the length
+/// byte can describe. MAX_TELEGRAM_LEN is the second of those -- 255 + 4 -- and
+/// it is the right bound for a buffer, because a peer can put 255 in that byte
+/// whether or not it is allowed to. It is the wrong bound for "is this a frame":
+/// the length field counts the PDU, the PDU is capped at MAX_PDU_LEN, so nothing
+/// legal exceeds 253 + 4.
+///
+/// The two were conflated in the receiver's overflow guard, which sat at 256 and
+/// so discarded the one legal size between them (issue #278).
+static const size_t MAX_LEGAL_TELEGRAM_LEN = MAX_PDU_LEN + 4;
+
+/// The floor on the same field: DA + SA + the shortest APDU, which is a head
+/// byte and a class byte and nothing else.
+///
+///     24 04 F8 E7 0A 40 CRC CRC     an Unknown Class refusal, 8 bytes
+///     24 05 F8 E7 0A 01 00 AE A2    a Class 10 acknowledge,   9 bytes
+///
+/// **4, not 5, and the difference is a lesson worth keeping.** 5 is what the
+/// capture corpus says: the smallest length byte in either direction across all
+/// 44,200 frames. But resources/traffic_capture is the phone app's traffic and
+/// the app is never refused -- all 459 short replies in it carry acknowledge OK
+/// -- and the zero-payload shape occurs ONLY in a refusal. So the corpus minimum
+/// is a minimum over non-refusal traffic, and a floor set from it rejects
+/// `0x40` Unknown Class, which is a real frame this project has captured
+/// elsewhere and handles deliberately (issue #208).
+///
+/// That mistake was made here and caught by the suite, which is the second time
+/// this field has been bounded from one end in a way that broke the other. The
+/// same eight-and-nine-byte frames are what any `len >= 11` gate excludes --
+/// see the read-refusal branch in Transport::try_dispatch_response().
+static const uint8_t MIN_LENGTH_FIELD = 4;
+static const size_t MIN_TELEGRAM_LEN = MIN_LENGTH_FIELD + 4;
+
 static const uint8_t CLASS_10 = 0x0A;
 
 /**

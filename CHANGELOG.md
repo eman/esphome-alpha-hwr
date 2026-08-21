@@ -1091,6 +1091,48 @@
 
 ### Fixed
 
+- **The receiver accepted a frame start the pump never sends, and refused one it
+  does** (issue #278). Four bounds on what counts as a frame, three of them
+  latent and one confirmed on hardware.
+
+  `is_frame_start()` accepted `0x27` as well as `0x24`, justified by a comment
+  calling it "Request frame (client → pump, also echoed back)". The captures
+  refute the echo: across 44,200 CRC-valid frames, all 22,138 phone→pump frames
+  begin `0x27` and all 22,062 pump→phone frames begin `0x24`, with none of the
+  latter beginning `0x27`. `on_notification()` is fed GATT notifications only,
+  so it never sees our own writes — and `0x27` is the byte issue #259's corrupt
+  fragment begins with. The claim turned out to be *inherited* rather than
+  derived; the Python client carried the same test with the same wording.
+
+  A declared length below the protocol's floor no longer starts a frame either.
+  The fragment in #259 declared `0`, giving an expected length of 4, which the
+  completion test satisfies from any notification at all — so it was trimmed to
+  four bytes, failed CRC, and was discarded having consumed the frame-start
+  slot, leaving the real frame's continuations with nowhere to go.
+
+  The floor is **4, not 5**, and the difference is worth recording. 5 is what
+  the corpus says. But the corpus is the phone app's traffic and the app is
+  never refused, so its minimum is a minimum over non-refusal frames — and the
+  zero-payload shape occurs only in a refusal. A floor of 5 rejects the 8-byte
+  `Unknown Class`, which this project handles deliberately. That mistake was
+  made here and caught by the suite.
+
+  The ceiling moved the other way, from 256 to the largest *legal* telegram,
+  257 (`MAX_PDU_LEN` + 4). 259 is what the length byte can hold, which is the
+  right bound for a buffer and the wrong one for "is this a frame"; 256 was
+  neither, and sat one byte under the only legal size above it.
+
+  And a Class 10 **read** the pump declines is now reported instead of waited
+  out. It is answered with the same nine bytes a write acknowledgement uses, and
+  matched nothing: that branch requires both a caller declaration and a SET on
+  the wire, and the `len >= 11` floor below then dropped it. So the read waited
+  out its full timeout while the log said "no response" about a pump that had
+  answered in milliseconds — issue #208's defect, one operation across. Two
+  implementations hit it independently walking the limiter family (#274), at two
+  three-second timeouts per probe run. The new branch can only ever report
+  failure, never satisfy a read, so a misattributed frame can at worst end early
+  a read those bytes could not have answered.
+
 - **A read in flight when the link dropped was never told, and one corrupt
   inbound fragment could do the same thing to a live link** (issue #259).
   `Transport::reset()` cleared the command queue without invoking the queued

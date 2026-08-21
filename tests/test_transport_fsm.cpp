@@ -573,6 +573,176 @@ void test_a_command_honours_its_own_timeout_not_the_default() {
               "shows the caller's value was the one in force");
 }
 
+// ── What the receiver will accept as a frame at all (issue #278) ────────────
+
+// 0x27 begins every frame we SEND and no frame the pump sends. Across the 44,200
+// CRC-valid frames of the capture corpus, all 22,138 phone->pump frames begin
+// 0x27 and all 22,062 pump->phone frames begin 0x24; not one inbound frame
+// begins 0x27. on_notification() is fed GATT notifications only, so it never
+// sees our own writes.
+//
+// It used to accept it, on the strength of a comment calling 0x27 "also echoed
+// back". That is the byte issue #259's corrupt fragment begins with.
+void test_an_inbound_frame_never_starts_with_the_request_delimiter() {
+  std::cout << "\n=== 0x27 does not begin an inbound frame ===" << std::endl;
+  esphome::alpha_hwr::core::Transport transport;
+  std::vector<std::vector<uint8_t>> packets;
+  transport.set_packet_callback([&packets](const uint8_t *d, size_t n) {
+    packets.push_back(std::vector<uint8_t>(d, d + n));
+  });
+
+  // A frame that is valid in every other respect -- real length, real CRC --
+  // and differs from an acceptable one only in its delimiter.
+  std::vector<uint8_t> f{0x27, 0x00, 0xF8, 0xE7, 0x0A, 0x03, 0x00, 0x00, 0xDE, 0x01};
+  while (f.size() < 22) f.push_back(0x11);
+  f.push_back(0x00);
+  f.push_back(0x00);
+  f[1] = static_cast<uint8_t>(f.size() - 4);
+  f = with_crc(std::move(f));
+
+  transport.on_notification(f.data(), f.size());
+
+  TEST_ASSERT(packets.empty(),
+              "a CRC-valid frame arriving with the request delimiter is not "
+              "reassembled -- the pump does not send that byte first");
+  TEST_ASSERT(!transport.is_reassembling(),
+              "  ...and it does not leave reassembly armed for whatever "
+              "arrives next");
+}
+
+// The length byte bounds the same field from below. The floor is 4, not 5:
+// 5 is the corpus minimum, but the corpus is the phone app's traffic and the app
+// is never refused, so its minimum is a minimum over non-refusal frames only.
+// A zero-payload Unknown Class refusal declares 4.
+void test_a_frame_start_declaring_less_than_a_telegram_is_refused() {
+  std::cout << "\n=== a length byte below the floor does not start a frame ==="
+            << std::endl;
+
+  // The exact first fragment from issue #259's report. Its length byte is 0, so
+  // the expected length came out as 4, the 20-byte notification satisfied the
+  // completion test immediately, the frame was trimmed to four bytes and failed
+  // CRC -- having consumed the frame-start slot, so the two real continuations
+  // behind it had nowhere to go.
+  const std::vector<uint8_t> reported_fragment = {
+      0x27, 0x00, 0x11, 0xFF, 0xFF, 0x00, 0x07, 0x00, 0x83, 0xFF,
+      0xFF, 0x00, 0x0D, 0x00, 0xB3, 0x00, 0xB3, 0x11, 0x43, 0x34};
+
+  for (uint8_t lead : {(uint8_t) 0x24, (uint8_t) 0x27}) {
+    esphome::alpha_hwr::core::Transport transport;
+    std::vector<std::vector<uint8_t>> packets;
+    transport.set_packet_callback([&packets](const uint8_t *d, size_t n) {
+      packets.push_back(std::vector<uint8_t>(d, d + n));
+    });
+
+    std::vector<uint8_t> frag = reported_fragment;
+    frag[0] = lead;   // 0x24 too, so this is about the LENGTH and not the byte
+    transport.on_notification(frag.data(), frag.size());
+
+    // Hoisted rather than written as a ternary inside the macro: TEST_ASSERT
+    // does not parenthesise its argument, so `<< a == b ? x : y` binds as
+    // `(cout << a) == b`.
+    const char *what = (lead == 0x24)
+                           ? "a declared length of 0 does not start a frame (0x24)"
+                           : "a declared length of 0 does not start a frame (0x27)";
+    TEST_ASSERT(packets.empty() && !transport.is_reassembling(), what);
+  }
+
+  // ...and the floor stops exactly where the protocol does. An 8-byte Unknown
+  // Class refusal declares 4 and must still be received: it is the shape that
+  // only ever appears in a refusal, which is why the corpus does not contain it.
+  esphome::alpha_hwr::core::Transport transport;
+  std::vector<std::vector<uint8_t>> packets;
+  transport.set_packet_callback([&packets](const uint8_t *d, size_t n) {
+    packets.push_back(std::vector<uint8_t>(d, d + n));
+  });
+  auto refusal = with_crc({0x24, 0x04, 0xF8, 0xE7, 0x0A, 0x40, 0x00, 0x00});
+  transport.on_notification(refusal.data(), refusal.size());
+  TEST_ASSERT(packets.size() == 1,
+              "  ...and a length of 4 -- an 8-byte Unknown Class refusal -- is "
+              "still a frame, which is where a floor of 5 would have broken it");
+}
+
+// A Class 10 read that the pump declines is answered with the same nine bytes a
+// write acknowledgement uses. It matched nothing: the short-ACK branch requires
+// a caller declaration AND a SET on the wire, and the len >= 11 floor then
+// dropped it -- so the read waited out its whole timeout and the log said "no
+// response" about a pump that had answered at once.
+void test_a_refused_class10_read_reports_failure_rather_than_timing_out() {
+  std::cout << "\n=== A refused Class 10 READ is reported, not waited out ==="
+            << std::endl;
+  esphome::alpha_hwr::core::Transport transport;
+  transport.set_write_callback([](const uint8_t *, size_t) -> bool { return true; });
+
+  // A read of object 86 sub 602 -- the limiter slot with nothing behind it.
+  // APDU head 0x03 is a GET, which is what excluded this from every branch.
+  std::vector<uint8_t> req = {0x27, 0x07, 0xE7, 0xF8, 0x0A, 0x03, 0x56, 0x02, 0x5A, 0x00, 0x00};
+
+  int calls = 0;
+  bool ok = true;
+  uint32_t answered_at = 0;
+  transport.send_command(req, 0x3F01, 0x0001,
+                         [&](bool success, const uint8_t *, size_t) {
+                           calls++;
+                           ok = success;
+                           answered_at = mock_millis;
+                         },
+                         /*timeout_ms=*/3000);
+  mock_millis += 50;
+  transport.loop();
+  const uint32_t sent_at = mock_millis;
+
+  // The pump's answer, byte for byte as captured on hardware: acknowledge OK at
+  // the head, Class 10 status 0x04 (OPERATION_FAILED) in the payload.
+  const std::vector<uint8_t> refusal = {0x24, 0x05, 0xF8, 0xE7, 0x0A, 0x01, 0x04, 0xEE, 0x26};
+  mock_millis += 55;
+  transport.on_notification(refusal.data(), refusal.size());
+
+  TEST_ASSERT(calls == 1, "the refused read is answered");
+  TEST_ASSERT(!ok, "  ...as a failure, which is what a refusal is");
+  TEST_ASSERT(answered_at - sent_at < 100,
+              "  ...at the moment the pump replied, not three seconds later "
+              "when the command gave up");
+
+  // And the transport is free: a refusal must not wedge the queue.
+  int next = 0;
+  transport.send_command(req, 0x3F01, 0x0001,
+                         [&](bool, const uint8_t *, size_t) { next++; }, 3000);
+  mock_millis += 60;
+  transport.loop();
+  transport.on_notification(refusal.data(), refusal.size());
+  TEST_ASSERT(next == 1, "  ...and the next read still runs and is answered");
+}
+
+// The other side of that branch: it must not swallow a frame meant for a WRITE.
+// A SET still goes through the acknowledge path, where it can report success --
+// the read path never can.
+void test_the_read_refusal_branch_does_not_take_a_writes_acknowledgement() {
+  std::cout << "\n=== the read-refusal branch leaves writes alone ===" << std::endl;
+  esphome::alpha_hwr::core::Transport transport;
+  transport.set_write_callback([](const uint8_t *, size_t) -> bool { return true; });
+
+  std::vector<uint8_t> req = {0x27, 0x0B, 0xE7, 0xF8, 0x0A, 0x97,
+                              0x5B, 0x01, 0xAE, 0x03, 0x00, 0x00};
+  int calls = 0;
+  bool ok = false;
+  transport.send_command(req, 0, 0,
+                         [&](bool success, const uint8_t *, size_t) {
+                           calls++;
+                           ok = success;
+                         },
+                         esphome::alpha_hwr::core::Transport::SET_ACK_TIMEOUT_MS,
+                         false, /*expect_short_ack=*/true, true);
+  mock_millis += 50;
+  transport.loop();
+
+  const std::vector<uint8_t> ack = {0x24, 0x05, 0xF8, 0xE7, 0x0A, 0x01, 0x00, 0xAE, 0xA2};
+  transport.on_notification(ack.data(), ack.size());
+
+  TEST_ASSERT(calls == 1 && ok,
+              "a SET still reports SUCCESS on its acknowledgement -- the read "
+              "branch, which can only ever fail, did not intercept it");
+}
+
 // ── An inbound overflow is a loss of frame sync, not a disconnect ───────────
 // on_notification() gives up on a partial frame once it passes MAX_PACKET_SIZE.
 // That call used to be reset(), which cancels the command queue -- so a single
@@ -586,14 +756,17 @@ void test_a_command_honours_its_own_timeout_not_the_default() {
 /// stop in the one place where the overflow guard is the only thing that can end
 /// it. No time passes, so the staleness guard is not in play either.
 ///
-/// The sizes are exact and they have to be. The declared frame is 259 bytes (the
-/// longest a GENIbus length byte can describe) and the buffer's cap is 256, so
-/// the ONLY totals that are over the cap and still short of the declared length
-/// are 257 and 258. Land anywhere at or past 259 and the completion test fires
-/// instead, the frame is dispatched, CRC-rejected and cleared -- and every
-/// assertion below then passes with the overflow guard disabled, which is
-/// exactly what a first draft of this helper did: 20-byte fragments cannot stop
-/// between 256 and 259, so it overshot to 260 and the mutation survived.
+/// The sizes are exact and they have to be. The declared frame is 259 bytes --
+/// the longest a GENIbus length byte can describe, which is deliberately NOT the
+/// longest legal one -- and the buffer's cap is MAX_LEGAL_TELEGRAM_LEN, 257. So
+/// the ONLY total that is over the cap and still short of the declared length is
+/// **258**. Land anywhere at or past 259 and the completion test fires instead,
+/// the frame is dispatched, CRC-rejected and cleared -- and every assertion below
+/// then passes with the overflow guard disabled, which is exactly what a first
+/// draft of this helper did: 20-byte fragments cannot stop inside that gap, so it
+/// overshot to 260 and the mutation survived. (The window was 257-258 while the
+/// cap was 256; raising the cap to the real legal maximum closed half of it, and
+/// this helper had to move with it.)
 static void overflow_the_reassembly_buffer(
     esphome::alpha_hwr::core::Transport &transport) {
   std::vector<uint8_t> head(20, 0x11);
@@ -604,8 +777,8 @@ static void overflow_the_reassembly_buffer(
   for (int i = 0; i < 11; i++) {          // 20 + 11*20 = 240
     transport.on_notification(more.data(), more.size());
   }
-  const std::vector<uint8_t> tail(17, 0x33);   // 240 + 17 = 257: over the cap,
-  transport.on_notification(tail.data(), tail.size());  // two short of the frame
+  const std::vector<uint8_t> tail(18, 0x33);   // 240 + 18 = 258: over the cap,
+  transport.on_notification(tail.data(), tail.size());  // one short of the frame
 }
 
 void test_an_inbound_overflow_does_not_cancel_a_command_in_flight() {
@@ -1511,6 +1684,10 @@ int main() {
   test_first_chunk_failure_does_not_hold_off();
   test_missing_write_callback_drops_the_command();
   test_a_command_honours_its_own_timeout_not_the_default();
+  test_an_inbound_frame_never_starts_with_the_request_delimiter();
+  test_a_frame_start_declaring_less_than_a_telegram_is_refused();
+  test_a_refused_class10_read_reports_failure_rather_than_timing_out();
+  test_the_read_refusal_branch_does_not_take_a_writes_acknowledgement();
   test_an_inbound_overflow_does_not_cancel_a_command_in_flight();
   test_an_inbound_overflow_keeps_the_peer_resync_hold();
   test_an_inbound_overflow_keeps_the_reply_debt();

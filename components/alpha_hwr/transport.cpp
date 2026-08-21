@@ -245,7 +245,20 @@ bool Transport::stale_reply_possible_() {
 }
 
 bool Transport::is_frame_start(uint8_t byte) {
-  return (byte == FRAME_START_RESPONSE || byte == FRAME_START_REQUEST);
+  // 0x24 only. This used to accept 0x27 as well, on the strength of a comment
+  // calling it "Request frame (client -> pump, also echoed back)" -- and the
+  // captures do not support the echo. Across the 44,200 CRC-valid frames of
+  // resources/traffic_capture, reassembled from ATT fragments and
+  // de-duplicated, all 22,138 phone->pump frames begin 0x27 and all 22,062
+  // pump->phone frames begin 0x24. Not one inbound frame begins 0x27.
+  //
+  // on_notification() is fed GATT notifications and nothing else, so it never
+  // sees our own writes; accepting 0x27 admitted a byte that cannot legitimately
+  // start a frame here. It is also the byte that begins the corrupt fragment in
+  // issue #259's report, where it was taken for a frame start and cost that read
+  // its answer. The claim was inherited rather than derived -- the Python client
+  // carried the same test with the same justification (issue #278).
+  return byte == FRAME_START_RESPONSE;
 }
 
 uint16_t Transport::calculate_expected_length() const {
@@ -285,7 +298,22 @@ void Transport::on_notification(const uint8_t* data, size_t len) {
     expected_packet_length_ = 0;
   }
 
-  if (is_frame_start(data[0]) && !reassembling_) {
+  // A frame start is only a frame start if what follows it could be a telegram.
+  // The length field counts DA + SA + PDU, so the smallest legal value is 5 --
+  // the nine-byte Class 10 acknowledge -- and 5 is the minimum observed in both
+  // directions across the whole corpus.
+  //
+  // Without this, a fragment declaring 0 gave an expected length of 4, which the
+  // completion test below satisfies immediately from any notification at all:
+  // the frame is trimmed to four bytes, fails CRC, and is discarded -- having
+  // consumed the frame-start slot, so the real frame's continuations arrive with
+  // nowhere to go. That is exactly what issue #259's report shows happening.
+  // Judged only when the byte is actually present; a one-byte notification says
+  // nothing either way.
+  const bool declares_a_possible_frame =
+      len < 2 || data[1] >= protocol::MIN_LENGTH_FIELD;
+
+  if (is_frame_start(data[0]) && declares_a_possible_frame && !reassembling_) {
     // New packet starting
     ESP_LOGV(TAG, "New packet detected (frame start: 0x%02X)", data[0]);
 
@@ -304,6 +332,14 @@ void Transport::on_notification(const uint8_t* data, size_t len) {
     reassembly_buffer_.insert(reassembly_buffer_.end(), data, data + len);
     ESP_LOGV(TAG, "Packet reassembly: %d/%d bytes", 
              reassembly_buffer_.size(), expected_packet_length_);
+  } else if (!reassembling_ && is_frame_start(data[0]) && !declares_a_possible_frame) {
+    // Distinguished from the generic line below because it is a different fact:
+    // this DID look like a frame start and was refused on its length byte. A log
+    // that says only "not frame start" about it sends the next person looking at
+    // the wrong byte.
+    ESP_LOGW(TAG, "Ignoring a frame start declaring %u bytes; the shortest telegram is %u",
+             (unsigned) data[1], (unsigned) protocol::MIN_LENGTH_FIELD);
+    return;
   } else {
     // Unexpected data (not a frame start, not reassembling)
     ESP_LOGW(TAG, "Unexpected notification data (not frame start, not reassembling)");
@@ -643,11 +679,57 @@ bool Transport::try_dispatch_response(const uint8_t* data, size_t len) {
     // for a send that had no callback to use it. Requiring the declaration is
     // strictly narrower for anything that does not opt in, and it puts the
     // decision at the call site that knows the answer.
+    // The shape of a short Class 10 frame, independent of what it answers: class
+    // 10 on both sides, and an APDU head declaring at most one payload byte.
+    // Named once because a write's acknowledgement and a read's refusal are the
+    // SAME BYTES -- what tells them apart is the queued command, not the reply.
+    const bool short_class10_frame =
+        queued_class == 0x0A && len >= 6 && data[4] == 0x0A &&
+        protocol::apdu_payload_len(data[5]) <= 1;
+
     const bool short_ack_shape =
-        queued_class == 0x0A && len >= 6 && data[4] == 0x0A && protocol::apdu_payload_len(data[5]) <= 1 &&
+        short_class10_frame &&
         cmd.expect_type_low_ver == 0x0000 && cmd.expect_type_high == 0x0000 &&
         cmd.expect_short_ack &&
         cmd.packet.size() > 5 && protocol::apdu_is_set(cmd.packet[5]);
+
+    // The SAME nine bytes, answering a READ rather than a write (issue #278).
+    //
+    // A Class 10 data reply carries [00][TypeH][TypeL][Version] and cannot be
+    // this short, so a frame of this shape arriving for a GET is never its data
+    // -- it is the pump declining the read. Confirmed on hardware and in a
+    // second implementation: 86/602 and 86/603 have no limiter behind them and
+    // answer `24 05 F8 E7 0A 01 04 EE 26` -- acknowledge OK at the head, Class
+    // 10 status OPERATION_FAILED in the payload -- as do all 54 other empty
+    // sub-ids in the limiter family (issue #274).
+    //
+    // Before this it matched nothing at all. `short_ack_shape` below requires
+    // both the caller's declaration AND a SET on the wire, and the `len < 11`
+    // floor further down then dropped it, so every such read waited out its full
+    // timeout and logged "no response" about a pump that had answered in
+    // milliseconds. That is issue #208's defect one operation across, and it
+    // cost two 3-second timeouts per probe run in the report that found it.
+    //
+    // Deliberately NOT gated on expect_short_ack: the declaration exists to say
+    // which write may be *satisfied* by an ambiguous frame, and this branch
+    // cannot satisfy anything. It only ever reports failure, so the worst a
+    // misattributed frame does here is end early a read that could not have been
+    // answered by these bytes anyway. It is also not gated on the wildcard
+    // expectation, because a read that names the type it wants is exactly the
+    // read this frame is refusing.
+    const bool short_read_refusal =
+        short_class10_frame &&
+        cmd.packet.size() > 5 && !protocol::apdu_is_set(cmd.packet[5]);
+
+    // Both branches read the same two bytes out of the same frame, so read them
+    // once. len >= 9, not 7: a real short frame carrying a payload byte is nine
+    // bytes, and at >= 7 an eight-byte frame whose head declares one payload
+    // byte makes data[6] the CRC HIGH BYTE -- and that byte then decides a
+    // verdict rather than the wording of a log line.
+    const protocol::ApduAck short_ack = protocol::apdu_ack(data[5]);
+    const bool has_payload =
+        short_class10_frame && protocol::apdu_payload_len(data[5]) == 1 && len >= 9;
+    const uint8_t class10_ack = has_payload ? data[6] : 0;
 
     // The frame has the right shape -- but shape is all we can test, so before
     // treating it as THIS command's answer, settle any debt owed to a command
@@ -660,7 +742,7 @@ bool Transport::try_dispatch_response(const uint8_t* data, size_t len) {
     // follows it. Consuming the frame closes the account: at most one match is
     // lost per late reply, and `suppressed_a_frame` stops this command's own
     // timeout from opening a new one.
-    if (short_ack_shape && this->stale_reply_possible_()) {
+    if ((short_ack_shape || short_read_refusal) && this->stale_reply_possible_()) {
       ESP_LOGD(TAG, "Short Class 10 frame consumed as the reply owed to an "
                     "abandoned command (%u still owed)",
                (unsigned) this->owed_replies_);
@@ -678,21 +760,15 @@ bool Transport::try_dispatch_response(const uint8_t* data, size_t len) {
       // successful write, and every other ID reported failure for the wrong
       // reason. See response_match.h for the encoding and the two captured
       // frames behind it.
-      const protocol::ApduAck ack = protocol::apdu_ack(data[5]);
       // BOTH acknowledges, not just the head's. A Class 10 reply carries a
       // second status byte in its payload -- OK / BUSY / OPERATION_FAILED, named
       // by the Grundfos GO app's own decoder (GeniAPDU.CLASS10_ACK_*, read from
       // the byte after the head) and present with exactly those three values in
       // 459 captured replies. Reading only the head reported success for 39 of
       // them: every "busy" and every "operation failed" the pump has ever sent
-      // us. Issue #208's defect, one layer further down.
-      // len >= 9, not 7. A real short ACK is `24 05 F8 E7 0A 01 PL CRC CRC` --
-      // nine bytes -- so the payload byte exists only at that length. At `>= 7`
-      // an eight-byte CRC-valid frame whose head declares one payload byte makes
-      // data[6] the CRC HIGH BYTE, and that byte now decides the write's verdict
-      // rather than just the wording of a log line.
-      const bool has_payload = protocol::apdu_payload_len(data[5]) == 1 && len >= 9;
-      const uint8_t class10_ack = has_payload ? data[6] : 0;
+      // us. Issue #208's defect, one layer further down. `has_payload` and
+      // `class10_ack` are read above, where the read-refusal branch shares them.
+      const protocol::ApduAck ack = short_ack;
       const bool success = protocol::class10_reply_is_ok(data[5], has_payload, class10_ack);
       if (success) {
         ESP_LOGI(TAG, "Matched short Class 10 ACK (head 0x%02X, ok) for Class 10 SET write", data[5]);
@@ -724,6 +800,19 @@ bool Transport::try_dispatch_response(const uint8_t* data, size_t len) {
         }
       }
       this->complete_front_command_(success, data, len);
+      this->state_ = State::IDLE;
+      return true;
+    }
+
+    if (short_read_refusal) {
+      // Warning, not debug, for the same reason the write refusals above are:
+      // nothing else surfaces it, and until now the only trace was a timeout
+      // reported as silence.
+      ESP_LOGW(TAG, "Class 10 read refused: head 0x%02X (%s), status %s (code 0x%02X)",
+               data[5], protocol::apdu_ack_name(short_ack),
+               protocol::class10_ack_name(class10_ack), class10_ack);
+      // Always a failure. There is no shape of this frame that answers a read.
+      this->complete_front_command_(false, data, len);
       this->state_ = State::IDLE;
       return true;
     }
