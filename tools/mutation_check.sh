@@ -598,11 +598,19 @@ MUTATIONS=(
 # transition. The symptom appears months after the cause.
 "dst-enabled-bit-ignored|components/alpha_hwr/dst_rule.h|  r.enabled = body[0] != 0;|  r.enabled = true;"
 "dst-offset-not-compared|components/alpha_hwr/dst_rule.h|  const bool same_amount = pump.offset_minutes == host.offset_minutes;|  const bool same_amount = true;"
-"dst-dates-not-compared|components/alpha_hwr/dst_rule.h|  const bool same_dates = pump.start == host.start && pump.end == host.end;|  const bool same_dates = true;"
-# "Last Sunday in October" is the fifth occurrence in some years and the fourth
-# in others. Collapsing that distinction the wrong way reports a mismatch for a
-# correct EU pump in an EU zone, in some years only.
-"dst-last-occurrence-is-a-mismatch|components/alpha_hwr/dst_rule.h|    const bool both_last = occurrence >= 4 && o.occurrence >= 4;|    const bool both_last = false;"
+"dst-dates-not-compared|components/alpha_hwr/dst_rule.h|  const bool same_start = transitions_coincide(pump.start, host.start, year);|  const bool same_start = true;"
+"dst-end-date-not-compared|components/alpha_hwr/dst_rule.h|  const bool same_end = transitions_coincide(pump.end, host.end, year);|  const bool same_end = true;"
+# "The last Sunday of October" and "the fourth Sunday of October" are different
+# rules that coincide in some years and not others, so both sides are resolved
+# to a concrete date in the year being asked about. Ignoring "last" makes a
+# correct EU pump in an EU zone read as a mismatch in every year where the month
+# has five of that weekday.
+"dst-last-occurrence-not-resolved|components/alpha_hwr/dst_rule.h|  if (d.occurrence >= 5) {\n    uint8_t last = first;|  if (false) {\n    uint8_t last = first;"
+# ...and the fields have to describe a real date before any of that runs. A
+# payload with occurrence 0 or hour 24 would otherwise decode into a
+# genuine-looking rule that resolves to nothing, reported to the user as a
+# mismatch against their timezone -- blaming the zone for a bad frame.
+"dst-impossible-fields-accepted|components/alpha_hwr/dst_rule.h|  const bool occurrence_ok = d.occurrence >= 1 && d.occurrence <= 5;|  const bool occurrence_ok = true;"
 # The southern hemisphere starts its year in daylight time, so the first
 # transition of the calendar year is the one OFF it. Reading them in calendar
 # order makes every southern installation a mismatch.

@@ -367,12 +367,11 @@
   rather than as a second run of all ~640 assertions, most of which have nothing
   timezone-dependent in them.
 
-  Also recorded there, because it is a real gap rather than an omission: the
-  fixture models the **host's** zone, since that is what the conversion reads. The
-  pump applies its own DST rule — `DaylightSavingTime` (94/102) reads enabled on
-  the bench unit, US rule, 60-minute offset — and nothing checks that the two
-  agree. A pump shipped for one market and installed in another would diverge
-  with no signal.
+  Recorded in the file, because it is a property of the fixture rather than an
+  oversight: it models the **host's** zone, since that is what the conversion
+  reads. Whether the pump's own DST rule agrees with that zone is a separate
+  question, and the gap this exposed is what the `Pump Clock DST` check above
+  closes — the two entries are the two halves of one problem, found together.
 
 - **A vacation that has already ended no longer shadows the live one**
   (issue #267). `find_vacation_slot()` returned the first enabled Stop

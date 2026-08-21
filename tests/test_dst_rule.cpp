@@ -25,6 +25,8 @@
 #include "../components/alpha_hwr/dst_rule.h"
 
 using esphome::alpha_hwr::services::compare_dst_rules;
+using esphome::alpha_hwr::services::resolve_transition_day;
+using esphome::alpha_hwr::services::transitions_coincide;
 using esphome::alpha_hwr::services::decode_dst_rule;
 using esphome::alpha_hwr::services::DstAgreement;
 using esphome::alpha_hwr::services::dst_rules_agree;
@@ -175,7 +177,7 @@ static void test_a_matching_zone_agrees() {
   with_tz("PST8PDT,M3.2.0/2,M11.1.0/2", []() {
     const DstRule pump = decode_dst_rule(BENCH_RULE, sizeof(BENCH_RULE));
     const DstRule host = probe_host_dst_rule(2026);
-    const DstAgreement a = compare_dst_rules(pump, host);
+    const DstAgreement a = compare_dst_rules(pump, host, 2026);
     TEST_ASSERT(a == DstAgreement::AGREE, "the rules agree");
     TEST_ASSERT(dst_rules_agree(a), "and nothing needs the user's attention");
     TEST_ASSERT(format_dst_agreement(a, pump, host).find("OK") == 0,
@@ -196,7 +198,7 @@ static void test_a_pump_that_does_not_shift_in_a_zone_that_does() {
     off[0] = 0x00;
     const DstRule pump = decode_dst_rule(off, sizeof(off));
     const DstRule host = probe_host_dst_rule(2026);
-    const DstAgreement a = compare_dst_rules(pump, host);
+    const DstAgreement a = compare_dst_rules(pump, host, 2026);
     TEST_ASSERT(a == DstAgreement::HOST_ONLY, "the disagreement is named, not just flagged");
     TEST_ASSERT(!dst_rules_agree(a), "and it is a mismatch");
     TEST_ASSERT(format_dst_agreement(a, pump, host).find("the pump does not") !=
@@ -210,7 +212,7 @@ static void test_a_pump_that_shifts_in_a_zone_that_does_not() {
   with_tz("MST7", []() {
     const DstRule pump = decode_dst_rule(BENCH_RULE, sizeof(BENCH_RULE));
     const DstRule host = probe_host_dst_rule(2026);
-    TEST_ASSERT(compare_dst_rules(pump, host) == DstAgreement::PUMP_ONLY,
+    TEST_ASSERT(compare_dst_rules(pump, host, 2026) == DstAgreement::PUMP_ONLY,
                 "the pump shifts and Arizona does not");
   });
 }
@@ -224,7 +226,7 @@ static void test_two_zones_that_both_shift_on_different_dates() {
     const DstRule pump = decode_dst_rule(BENCH_RULE, sizeof(BENCH_RULE));
     const DstRule host = probe_host_dst_rule(2026);
     TEST_ASSERT(host.valid && host.enabled, "the EU zone observes DST");
-    const DstAgreement a = compare_dst_rules(pump, host);
+    const DstAgreement a = compare_dst_rules(pump, host, 2026);
     TEST_ASSERT(a == DstAgreement::RULES_DIFFER,
                 "a US pump in an EU zone is a mismatch, though both observe DST");
     const std::string s = format_dst_agreement(a, pump, host);
@@ -234,17 +236,80 @@ static void test_two_zones_that_both_shift_on_different_dates() {
   });
 }
 
-// "Last Sunday in October" is the fifth occurrence in some years and the fourth
-// in others. Treating those as different rules would report a mismatch for a
-// correct EU pump in an EU zone, in some years only -- the noisiest possible
-// false positive.
-static void test_last_and_fourth_occurrence_are_not_a_mismatch() {
-  std::cout << "\n=== 'Last' and 'fourth' are the same rule ===" << std::endl;
-  DstTransition last{10, 7, 5, 3};
-  DstTransition fourth{10, 7, 4, 3};
-  TEST_ASSERT(last == fourth, "occurrence 5 and occurrence 4 compare equal at the month's end");
-  DstTransition second{10, 7, 2, 3};
-  TEST_ASSERT(!(last == second), "but the second Sunday is still a different rule");
+// "The last Sunday of October" and "the fourth Sunday of October" are DIFFERENT
+// rules that coincide in some years and not others, so neither field equality
+// nor a loose `>= 4` comparison answers the question. Both sides are resolved to
+// a concrete date in the year being asked about instead.
+//
+// My first version collapsed every occurrence `>= 4` into "the same", on the
+// reasoning that "last" is sometimes the fourth. That is wrong in the direction
+// that matters and CI's reviewer caught it: it reports AGREE for a pump that
+// changes a week before the node, which is exactly the case this feature exists
+// to catch.
+static void test_last_and_fourth_are_the_same_rule_only_when_they_coincide() {
+  std::cout << "\n=== 'Last' and 'fourth' agree only in years where they coincide ===" << std::endl;
+  const DstTransition last{10, 7, 5, 3};    // last Sunday of October -- the EU rule
+  const DstTransition fourth{10, 7, 4, 3};  // the fourth Sunday
+
+  // 2027: October has five Sundays, so the two are a week apart.
+  TEST_ASSERT(resolve_transition_day(last, 2027) == 31,
+              "October 2027's last Sunday is the 31st");
+  TEST_ASSERT(resolve_transition_day(fourth, 2027) == 24,
+              "and its fourth Sunday is the 24th");
+  TEST_ASSERT(!transitions_coincide(last, fourth, 2027),
+              "so in 2027 they are not the same rule -- a pump on one and a node "
+              "on the other change a week apart, which is the whole point");
+
+  // 2026: October has four Sundays, so "last" IS the fourth.
+  TEST_ASSERT(resolve_transition_day(last, 2026) == resolve_transition_day(fourth, 2026),
+              "October 2026's last Sunday IS its fourth");
+  TEST_ASSERT(transitions_coincide(last, fourth, 2026),
+              "so in 2026 they agree, and a correct EU pump in an EU zone is not "
+              "reported as a mismatch");
+
+  const DstTransition second{10, 7, 2, 3};
+  TEST_ASSERT(!transitions_coincide(last, second, 2026),
+              "the second Sunday is a different rule in any year");
+}
+
+// The date arithmetic the comparison rests on, checked against dates anyone can
+// verify. Written without libc (no timegm on ESP-IDF), so it is worth pinning
+// rather than trusting.
+static void test_the_date_arithmetic() {
+  std::cout << "\n=== Resolving a rule to a date ===" << std::endl;
+  // The US rule, 2026: second Sunday of March is the 8th, first Sunday of
+  // November is the 1st.
+  TEST_ASSERT(resolve_transition_day(DstTransition{3, 7, 2, 2}, 2026) == 8,
+              "second Sunday of March 2026 is the 8th");
+  TEST_ASSERT(resolve_transition_day(DstTransition{11, 7, 1, 2}, 2026) == 1,
+              "first Sunday of November 2026 is the 1st");
+  // A leap February, where the last occurrence depends on the extra day.
+  TEST_ASSERT(resolve_transition_day(DstTransition{2, 7, 5, 2}, 2026) == 22,
+              "last Sunday of February 2026 (28 days) is the 22nd");
+  TEST_ASSERT(resolve_transition_day(DstTransition{2, 7, 5, 2}, 2028) == 27,
+              "last Sunday of February 2028 (29 days) is the 27th");
+  // A rule that describes no date in this month.
+  TEST_ASSERT(resolve_transition_day(DstTransition{2, 7, 5, 2}, 2026) != 29,
+              "and never a day the month does not have");
+  TEST_ASSERT(resolve_transition_day(DstTransition{11, 7, 4, 2}, 2026) == 22,
+              "fourth Sunday of November 2026 is the 22nd");
+}
+
+// A payload whose fields cannot describe a date is not a rule to compare
+// against a timezone. Reporting a mismatch for one blames the user's zone for a
+// bad frame.
+static void test_impossible_transition_fields_are_refused() {
+  std::cout << "\n=== Fields that cannot describe a date are refused ===" << std::endl;
+  uint8_t bad[10];
+  memcpy(bad, BENCH_RULE, sizeof(bad));
+  bad[3] = 0;  // occurrence 0
+  TEST_ASSERT(!decode_dst_rule(bad, sizeof(bad)).valid, "occurrence 0 is not an occurrence");
+  memcpy(bad, BENCH_RULE, sizeof(bad));
+  bad[3] = 9;  // occurrence 9
+  TEST_ASSERT(!decode_dst_rule(bad, sizeof(bad)).valid, "nor is occurrence 9");
+  memcpy(bad, BENCH_RULE, sizeof(bad));
+  bad[8] = 24;  // hour 24
+  TEST_ASSERT(!decode_dst_rule(bad, sizeof(bad)).valid, "hour 24 is not an hour");
 }
 
 // Same dates, different AMOUNT. Every zone tested above shifts by 60 minutes,
@@ -274,7 +339,7 @@ static void test_the_same_dates_with_a_different_shift_is_a_mismatch() {
 
   TEST_ASSERT(pump.start == host.start && pump.end == host.end,
               "the two rules transition on exactly the same instants");
-  const DstAgreement a = compare_dst_rules(pump, host);
+  const DstAgreement a = compare_dst_rules(pump, host, 2026);
   TEST_ASSERT(a == DstAgreement::RULES_DIFFER,
               "and they still disagree, because the amount is part of the rule");
   const std::string s = format_dst_agreement(a, pump, host);
@@ -283,7 +348,7 @@ static void test_the_same_dates_with_a_different_shift_is_a_mismatch() {
 
   // The control: make the amounts agree and they agree.
   host.offset_minutes = 60;
-  TEST_ASSERT(compare_dst_rules(pump, host) == DstAgreement::AGREE,
+  TEST_ASSERT(compare_dst_rules(pump, host, 2026) == DstAgreement::AGREE,
               "with the same shift they agree, so the assertion above is about "
               "the offset and not about something else");
 }
@@ -293,7 +358,7 @@ static void test_an_unread_rule_is_unknown_not_a_mismatch() {
   DstRule unread{};  // valid == false, as before the read lands
   with_tz("PST8PDT,M3.2.0/2,M11.1.0/2", []() {});
   const DstRule host = probe_host_dst_rule(2026);
-  const DstAgreement a = compare_dst_rules(unread, host);
+  const DstAgreement a = compare_dst_rules(unread, host, 2026);
   TEST_ASSERT(a == DstAgreement::UNKNOWN, "an unread rule is UNKNOWN");
   TEST_ASSERT(format_dst_agreement(a, unread, host) == "unknown",
               "and the entity says so rather than accusing the timezone");
@@ -307,7 +372,7 @@ static void test_neither_shifting_is_agreement() {
     off[0] = 0x00;
     const DstRule pump = decode_dst_rule(off, sizeof(off));
     const DstRule host = probe_host_dst_rule(2026);
-    const DstAgreement a = compare_dst_rules(pump, host);
+    const DstAgreement a = compare_dst_rules(pump, host, 2026);
     TEST_ASSERT(a == DstAgreement::NEITHER, "neither observes DST");
     TEST_ASSERT(dst_rules_agree(a), "which is agreement");
     TEST_ASSERT(format_dst_agreement(a, pump, host).find("neither") != std::string::npos,
@@ -336,7 +401,9 @@ int main() {
   test_a_pump_that_does_not_shift_in_a_zone_that_does();
   test_a_pump_that_shifts_in_a_zone_that_does_not();
   test_two_zones_that_both_shift_on_different_dates();
-  test_last_and_fourth_occurrence_are_not_a_mismatch();
+  test_last_and_fourth_are_the_same_rule_only_when_they_coincide();
+  test_the_date_arithmetic();
+  test_impossible_transition_fields_are_refused();
   test_the_same_dates_with_a_different_shift_is_a_mismatch();
   test_an_unread_rule_is_unknown_not_a_mismatch();
   test_neither_shifting_is_agreement();

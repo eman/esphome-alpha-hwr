@@ -147,9 +147,14 @@ text_sensor:
 ```
 
 It reads `OK (Mar Sun#2 02:00 - Nov Sun#1 02:00, +60 min)` when the two agree,
-and names both rules when they do not. `alpha_hwr_pairing.yaml` declares it; on
-`alpha_hwr_base.yaml` and hand-written blocks, add it or read the `WARN` in the
-log. The read is only issued when the entity is configured.
+and names both rules when they do not.
+
+`alpha_hwr_pairing.yaml` declares it. **On `alpha_hwr_base.yaml` and on
+hand-written blocks you have to add it**, and adding it is the only way to get
+the check at all: the 94/102 read is skipped entirely when the entity is absent,
+so there is no log warning to fall back on either. That is the same
+"don't pay for what you didn't ask for" rule the other optional reads follow —
+but it does mean the diagnostic is opt-in rather than on by default.
 
 **Nothing is corrected automatically.** The Grundfos GO app, this component and
 the sibling Python library all write this pump's clock, and the pump cannot say

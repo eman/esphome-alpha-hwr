@@ -1330,6 +1330,25 @@ void AlphaHwrComponent::update() {
     this->set_timeout("schedule_poll", 500,
                       [this]() { schedule_service_.poll_state(); });
 
+#ifdef USE_TEXT_SENSOR
+    // The Vacation display answers a question about NOW -- is the pump being
+    // held off, and until when (issue #267) -- so it goes stale on its own,
+    // without anything changing on the pump. It used to be republished only
+    // when the single events were re-read or a write settled, which meant a
+    // vacation that ENDED between refreshes went on being displayed as active
+    // until the next reconnect. That is the same defect the clocked picker
+    // fixed, surviving in the entity.
+    //
+    // Costs nothing while the answer is unchanged: publish_text_sensor_if_changed
+    // sends no frame unless the string moves, and this one moves twice in a
+    // vacation's life.
+    if (this->vacation_text_sensor_ != nullptr) {
+      publish_text_sensor_if_changed(
+          this->vacation_text_sensor_,
+          schedule_service_.format_vacation_display(time_service_.now_unix()));
+    }
+#endif
+
     // Periodic control state polling (fixes #54): detect out-of-band pump state
     // changes (e.g., internal schedule execution, manual button press, external
     // app control). Scheduled via set_timeout() with 1000ms delay after telemetry
@@ -1610,7 +1629,7 @@ void AlphaHwrComponent::check_pump_dst_rule_(uint32_t gen) {
       host_rule = services::probe_host_dst_rule(year);
 
     const services::DstAgreement agreement =
-        services::compare_dst_rules(pump_rule, host_rule);
+        services::compare_dst_rules(pump_rule, host_rule, year);
 
     // WARN rather than INFO on a mismatch, and once per connection rather than
     // per poll. The symptom this exists to pre-empt -- "my schedule moved an

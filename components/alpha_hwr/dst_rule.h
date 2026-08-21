@@ -60,16 +60,19 @@ struct DstTransition {
   uint8_t occurrence{0};  ///< 1-4, or 5 meaning "the last one in the month"
   uint8_t hour{0};        ///< 0-23, local
 
+  /// Exact field equality. Note this is NOT how two rules are compared --
+  /// see resolve_transition_day() and compare_dst_rules(), which resolve both
+  /// sides to a concrete date first.
+  ///
+  /// An earlier version of this operator treated any two occurrences `>= 4` as
+  /// equal, reasoning that "last" is sometimes the fourth. That is wrong in the
+  /// direction that matters: a genuine "fourth Sunday" rule and a genuine "last
+  /// Sunday" rule are *different rules*, and in October 2027 they fall a week
+  /// apart (the 24th against the 31st). Collapsing them reported AGREE for
+  /// exactly the case this feature exists to catch.
   bool operator==(const DstTransition &o) const {
-    const bool same_day = month == o.month && weekday == o.weekday && hour == o.hour;
-    if (!same_day)
-      return false;
-    // 5 is "the last one", which in a month where that weekday occurs only four
-    // times IS the fourth. Treating them as different is how a correct EU rule
-    // ("last Sunday in October") reads as a mismatch in some years and not
-    // others -- the noisiest possible false positive, once every few years.
-    const bool both_last = occurrence >= 4 && o.occurrence >= 4;
-    return occurrence == o.occurrence || both_last;
+    return month == o.month && weekday == o.weekday && hour == o.hour &&
+           occurrence == o.occurrence;
   }
   bool operator!=(const DstTransition &o) const { return !(*this == o); }
 };
@@ -101,6 +104,18 @@ inline bool dst_rules_agree(DstAgreement a) {
 /// Bytes in the type 323 v1 object body, after the 3-byte size header.
 static constexpr size_t DST_RULE_BODY_LEN = 10;
 
+/// True when every field could describe a real recurring date.
+///
+/// `occurrence` runs 1-5, where 5 is "the last one in the month"; anything
+/// above 5 is not a slot the pump has.
+inline bool dst_transition_fields_in_range(const DstTransition &d) {
+  const bool month_ok = d.month >= 1 && d.month <= 12;
+  const bool weekday_ok = d.weekday >= 1 && d.weekday <= 7;
+  const bool occurrence_ok = d.occurrence >= 1 && d.occurrence <= 5;
+  const bool hour_ok = d.hour <= 23;
+  return month_ok && weekday_ok && occurrence_ok && hour_ok;
+}
+
 /**
  * Decode `DaylightSavingTime` (94/102, type 323 v1).
  *
@@ -125,12 +140,18 @@ inline DstRule decode_dst_rule(const uint8_t *body, size_t len) {
   // A rule whose months are out of range is not a rule we can compare against
   // anything. Only checked when enabled: a disabled rule's fields are whatever
   // the factory left there, and on the bench unit they are still populated.
+  // Every field of an enabled rule is checked, not just the month and weekday.
+  // A payload carrying occurrence 0 or hour 24 would otherwise decode into a
+  // genuine-looking rule that resolves to no date at all -- reported to the user
+  // as a mismatch against their timezone, which blames the wrong thing.
+  //
+  // Only when enabled: a disabled rule's fields are whatever the factory left
+  // there, and on the bench unit they are still populated. Refusing those would
+  // report "unknown" for a pump that is perfectly clear it does not shift.
   if (r.enabled) {
-    const bool months_in_range = r.start.month >= 1 && r.start.month <= 12 &&
-                                 r.end.month >= 1 && r.end.month <= 12;
-    const bool weekdays_in_range = r.start.weekday >= 1 && r.start.weekday <= 7 &&
-                                   r.end.weekday >= 1 && r.end.weekday <= 7;
-    if (!months_in_range || !weekdays_in_range)
+    const bool start_ok = dst_transition_fields_in_range(r.start);
+    const bool end_ok = dst_transition_fields_in_range(r.end);
+    if (!start_ok || !end_ok)
       r.valid = false;
   }
   return r;
@@ -140,6 +161,89 @@ inline DstRule decode_dst_rule(const uint8_t *body, size_t len) {
 /// (0 = Sunday ... 6 = Saturday).
 inline uint8_t dst_weekday_from_tm(int tm_wday) {
   return static_cast<uint8_t>(tm_wday == 0 ? 7 : tm_wday);
+}
+
+inline bool dst_year_is_leap(int y) {
+  return (y % 4 == 0 && y % 100 != 0) || (y % 400 == 0);
+}
+
+inline uint8_t dst_days_in_month(uint8_t month, int year) {
+  static const uint8_t DIM[12] = {31, 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31};
+  if (month < 1 || month > 12)
+    return 0;
+  if (month == 2 && dst_year_is_leap(year))
+    return 29;
+  return DIM[month - 1];
+}
+
+/// Days from 1970-01-01 to @p year-@p month-@p day.
+///
+/// Arithmetic rather than libc: ESP-IDF's newlib has no timegm(), and its
+/// mktime() does not apply the TZ to a UTC-field tm (the trap
+/// local_utc_offset_seconds() in schedule_service.h documents). Both would be
+/// the obvious way to do this and neither works on the target.
+inline int64_t dst_days_from_epoch(int year, uint8_t month, uint8_t day) {
+  int64_t days = 0;
+  for (int y = 1970; y < year; y++)
+    days += dst_year_is_leap(y) ? 366 : 365;
+  for (uint8_t m = 1; m < month; m++)
+    days += dst_days_in_month(m, year);
+  return days + (day - 1);
+}
+
+/// Day of the week for a civil date, in the pump's encoding (1 = Monday).
+inline uint8_t dst_weekday_of(int year, uint8_t month, uint8_t day) {
+  // 1970-01-01 was a Thursday, which is 4 here.
+  const int64_t d = dst_days_from_epoch(year, month, day);
+  int w = static_cast<int>((d + 3) % 7);
+  if (w < 0)
+    w += 7;
+  return static_cast<uint8_t>(w + 1);
+}
+
+/**
+ * The day of the month a transition rule lands on in @p year, or 0 when the
+ * fields cannot describe one.
+ *
+ * This is what makes two rules comparable. "The last Sunday of October" and
+ * "the fourth Sunday of October" are different rules that happen to coincide in
+ * some years, so comparing the *fields* is wrong in one direction and comparing
+ * them loosely is wrong in the other. Resolving both sides to a concrete date
+ * in the year being asked about is right in both: it answers "will these two
+ * clocks change on the same day", which is the only question anybody has.
+ *
+ * `occurrence >= 5` means "the last one in the month", which is how the EU rule
+ * is normally encoded.
+ */
+inline uint8_t resolve_transition_day(const DstTransition &d, int year) {
+  const uint8_t dim = dst_days_in_month(d.month, year);
+  if (dim == 0)
+    return 0;
+  if (d.weekday < 1 || d.weekday > 7)
+    return 0;
+  if (d.occurrence < 1)
+    return 0;
+
+  uint8_t first = 0;
+  for (uint8_t day = 1; day <= 7; day++) {
+    if (dst_weekday_of(year, d.month, day) == d.weekday) {
+      first = day;
+      break;
+    }
+  }
+  if (first == 0)
+    return 0;  // unreachable: any weekday occurs in the first seven days
+
+  if (d.occurrence >= 5) {
+    uint8_t last = first;
+    while (static_cast<uint8_t>(last + 7) <= dim)
+      last = static_cast<uint8_t>(last + 7);
+    return last;
+  }
+  const int day = first + 7 * (d.occurrence - 1);
+  if (day > dim)
+    return 0;  // e.g. "the fifth Sunday" of a month with four
+  return static_cast<uint8_t>(day);
 }
 
 /**
@@ -236,15 +340,16 @@ inline DstRule probe_host_dst_rule(int year) {
       DstTransition &d = found[transitions_found];
       d.month = static_cast<uint8_t>(just_before.tm_mon + 1);
       d.weekday = dst_weekday_from_tm(just_before.tm_wday);
+      // The ACTUAL occurrence of the observed date, not a guess at how the
+      // rule was written. An earlier version rewrote a final-week transition to
+      // occurrence 5 ("last") so the two sides would compare without
+      // special-casing; that is the wrong place to normalise, because it makes
+      // a host whose rule really is "the fourth Sunday" indistinguishable from
+      // one whose rule is "the last Sunday" in every year where they coincide.
+      // The comparison resolves both sides to a date instead, which needs no
+      // normalisation here and is right in every year.
       d.occurrence = static_cast<uint8_t>(((just_before.tm_mday - 1) / 7) + 1);
       d.hour = static_cast<uint8_t>((just_before.tm_hour + 1) % 24);
-      // "Last in the month" is what a rule usually means when the date is in
-      // the final week; record it the way the pump would encode it so the two
-      // are comparable without special-casing at the comparison.
-      const int days_in_month_after = just_before.tm_mday + 7;
-      static const int DIM[12] = {31, 29, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31};
-      if (days_in_month_after > DIM[just_before.tm_mon])
-        d.occurrence = 5;
     }
     if (transitions_found == 0) {
       offset_before_first = utc_offset_at(hi - 1);
@@ -271,8 +376,35 @@ inline DstRule probe_host_dst_rule(int year) {
   return r;
 }
 
-/// Compare the pump's rule against the node's zone.
-inline DstAgreement compare_dst_rules(const DstRule &pump, const DstRule &host) {
+/// True when two transition rules land on the same instant in @p year.
+///
+/// Resolved to a concrete date rather than compared field by field, so "the
+/// last Sunday of October" and "the fourth Sunday of October" agree in a year
+/// where they coincide and disagree in a year where they do not -- which is
+/// what they actually do, and what a user needs to know.
+inline bool transitions_coincide(const DstTransition &a, const DstTransition &b,
+                                 int year) {
+  if (a.month != b.month)
+    return false;
+  if (a.hour != b.hour)
+    return false;
+  const uint8_t day_a = resolve_transition_day(a, year);
+  const uint8_t day_b = resolve_transition_day(b, year);
+  if (day_a == 0 || day_b == 0)
+    return false;  // one of them describes no date; not something to call equal
+  return day_a == day_b;
+}
+
+/**
+ * Compare the pump's rule against the node's zone, for @p year.
+ *
+ * The year is a parameter rather than a constant because the comparison is
+ * about dates: a rule is a recurrence, and two recurrences can coincide in one
+ * year and not the next. The year that matters is the one the pump is about to
+ * run a schedule in.
+ */
+inline DstAgreement compare_dst_rules(const DstRule &pump, const DstRule &host,
+                                      int year) {
   if (!pump.valid || !host.valid)
     return DstAgreement::UNKNOWN;
   if (!pump.enabled && !host.enabled)
@@ -281,9 +413,10 @@ inline DstAgreement compare_dst_rules(const DstRule &pump, const DstRule &host) 
     return DstAgreement::PUMP_ONLY;
   if (!pump.enabled && host.enabled)
     return DstAgreement::HOST_ONLY;
-  const bool same_dates = pump.start == host.start && pump.end == host.end;
+  const bool same_start = transitions_coincide(pump.start, host.start, year);
+  const bool same_end = transitions_coincide(pump.end, host.end, year);
   const bool same_amount = pump.offset_minutes == host.offset_minutes;
-  if (same_dates && same_amount)
+  if (same_start && same_end && same_amount)
     return DstAgreement::AGREE;
   return DstAgreement::RULES_DIFFER;
 }
