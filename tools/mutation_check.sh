@@ -1223,7 +1223,7 @@ MUTATIONS=(
 # is deliberately not listed: removing it leaves the suspension intact, because
 # the timer still declines to act, so it is belt-and-braces rather than the fix
 # and no test can distinguish it. Verified by removing each in turn.
-"suspend-undone-by-the-reconnect-settle-timer|components/alpha_hwr/alpha_hwr.cpp|if (this->parent_ != nullptr && !this->suspended_) {|if (this->parent_ != nullptr) {"
+"suspend-undone-by-the-reconnect-settle-timer|components/alpha_hwr/alpha_hwr.cpp|    // reading. Raised in review on #285.\n    if (this->suspended_) {|    // reading. Raised in review on #285.\n    if (false) {"
 # A link taken down on purpose is not Unreachable and not a fault. Both of these
 # are what an operator glancing at Home Assistant sees, and what an automation
 # reads -- the fault mask in particular outlasts the suspension deliberately, so
@@ -1235,9 +1235,25 @@ MUTATIONS=(
 # leaving any suspension past the threshold to resume through a spurious
 # Unreachable. Reported by the person who wrote the same bug in their own
 # implementation and caught it at 85 seconds.
-"suspend-release-leaves-the-unreachable-clock-stopped|components/alpha_hwr/alpha_hwr.cpp|    this->link_last_open_ms_ = millis();\n    if (this->parent_ != nullptr) {\n      this->parent_->set_auto_connect(true);\n    }|    if (this->parent_ != nullptr) {\n      this->parent_->set_auto_connect(true);\n    }"
+"suspend-release-leaves-the-unreachable-clock-stopped|components/alpha_hwr/alpha_hwr.cpp|    this->link_last_open_ms_ = millis();\n    // ...but NOT if a reconnect-settle hold is still in force.|    // mutated: clock left stopped\n    // ...but NOT if a reconnect-settle hold is still in force."
 "suspended-link-reads-as-a-failed-one|components/alpha_hwr/alpha_hwr.cpp|  if (this->suspended_) {\n    // Ahead of every other rung|  if (false) {\n    // Ahead of every other rung"
-"suspend-fault-mask-removed|components/alpha_hwr/alpha_hwr.cpp|    bool show_none = this->suspend_fault_mask_;|    bool show_none = false;"
+"suspend-fault-mask-removed|components/alpha_hwr/alpha_hwr.cpp|    bool show_none = this->suspended_;|    bool show_none = false;"
+# Three more from the review on #285, all reproduced before fixing.
+#
+# Releasing must not spend an active reconnect-settle hold. That hold exists
+# because a premature encryption request into a not-ready pump can fail with
+# 0x61 and make ESP-IDF erase the bond -- which strands the pump until someone
+# re-pairs at the pump itself.
+"suspend-release-bypasses-an-active-settle-hold|components/alpha_hwr/alpha_hwr.cpp|    if (this->parent_ != nullptr && !this->reconnect_settling_) {|    if (this->parent_ != nullptr) {"
+# Clearing the ONE expected reason, rather than masking the surface until the
+# pump is ready. The mask was the first cut and it hides a failed reconnect, an
+# auth error or a readiness fault -- indefinitely, if recovery never succeeds.
+"suspend-release-leaves-its-own-teardown-on-the-fault-surface|components/alpha_hwr/alpha_hwr.cpp|    this->ble_manager_.clear_last_failure();|    // mutated: leave the reason latched"
+# A suspension is not an outage. on_disconnect() samples the interval up to an
+# involuntary drop deliberately; a suspension ends because someone clicked, so
+# recording it moves link_gaps_truncated -- the trust check on every other
+# number in that histogram -- once per suspend.
+"suspend-recorded-as-a-truncated-gap|components/alpha_hwr/alpha_hwr.cpp|    this->link_gap_.disarm();|    // mutated: sample it as an outage"
 "bridge-parse-failure-settles-rejected|components/alpha_hwr/api_bridge.cpp|  result.status = WriteStatus::INVALID;|  result.status = WriteStatus::REJECTED;"
 )
 

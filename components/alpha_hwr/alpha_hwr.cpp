@@ -518,13 +518,21 @@ bool AlphaHwrComponent::parse_device(
   ESP_LOGI(TAG, "Pump reappeared; holding reconnect %" PRIu32 " ms to let it settle",
            this->reconnect_settle_ms_);
   this->set_timeout("reconnect_settle", this->reconnect_settle_ms_, [this]() {
-    ESP_LOGI(TAG, "Reconnect settle window elapsed; allowing reconnect");
     this->reconnect_settling_ = false;
     this->reconnect_timer_armed_ = false;
     // Guard 1 stops this timer being armed during a suspend, but not a suspend
     // that arrives while it is already running. Restoring auto-connect here
     // would silently undo the switch (issue #243).
-    if (this->parent_ != nullptr && !this->suspended_) {
+    //
+    // The log lives inside the branch rather than above it. It used to announce
+    // "allowing reconnect" and then decline to allow it -- saying the opposite
+    // of what happened, in the one log someone debugging this path would be
+    // reading. Raised in review on #285.
+    if (this->suspended_) {
+      ESP_LOGI(TAG, "Reconnect settle window elapsed, but the link is "
+                    "suspended; leaving it down");
+    } else if (this->parent_ != nullptr) {
+      ESP_LOGI(TAG, "Reconnect settle window elapsed; allowing reconnect");
       this->parent_->set_auto_connect(true);
     }
   });
@@ -817,9 +825,13 @@ void AlphaHwrComponent::set_suspended(bool suspended) {
   this->suspended_ = suspended;
 
   if (suspended) {
-    // The mask goes up FIRST, so the disconnect below cannot publish a fault
-    // before evaluate_link_status() next runs.
-    this->suspend_fault_mask_ = true;
+    // BEFORE the teardown, because the DISCONNECT event it provokes is
+    // asynchronous and lands in the handler that samples this. on_disconnect()
+    // deliberately records the interval up to an involuntary drop -- that
+    // interval is evidence about the link -- but a suspension ends because
+    // someone clicked, so recording it would move `link_gaps_truncated`, the
+    // trust check on the whole histogram, once per suspend (issue #243).
+    this->link_gap_.disarm();
     if (this->parent_ != nullptr) {
       // Without this the client reconnects from IDLE on the next matching
       // advertisement -- `ble_client.disconnect` alone is not a suspend, which
@@ -829,6 +841,13 @@ void AlphaHwrComponent::set_suspended(bool suspended) {
     this->ble_manager_.suspend_link();
   } else {
     ESP_LOGI(TAG, "Releasing BLE suspend; reconnecting to the pump");
+    // Forget the teardown we asked for, rather than masking the surface until
+    // the pump is ready. Masking was the first cut and it hides too much: a
+    // failed reconnect, an authentication error or a readiness fault after the
+    // release would all read "None", indefinitely if recovery never succeeds.
+    // Clearing the ONE expected reason keeps the self-inflicted 0x16 off the
+    // surface across the reconnect without hiding what replaces it.
+    this->ble_manager_.clear_last_failure();
     // Restart the Unreachable clock. It is `now - link_last_open_ms_ >
     // LINK_UNREACHABLE_MS`, and that stamp only advances while the session is
     // READY -- so it stopped moving the moment we took the link down. Without
@@ -842,7 +861,14 @@ void AlphaHwrComponent::set_suspended(bool suspended) {
     // failure needs a suspension longer than the threshold, which is precisely
     // what this switch is for.
     this->link_last_open_ms_ = millis();
-    if (this->parent_ != nullptr) {
+    // ...but NOT if a reconnect-settle hold is still in force. That hold exists
+    // because a premature encryption request into a not-ready pump can fail
+    // with 0x61 and make ESP-IDF erase the bond -- and an erased bond strands
+    // the pump until someone re-pairs at the pump itself. A suspend arriving
+    // and being released inside someone else's settle window must not spend
+    // that. The settle timer restores auto-connect when it is safe; with
+    // suspended_ now false it will.
+    if (this->parent_ != nullptr && !this->reconnect_settling_) {
       this->parent_->set_auto_connect(true);
     }
     // suspend_fault_mask_ deliberately stays up; see its declaration. It comes
@@ -879,7 +905,7 @@ void AlphaHwrComponent::evaluate_link_status() {
     // one-liner was written first and --verify refused it. Restructuring for the
     // tool is the right trade: an entry that cannot be written is a hole that
     // reads as covered.
-    bool show_none = this->suspend_fault_mask_;
+    bool show_none = this->suspended_;
     if (this->link_pump_ready_seen_) show_none = true;
     if (lf.empty()) show_none = true;
     const std::string shown = show_none ? std::string("None") : lf;
@@ -1206,9 +1232,6 @@ void AlphaHwrComponent::update() {
         // a watchdog that treats an undeclared entity as "never ready" recycles
         // a healthy link forever (issue #211 review).
         this->link_pump_ready_seen_ = true;
-        // ...and with it the suspend mask, which has been holding the fault
-        // surface at "None" across the reconnect (issue #243).
-        this->suspend_fault_mask_ = false;
         if (ready_sensor_ && !ready_sensor_->state)
           ready_sensor_->publish_state(true);
         // The one thing that refutes a readiness fault, so the one thing that

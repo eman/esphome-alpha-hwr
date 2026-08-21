@@ -162,7 +162,7 @@ regardless — this node cannot decline it — but answering is not bonding.)
 > one-connection constraint rather than something observed, and it was wrong for
 > the case this section is actually about.
 >
-> **Turn on `Suspend BLE Link`** before connecting the app, and off again after.
+> **Turn on `Suspend Pump Link`** before connecting the app, and off again after.
 > The node drops the connection and stops reconnecting until you release it, so
 > the pump is free. See [Suspending the BLE link](#suspending-the-ble-link) —
 > it is not only for the GO app.
@@ -215,8 +215,11 @@ shape. So the third cause, if there is one, is still unnamed.
 The pump accepts **one BLE connection at a time**. While this node is bonded and
 connected it owns that connection, and nothing else can have it.
 
-`Suspend BLE Link` is a diagnostic switch that drops the link and stops
-reconnecting until you turn it off. Two uses, and the second is the one this
+`Suspend Pump Link` is a switch that drops the link and stops reconnecting
+until you turn it off. It sits in the same `Pump Link` family as the status and
+fault sensors it acts on, and it carries **no** `entity_category` — Home
+Assistant would otherwise leave it off auto-generated dashboards, which is the
+last place you want the control you need at that moment. Two uses, and the second is the one this
 project leans on hardest:
 
 **Handing the pump to the Grundfos GO app.** The app is how you unlock the
@@ -241,6 +244,12 @@ reads `None`. Neither is a fault. The fault stays masked through the reconnect
 until the pump is READY again, so releasing the switch does not publish the
 node's own `Local Host Terminated (0x16)` for the ~15 s it takes to get back —
 which is exactly the window an automation watches.
+
+**Which package provides it.** The switch ships in `alpha_hwr_pairing.yaml`,
+alongside the link diagnostics, because that is the package a bonded node loads
+— and a bonded, connected node is the one holding the pump. If you build a
+configuration from `alpha_hwr_base.yaml` instead, add the switch yourself or
+load the pairing package.
 
 **Not persisted.** A reboot comes back connected. A node that refuses to talk to
 the pump after a power cut, because of a switch flipped a week ago, is a worse

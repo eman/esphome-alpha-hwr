@@ -130,6 +130,48 @@ text_sensor:
     reset_reason:
       name: "Reset Reason"
 
+# ==============================================================================
+# Diagnostic control
+# ==============================================================================
+#
+# Here rather than in alpha_hwr_controls.yaml, and the reason is which
+# configurations ship with it. The switch below is for handing the pump to
+# something else, which only matters for a node that is BONDED AND CONNECTED --
+# and that is this package. Both shipped bonded examples
+# (hwr-pairing-example.yaml and hwr-pump-schedule-example.yaml) load this and not
+# controls, so putting it there left them without the switch that
+# docs/configuration.md tells them to turn on. Raised in review on #285.
+switch:
+  # Diagnostic suspend (issue #243). The pump accepts one BLE connection at a
+  # time, so while this node is connected nothing else can reach the pump --
+  # not the Grundfos GO app (which is how you unlock the front panel, which is
+  # how you re-pair), and not another client doing bench work or protocol
+  # discovery. Before this switch the only way to hand the pump over was to
+  # remove power from the node. Clearing the bond is NOT the alternative: that
+  # strands the pump until someone re-pairs at the pump itself.
+  #
+  # Not persisted: a reboot comes back connected. A node that refuses to talk to
+  # the pump because someone flipped a switch a week ago is a worse failure than
+  # the inconvenience it solves.
+  # No entity_category, deliberately. Home Assistant groups `diagnostic` and
+  # `config` entities onto a separate card, leaves both out of auto-generated
+  # dashboards, and excludes both from voice assistants -- so categorising this
+  # would hide the one control someone needs at the exact moment they are trying
+  # to get another client onto the pump. It reports nothing; you reach for it on
+  # purpose. HA also caches the category in the entity registry, so a later
+  # change does not cleanly propagate to installs that already have the entity:
+  # whatever it ships as is what existing users keep. Raised in review on #285.
+  - platform: template
+    name: "Suspend Pump Link"
+    id: suspend_pump_link_switch
+    icon: "mdi:bluetooth-off"
+    optimistic: false
+    lambda: 'return id(pump).is_suspended();'
+    turn_on_action:
+      - lambda: 'id(pump).set_suspended(true);'
+    turn_off_action:
+      - lambda: 'id(pump).set_suspended(false);'
+
 api:
   # Required by the alpha_hwr programmatic write services + write_settled event (issue #92)
   custom_services: true

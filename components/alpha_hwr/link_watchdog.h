@@ -469,6 +469,17 @@ class LinkGapSampler {
     this->armed_ = false;
   }
 
+  /// End the interval without recording it: the session was ended on purpose.
+  ///
+  /// The two cases above sample deliberately, and the reasoning is that an
+  /// involuntary end still measures real airtime -- the interval up to a recycle
+  /// or a drop is evidence about the link, and discarding it censors the
+  /// statistic. A diagnostic suspend is the case that reasoning does not cover.
+  /// It ends because a human clicked a switch, so its length says nothing about
+  /// the pump, and counting it would move `truncated_` -- the trust check on
+  /// everything else here -- once per suspension (issue #243).
+  void disarm() { this->armed_ = false; }
+
   uint32_t max_ms() const { return this->max_ms_; }
 
   /// Intervals longer than LINK_GAP_THRESHOLDS_MS[index], since boot.

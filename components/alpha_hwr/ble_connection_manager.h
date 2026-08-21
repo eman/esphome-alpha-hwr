@@ -123,6 +123,13 @@ class BLEConnectionManager {
   /// nothing about the pump's willingness to pair.
   void suspend_link();
 
+  /// Forget the latched failure reason. For the suspend release (issue #243):
+  /// the reason on the surface is the teardown we asked for, and leaving it
+  /// there would republish it across the reconnect -- while MASKING everything
+  /// until the pump is ready would hide a genuine failure of that reconnect.
+  /// Clearing the one expected reason does neither.
+  void clear_last_failure() { last_failure_.clear(); }
+
   /// Latch a failure reason WITHOUT touching the link.
   ///
   /// force_disconnect() is this plus a teardown, and separating them is the

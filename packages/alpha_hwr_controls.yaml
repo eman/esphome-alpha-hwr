@@ -48,29 +48,6 @@ switch:
     turn_off_action:
       - lambda: 'id(pump).set_engage_pump(false);'
 
-  # Diagnostic suspend (issue #243). The pump accepts one BLE connection at a
-  # time, so while this node is connected nothing else can reach the pump --
-  # not the Grundfos GO app (which is how you unlock the front panel, which is
-  # how you re-pair), and not another client doing bench work or protocol
-  # discovery. Before this switch the only way to hand the pump over was to
-  # remove power from the node. Clearing the bond is NOT the alternative: that
-  # strands the pump until someone re-pairs at the pump itself.
-  #
-  # Not persisted: a reboot comes back connected. A node that refuses to talk to
-  # the pump because someone flipped a switch a week ago is a worse failure than
-  # the inconvenience it solves.
-  - platform: template
-    name: "Suspend BLE Link"
-    id: suspend_ble_link_switch
-    icon: "mdi:bluetooth-off"
-    entity_category: diagnostic
-    optimistic: false
-    lambda: 'return id(pump).is_suspended();'
-    turn_on_action:
-      - lambda: 'id(pump).set_suspended(true);'
-    turn_off_action:
-      - lambda: 'id(pump).set_suspended(false);'
-
   # Schedule Enable/Disable Control.
   # Enabling forces the pump to AUTO so the schedule can actually run it (a
   # STOP + schedule-enabled pump never runs); disabling stops the pump. "Engage
