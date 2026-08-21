@@ -821,6 +821,26 @@ private:
   uint32_t link_last_open_ms_{0};
   uint32_t link_last_eval_ms_{0};
   uint16_t link_consecutive_failures_{0};
+  /// Diagnostic suspend (issue #243): the link is down because someone asked for
+  /// it, not because anything failed.
+  ///
+  /// The pump holds one BLE connection at a time, so a bonded, connected node
+  /// owns it and the Grundfos GO app cannot have it -- and the GO app is how you
+  /// unlock the pump's front panel. Before this the only way to hand the pump
+  /// over was to remove power from the node, which is a remote action on PoE and
+  /// a walk to the pump on USB. The reporter logged six power cycles in one
+  /// night doing exactly that, with outages from 44 seconds to 40 minutes.
+  bool suspended_{false};
+
+  /// Holds Pump Link Fault at "None" from the moment of suspension until the
+  /// pump is READY again -- deliberately OUTLASTING the suspension itself.
+  ///
+  /// Clearing it on release would republish the self-inflicted
+  /// `Local Host Terminated (0x16)` for the ~15 s between reconnecting and
+  /// readiness, which is precisely the window an automation watches. The one
+  /// thing that refutes a fault is the pump working, so that is what clears it.
+  bool suspend_fault_mask_{false};
+
   bool link_ever_opened_{false};
   bool link_reached_ready_{false};
   std::string link_last_status_;
@@ -1164,6 +1184,15 @@ public:
   // "Engage Pump" switch: mode engaged continuously *now* = AUTO and not
   // schedule-gated. Returns false when either input is not yet cached (switch
   // shows unknown).
+  /// Drop the BLE link and stop reconnecting until released (issue #243).
+  ///
+  /// Not persisted: the flag initialises false, so a node coming back from a
+  /// power cut is connected. A node that refuses to talk to the pump because
+  /// someone flipped a switch a week ago is a worse failure than the
+  /// inconvenience this solves.
+  void set_suspended(bool suspended);
+  bool is_suspended() const { return suspended_; }
+
   bool get_engage_pump_state(bool *result) {
     bool schedule_on = false;
     if (!control_service_.is_pump_enabled_valid() ||

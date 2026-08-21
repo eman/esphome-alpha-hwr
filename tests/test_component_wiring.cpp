@@ -1238,6 +1238,154 @@ void test_a_disconnect_does_not_publish_a_drift_reading() {
               "measured a drift");
 }
 
+// ── Diagnostic suspend (issue #243) ──────────────────────────────────────────
+//
+// The pump holds one BLE connection at a time, so a bonded, connected node owns
+// it and the Grundfos GO app cannot. Before this the only way to hand the pump
+// over was to remove power from the node.
+//
+// The two calls are trivial. What needs testing is the three guards, because
+// without them the component undoes its own switch: the reconnect-settle path
+// (`reconnect_settle_time`, on by default) turns auto-connect off on a
+// disconnect and schedules a timer that turns it back on. A suspend is a
+// disconnect, so it trips that path with its own teardown and the flag comes
+// straight back. Reported from a node running the default window: suspended for
+// 2.3 seconds, all of it the window.
+
+/// Hand parse_device() an advertisement from the pump, which is what starts the
+/// settle timer once the pump reappears after a drop.
+static void advertise_pump(Rig &r) {
+  esphome::esp32_ble_tracker::ESPBTDevice dev;
+  dev.set_address(r.client.get_address());
+  r.component.parse_device(dev);
+}
+
+/// Put the rig in the state the guards are about, and PROVE it -- both defaults
+/// silently make these tests vacuous:
+///
+///   - the mock's `auto_connect_` starts FALSE, so "suspending clears it" passes
+///     against a component that does nothing at all. Real builds default the
+///     YAML option to true, which is what this restores.
+///   - `bond_device_num` starts 0, and the settle block is gated on
+///     `esp_ble_get_bond_device_num() > 0`, so the whole path the guards protect
+///     never executes. Both guards could be deleted with the suite still green;
+///     that is how the first draft of these tests scored.
+static void arm_the_settle_path(Rig &r) {
+  esp_gap_mock().bond_device_num = 1;
+  r.client.set_auto_connect(true);
+  r.component.set_reconnect_settle_time(2000);
+}
+
+void test_suspend_drops_the_link_and_stops_reconnecting() {
+  std::cout << "\n=== Suspend drops the link and does not reconnect ===" << std::endl;
+  Rig r;
+  arm_the_settle_path(r);
+  r.setup();
+  r.connect_and_subscribe();
+  r.advance(2000);
+  TEST_ASSERT(r.client.mock_auto_connect(),
+              "precondition: auto-connect is on, so clearing it can be seen");
+
+  const int before = r.client.mock_disconnect_calls();
+  r.component.set_suspended(true);
+
+  TEST_ASSERT(r.client.mock_disconnect_calls() == before + 1,
+              "suspending drops the BLE link");
+  TEST_ASSERT(!r.client.mock_auto_connect(),
+              "  ...and clears auto-connect, which is what makes it a suspend "
+              "rather than a disconnect the client undoes on the next advert");
+
+  // The disconnect the suspend just caused, then the pump advertising again --
+  // exactly the sequence that fed the settle timer and released the switch.
+  r.disconnect(ESP_GATT_CONN_TERMINATE_LOCAL_HOST);
+  advertise_pump(r);
+  r.advance(10000);
+
+  TEST_ASSERT(!r.client.mock_auto_connect(),
+              "  ...and it is STILL suspended ten seconds later: the settle "
+              "path did not hand auto-connect back");
+  TEST_ASSERT(r.component.is_suspended(), "  ...and the component says so");
+}
+
+void test_release_restores_the_link() {
+  std::cout << "\n=== Releasing the suspend reconnects ===" << std::endl;
+  Rig r;
+  arm_the_settle_path(r);
+  r.setup();
+  r.connect_and_subscribe();
+  r.advance(2000);
+
+  r.component.set_suspended(true);
+  r.disconnect(ESP_GATT_CONN_TERMINATE_LOCAL_HOST);
+  advertise_pump(r);
+  r.advance(5000);
+  TEST_ASSERT(!r.client.mock_auto_connect(), "suspended");
+
+  r.component.set_suspended(false);
+  TEST_ASSERT(r.client.mock_auto_connect(),
+              "releasing restores auto-connect, so the client reconnects on the "
+              "pump's next advertisement");
+  TEST_ASSERT(!r.component.is_suspended(), "  ...and the flag is down");
+}
+
+// The guard the first test cannot reach: a suspend arriving while the settle
+// timer is ALREADY running. Guard 1 stops the timer being armed during a
+// suspend; only guard 2 stops a timer armed before it from firing into one.
+void test_a_suspend_during_a_settle_window_is_not_undone_by_the_timer() {
+  std::cout << "\n=== A suspend mid-settle survives the timer ===" << std::endl;
+  Rig r;
+  arm_the_settle_path(r);
+  r.setup();
+  r.connect_and_subscribe();
+  r.advance(2000);
+
+  // An ordinary drop arms the settle path, and the pump reappearing starts the
+  // timer. No suspend yet.
+  r.disconnect(ESP_GATT_CONN_TIMEOUT);
+  advertise_pump(r);
+  TEST_ASSERT(!r.client.mock_auto_connect(),
+              "precondition: the settle path really is holding auto-connect "
+              "down, so the timer below has something to restore");
+
+  // Suspend lands inside the window, then the window elapses.
+  r.component.set_suspended(true);
+  r.advance(6000);
+
+  TEST_ASSERT(!r.client.mock_auto_connect(),
+              "the settle timer fired into a suspended link and left it alone");
+  TEST_ASSERT(r.component.is_suspended(), "  ...and it is still suspended");
+}
+
+void test_a_suspended_link_reads_as_suspended_not_as_a_fault() {
+  std::cout << "\n=== A suspended link is not a fault ===" << std::endl;
+  Rig r;
+  arm_the_settle_path(r);
+  r.setup();
+  r.connect_and_subscribe();
+  r.advance(2000);
+
+  r.component.set_suspended(true);
+  r.disconnect(ESP_GATT_CONN_TERMINATE_LOCAL_HOST);
+  r.advance(30000);   // well past the Unreachable threshold
+
+  TEST_ASSERT(r.link_status.state == "Suspended",
+              "Pump Link Status reads Suspended, not Unreachable -- a link we "
+              "took down on purpose is not a broken one");
+  TEST_ASSERT(r.link_fault.state == "None",
+              "  ...and Pump Link Fault reads None, not the node's own "
+              "Local Host Terminated");
+
+  // The mask outlasts the release. Between reconnecting and Pump Ready there is
+  // a ~15 s window in which the self-inflicted 0x16 would otherwise be
+  // republished -- which is precisely the window an automation watches.
+  r.component.set_suspended(false);
+  r.advance(3000);
+  TEST_ASSERT(r.link_fault.state == "None",
+              "  ...and it stays None across the reconnect, rather than "
+              "republishing the disconnect the suspend itself caused");
+}
+
+
 int main() {
   std::cout << "===========================================================" << std::endl;
   std::cout << "  Component BLE Wiring Test Suite" << std::endl;
@@ -1257,6 +1405,10 @@ int main() {
   test_one_cache_is_not_enough_for_ready();
   test_ready_clears_on_disconnect();
   test_a_disconnect_does_not_publish_a_drift_reading();
+  test_suspend_drops_the_link_and_stops_reconnecting();
+  test_release_restores_the_link();
+  test_a_suspend_during_a_settle_window_is_not_undone_by_the_timer();
+  test_a_suspended_link_reads_as_suspended_not_as_a_fault();
   test_link_gap_baseline_is_published_once_at_zero();
   test_gap_counters_do_not_publish_on_every_tick();
   test_a_quiet_link_fills_the_rungs_end_to_end();

@@ -153,20 +153,32 @@ capability, no bonding requirement and no key distribution, so nothing is set up
 to complete a bond. (ESPHome's own BLE client answers the pump's request
 regardless — this node cannot decline it — but answering is not bonding.)
 
-> **When the node does have to be stopped.** A node that is *bonded and
+> **When the node does have to give up the link.** A node that is *bonded and
 > connected* holds the pump's one connection, and the GO app cannot have it at
-> the same time — power the node down, or otherwise drop its link, before
-> connecting the app. That is a different situation from the one above, where
-> the node is unbonded and failing to connect, and where it has been observed
-> across about a dozen attempts not to interfere. An earlier version of this
-> page told you to stop the node in both cases; that was an inference from the
+> the same time. That is a different situation from the one above, where the
+> node is unbonded and failing to connect, and where it has been observed across
+> about a dozen attempts not to interfere. An earlier version of this page told
+> you to stop the node in both cases; that was an inference from the
 > one-connection constraint rather than something observed, and it was wrong for
 > the case this section is actually about.
 >
-> There is no built-in way to idle the link — no suspend switch that drops the
-> BLE connection and stops reconnecting until you release it. Powering the node
-> down is the workaround, which is easy on PoE and less so on USB beside the
-> pump.
+> **Turn on `Suspend BLE Link`.** The node drops the connection and stops
+> reconnecting until you turn it off again, so the pump is free for the app. It
+> is a diagnostic switch and it is not persisted — a reboot comes back connected,
+> deliberately, because a node refusing to talk to the pump after a power cut
+> because of a switch flipped last week is a worse failure than the inconvenience
+> it solves.
+>
+> While suspended, **Pump Link Status** reads `Suspended` and **Pump Link Fault**
+> reads `None`. Neither is a fault, and the fault stays masked through the
+> reconnect until the pump is READY again — otherwise releasing the switch would
+> publish the node's own `Local Host Terminated (0x16)` for the ~15 s it takes to
+> get back, which is exactly the window an automation watches.
+>
+> A stock `ble_client.disconnect` is **not** a substitute: the client reconnects
+> from `IDLE` on the next matching advertisement, so the link is back within a
+> scan interval. Before this switch existed, powering the node down was the only
+> thing that worked — easy on PoE, a walk to the pump on USB.
 
 Two caveats on the procedure. It is one owner's routine on one pump, not
 something this project has verified across models, and the panel-unlock step in

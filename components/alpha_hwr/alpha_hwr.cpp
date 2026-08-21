@@ -228,8 +228,22 @@ void AlphaHwrComponent::setup() {
     // off would only slow pairing. esp_ble_get_bond_device_num() > 0 is the same
     // bond test BLEConnectionManager::check_is_bonded() starts with; for this
     // single-pump node it means "the pump is bonded."
-    if (this->reconnect_settle_ms_ > 0 && this->parent_ != nullptr &&
-        esp_ble_get_bond_device_num() > 0) {
+    // ...and not while suspended (issue #243). The settle path exists to hold a
+    // reconnect off briefly; arming it during a suspend schedules the timer that
+    // hands auto-connect straight back, so the switch would release itself a
+    // couple of seconds after being flipped. Reported from a node running the
+    // default settle window: suspended for 2.3 seconds, all of it the window.
+    //
+    // Belt-and-braces rather than the fix, and worth being honest about which.
+    // The guard on the timer callback below is what actually holds the
+    // suspension -- delete THIS term and the suspension still survives, because
+    // the timer fires into a suspended link and declines to act. Verified by
+    // removing each in turn. What this one buys is that the component does not
+    // arm a state machine it has no use for during a suspend, and does not log
+    // "holding reconnect until pump reappears" about a link nobody is waiting
+    // to reconnect.
+    if (!this->suspended_ && this->reconnect_settle_ms_ > 0 &&
+        this->parent_ != nullptr && esp_ble_get_bond_device_num() > 0) {
       ESP_LOGI(TAG, "Disconnected; holding reconnect until pump reappears + %" PRIu32 " ms",
                this->reconnect_settle_ms_);
       this->parent_->set_auto_connect(false);
@@ -507,7 +521,10 @@ bool AlphaHwrComponent::parse_device(
     ESP_LOGI(TAG, "Reconnect settle window elapsed; allowing reconnect");
     this->reconnect_settling_ = false;
     this->reconnect_timer_armed_ = false;
-    if (this->parent_ != nullptr) {
+    // Guard 1 stops this timer being armed during a suspend, but not a suspend
+    // that arrives while it is already running. Restoring auto-connect here
+    // would silently undo the switch (issue #243).
+    if (this->parent_ != nullptr && !this->suspended_) {
       this->parent_->set_auto_connect(true);
     }
   });
@@ -793,6 +810,34 @@ void AlphaHwrComponent::publish_link_diagnostics_(uint32_t now_ms) {
 //                 failing before READY.
 //   Connecting    not ready, opened within 20s, fewer than 3 failures: a normal
 //                 in-progress attempt (including the first after a clean drop).
+// Diagnostic suspend (issue #243). Two calls and three guards; the guards are
+// the whole of it, because the component otherwise fights its own switch.
+void AlphaHwrComponent::set_suspended(bool suspended) {
+  if (suspended == this->suspended_) return;
+  this->suspended_ = suspended;
+
+  if (suspended) {
+    // The mask goes up FIRST, so the disconnect below cannot publish a fault
+    // before evaluate_link_status() next runs.
+    this->suspend_fault_mask_ = true;
+    if (this->parent_ != nullptr) {
+      // Without this the client reconnects from IDLE on the next matching
+      // advertisement -- `ble_client.disconnect` alone is not a suspend, which
+      // is why powering the node down was the only thing that worked.
+      this->parent_->set_auto_connect(false);
+    }
+    this->ble_manager_.suspend_link();
+  } else {
+    ESP_LOGI(TAG, "Releasing BLE suspend; reconnecting to the pump");
+    if (this->parent_ != nullptr) {
+      this->parent_->set_auto_connect(true);
+    }
+    // suspend_fault_mask_ deliberately stays up; see its declaration. It comes
+    // down when the pump is READY again, alongside link_pump_ready_seen_.
+  }
+  this->evaluate_link_status();
+}
+
 void AlphaHwrComponent::evaluate_link_status() {
 #ifdef USE_TEXT_SENSOR
   // Companion sensor: show the latched failure reason only while the link is
@@ -815,8 +860,16 @@ void AlphaHwrComponent::evaluate_link_status() {
   // usable yet during that window.
   if (this->pump_last_link_failure_sensor_ != nullptr) {
     const std::string &lf = this->ble_manager_.get_last_failure();
-    const std::string shown =
-        (this->link_pump_ready_seen_ || lf.empty()) ? std::string("None") : lf;
+    // Three statements rather than one `||` chain, because a line containing a
+    // `|` cannot be anchored by tools/mutation_check.sh -- its entries are split
+    // on that character, so the search field is truncated mid-expression. The
+    // one-liner was written first and --verify refused it. Restructuring for the
+    // tool is the right trade: an entry that cannot be written is a hole that
+    // reads as covered.
+    bool show_none = this->suspend_fault_mask_;
+    if (this->link_pump_ready_seen_) show_none = true;
+    if (lf.empty()) show_none = true;
+    const std::string shown = show_none ? std::string("None") : lf;
     if (shown != this->link_last_failure_published_) {
       this->link_last_failure_published_ = shown;
       this->pump_last_link_failure_sensor_->publish_state(shown);
@@ -832,7 +885,12 @@ void AlphaHwrComponent::evaluate_link_status() {
   const uint32_t now = millis();
 
   const char *state;
-  if (this->session_.is_ready()) {
+  if (this->suspended_) {
+    // Ahead of every other rung, including the ready check: a link we took down
+    // on purpose is not Unreachable, not Reconnecting, and not a fault. The
+    // operator glancing at Home Assistant should see the state they asked for.
+    state = "Suspended";
+  } else if (this->session_.is_ready()) {
     state = "Connected";
     this->link_last_open_ms_ = now;  // measure "unreachable" from the drop, not the first open
   } else if (!this->link_ever_opened_) {
@@ -1135,6 +1193,9 @@ void AlphaHwrComponent::update() {
         // a watchdog that treats an undeclared entity as "never ready" recycles
         // a healthy link forever (issue #211 review).
         this->link_pump_ready_seen_ = true;
+        // ...and with it the suspend mask, which has been holding the fault
+        // surface at "None" across the reconnect (issue #243).
+        this->suspend_fault_mask_ = false;
         if (ready_sensor_ && !ready_sensor_->state)
           ready_sensor_->publish_state(true);
         // The one thing that refutes a readiness fault, so the one thing that
@@ -1230,7 +1291,13 @@ void AlphaHwrComponent::update() {
     // Check for timed-out response handlers (2 second timeout)
     transport_.check_timeouts(2000);
   } else {
-    ESP_LOGW(TAG, "Skipping polls - not ready");
+    // Down on purpose is not worth a warning every ten seconds -- 27 lines in
+    // one 4.5 minute session on the reporter's node (issue #243).
+    if (this->suspended_) {
+      ESP_LOGD(TAG, "Skipping polls - link suspended");
+    } else {
+      ESP_LOGW(TAG, "Skipping polls - not ready");
+    }
   }
 }
 

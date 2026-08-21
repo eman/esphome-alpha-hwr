@@ -1213,6 +1213,24 @@ MUTATIONS=(
 # -1 means "not known". Without the guard, -1 != 0 reads as true and a write
 # that never reached the pump reports a fabricated state.
 "bridge-state-fabricated-from-unknown-flags|components/alpha_hwr/api_bridge.cpp|      if (result.enabled >= 0 && result.sched_enabled >= 0) {|      if (true) {"
+# Issue #243: the diagnostic suspend. Two calls, and the guards are the whole of
+# it -- without them the component undoes its own switch, because the
+# reconnect-settle path turns auto-connect off on a disconnect and schedules a
+# timer that turns it back on. A suspend IS a disconnect, so it trips that path
+# with its own teardown.
+#
+# The timer guard is the load-bearing one. Its sibling in the disconnect handler
+# is deliberately not listed: removing it leaves the suspension intact, because
+# the timer still declines to act, so it is belt-and-braces rather than the fix
+# and no test can distinguish it. Verified by removing each in turn.
+"suspend-undone-by-the-reconnect-settle-timer|components/alpha_hwr/alpha_hwr.cpp|if (this->parent_ != nullptr && !this->suspended_) {|if (this->parent_ != nullptr) {"
+# A link taken down on purpose is not Unreachable and not a fault. Both of these
+# are what an operator glancing at Home Assistant sees, and what an automation
+# reads -- the fault mask in particular outlasts the suspension deliberately, so
+# releasing does not republish the node's own 0x16 for the ~15 s it takes to get
+# back to Pump Ready.
+"suspended-link-reads-as-a-failed-one|components/alpha_hwr/alpha_hwr.cpp|  if (this->suspended_) {\n    // Ahead of every other rung|  if (false) {\n    // Ahead of every other rung"
+"suspend-fault-mask-removed|components/alpha_hwr/alpha_hwr.cpp|    bool show_none = this->suspend_fault_mask_;|    bool show_none = false;"
 "bridge-parse-failure-settles-rejected|components/alpha_hwr/api_bridge.cpp|  result.status = WriteStatus::INVALID;|  result.status = WriteStatus::REJECTED;"
 )
 

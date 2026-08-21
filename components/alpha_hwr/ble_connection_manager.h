@@ -114,6 +114,15 @@ class BLEConnectionManager {
   ///             do. Pass the rank; do not assume it.
   void force_disconnect(const char *reason, FailureHold rank = FailureHold::DATA);
 
+  /// Drop the link for a diagnostic suspend (issue #243).
+  ///
+  /// force_disconnect() with a reason string would be wrong here twice over: it
+  /// logs at WARN, and it latches that string onto the fault surface. A suspend
+  /// is not a failure and must not read as one. What it DOES share is the
+  /// pairing-stall exemption -- this teardown is ours, so the cycle it ends says
+  /// nothing about the pump's willingness to pair.
+  void suspend_link();
+
   /// Latch a failure reason WITHOUT touching the link.
   ///
   /// force_disconnect() is this plus a teardown, and separating them is the
