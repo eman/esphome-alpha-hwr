@@ -1474,6 +1474,10 @@ void test_the_config_chain_stops_at_the_first_failure() {
   r.setup();
   r.connect_and_subscribe();
   r.run_until_ready();
+  // Long enough, at a fine enough tick, that a chain which DID carry on would
+  // have got its next read out and been seen. Asserting too early passes
+  // against a chain that simply had not reached 86/601 yet.
+  r.advance(300000, 600);
 
   TEST_ASSERT(r.limiter_sub_was_requested(600), "86/600 was asked for");
   TEST_ASSERT(!r.limiter_sub_was_requested(601),
@@ -1490,6 +1494,7 @@ void test_the_status_chain_stops_at_the_first_failure() {
   r.setup();
   r.connect_and_subscribe();
   r.run_until_ready();
+  r.advance(300000, 600);  // see the note in the config test above
 
   TEST_ASSERT(r.limiter_sub_was_requested(600) && r.limiter_sub_was_requested(601),
               "the config pair completed, so the status chain was reached");
@@ -1507,6 +1512,11 @@ void test_a_healthy_pump_is_read_all_the_way_through() {
   std::cout << "\n=== A pump that answers is read all the way through ===" << std::endl;
   Rig r;
   r.attach_limiter_entities();
+  // A deliberately aggressive control poll, so a poll certainly falls WHILE the
+  // connect-time chain is still running. At the shipped 30 s the chain can
+  // finish first and the overlap never arises, which would make this test agree
+  // with a component that has no guard at all.
+  r.component.set_control_state_poll_interval(5000);
   r.setup();
   r.connect_and_subscribe();
   r.run_until_ready();
@@ -1520,11 +1530,25 @@ void test_a_healthy_pump_is_read_all_the_way_through() {
   // nothing could ever be answered. 600 steps is 500 ms a tick.
   r.advance(300000, 600);
 
+  // The first five requests, IN ORDER, rather than "was each one ever asked
+  // for". The weaker form passes against overlapping chains: the control poll
+  // issues 640/641/660 of its own, so every address gets requested by somebody
+  // even when the connect chain is being cut off after its third read. Only the
+  // contiguous sequence says one chain ran to completion.
   const uint16_t expected[5] = {600, 601, 640, 641, 660};
-  bool all_seen = true;
-  for (uint16_t sub : expected)
-    if (!r.limiter_sub_was_requested(sub)) all_seen = false;
-  TEST_ASSERT(all_seen, "all five addresses were read");
+  TEST_ASSERT(r.limiter_subs_seen.size() >= 5, "at least five reads went out");
+  bool in_order = r.limiter_subs_seen.size() >= 5;
+  for (size_t i = 0; i < 5 && in_order; i++)
+    if (r.limiter_subs_seen[i] != expected[i]) in_order = false;
+  if (!in_order) {
+    std::cout << "       requested:";
+    for (uint16_t x : r.limiter_subs_seen) std::cout << " " << x;
+    std::cout << std::endl;
+  }
+  TEST_ASSERT(in_order,
+              "all five addresses were read, in one uninterrupted chain -- a "
+              "second chain starting on top of this one would show up here as "
+              "a repeated 86/640 partway through");
 }
 
 // The restraint that keeps this optional rather than a tax: five frames per
