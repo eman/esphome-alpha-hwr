@@ -927,42 +927,27 @@ MUTATIONS=(
 # failure this change exists to fix. The tests now pin the count exactly.
 "abandon-drain-cap-stops-it-dead|components/alpha_hwr/transport.h|  static constexpr size_t MAX_ABANDON_STEPS = 512;|  static constexpr size_t MAX_ABANDON_STEPS = 0;"
 "abandon-drain-cap-too-small-for-a-real-chain|components/alpha_hwr/transport.h|  static constexpr size_t MAX_ABANDON_STEPS = 512;|  static constexpr size_t MAX_ABANDON_STEPS = 8;"
-# The inbound overflow is the other half. It runs on a LIVE link -- a corrupt
-# fragment declaring a long frame is enough -- and it used to reach reset(), so
-# one bad fragment cancelled every read in flight with nothing telling any
-# caller. Two entries: the guard has to fire, and firing it must not cancel
-# commands the pump may still answer.
-"inbound-overflow-never-drops-the-partial|components/alpha_hwr/transport.cpp|  if (reassembly_buffer_.size() > MAX_PACKET_SIZE && still_incomplete) {|  if (false && still_incomplete) {"
-"inbound-overflow-cancels-the-queue|components/alpha_hwr/transport.cpp|  if (reassembly_buffer_.size() > MAX_PACKET_SIZE && still_incomplete) {|  if (reassembly_buffer_.size() > MAX_PACKET_SIZE && still_incomplete) { reset(); return; } if (false) {"
-# And the reply debt survives it. This is the one genuine REVERSAL in the
-# overflow half of the change -- the old path cleared the debt deliberately, on
-# the argument that clearing was "the safer of the two errors". It is not:
-# clearing lets a reply owed by an abandoned command be taken for the next
-# write's acknowledgement, which is the misattribution issue #248 exists to
-# prevent. It shipped with no test until a skeptic put the old clear back and
-# watched all 31 binaries pass.
-# Issue #278: what the receiver will accept as a frame at all. The length field
-# is bounded from both ends and the delimiter from one, and each bound has been
-# got wrong at least once -- including while writing this change, where a floor
-# taken from the capture corpus (5) rejected the 8-byte Unknown Class refusal
-# that only ever appears in traffic the corpus does not contain.
-"inbound-frame-accepts-the-request-delimiter|components/alpha_hwr/transport.cpp|  return byte == FRAME_START_RESPONSE;|  return byte == FRAME_START_RESPONSE || byte == FRAME_START_REQUEST;"
-"frame-start-length-floor-removed|components/alpha_hwr/transport.cpp|  if (len >= 2) declares_a_possible_frame = data[1] >= protocol::MIN_LENGTH_FIELD;|  // mutated: no floor on the declared length"
-# The floor must be exactly 4, and BOTH directions need an entry -- the first cut
-# of this shipped only the "too high" one, and a skeptic set MIN_LENGTH_FIELD to
-# 3 and to 2 with the whole suite staying green. At 5 the Unknown Class refusal
-# stops being a frame; at 3 a fragment declaring 3 arms reassembly and swallows
-# the frame behind it.
-"frame-start-length-floor-excludes-a-refusal|components/alpha_hwr/frame_builder.h|static const uint8_t MIN_LENGTH_FIELD = 4;|static const uint8_t MIN_LENGTH_FIELD = 5;"
-"frame-start-length-floor-too-low|components/alpha_hwr/frame_builder.h|static const uint8_t MIN_LENGTH_FIELD = 4;|static const uint8_t MIN_LENGTH_FIELD = 3;"
-# ...and the two reachability defects a skeptic pass found in the same function.
-"lone-frame-start-never-learns-its-length|components/alpha_hwr/transport.cpp|    if (expected_packet_length_ == 0 && reassembly_buffer_.size() >= 2) {|    if (false) {"
-"complete-frame-discarded-as-an-overflow|components/alpha_hwr/transport.cpp|  if (reassembly_buffer_.size() > MAX_PACKET_SIZE && still_incomplete) {|  if (reassembly_buffer_.size() > MAX_PACKET_SIZE) {"
-# The ceiling is the largest telegram the specification permits: LENGTH 255 plus
-# the four bytes outside it. At the old 256 the three largest legal sizes were
-# discarded as overflows.
-"reassembly-ceiling-below-a-legal-frame|components/alpha_hwr/transport.h|  static constexpr size_t MAX_PACKET_SIZE = protocol::MAX_TELEGRAM_LEN;|  static constexpr size_t MAX_PACKET_SIZE = 256;"
-"inbound-overflow-forgives-the-reply-debt|components/alpha_hwr/transport.cpp|    reassembling_ = false;\n    reassembly_buffer_.clear();\n    expected_packet_length_ = 0;\n    return;|    reassembling_ = false;\n    reassembly_buffer_.clear();\n    expected_packet_length_ = 0;\n    owed_pending_ = false;\n    owed_replies_ = 0;\n    return;"
+# Deliberate absence, as of issue #278: the inbound-overflow branch in
+# on_notification() is now UNREACHABLE, so its three entries have been removed
+# rather than left to survive. CI found all three surviving at once.
+#
+# Why. expected_packet_length_ is `data[1] + 4`, at most 259, and MAX_PACKET_SIZE
+# is now that same 259 -- it was 256, three bytes under a legal frame, and that
+# gap is what the branch existed to paper over. A buffer above the cap is
+# therefore also at or past the expected length, which is the completion test, so
+# the frame leaves through there instead. The only escape is an expected length
+# of 0, which holds solely while the buffer has one byte in it.
+#
+# The branch stays as a backstop -- see the comment at the site -- but nothing
+# can prove it, and pretending otherwise is what these entries were doing. The
+# properties they asserted (losing frame sync must not touch the command queue,
+# the peer-resync hold or the reply debt) are still tested, through the CRC-drop
+# path that IS reachable. What is no longer claimed is that an overflow does it.
+#
+# The entry that remains on this ground is complete-frame-discarded-as-an-overflow,
+# which is not about the branch firing: it removes the `still_incomplete` term and
+# so makes the guard fire on a COMPLETE frame arriving with trailing bytes,
+# destroying it. That is reachable, and caught.
 # Reporting the failure is only half of it. The chain now reaches its terminal
 # branch on the abandoned exit too, and that branch is where the display cache is
 # written -- so both of these services need the readiness gate they already open

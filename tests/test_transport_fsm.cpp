@@ -792,35 +792,26 @@ void test_trailing_bytes_do_not_overflow_a_frame_that_is_already_complete() {
 // outstanding, the pump may still answer them, and if it does not, each one's
 // own timeout says so.
 
-/// Feed a partial frame that declares more bytes than the buffer will hold, and
-/// stop in the one place where the overflow guard is the only thing that can end
-/// it. No time passes, so the staleness guard is not in play either.
+/// Lose inbound frame sync the way a live link actually can: deliver a frame
+/// that completes and then fails its CRC, so the reassembler throws away what it
+/// has and starts over.
 ///
-/// The sizes are exact and they have to be. The buffer's cap is
-/// MAX_TELEGRAM_LEN, 259, so a partial frame only overflows once it passes that
-/// -- and it must not have completed first, or the completion test fires
-/// instead, the frame is dispatched, CRC-rejected and cleared, and every
-/// assertion below passes with the overflow guard disabled. A first draft did
-/// exactly that and the mutation survived.
+/// This used to drive the buffer past MAX_PACKET_SIZE instead. That route is
+/// gone, and its absence is the point. The cap is now the largest telegram the
+/// length byte can describe, so a buffer above the cap is also at or past the
+/// expected length -- which is the completion test -- and the overflow branch
+/// cannot be reached at all. Keeping the old helper would have left three tests
+/// asserting the properties of a branch nothing can enter; they passed, because
+/// the CRC drop clears the same state.
 ///
-/// So the declared length has to be one the buffer can EXCEED without reaching:
-/// 255 (a 259-byte frame) cannot be, since 259 is also the cap. Declare a frame
-/// the fragments overshoot instead -- 251 bytes -- and stop at 260: past the cap,
-/// past the declared length, and never completing because the trim-and-dispatch
-/// only runs for a frame that has not already been thrown away.
-///
-/// This helper has now been wrong twice, in both directions, and both times the
-/// mutation check is what said so.
-static void overflow_the_reassembly_buffer(
-    esphome::alpha_hwr::core::Transport &transport) {
-  std::vector<uint8_t> head(20, 0x11);
-  head[0] = 0x24;
-  head[1] = 0xF7;   // 247 + 4 = a 251-byte frame
-  transport.on_notification(head.data(), head.size());
-  const std::vector<uint8_t> more(20, 0x22);
-  for (int i = 0; i < 12; i++) {          // 20 + 12*20 = 260, past the 259 cap
-    transport.on_notification(more.data(), more.size());
-  }
+/// The properties below are worth pinning either way: losing frame sync, by
+/// whatever route, must not touch the command queue, the peer-resync hold or the
+/// reply debt.
+static void lose_frame_sync(esphome::alpha_hwr::core::Transport &transport) {
+  // Declares 5, arrives whole, and the CRC is deliberately wrong.
+  const std::vector<uint8_t> bad = {0x24, 0x05, 0xF8, 0xE7, 0x0A,
+                                    0x01, 0x00, 0xDE, 0xAD};
+  transport.on_notification(bad.data(), bad.size());
 }
 
 // The ceiling, from the side that matters: a maximum-length LEGAL frame has to
@@ -865,8 +856,8 @@ void test_a_maximum_length_legal_frame_is_not_read_as_an_overflow() {
   }
 }
 
-void test_an_inbound_overflow_does_not_cancel_a_command_in_flight() {
-  std::cout << "\n=== an inbound overflow leaves the queue alone ===" << std::endl;
+void test_losing_frame_sync_does_not_cancel_a_command_in_flight() {
+  std::cout << "\n=== losing frame sync leaves the queue alone ===" << std::endl;
   esphome::alpha_hwr::core::Transport transport;
   transport.set_write_callback([](const uint8_t *, size_t) -> bool { return true; });
 
@@ -881,14 +872,14 @@ void test_an_inbound_overflow_does_not_cancel_a_command_in_flight() {
   mock_millis += 50;
   transport.loop();   // on the wire, awaiting a response
 
-  overflow_the_reassembly_buffer(transport);
+  lose_frame_sync(transport);
   transport.loop();
 
   TEST_ASSERT(cb_calls == 0,
               "the command is still outstanding -- losing inbound frame sync "
               "says nothing about whether the pump will answer it");
   TEST_ASSERT(!transport.is_reassembling() && transport.get_buffer_size() == 0,
-              "  ...and the partial frame itself is gone, which is the part "
+              "  ...and the frame that lost sync is gone, which is the part "
               "that had to happen");
 
   // And it still has the timeout it always had, which is how its caller finds
@@ -914,8 +905,8 @@ void test_an_inbound_overflow_does_not_cancel_a_command_in_flight() {
 //
 // Without this the mutation is invisible: a skeptic put the old clear back into
 // the overflow branch and all 31 test binaries passed.
-void test_an_inbound_overflow_keeps_the_reply_debt() {
-  std::cout << "\n=== an inbound overflow does not forgive the reply debt ==="
+void test_losing_frame_sync_keeps_the_reply_debt() {
+  std::cout << "\n=== losing frame sync does not forgive the reply debt ==="
             << std::endl;
   esphome::alpha_hwr::core::Transport transport;
   transport.set_write_callback([](const uint8_t *, size_t) -> bool { return true; });
@@ -935,7 +926,7 @@ void test_an_inbound_overflow_keeps_the_reply_debt() {
   transport.loop();
   TEST_ASSERT(first == 1, "the first write gave up, so a reply is owed");
 
-  overflow_the_reassembly_buffer(transport);
+  lose_frame_sync(transport);
 
   // The next write, and an acknowledgement arriving well inside the window.
   int second = 0;
@@ -964,8 +955,8 @@ void test_an_inbound_overflow_keeps_the_reply_debt() {
               "than hanging");
 }
 
-void test_an_inbound_overflow_keeps_the_peer_resync_hold() {
-  std::cout << "\n=== an inbound overflow does not release the resync hold ==="
+void test_losing_frame_sync_keeps_the_peer_resync_hold() {
+  std::cout << "\n=== losing frame sync does not release the resync hold ==="
             << std::endl;
   esphome::alpha_hwr::core::Transport transport;
 
@@ -982,7 +973,7 @@ void test_an_inbound_overflow_keeps_the_peer_resync_hold() {
   for (int i = 0; i < 2; i++) { mock_millis += 51; transport.loop(); }
   TEST_ASSERT(chunks == 2, "the second chunk failed, so the hold is armed");
 
-  overflow_the_reassembly_buffer(transport);
+  lose_frame_sync(transport);
 
   // Same boundary as test_partial_write_holds_off_so_the_peer_can_resync(), for
   // the same reason. The old code reached this through reset(), which clears the
@@ -1773,9 +1764,9 @@ int main() {
   test_a_maximum_length_legal_frame_is_not_read_as_an_overflow();
   test_a_lone_frame_start_byte_does_not_swallow_what_follows();
   test_trailing_bytes_do_not_overflow_a_frame_that_is_already_complete();
-  test_an_inbound_overflow_does_not_cancel_a_command_in_flight();
-  test_an_inbound_overflow_keeps_the_peer_resync_hold();
-  test_an_inbound_overflow_keeps_the_reply_debt();
+  test_losing_frame_sync_does_not_cancel_a_command_in_flight();
+  test_losing_frame_sync_keeps_the_peer_resync_hold();
+  test_losing_frame_sync_keeps_the_reply_debt();
   test_reset_fails_a_pending_command_instead_of_dropping_it();
   test_reset_fails_a_command_that_never_went_out();
   test_reset_takes_the_commands_its_own_callbacks_queue();

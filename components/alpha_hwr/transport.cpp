@@ -375,17 +375,27 @@ void Transport::on_notification(const uint8_t* data, size_t len) {
     return;
   }
 
-  // Safety: Check buffer overflow.
+  // Safety: buffer overflow. A backstop that, as the code stands, CANNOT FIRE --
+  // and saying so is the point of this comment, because it used to be able to
+  // and the tests that exercised it are gone with the reachability.
   //
-  // Only while the frame is still INCOMPLETE. This guard runs ahead of the
-  // completion test below, and the completion test is `>=` precisely so that a
-  // notification carrying trailing bytes -- two frames sharing one delivery --
-  // is trimmed rather than lost. Without the second term the guard fires first
-  // and throws away a complete, CRC-valid frame whose own declared length is
-  // well inside the limit, for the sake of bytes that were never part of it.
-  // Reachable only for frames from about 241 bytes up, since the negotiated MTU
-  // leaves 20 bytes of ATT payload, so this is a latent fix rather than an
-  // observed one (issue #278).
+  // The arithmetic: expected_packet_length_ is `data[1] + 4`, so it is at most
+  // 259, and MAX_PACKET_SIZE is now that same 259 (issue #278 -- it was 256,
+  // three bytes under a legal frame, which is what made this guard reachable).
+  // A buffer above the cap is therefore also at or above the expected length,
+  // which is the completion test below, so the frame is dispatched or dropped
+  // there instead. The only escape is expected_packet_length_ == 0, and that
+  // holds solely while the buffer has a single byte in it.
+  //
+  // It stays because the two things that make it redundant are the length
+  // arithmetic and the value of one constant, and neither is guaranteed by
+  // anything but this comment. Unbounded growth is bounded elsewhere anyway:
+  // by the completion test for a frame that arrives, and by
+  // REASSEMBLY_TIMEOUT_MS for one that does not.
+  //
+  // Note it never bounded a single oversized NOTIFICATION -- the insert above
+  // has already happened -- so a 600-byte delivery briefly holds 600 bytes
+  // whatever this says. The real bound there is the negotiated ATT payload.
   const bool still_incomplete =
       expected_packet_length_ == 0 || reassembly_buffer_.size() < expected_packet_length_;
   if (reassembly_buffer_.size() > MAX_PACKET_SIZE && still_incomplete) {

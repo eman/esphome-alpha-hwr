@@ -1120,6 +1120,17 @@
   above 253. The 257 reading also contradicted this change's own floor, which is
   derived the other way.
 
+  Raising the ceiling to the true maximum has a consequence worth stating: the
+  reassembly-overflow branch **can no longer fire**. The expected length is
+  `data[1] + 4`, so at most 259, and the cap is now that same 259 — a buffer
+  above the cap is therefore also at or past the expected length, which is the
+  completion test. The branch was reachable only because the cap sat three bytes
+  under a legal frame. It stays as a backstop, documented as unreachable, but
+  the three tests and three mutation entries that exercised it have been re-aimed
+  at the CRC-drop path, which is a route into the same state that actually
+  exists. Unbounded growth is bounded by the completion test and by
+  `REASSEMBLY_TIMEOUT_MS` regardless.
+
   Two further defects in the same function, both found by an adversarial pass
   and both reproduced. A frame start delivered as a **one-byte notification**
   armed reassembly before its length byte existed, and nothing recomputed the
