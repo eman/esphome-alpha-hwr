@@ -12,16 +12,28 @@
 // substituting the wrong timestamp for "now", and several independent notions
 // of now is the condition that makes that class of bug easy to reintroduce.
 //
+// **What this file is, stated because an adversarial review found the claim
+// that used to stand here overstated.** These are characterization tests for
+// the accessor contract, plus the mutation coverage for the floor. They are NOT
+// a regression test for #270: on `main` the three accessors already shared
+// clock_is_synced() and already refused without USE_TIME, and #270's change was
+// moving the five *callers* off ::time(nullptr). This file links no caller, so
+// reverting #270's production change leaves every assertion below passing --
+// verified, not assumed. The caller-side behaviour is pinned in
+// tests/test_component_wiring.cpp instead.
+//
 // Two binaries are built from this file:
 //
 //   test_time_service          -DUSE_TIME  -- the real accessors
 //   test_time_service_no_time              -- the #else stubs
 //
-// The second is not redundancy. "The behaviour under #ifndef USE_TIME is the
-// same for every caller" is an acceptance criterion of #270, and a criterion
-// about a build that is never built is not checked by anything. The uniform
-// answer is *refuse*: no time component means no timezone loaded either, so
-// libc's answer there is not merely unvalidated, it is in the wrong zone.
+// The second compiles the #else branch and pins that it refuses. Worth having,
+// because nothing else builds that branch and replacing its body with a libc
+// read does fail these tests. It does NOT verify the caller-side half of "every
+// caller refuses under #ifndef USE_TIME": no caller is linked into it. That
+// half holds by construction -- every caller goes through TimeService and no
+// ::time(nullptr) remains in components/alpha_hwr/ -- which is a weaker
+// guarantee than a test, and is said so rather than implied.
 
 #include <cstdint>
 #include <cstdlib>

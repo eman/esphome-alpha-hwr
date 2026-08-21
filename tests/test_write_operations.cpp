@@ -3234,84 +3234,6 @@ static void test_without_a_clock_no_slot_is_treated_as_expired() {
               "and no slot was overwritten");
 }
 
-// ── A window that has already ended (issue #269) ─────────────────────────────
-//
-// run_single_event_() validated only that end > begin, so a window entirely in
-// the past was written to the pump, confirmed by readback, and settled
-// ACCEPTED -- after which it was recyclable garbage occupying one of the five
-// slots this pump has. Observed on the bench while verifying #262: two events
-// written with yesterday's window both landed and both confirmed.
-//
-// Not destructive, and arguably harmless, since the pump simply never runs it.
-// But it is a write that cannot do anything, reported as a success: a client
-// with a timezone bug or a stale timestamp got `accepted` and no signal.
-static void test_a_window_that_has_already_ended_is_refused() {
-  std::cout << "\n=== set_single_event: a wholly-past window -> invalid ===" << std::endl;
-  Harness h;
-  h.prime_cache();
-  h.sim.respond_overview_reads = false;  // the link cannot answer either
-
-  h.write_op.submit_set_single_event(EVENT_ENDED_BEGIN, EVENT_ENDED_END, "past1");
-  h.advance(25000);
-
-  TEST_ASSERT(h.events_for("past1") == 1, "exactly one terminal event");
-  const WriteResult *r = h.result_for("past1");
-  TEST_ASSERT(r && r->status == WriteStatus::INVALID,
-              "a window that can never run is invalid, not accepted");
-  TEST_ASSERT(r && r->detail.find("already ended") != std::string::npos,
-              "the detail names the reason");
-  TEST_ASSERT(r && r->detail.find(std::to_string(EVENT_ENDED_END)) != std::string::npos,
-              "...and quotes the window's own end, so a client with a timezone "
-              "bug can see which timestamp it sent");
-  TEST_ASSERT(r && r->detail.find("overview") == std::string::npos,
-              "and does not blame the link, which is also down");
-  TEST_ASSERT(h.sim.single_events[0][0] == 0, "nothing reached the wire");
-}
-
-// Only the END decides. A window that has BEGUN but not ended is legitimate and
-// must still run -- refusing it would break every "start this now, stop it at
-// six" request, which is exactly what the Lovelace card's Quick Run presets
-// produce. Without this the test above passes against a check that refuses any
-// window touching the past at all.
-static void test_a_window_that_has_begun_but_not_ended_still_runs() {
-  std::cout << "\n=== set_single_event: a half-elapsed window still runs ===" << std::endl;
-  Harness h;
-  h.prime_cache();
-
-  // Began an hour ago, ends an hour from now.
-  h.write_op.submit_set_single_event(NODE_EPOCH_AT_BOOT - 3600, NODE_EPOCH_AT_BOOT + 3600,
-                                     "past2");
-  h.advance(60000);
-
-  const WriteResult *r = h.result_for("past2");
-  TEST_ASSERT(h.events_for("past2") == 1, "exactly one terminal event");
-  TEST_ASSERT(r && r->status == WriteStatus::ACCEPTED,
-              "a window with time left on it is accepted");
-  TEST_ASSERT(h.sim.single_events[0][0] == 1, "and it reached the pump");
-}
-
-// With no synced clock there is no honest answer to "is this in the past", so
-// the write is not refused on these grounds -- the same rule #262 established
-// for the slot picker, where 0 means "expire nothing" rather than "expire
-// everything". A node that cannot tell the time must not decide that somebody
-// else's timestamp is stale.
-static void test_without_a_clock_a_past_window_is_not_refused() {
-  std::cout << "\n=== set_single_event: no node clock -> no past-window refusal ===" << std::endl;
-  Harness h;
-  h.prime_cache();
-  h.set_node_time(0);  // never synced
-
-  h.write_op.submit_set_single_event(EVENT_ENDED_BEGIN, EVENT_ENDED_END, "past3");
-  h.advance(60000);
-
-  const WriteResult *r = h.result_for("past3");
-  TEST_ASSERT(h.events_for("past3") == 1, "exactly one terminal event");
-  TEST_ASSERT(r && r->status != WriteStatus::INVALID,
-              "the same window a clocked node refuses is not refused here");
-  TEST_ASSERT(r && r->detail.find("already ended") == std::string::npos,
-              "...and nothing claims it has ended, because nothing knows");
-}
-
 // The same pump with a clock: the five expired events are all reusable, so the
 // write lands. Without this the test above passes against a picker that refuses
 // everything, clock or no clock.
@@ -3576,6 +3498,14 @@ static void test_a_window_below_the_wire_floor_is_refused() {
     TEST_ASSERT(h.events_for("tz2") == 1, "exactly one terminal event");
     TEST_ASSERT(r && r->status == WriteStatus::INVALID,
                 "a window below the westward offset is invalid");
+    // The DETAIL, not just the status. Any window this guard can refuse is in
+    // 1970, so any other guard that also refuses 1970 windows would make the
+    // status assertion above pass with this one's production line reverted --
+    // which is exactly what happened while the branch also carried #269's
+    // past-window check.
+    TEST_ASSERT(r && r->detail.find("local-time") != std::string::npos,
+                "and it is the representability guard that refused it, named "
+                "in the detail");
     TEST_ASSERT(h.sim.single_events[0][0] == 0, "nothing reached the wire");
   }
   setenv("TZ", "UTC", 1);
@@ -5172,9 +5102,6 @@ int main() {
   test_a_far_future_event_does_not_evict_a_live_one();
   test_a_far_future_vacation_does_not_evict_a_live_event();
   test_without_a_clock_no_slot_is_treated_as_expired();
-  test_a_window_that_has_already_ended_is_refused();
-  test_a_window_that_has_begun_but_not_ended_still_runs();
-  test_without_a_clock_a_past_window_is_not_refused();
   test_with_a_clock_the_same_expired_slots_are_reusable();
   test_single_event_prefers_an_empty_slot_to_an_expired_one();
   test_a_pool_of_live_events_is_a_full_pool();

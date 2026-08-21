@@ -591,34 +591,6 @@ MUTATIONS=(
 "clock-gate-grace-boundary-off-by-one|components/alpha_hwr/clock_sync_gate.h|  if (uptime_ms < grace_ms) {|  if (uptime_ms <= grace_ms) {"
 "clock-gate-every-block-warns|components/alpha_hwr/clock_sync_gate.h|  return a == ClockSyncAction::WARN_NO_TIME_ID |  return a != ClockSyncAction::SYNC; //"
 
-# The pump's own DST rule against the node's timezone (issue #286). The pump
-# shifts its own clock twice a year by its own stored rule; schedule windows are
-# stored in its LOCAL time and converted using the HOST's offset, so the two
-# have to agree or every stored window is an hour out on one side of a
-# transition. The symptom appears months after the cause.
-"dst-enabled-bit-ignored|components/alpha_hwr/dst_rule.h|  r.enabled = body[0] != 0;|  r.enabled = true;"
-"dst-offset-not-compared|components/alpha_hwr/dst_rule.h|  const bool same_amount = pump.offset_minutes == host.offset_minutes;|  const bool same_amount = true;"
-"dst-dates-not-compared|components/alpha_hwr/dst_rule.h|  const bool same_start = transitions_coincide(pump.start, host.start, year);|  const bool same_start = true;"
-"dst-end-date-not-compared|components/alpha_hwr/dst_rule.h|  const bool same_end = transitions_coincide(pump.end, host.end, year);|  const bool same_end = true;"
-# "The last Sunday of October" and "the fourth Sunday of October" are different
-# rules that coincide in some years and not others, so both sides are resolved
-# to a concrete date in the year being asked about. Ignoring "last" makes a
-# correct EU pump in an EU zone read as a mismatch in every year where the month
-# has five of that weekday.
-"dst-last-occurrence-not-resolved|components/alpha_hwr/dst_rule.h|  if (d.occurrence >= 5) {\n    uint8_t last = first;|  if (false) {\n    uint8_t last = first;"
-# ...and the fields have to describe a real date before any of that runs. A
-# payload with occurrence 0 or hour 24 would otherwise decode into a
-# genuine-looking rule that resolves to nothing, reported to the user as a
-# mismatch against their timezone -- blaming the zone for a bad frame.
-"dst-impossible-fields-accepted|components/alpha_hwr/dst_rule.h|  const bool occurrence_ok = d.occurrence >= 1 && d.occurrence <= 5;|  const bool occurrence_ok = true;"
-# The southern hemisphere starts its year in daylight time, so the first
-# transition of the calendar year is the one OFF it. Reading them in calendar
-# order makes every southern installation a mismatch.
-"dst-transitions-read-backwards|components/alpha_hwr/dst_rule.h|  const bool first_is_the_spring_shift = offset_after_first > offset_before_first;|  const bool first_is_the_spring_shift = true;"
-# A frame too short to hold the rule must not be read past the end, and must not
-# be reported as a rule.
-"dst-short-frame-decoded|components/alpha_hwr/dst_rule.h|  if (body == nullptr |  if (false) return r; //"
-
 # One clock, one floor (issue #270). The component used to resolve "what time is
 # it" in five places with three different floors -- year 2020, year 2021, and
 # the literal 1609459200 -- three of which read ::time(nullptr) directly, so a
@@ -1181,31 +1153,6 @@ MUTATIONS=(
 # so an enabled event beginning at 0 confirmed clean while describing a slot
 # that says "cleared".
 "epoch-field-accepts-the-cleared-sentinel|components/alpha_hwr/api_bridge.cpp|  if (!parse_int_field(s, 1, EPOCH_MAX_TS, &v)) return false;|  if (!parse_int_field(s, 0, EPOCH_MAX_TS, &v)) return false;"
-# A window that has already ended (issue #269). It was written, confirmed by
-# readback and settled ACCEPTED, after which it was recyclable garbage in one of
-# five slots. A write that cannot do anything, reported as a success.
-"single-event-past-window-accepted|components/alpha_hwr/write_operation_service.cpp|    const bool refuse_as_past = clock_is_known && window_has_ended;|    const bool refuse_as_past = false;"
-# Only the END decides: a window that has BEGUN but not ended is legitimate and
-# must still run. Mutating the test to the begin refuses every "start now, stop
-# at six" request -- which is what the Lovelace card's Quick Run presets send.
-"single-event-past-window-tested-on-the-begin|components/alpha_hwr/write_operation_service.cpp|    const bool window_has_ended = op->end_ts <= now_ts;|    const bool window_has_ended = op->begin_ts <= now_ts;"
-#
-# Deliberately absent: `clock_is_known` on its own. With no clock now_ts is 0 and
-# `end_ts <= 0` is false for every window the parser admits (both epoch fields
-# floor at 1, and the ordering rule needs end > begin), so dropping the term
-# changes no reachable behaviour. It is written out because the rule -- a node
-# that cannot tell the time must not call somebody else's timestamp stale -- is
-# the point, not because the arithmetic needs it.
-
-# The read path converts the pump's LOCAL-Unix wire value back to UTC, and the
-# cache invariant that it does is load-bearing: the slot picker compares cached
-# end_timestamps against the node clock (#262) and the confirm compares a
-# readback against the request. The write-op suite pins TZ=UTC, where the
-# conversion is the identity, so both of these mutants used to pass it (issue
-# #268). They are caught by the two tests that un-pin the zone.
-"tz-read-path-leaves-the-cache-in-local-time|components/alpha_hwr/schedule_service.cpp|            ev.begin_timestamp = local_unix_to_utc_resolved(ev.begin_timestamp);\n            ev.end_timestamp = local_unix_to_utc_resolved(ev.end_timestamp);|            // mutated: cache keeps the pump's local-Unix values"
-"tz-single-slot-read-leaves-local-time|components/alpha_hwr/schedule_service.cpp|        ev.begin_timestamp = local_unix_to_utc_resolved(ev.begin_timestamp);\n        ev.end_timestamp = local_unix_to_utc_resolved(ev.end_timestamp);|        // mutated: single-slot read keeps the pump's local-Unix values"
-
 # A vacation that has already ended (issue #267). find_vacation_slot() returned
 # the first enabled Stop in slot order with no clock, so a FINISHED vacation in
 # an early slot shadowed a live one later: clear_vacation cleared the finished

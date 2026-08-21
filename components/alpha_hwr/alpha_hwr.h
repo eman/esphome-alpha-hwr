@@ -229,9 +229,6 @@ public:
   void set_pump_link_status_text_sensor(text_sensor::TextSensor *sensor) {
     pump_link_status_sensor_ = sensor;
   }
-  void set_pump_clock_dst_text_sensor(text_sensor::TextSensor *sensor) {
-    pump_clock_dst_text_sensor_ = sensor;
-  }
   void set_pump_last_link_failure_text_sensor(text_sensor::TextSensor *sensor) {
     pump_last_link_failure_sensor_ = sensor;
   }
@@ -608,11 +605,6 @@ private:
   sensor::Sensor *start_count_sensor_{nullptr};
   sensor::Sensor *operating_hours_sensor_{nullptr};
   sensor::Sensor *clock_diff_sensor_{nullptr};
-#ifdef USE_TEXT_SENSOR
-  /// "Pump Clock DST" -- whether the pump's own DST rule matches this node's
-  /// timezone (issue #286).
-  text_sensor::TextSensor *pump_clock_dst_text_sensor_{nullptr};
-#endif
 #ifdef USE_TIME
   time::RealTimeClock *time_id_{nullptr};
 #endif
@@ -729,21 +721,6 @@ private:
    */
   bool publish_clock_drift_(const ESPTime &pump_time, const char *context);
 
-  /**
-   * @brief Read the pump's DST rule and report whether this node agrees with it.
-   *
-   * The pump shifts its own clock twice a year by its own stored rule, and
-   * single-event windows are stored in its LOCAL time -- but
-   * utc_to_local_unix() takes that offset from the HOST's zone. The conversion
-   * preserves the user's wall clock across a transition only while the two
-   * rules agree, and nothing checked that they did (issue #286).
-   *
-   * Reported, never corrected. Three clients write this pump's clock and the
-   * pump cannot say which base a value arrived in, so a component that silently
-   * rewrote the pump's rule would be the third party in a fight the user cannot
-   * see. See dst_rule.h.
-   */
-  void check_pump_dst_rule_(uint32_t gen);
 
   /**
    * Check if daily time sync is due and perform it if needed.

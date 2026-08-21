@@ -91,10 +91,6 @@ struct Rig {
   // the state every test in this file ran in before the clock had a fixture at
   // all. A test that wants one calls attach_node_clock().
   esphome::time::RealTimeClock node_clock;
-  // "Pump Clock DST" (issue #286). NOT attached by default: the component only
-  // issues the 94/102 read when somebody is asking, and that restraint is
-  // itself pinned below.
-  esphome::text_sensor::TextSensor clock_dst;
   AlphaHwrComponent component{&client};
 
   BLEService service;
@@ -218,12 +214,6 @@ struct Rig {
   /// ran against a pump that never answered it.
   bool answer_clock{false};
 
-  /// Attach the Pump Clock DST entity, so the 94/102 read is issued at all.
-  void attach_dst_sensor() { component.set_pump_clock_dst_text_sensor(&clock_dst); }
-
-  /// How many times the component asked for the pump's DST rule.
-  int dst_reads{0};
-
   /// Give the node a synced wall clock reading @p epoch.
   void attach_node_clock(time_t epoch) {
     node_clock.set_epoch_for_test(epoch);
@@ -312,16 +302,6 @@ void Rig::answer_outstanding_writes() {
                          0x42, 0x0C, 0x00, 0x00,   // 35.0
                          0x42, 0x1B, 0x99, 0x9A,   // 38.9
                          0x00, 0x00, 0x00, 0x00}));
-      } else if (obj == 94 && sub == 102) {
-        // DaylightSavingTime (Obj 94 Sub 102), type 323 v1 -- the bench unit's
-        // own ten bytes: enabled, second Sunday of March to first Sunday of
-        // November at 02:00, +60 minutes. The US rule.
-        dst_reads++;
-        if (answer_clock) {
-          const uint8_t rule[10] = {0x01, 0x03, 0x07, 0x02, 0x02,
-                                    0x0b, 0x07, 0x01, 0x02, 0x3c};
-          notify(data_object_frame(0x01, 0x43, rule, sizeof(rule)));
-        }
       } else if (obj == 94 && sub == 101 && answer_clock) {
         // DateTimeActual (Obj 94 Sub 101), type 322 v1. The body is the bench
         // capture recorded in time_service.cpp -- 2026-08-15 20:38:55, with the
@@ -1391,58 +1371,6 @@ void test_a_manual_clock_read_without_a_node_clock_answers_unknown() {
               "node simply cannot say how far out it is");
 }
 
-// ── The pump's own DST rule against the node's timezone (issue #286) ─────────
-//
-// The pump shifts its own clock twice a year by its own stored rule, and
-// schedule windows are stored in its LOCAL time -- but utc_to_local_unix()
-// takes that offset from the HOST's zone. The conversion preserves the user's
-// wall clock across a transition only while the two agree.
-//
-// The rule comparison itself is pinned in tests/test_dst_rule.cpp, across US,
-// EU, no-DST and southern-hemisphere zones. What is pinned here is the wiring:
-// that the read is issued, that the answer reaches the entity, and that a node
-// which does not ask does not pay for it.
-void test_a_pump_dst_rule_that_disagrees_reaches_the_entity() {
-  std::cout << "\n=== A DST rule disagreeing with the node's zone reaches the entity ==="
-            << std::endl;
-  Rig r;
-  r.answer_clock = true;
-  r.attach_dst_sensor();
-  // The suite runs under TZ=UTC, which never shifts, against a pump whose rule
-  // says it does. That is a real installation shape -- a US pump on a node
-  // whose timezone was left unset -- and it is the disagreement, not a
-  // contrivance.
-  r.attach_node_clock(1786104000);  // 2026-08-07
-  r.setup();
-  r.connect_and_subscribe();
-  r.run_until_ready();
-
-  TEST_ASSERT(r.dst_reads > 0, "the component asked the pump for its DST rule");
-  TEST_ASSERT(r.clock_dst.has_state(), "and published a verdict");
-  TEST_ASSERT(r.clock_dst.state.find("Mismatch") != std::string::npos,
-              "which names the disagreement rather than staying quiet");
-  TEST_ASSERT(r.clock_dst.state.find("the pump shifts") != std::string::npos,
-              "...and says which side shifts, so the user knows what to change");
-}
-
-// The restraint that makes the entity optional rather than a tax: a node
-// without it configured does not spend a BLE round trip per connection asking a
-// question nobody will read.
-void test_a_node_without_the_dst_entity_does_not_ask_for_the_rule() {
-  std::cout << "\n=== No DST entity, no DST read ===" << std::endl;
-  Rig r;
-  r.answer_clock = true;
-  r.attach_node_clock(1786104000);
-  // deliberately no attach_dst_sensor()
-  r.setup();
-  r.connect_and_subscribe();
-  r.run_until_ready();
-
-  TEST_ASSERT(r.dst_reads == 0,
-              "nothing asked for the rule, so the read costs nothing on a node "
-              "that does not display it");
-}
-
 // ── build_event_window(): the schedule editor's dated-event helper ───────────
 
 void test_build_event_window_refuses_without_a_node_clock() {
@@ -1463,10 +1391,16 @@ void test_build_event_window_refuses_without_a_node_clock() {
 void test_build_event_window_anchors_to_the_node_clock() {
   std::cout << "\n=== A dated event anchors to the node's year ===" << std::endl;
   Rig r;
-  // 2026-08-07 12:00:00 UTC. The year is the whole question: the helper takes
-  // month/day/hour/minute and has to get the YEAR from somewhere, and before
-  // #270 it took it from libc's localtime() rather than from the node clock.
-  r.attach_node_clock(1786104000);
+  // 2022-06-15 12:00:00 UTC, and the year is deliberately one the machine
+  // running this test is NOT in.
+  //
+  // That is the whole test. The helper takes month/day/hour/minute and has to
+  // get the YEAR from somewhere; before #270 it took it from libc, i.e. from
+  // the host's own clock. A fixture dated in the CURRENT year cannot tell the
+  // two sources apart -- and the first version of this test used one, so it
+  // passed with the production line reverted. Any year above the 2021 floor
+  // and away from today works.
+  r.attach_node_clock(1655294400);
   r.setup();
 
   uint32_t begin = 0, end = 0;
@@ -1476,8 +1410,10 @@ void test_build_event_window_anchors_to_the_node_clock() {
 
   esphome::ESPTime b = esphome::ESPTime::from_epoch_local(begin);
   esphome::ESPTime e = esphome::ESPTime::from_epoch_local(end);
-  TEST_ASSERT(b.year == 2026 && e.year == 2026,
-              "both ends land in the node clock's year, not libc's");
+  TEST_ASSERT(b.year == 2022 && e.year == 2022,
+              "both ends land in the node clock's year, not the host's -- the "
+              "fixture year is deliberately not the current one, so this "
+              "assertion can actually fail");
   TEST_ASSERT(b.month == 6 && b.day_of_month == 1 && b.hour == 9 && b.minute == 0,
               "the begin carries the fields it was given");
   TEST_ASSERT(e.month == 6 && e.day_of_month == 8 && e.hour == 17 && e.minute == 0,
@@ -2106,8 +2042,6 @@ int main() {
   test_the_drift_leg_publishes_the_drift_it_measured();
   test_the_drift_leg_leaves_a_good_reading_alone();
   test_a_manual_clock_read_without_a_node_clock_answers_unknown();
-  test_a_pump_dst_rule_that_disagrees_reaches_the_entity();
-  test_a_node_without_the_dst_entity_does_not_ask_for_the_rule();
   test_build_event_window_refuses_without_a_node_clock();
   test_build_event_window_anchors_to_the_node_clock();
   test_build_event_window_refuses_an_unsynced_clock();
