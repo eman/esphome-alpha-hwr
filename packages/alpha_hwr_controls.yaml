@@ -516,10 +516,14 @@ number:
   # during ON periods in cycle mode (Obj 91 Sub 421 stored setpoint, issue
   # #107). Shows unknown until the DHW config has been read from the pump.
   #
-  # NOTE: the Grundfos GO app has no equivalent control and the manual says
-  # this mode has no flow parameter (issue #280). The register is real and
-  # regulates -- bench-measured within 1% across four setpoints -- so it is
-  # exposed here deliberately. See docs/configuration.md.
+  # NOTE: the Grundfos GO app has no equivalent control on any ordinary screen
+  # and the manual says this mode has no flow parameter -- but the app's
+  # COMMISSIONING flow writes this field, computing a value from the largest
+  # supply pipe dimension and the pipe material (issue #280). So it is a loop
+  # flow limit the vendor sets and then hides, not a register this component
+  # repurposed, and it survives normal app use: changing cycle times in the GO
+  # app preserves it. Bench-measured within 1% across four setpoints.
+  # See docs/configuration.md.
   # Box input rather than slider: 0.01 m³/h precision over 0.1-10.0 (the
   # factory value 0.23 m³/h = 1.0 gal/min needs finer steps than a slider
   # can usefully offer).

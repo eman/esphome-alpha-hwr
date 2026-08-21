@@ -458,6 +458,44 @@
 
 ### Changed
 
+- **Cycle Flow is documented as a supported field the vendor hides, not a
+  happens-to-work capability** (issue #280). The doubt was reasonable: the
+  Grundfos GO app shows no such control on any ordinary screen, and the manual
+  (§9.3.4) says the mode runs on its maximum curve with only time parameters.
+
+  Reading the app settled it the other way. Its **commissioning** flow writes
+  this field — an input widget bound to it, and a recommendation engine that
+  computes the value from the largest supply pipe dimension and the pipe
+  material. It is a flow limit for the recirculation loop, sized to the piping.
+  The vendor's own setup flow computing and storing a value there makes it
+  supported by any reasonable definition, whatever the settings screens show.
+
+  Two things recorded so the next person does not repeat the search: it appears
+  on no ordinary app screen (finding nothing is the expected result, not
+  evidence the component invented it), and it survives normal app use — changing
+  cycle times in the GO app preserves it. The docs previously ended on "treat it
+  as a capability that happens to work rather than a supported one", which is
+  now the opposite of what is known.
+
+- **`CONFIG_CONFIRM_DELAY_MS` carries its measurement** (issue #250). The
+  constant is unchanged at 1200 ms; what changed is that it is now measured
+  rather than assumed. Rebuilt with the delay cut and `CONFIG_MAX_ATTEMPTS` at 0
+  so no retry could mask the first readback: at **50 ms**, five writes settled
+  five `accepted`, each carrying back the value just written, and the same at
+  200 ms. A stale readback would have settled `rejected`, a silent one
+  `timeout`; neither occurred in ten writes.
+
+  So the failure mode the issue was filed about — an early readback settling
+  `clamped`/`rejected` for a write that landed — is not reachable by reading
+  early on this pump, and 1200 ms has ≥24× margin. Nothing argues for moving
+  toward the app's 2500 ms.
+
+  The comment records what the margin actually belongs to: settle is 0.7–0.8 s
+  even at a 50 ms delay, because the write sequence is several round trips of
+  its own. The measurement cannot separate "the pump applies instantly" from
+  "the sequence is long enough that this delay is irrelevant", so shortening the
+  sequence would require re-measuring.
+
 - **A Class 10 read the pump declines completes at once instead of timing out**
   (issue #283). The pump answers a read it cannot fulfil with the same nine bytes
   a write acknowledgement uses — `24 05 F8 E7 0A 01 04 EE 26`, acknowledge OK at
