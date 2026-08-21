@@ -824,12 +824,22 @@ private:
   /// Diagnostic suspend (issue #243): the link is down because someone asked for
   /// it, not because anything failed.
   ///
-  /// The pump holds one BLE connection at a time, so a bonded, connected node
-  /// owns it and the Grundfos GO app cannot have it -- and the GO app is how you
-  /// unlock the pump's front panel. Before this the only way to hand the pump
-  /// over was to remove power from the node, which is a remote action on PoE and
-  /// a walk to the pump on USB. The reporter logged six power cycles in one
-  /// night doing exactly that, with outages from 44 seconds to 40 minutes.
+  /// The pump accepts ONE BLE connection at a time, so a bonded, connected node
+  /// owns it and nothing else can have it. Two things want it:
+  ///
+  ///   - the Grundfos GO app, which is how you unlock the pump's front panel,
+  ///     which is how you re-pair. The reporter logged six power cycles in one
+  ///     night to free the pump for it, with outages from 44 seconds to 40
+  ///     minutes;
+  ///   - another CLIENT, for bench work -- the Python implementation in the
+  ///     sibling alpha-hwr repo, or a throwaway probe. Protocol discovery and
+  ///     wire-level reads of objects this component does not implement yet both
+  ///     need something else on the link, and comparing the two implementations
+  ///     against the same pump needs to go back and forth. Before this, that
+  ///     meant flashing probe firmware and then flashing this back.
+  ///
+  /// Neither needs the bond cleared, which is the trap this replaces: clearing
+  /// the ESP's bond strands the pump until someone re-pairs at the pump itself.
   bool suspended_{false};
 
   /// Holds Pump Link Fault at "None" from the moment of suspension until the

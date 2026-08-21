@@ -162,23 +162,10 @@ regardless — this node cannot decline it — but answering is not bonding.)
 > one-connection constraint rather than something observed, and it was wrong for
 > the case this section is actually about.
 >
-> **Turn on `Suspend BLE Link`.** The node drops the connection and stops
-> reconnecting until you turn it off again, so the pump is free for the app. It
-> is a diagnostic switch and it is not persisted — a reboot comes back connected,
-> deliberately, because a node refusing to talk to the pump after a power cut
-> because of a switch flipped last week is a worse failure than the inconvenience
-> it solves.
->
-> While suspended, **Pump Link Status** reads `Suspended` and **Pump Link Fault**
-> reads `None`. Neither is a fault, and the fault stays masked through the
-> reconnect until the pump is READY again — otherwise releasing the switch would
-> publish the node's own `Local Host Terminated (0x16)` for the ~15 s it takes to
-> get back, which is exactly the window an automation watches.
->
-> A stock `ble_client.disconnect` is **not** a substitute: the client reconnects
-> from `IDLE` on the next matching advertisement, so the link is back within a
-> scan interval. Before this switch existed, powering the node down was the only
-> thing that worked — easy on PoE, a walk to the pump on USB.
+> **Turn on `Suspend BLE Link`** before connecting the app, and off again after.
+> The node drops the connection and stops reconnecting until you release it, so
+> the pump is free. See [Suspending the BLE link](#suspending-the-ble-link) —
+> it is not only for the GO app.
 
 Two caveats on the procedure. It is one owner's routine on one pump, not
 something this project has verified across models, and the panel-unlock step in
@@ -222,6 +209,46 @@ failed opens are not counted as cycles at all. They surface as `Failed To
 Establish (0x3e)` and, before long, as `Unreachable` on Pump Link Status. The
 stall needs connections that open and are then dropped, which is a different
 shape. So the third cause, if there is one, is still unnamed.
+
+### Suspending the BLE link
+
+The pump accepts **one BLE connection at a time**. While this node is bonded and
+connected it owns that connection, and nothing else can have it.
+
+`Suspend BLE Link` is a diagnostic switch that drops the link and stops
+reconnecting until you turn it off. Two uses, and the second is the one this
+project leans on hardest:
+
+**Handing the pump to the Grundfos GO app.** The app is how you unlock the
+pump's front panel, and the front panel is how you re-pair. Before this switch,
+the only way to give the app the pump was to remove power from the node — a
+remote action on PoE, and a walk to the pump on USB.
+
+**Handing the pump to another client for bench work.** Protocol discovery,
+wire-level reads of objects this component does not implement yet, and probing
+a behaviour before writing code for it all need something else talking to the
+pump — the Python client in the sibling `alpha-hwr` repo, or a throwaway probe.
+Suspend, run the probe, release, and the component picks the link back up. That
+turns "build and flash probe firmware, then flash the real thing back" into
+flipping a switch, and it makes going *back and forth* practical, which is what
+comparing the two implementations against the same pump actually requires.
+
+Neither use needs the bond cleared. **Do not clear the bond to free the pump** —
+clearing the ESP's bond strands it until someone re-pairs at the pump itself.
+
+While suspended, **Pump Link Status** reads `Suspended` and **Pump Link Fault**
+reads `None`. Neither is a fault. The fault stays masked through the reconnect
+until the pump is READY again, so releasing the switch does not publish the
+node's own `Local Host Terminated (0x16)` for the ~15 s it takes to get back —
+which is exactly the window an automation watches.
+
+**Not persisted.** A reboot comes back connected. A node that refuses to talk to
+the pump after a power cut, because of a switch flipped a week ago, is a worse
+failure than the inconvenience it solves.
+
+A stock `ble_client.disconnect` is **not** a substitute: the client reconnects
+from `IDLE` on the next matching advertisement, so the link is back within a
+scan interval.
 
 ### `ready_timeout`
 
