@@ -6,6 +6,8 @@
  */
 
 #include "event_log_service.h"
+
+#include "esphome/core/time.h"
 #include "frame_builder.h"
 #include "codec.h"
 #include "transport.h"
@@ -168,15 +170,14 @@ std::string EventLogService::format_display() const {
 
   std::string result;
   for (const auto &e : cached_entries_) {
-    time_t ts = (time_t)e.timestamp;
-    struct tm tm_info;
-    localtime_r(&ts, &tm_info);
+    // ESPTime, not localtime_r: on the ESP32 libc has no timezone, so this
+    // rendered every event-log entry in UTC (issue #289).
+    const ESPTime lt = ESPTime::from_epoch_local(static_cast<time_t>(e.timestamp));
 
     char buf[80];
     snprintf(buf, sizeof(buf), "%s %04d-%02d-%02d %02d:%02d",
              e.event_type_str(),
-             tm_info.tm_year + 1900, tm_info.tm_mon + 1, tm_info.tm_mday,
-             tm_info.tm_hour, tm_info.tm_min);
+             lt.year, lt.month, lt.day_of_month, lt.hour, lt.minute);
 
     if (!result.empty()) result += "\n";
     result += buf;

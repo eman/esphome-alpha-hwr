@@ -1038,19 +1038,16 @@ std::string ScheduleService::format_single_events_display() const {
   for (const auto &ev : cached_single_events_) {
     if (!ev.enabled)
       continue;
-    time_t begin_t = (time_t)ev.begin_timestamp;
-    time_t end_t = (time_t)ev.end_timestamp;
-    struct tm begin_tm, end_tm;
-    localtime_r(&begin_t, &begin_tm);
-    localtime_r(&end_t, &end_tm);
+    // ESPTime, not localtime_r -- see issue #289.
+    const ESPTime b = ESPTime::from_epoch_local(static_cast<time_t>(ev.begin_timestamp));
+    const ESPTime e = ESPTime::from_epoch_local(static_cast<time_t>(ev.end_timestamp));
 
     // action 0x01 = Stop (pump off / vacation), 0x02 = Auto (one-time run).
     const char *action = ev.action == 0x01 ? "off" : "run";
     char buf[96];
     snprintf(buf, sizeof(buf), "[%d] %04d-%02d-%02d %02d:%02d - %02d:%02d (%s)",
-             ev.index, begin_tm.tm_year + 1900, begin_tm.tm_mon + 1,
-             begin_tm.tm_mday, begin_tm.tm_hour, begin_tm.tm_min,
-             end_tm.tm_hour, end_tm.tm_min, action);
+             ev.index, b.year, b.month, b.day_of_month, b.hour, b.minute,
+             e.hour, e.minute, action);
 
     if (!result.empty())
       result += "\n";
@@ -1173,17 +1170,14 @@ std::string ScheduleService::format_vacation_display(uint32_t now_ts) const {
   if (nothing_to_show)
     return "No vacation";
 
-  time_t begin_t = (time_t) ev->begin_timestamp;
-  time_t end_t = (time_t) ev->end_timestamp;
-  struct tm begin_tm, end_tm;
-  localtime_r(&begin_t, &begin_tm);
-  localtime_r(&end_t, &end_tm);
+  // ESPTime, not localtime_r -- see issue #289: on the ESP32 libc has no
+  // timezone, so this showed the user their vacation in UTC.
+  const ESPTime b = ESPTime::from_epoch_local(static_cast<time_t>(ev->begin_timestamp));
+  const ESPTime e = ESPTime::from_epoch_local(static_cast<time_t>(ev->end_timestamp));
   char buf[96];
   snprintf(buf, sizeof(buf), "%04d-%02d-%02d %02d:%02d - %04d-%02d-%02d %02d:%02d",
-           begin_tm.tm_year + 1900, begin_tm.tm_mon + 1, begin_tm.tm_mday,
-           begin_tm.tm_hour, begin_tm.tm_min,
-           end_tm.tm_year + 1900, end_tm.tm_mon + 1, end_tm.tm_mday,
-           end_tm.tm_hour, end_tm.tm_min);
+           b.year, b.month, b.day_of_month, b.hour, b.minute,
+           e.year, e.month, e.day_of_month, e.hour, e.minute);
   return std::string(buf);
 }
 

@@ -1421,6 +1421,73 @@ void test_build_event_window_anchors_to_the_node_clock() {
   TEST_ASSERT(end > begin, "the pair is ordered");
 }
 
+// build_event_window() encodes local calendar fields into a UTC epoch, and it
+// used mktime() -- which resolves against libc's zone, and on the ESP32 libc
+// has none (issue #289). So the schedule editor's buttons produced windows out
+// by the node's offset, and no ordinary host test could see it because the host
+// build DOES set the zone.
+//
+// MockZoneOverride makes ESPHome's zone disagree with the process TZ, which is
+// the device's split reproduced on the host.
+void test_build_event_window_does_not_encode_through_libc() {
+  std::cout << "\n=== A dated event is encoded through ESPTime, not libc ===" << std::endl;
+  setenv("TZ", "UTC", 1);
+  tzset();
+  Rig r;
+  r.attach_node_clock(1655294400);  // 2022-06-15 12:00 UTC
+  r.setup();
+  {
+    esphome::MockZoneOverride pst(-8 * 3600);  // libc says UTC, ESPHome says PST
+
+    uint32_t begin = 0, end = 0;
+    TEST_ASSERT(r.component.build_event_window("test", 6, 1, 9, 0, 6, 1, 17, 0,
+                                               &begin, &end),
+                "the window is built");
+
+    // 2022-06-01 09:00 LOCAL in a UTC-8 zone is 17:00 UTC.
+    struct tm fields {};
+    fields.tm_year = 122;  // 2022
+    fields.tm_mon = 5;     // June
+    fields.tm_mday = 1;
+    fields.tm_hour = 9;
+    const uint32_t naive = static_cast<uint32_t>(timegm(&fields));
+
+    TEST_ASSERT(begin == naive + 8u * 3600u,
+                "the begin is the UTC instant of 09:00 LOCAL -- eight hours "
+                "later than the fields read as UTC");
+    TEST_ASSERT(begin != naive,
+                "and specifically not the fields taken as UTC, which is what "
+                "mktime() produced on the device");
+    TEST_ASSERT(end - begin == 8u * 3600u,
+                "and the window is still the eight hours that were asked for");
+  }
+}
+
+// The displays render the pump's timestamps for a human, and they went through
+// localtime_r -- so on the device the user was shown UTC (issue #289).
+void test_the_vacation_display_is_rendered_in_local_time() {
+  std::cout << "\n=== The vacation display renders in the node's zone ===" << std::endl;
+  setenv("TZ", "UTC", 1);
+  tzset();
+  Rig r;
+  r.setup();
+  {
+    esphome::MockZoneOverride pst(-8 * 3600);
+    // A vacation running 2022-06-01 00:00 UTC -> the display should read the
+    // PREVIOUS day at 16:00 local, not 00:00.
+    struct tm fields {};
+    fields.tm_year = 122;
+    fields.tm_mon = 5;
+    fields.tm_mday = 1;
+    const uint32_t utc_begin = static_cast<uint32_t>(timegm(&fields));
+
+    esphome::ESPTime shown = esphome::ESPTime::from_epoch_local(utc_begin);
+    TEST_ASSERT(shown.hour == 16 && shown.day_of_month == 31 && shown.month == 5,
+                "ESPTime renders it as 16:00 on May 31 local, which is what a "
+                "user in that zone should see");
+  }
+}
+
 // A clock the node has but that nothing has SET is not a clock. This is the
 // case the retired year-2020 floor let through and the one floor now refuses --
 // and it is the realistic one, since an ESP32 that boots without SNTP has a
@@ -2045,6 +2112,8 @@ int main() {
   test_build_event_window_refuses_without_a_node_clock();
   test_build_event_window_anchors_to_the_node_clock();
   test_build_event_window_refuses_an_unsynced_clock();
+  test_build_event_window_does_not_encode_through_libc();
+  test_the_vacation_display_is_rendered_in_local_time();
 
   std::cout << "\n==========================================" << std::endl;
   std::cout << "Results: " << tests_passed << " passed, " << tests_failed

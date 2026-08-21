@@ -42,6 +42,7 @@
 
 #include "esphome/core/helpers.h"
 #include "esphome/core/log.h"
+#include "esphome/core/time.h"
 #include "schedule_entry.h"
 #include <cstdint>
 #include <ctime>
@@ -131,24 +132,42 @@ inline uint32_t local_unix_to_utc(uint32_t local, int32_t offset_s) {
 }
 
 /// Local UTC offset (seconds east of UTC) at the instant `ref`, e.g. -25200 for
-/// PDT, +3600 for CET.
+/// PDT, +3600 for CET. `ref` is a **UTC epoch**.
 ///
-/// `ref` is a **UTC epoch**. Uses only localtime_r/gmtime_r, both of which work
-/// on ESP-IDF newlib; mktime() there does NOT apply the TZ to a UTC-field tm, so
-/// the mktime(gmtime()) idiom returns 0. localtime has already resolved DST at
-/// `ref`, so the difference between the two representations is the offset.
+/// ## Why this does not use libc (issue #289)
+///
+/// It used to, and on the ESP32 that made it **return 0** -- so the whole
+/// UTC<->local shift below was a no-op on the device this component ships to,
+/// while every host test passed.
+///
+/// ESPHome sets libc's timezone only on the host:
+///
+///     // esphome/components/time/real_time_clock.cpp
+///     #ifdef USE_HOST
+///       setenv("TZ", tz, 1);
+///       tzset();
+///     #endif
+///
+/// `USE_HOST` is not defined in the ESP32 build ("we eliminated
+/// setenv("TZ")/tzset() on embedded platforms to save flash" --
+/// esphome/core/time.cpp). ESPHome's own conversions use its parsed timezone
+/// instead and never consult libc, so on the device `localtime_r` is UTC while
+/// `ESPTime::from_epoch_local()` is correct. The old comment here was careful
+/// about which libc functions exist on newlib and never asked whether they had
+/// a zone to work with.
+///
+/// So: ask ESPTime, which is right on both targets. Take the local FIELDS at
+/// `ref`, re-encode them as though they were UTC, and the difference is the
+/// offset. That is also exactly the encoding the sibling Python library uses
+/// (`calendar.timegm()` on naive local fields), which is bench-confirmed -- so
+/// the two implementations now agree in execution as well as in design.
 inline int32_t local_utc_offset_seconds(time_t ref) {
-  struct tm lt {}, gt {};
-  localtime_r(&ref, &lt);
-  gmtime_r(&ref, &gt);
-  int32_t off = (lt.tm_hour - gt.tm_hour) * 3600 + (lt.tm_min - gt.tm_min) * 60 +
-                (lt.tm_sec - gt.tm_sec);
-  // Correct for a date rollover between the two representations.
-  int day_delta = lt.tm_yday - gt.tm_yday;
-  if (lt.tm_year != gt.tm_year)
-    day_delta = (lt.tm_year > gt.tm_year) ? 1 : -1;
-  off += day_delta * 86400;
-  return off;
+  ESPTime local_fields = ESPTime::from_epoch_local(ref);
+  // Re-encode the local fields as if they were UTC. `false` skips day_of_year,
+  // which from_epoch_local() has set but which is redundant here and is one
+  // more thing to be wrong.
+  local_fields.recalc_timestamp_utc(false);
+  return static_cast<int32_t>(local_fields.timestamp - ref);
 }
 
 /// Convert a LOCAL-Unix value read back from the pump into UTC, resolving the

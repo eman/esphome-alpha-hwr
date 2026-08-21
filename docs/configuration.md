@@ -113,6 +113,28 @@ off the pump was when it was found; the two together are the way to check this
 is working. `alpha_hwr_base.yaml` declares neither, so on that package and on
 hand-written blocks the log is the only signal.
 
+### Timezones, and what the pump stores
+
+The pump stores schedule windows in its **own local time** — its clock reports a
+DST state and the protocol has no timezone field anywhere, so local is the only
+base it can be using. This component takes the timezone from your `time:`
+component and converts at the edge, because Home Assistant speaks UTC.
+
+Two things follow that are worth knowing:
+
+- **`time_id` is what makes that conversion possible.** Without it the component
+  refuses to date an event at all, rather than guessing.
+- **The conversion uses ESPHome's timezone engine, never libc.** That sounds like
+  an implementation detail and is not: ESPHome applies the timezone to libc only
+  on the host, so on an ESP32 `localtime()` answers UTC. Before v0.16 this
+  component used libc, and single events on a non-UTC node were stored — and run
+  — offset by the node's UTC offset (issue #289).
+
+**If you stored vacations or one-time runs before v0.16, re-enter them.** They
+are on the pump at the wrong instant and are not rewritten automatically. The
+weekly schedule is unaffected: it is stored as day-and-minute-of-day, not as an
+epoch, so it never went through the conversion.
+
 ### `enable_pairing`
 
 Pairing is initiated by the pump, not by this node. On an unbonded connection
