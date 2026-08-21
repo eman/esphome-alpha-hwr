@@ -24,8 +24,56 @@
 // they must still agree on which of two instants an ambiguous local time means:
 // real ESPHome documents "prefer standard time" and this mock gets there by
 // handing mktime tm_isdst = -1.
+//
+// ## Modelling the embedded target (issue #289)
+//
+// The libc-backed behaviour above is faithful to ESPHome **on the host** and
+// unfaithful to it on an ESP32, and the difference is not cosmetic: real
+// ESPHome keeps its own parsed timezone and calls setenv("TZ")/tzset() only
+// under USE_HOST, so on the device `localtime_r` is UTC while
+// `ESPTime::from_epoch_local()` is correct. A component that reached for libc
+// was therefore right on the host and wrong on hardware, and no host test could
+// tell -- which is exactly how #289 shipped.
+//
+// mock_parsed_zone() closes that. Set `follow_libc = false` with an
+// `offset_seconds` that DISAGREES with the process TZ, and ESPTime answers from
+// the offset while libc answers from TZ -- the device's split, reproduced on the
+// host. A conversion done the wrong way then gives a visibly wrong answer.
+//
+// The default is `follow_libc = true`, so every test written before this keeps
+// the behaviour it was verified against.
 
 namespace esphome {
+
+/// Mock of ESPHome's parsed timezone. See the note above.
+struct MockParsedZone {
+  /// True: resolve local time through libc, as this mock always did and as
+  /// real ESPHome does on the host.
+  bool follow_libc{true};
+  /// Seconds east of UTC, used only when follow_libc is false. A fixed offset
+  /// with no DST rule -- enough to catch a libc call, which is the job.
+  int32_t offset_seconds{0};
+};
+
+inline MockParsedZone &mock_parsed_zone() {
+  static MockParsedZone zone;
+  return zone;
+}
+
+/// Scoped override, so a test cannot leak its zone into the next one.
+class MockZoneOverride {
+ public:
+  explicit MockZoneOverride(int32_t offset_seconds) : saved_(mock_parsed_zone()) {
+    mock_parsed_zone().follow_libc = false;
+    mock_parsed_zone().offset_seconds = offset_seconds;
+  }
+  ~MockZoneOverride() { mock_parsed_zone() = saved_; }
+  MockZoneOverride(const MockZoneOverride &) = delete;
+  MockZoneOverride &operator=(const MockZoneOverride &) = delete;
+
+ private:
+  MockParsedZone saved_;
+};
 
 inline uint8_t days_in_month(uint8_t month, uint16_t year) {
   static const uint8_t DAYS[12] = {31, 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31};
@@ -80,6 +128,13 @@ struct ESPTime {
   }
 
   static ESPTime from_epoch_local(time_t epoch) {
+    if (!mock_parsed_zone().follow_libc) {
+      // The local FIELDS at `epoch` are the UTC fields of `epoch + offset`;
+      // `timestamp` stays the true UTC epoch, as real from_epoch_local() does.
+      ESPTime res = ESPTime::from_epoch_utc(epoch + mock_parsed_zone().offset_seconds);
+      res.timestamp = epoch;
+      return res;
+    }
     struct tm buf;
     struct tm *c_tm = ::localtime_r(&epoch, &buf);
     if (c_tm == nullptr) return ESPTime{};
@@ -101,6 +156,12 @@ struct ESPTime {
   }
 
   void recalc_timestamp_local() {
+    if (!mock_parsed_zone().follow_libc) {
+      // Fields are local; timegm() of them is (utc + offset), so subtract it.
+      this->recalc_timestamp_utc(false);
+      this->timestamp -= mock_parsed_zone().offset_seconds;
+      return;
+    }
     struct tm c_tm = this->to_c_tm();
     c_tm.tm_isdst = -1;  // let libc resolve the DST flag from the local fields
     this->timestamp = ::mktime(&c_tm);

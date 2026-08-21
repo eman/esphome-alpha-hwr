@@ -369,6 +369,49 @@ static std::vector<uint8_t> event_meta_reply(uint16_t available) {
                                     0x00}));
 }
 
+/// The event log's timestamps are the pump's OWN clock, and must be rendered
+/// verbatim (issue #289).
+///
+/// The distinction this pins is the one I got wrong while fixing #289, and
+/// nothing caught it because no test looked at the rendering at all.
+///
+/// EventLogEntry::from_bytes() reads the four wire bytes and NOTHING converts
+/// them. They are the pump's clock, which runs on local time -- unlike cached
+/// single events, which go through local_unix_to_utc_resolved() on read and
+/// really are UTC epochs in our domain. So the correct rendering takes the
+/// value's fields as they stand; shifting it "to local" moves a local wall
+/// clock by the offset a second time.
+///
+/// Driven under MockZoneOverride, where ESPHome's zone disagrees with the
+/// process TZ, so any shift at all is visible. Under the plain TZ=UTC pin both
+/// a shift and no shift look identical, which is why this needs the override.
+static void test_event_log_timestamps_are_rendered_verbatim() {
+  setenv("TZ", "UTC", 1);
+  tzset();
+  esphome::MockZoneOverride pst(-8 * 3600);
+
+  Rig rig;
+  services::EventLogService svc(rig.transport, rig.session);
+
+  svc.read_entries_async(
+      [](bool, const std::vector<services::EventLogEntry> &) {});
+  step(rig.transport, 2);
+  auto meta = event_meta_reply(1);
+  rig.transport.on_notification(meta.data(), meta.size());
+  step(rig.transport, 2);
+  // 2023-11-14 22:13:20 when its fields are read as they stand.
+  auto entry = event_entry_reply(1700000000u);
+  rig.transport.on_notification(entry.data(), entry.size());
+  step(rig.transport, 2);
+
+  const std::string shown = svc.format_display();
+  TEST_ASSERT(shown.find("2023-11-14 22:13") != std::string::npos,
+              "the entry renders the pump's own wall clock verbatim");
+  TEST_ASSERT(shown.find("2023-11-14 14:13") == std::string::npos,
+              "and is NOT shifted into the node's zone -- that would move a "
+              "local wall clock by the offset a second time");
+}
+
 /// The other half of the event-log gate, and the half nothing asserted.
 ///
 /// The gate does two things: report failure, and leave the cache alone. The
@@ -452,6 +495,7 @@ int main() {
   test_abandoned_history_read_keeps_the_previous_data();
   test_abandoned_event_log_read_reports_failure();
   test_abandoned_event_log_read_keeps_the_previous_data();
+  test_event_log_timestamps_are_rendered_verbatim();
 
   std::cout << "\n==========================================" << std::endl;
   std::cout << "Results: " << tests_passed << " passed, " << tests_failed

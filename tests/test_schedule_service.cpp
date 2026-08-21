@@ -138,6 +138,81 @@ static uint32_t to_wire(uint32_t utc, int32_t offset_s) {
   return wire;
 }
 
+// ── The conversion must not go through libc (issue #289) ────────────────────
+//
+// This is the one test on this branch that could have caught the shipped bug,
+// and it needs the mock's embedded mode to do it.
+//
+// Real ESPHome keeps its own parsed timezone and calls setenv("TZ")/tzset()
+// only under USE_HOST. On an ESP32 libc therefore has NO zone: localtime_r,
+// mktime and gmtime_r all answer UTC, while ESPTime::from_epoch_local() is
+// correct. local_utc_offset_seconds() was written against libc, so on hardware
+// it returned 0 and the entire UTC<->local shift for single events was a no-op
+// -- a user in Los Angeles asking for 07:00 got 00:00.
+//
+// Every ordinary host test agrees with libc, because the host build DOES set
+// the zone. So the discriminator has to be a state the host cannot otherwise
+// reach: ESPTime's zone deliberately DISAGREEING with the process TZ. Under
+// MockZoneOverride the two differ, and a conversion done the wrong way gives a
+// visibly wrong answer.
+void test_the_offset_does_not_come_from_libc() {
+  using esphome::alpha_hwr::services::local_utc_offset_seconds;
+
+  // libc says UTC...
+  setenv("TZ", "UTC", 1);
+  tzset();
+  {
+    // ...and ESPHome's zone says PST. On a device, only the second is right.
+    esphome::MockZoneOverride pst(-8 * 3600);
+
+    const time_t ref = 1786104000;  // 2026-08-07 12:00:00 UTC
+    TEST_ASSERT(local_utc_offset_seconds(ref) == -8 * 3600,
+                "the offset comes from ESPHome's timezone, not from libc -- "
+                "with libc it would be 0, which is what the ESP32 was doing");
+
+    // ...and the whole point: the wire value is shifted by it.
+    uint32_t wire = 0;
+    TEST_ASSERT(esphome::alpha_hwr::services::utc_to_local_unix(
+                    static_cast<uint32_t>(ref), local_utc_offset_seconds(ref), &wire),
+                "the shift is representable");
+    TEST_ASSERT(wire == static_cast<uint32_t>(ref) - 8u * 3600u,
+                "so a UTC instant reaches the pump as the local wall clock, "
+                "which is what the pump's own clock is set to");
+    TEST_ASSERT(wire != static_cast<uint32_t>(ref),
+                "and specifically NOT unshifted, which is what shipped");
+
+    // The round trip still closes, so the fix is not one-directional.
+    TEST_ASSERT(esphome::alpha_hwr::services::local_unix_to_utc_resolved(wire) ==
+                    static_cast<uint32_t>(ref),
+                "and the readback converts back to the instant asked for");
+  }
+
+  // The control: with the override gone, the offset follows libc again, so the
+  // assertions above are about the zone source and not about the arithmetic.
+  TEST_ASSERT(local_utc_offset_seconds(1786104000) == 0,
+              "back under the UTC pin the offset is 0 again");
+}
+
+// An eastward zone too, because a sign error would pass the test above only if
+// it also flipped -- and this is the direction that makes a window arrive
+// REVERSED rather than merely late.
+void test_the_offset_is_signed_the_way_the_pump_expects() {
+  using esphome::alpha_hwr::services::local_utc_offset_seconds;
+  setenv("TZ", "UTC", 1);
+  tzset();
+  esphome::MockZoneOverride cet(3600);
+
+  const time_t ref = 1786104000;
+  TEST_ASSERT(local_utc_offset_seconds(ref) == 3600,
+              "an eastward zone reports a positive offset");
+  uint32_t wire = 0;
+  esphome::alpha_hwr::services::utc_to_local_unix(static_cast<uint32_t>(ref),
+                                                  local_utc_offset_seconds(ref), &wire);
+  TEST_ASSERT(wire == static_cast<uint32_t>(ref) + 3600u,
+              "and the wire value is AHEAD of UTC, matching a pump whose own "
+              "clock reads local");
+}
+
 // Single-event timestamps live in the pump's LOCAL-Unix clock domain on the
 // wire, while our SingleEvent fields hold UTC. Verify the shift helpers.
 void test_single_event_tz_shift() {
@@ -536,6 +611,8 @@ int main() {
   std::cout << "===========================================================" << std::endl;
 
   test_schedule_write_payload();
+  test_the_offset_does_not_come_from_libc();
+  test_the_offset_is_signed_the_way_the_pump_expects();
   test_single_event_tz_shift();
   test_a_shift_that_cannot_be_represented_is_refused();
   test_single_event_tz_shift_across_dst();

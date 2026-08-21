@@ -154,14 +154,19 @@ MUTATIONS=(
 # at one of them -- and the visible symptom was a write settling REJECTED while
 # the pump held exactly the right value.
 "dst-offset-resolved-from-local|components/alpha_hwr/schedule_service.h|  const int32_t refined = local_utc_offset_seconds(\n      static_cast<time_t>(static_cast<int64_t>(local) - approx));\n  return local_unix_to_utc(local, refined);|  return local_unix_to_utc(local, approx);"
-# Both found by a skeptic pass, both survived the original tests: the only
-# TZ-driven test used US Pacific, whose offsets are whole hours and whose sample
-# instants share a calendar year with UTC. So a whole-hour-only implementation
-# and a broken year-rollover branch were each indistinguishable from the real
-# thing. Pre-existing code, but this change is the first to test the function at
-# all, which makes it the place to close them.
-"dst-offset-ignores-sub-hour-zones|components/alpha_hwr/schedule_service.h|(lt.tm_min - gt.tm_min) * 60|0 * (lt.tm_min - gt.tm_min) * 60"
-"dst-offset-year-rollover-branch|components/alpha_hwr/schedule_service.h|    day_delta = (lt.tm_year > gt.tm_year) ? 1 : -1;|    day_delta = 0;"
+# DELETED, not lost: dst-offset-ignores-sub-hour-zones and
+# dst-offset-year-rollover-branch. They mutated the minutes term and the
+# year-rollover branch of local_utc_offset_seconds()'s hand-rolled offset
+# arithmetic, and issue #289 deleted that arithmetic -- the function now asks
+# ESPTime, which is the only implementation that is right on the ESP32 as well
+# as the host. There is no line left to mutate.
+#
+# The PROPERTIES they proved are still tested, and by the same assertions as
+# before: test_schedule_service's ACST fixture (a +9:30 zone, so a whole-hour
+# implementation fails it) and its New Year fixture (local and UTC in different
+# calendar years). Those tests did not change; only what they exercise did.
+# Recorded here because --verify checks entries against code and never code
+# against entries, so a deletion is invisible to it (see the note at the top).
 "ignore-unrelated-gate|components/alpha_hwr/response_match.h|  if (!is_wildcard_matched_class(queued_class)) return false;\n  return !is_wildcard_matched_class(incoming_class);|  return false;"
 # The wildcard-matched class set (issue #174). Membership is the whole safety
 # argument for admitting classes 2, 5 and 11, so both directions are pinned:
@@ -590,6 +595,26 @@ MUTATIONS=(
 "clock-gate-accuses-a-booting-node|components/alpha_hwr/clock_sync_gate.h|  if (uptime_ms < grace_ms) {\n    return ClockSyncAction::WAIT;\n  }|  if (false) {\n    return ClockSyncAction::WAIT;\n  }"
 "clock-gate-grace-boundary-off-by-one|components/alpha_hwr/clock_sync_gate.h|  if (uptime_ms < grace_ms) {|  if (uptime_ms <= grace_ms) {"
 "clock-gate-every-block-warns|components/alpha_hwr/clock_sync_gate.h|  return a == ClockSyncAction::WARN_NO_TIME_ID |  return a != ClockSyncAction::SYNC; //"
+
+# Local time comes from ESPHome's parsed zone, never from libc (issue #289).
+# ESPHome calls setenv("TZ")/tzset() only under USE_HOST, so on the ESP32 libc
+# has NO zone: localtime_r/mktime/gmtime_r all answer UTC while ESPTime is
+# correct. local_utc_offset_seconds() was written against libc and therefore
+# returned 0 on the device, making the whole UTC<->local shift for single
+# events a no-op -- a user asking for 07:00 got 00:00.
+#
+# These are the mutants an ordinary host test cannot catch, because the host
+# build DOES set libc's zone. They die only under the mock's embedded mode,
+# where ESPTime's zone deliberately disagrees with the process TZ.
+"tz-offset-taken-as-utc|components/alpha_hwr/schedule_service.h|  ESPTime local_fields = ESPTime::from_epoch_local(ref);|  ESPTime local_fields = ESPTime::from_epoch_utc(ref);"
+"tz-event-window-encoded-as-utc|components/alpha_hwr/alpha_hwr.h|      t.recalc_timestamp_local();|      t.recalc_timestamp_utc(false);"
+# The other half of the same distinction, and the one I got wrong first. Event
+# log and cycle timestamps come off the wire RAW -- nothing converts them,
+# because they are the pump's own clock, which runs local. Rendering them
+# "to local" shifts a local wall clock by the offset a SECOND time. Cached
+# single events are the opposite case: local_unix_to_utc_resolved() has already
+# made them UTC epochs in our domain, so they do want shifting.
+"tz-event-log-shifted-twice|components/alpha_hwr/event_log_service.cpp|    const ESPTime lt = ESPTime::from_epoch_utc(static_cast<time_t>(e.timestamp));|    const ESPTime lt = ESPTime::from_epoch_local(static_cast<time_t>(e.timestamp));"
 
 # One clock, one floor (issue #270). The component used to resolve "what time is
 # it" in five places with three different floors -- year 2020, year 2021, and

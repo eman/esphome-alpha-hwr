@@ -1382,17 +1382,31 @@ public:
       }
       return day <= max_day;
     };
+    // Local calendar fields -> UTC epoch, through ESPTime rather than mktime()
+    // (issue #289). mktime() resolves against libc's zone, and on the ESP32
+    // libc has no zone -- ESPHome only calls tzset() under USE_HOST -- so this
+    // encoded the user's local wall clock as though it were UTC. Every window
+    // the schedule editor produced was out by the node's offset, and no host
+    // test could see it because the host build DOES set the zone.
+    //
+    // recalc_timestamp_local() is ESPHome's own engine, correct on both
+    // targets, and it resolves the DST-ambiguous hour the same way mktime's
+    // tm_isdst = -1 did (preferring standard time in the fall-back fold).
     auto make_ts = [](int tm_year, uint16_t month, uint16_t day, uint16_t hour,
                       uint16_t minute) -> time_t {
-      struct tm t = {};
-      t.tm_year = tm_year;
-      t.tm_mon = month - 1;
-      t.tm_mday = day;
-      t.tm_hour = hour;
-      t.tm_min = minute;
-      t.tm_sec = 0;
-      t.tm_isdst = -1;  // let mktime resolve DST for the local zone
-      return mktime(&t);
+      ESPTime t{};
+      t.year = static_cast<uint16_t>(tm_year + 1900);
+      t.month = static_cast<uint8_t>(month);
+      t.day_of_month = static_cast<uint8_t>(day);
+      t.hour = static_cast<uint8_t>(hour);
+      t.minute = static_cast<uint8_t>(minute);
+      t.second = 0;
+      // Not read by the conversion, but ESPTime carries them and leaving them
+      // zero makes the struct fail its own is_valid() if anything looks.
+      t.day_of_week = 1;
+      t.day_of_year = 1;
+      t.recalc_timestamp_local();
+      return t.timestamp;
     };
 
     // The node's clock, through the one accessor, at the one floor (issue
@@ -1501,10 +1515,15 @@ public:
             if (this->cycle_timestamps_text_sensor_) {
               std::string display;
               for (const auto &ts : timestamps) {
-                time_t t = ts;
-                const struct tm *tm_info = localtime(&t);
+                // from_epoch_**utc**: these are the pump's own clock, read raw
+                // off Object 88 with no conversion, and its clock runs local.
+                // Taking the fields verbatim is the correct rendering; shifting
+                // them would move a local wall clock by the offset a second
+                // time. Same distinction as the event log -- see the note in
+                // event_log_service.cpp (issue #289).
+                ESPTime lt = ESPTime::from_epoch_utc(static_cast<time_t>(ts));
                 char buf[32];
-                strftime(buf, sizeof(buf), "%Y-%m-%d %H:%M", tm_info);
+                lt.strftime(buf, sizeof(buf), "%Y-%m-%d %H:%M");
                 if (!display.empty())
                   display += "\n";
                 display += buf;

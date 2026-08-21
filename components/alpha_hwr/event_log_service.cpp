@@ -6,6 +6,8 @@
  */
 
 #include "event_log_service.h"
+
+#include "esphome/core/time.h"
 #include "frame_builder.h"
 #include "codec.h"
 #include "transport.h"
@@ -168,15 +170,28 @@ std::string EventLogService::format_display() const {
 
   std::string result;
   for (const auto &e : cached_entries_) {
-    time_t ts = (time_t)e.timestamp;
-    struct tm tm_info;
-    localtime_r(&ts, &tm_info);
+    // from_epoch_**utc**, and the distinction is the whole trap of issue #289.
+    //
+    // Event-log timestamps come off the wire RAW: EventLogEntry::from_bytes()
+    // reads the four bytes and nothing converts them, because they are the
+    // pump's OWN clock, which runs on local time. They are not UTC epochs in
+    // our domain the way cached single events are (those go through
+    // local_unix_to_utc_resolved() on read).
+    //
+    // So the right rendering is to take the value's fields verbatim -- which is
+    // what from_epoch_utc() does -- and NOT to shift it again. from_epoch_local()
+    // here would treat the pump's local wall clock as though it were UTC and
+    // move it by the offset a second time.
+    //
+    // This also corrects the host side, where the old localtime_r() DID shift
+    // and was wrong. On the device localtime_r happened to be right, for the
+    // wrong reason: libc had no zone, so it shifted by zero.
+    const ESPTime lt = ESPTime::from_epoch_utc(static_cast<time_t>(e.timestamp));
 
     char buf[80];
     snprintf(buf, sizeof(buf), "%s %04d-%02d-%02d %02d:%02d",
              e.event_type_str(),
-             tm_info.tm_year + 1900, tm_info.tm_mon + 1, tm_info.tm_mday,
-             tm_info.tm_hour, tm_info.tm_min);
+             lt.year, lt.month, lt.day_of_month, lt.hour, lt.minute);
 
     if (!result.empty()) result += "\n";
     result += buf;
