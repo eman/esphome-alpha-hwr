@@ -117,7 +117,7 @@ struct LimiterStatus {
   bool valid{false};
   LimiterName name{LimiterName::NONE};
   bool limiting{false};   ///< Is this limiter constraining the pump right now?
-  float reference{0.0f};  ///< See reference_is_a_speed() below.
+  float reference{0.0f};  ///< A SPEED in RPM -- see the note below.
 
   /// `limiter_reference` is a **speed in RPM**, not a flow, and the magnitudes
   /// are what settle it. A flow in the pump's native m³/s would be around
@@ -132,7 +132,6 @@ struct LimiterStatus {
   /// An enabled limiter with nothing to do publishes the top of the
   /// constant-speed range; one that is limiting publishes the speed it is
   /// imposing.
-  bool reference_is_a_speed() const { return true; }
 };
 
 /// Bytes of payload each record carries, after the 3-byte size header.
@@ -158,10 +157,15 @@ inline LimiterName limiter_name_from_byte(uint8_t b) {
 /// Decode a type 895 v1 record. @p body starts after the 3-byte size header.
 inline LimiterConfig decode_limiter_config(const uint8_t *body, size_t len) {
   LimiterConfig c{};
-  // Split in two, and spelled without a '||', so mutation_check.sh has a
-  // pipe-free line to anchor to -- its entries are split on that character.
-  const bool body_is_readable = body != nullptr;
-  const bool long_enough = body_is_readable && len >= LIMITER_CONFIG_BODY_LEN;
+  // Two separate guards rather than one condition. Not only style: folding the
+  // null check into a `&&` with the length check left cppcheck unable to prove
+  // the pointer was non-null at the reads below, and it said so -- correctly,
+  // since a reader has the same trouble. Keeping them apart also leaves the
+  // length check on its own pipe-free line, which mutation_check.sh needs (it
+  // splits its entries on that character).
+  if (body == nullptr)
+    return c;
+  const bool long_enough = len >= LIMITER_CONFIG_BODY_LEN;
   if (!long_enough)
     return c;
   c.valid = true;
@@ -174,8 +178,9 @@ inline LimiterConfig decode_limiter_config(const uint8_t *body, size_t len) {
 /// Decode a type 896 v1 record. @p body starts after the 3-byte size header.
 inline LimiterStatus decode_limiter_status(const uint8_t *body, size_t len) {
   LimiterStatus s{};
-  const bool body_is_readable = body != nullptr;
-  const bool long_enough = body_is_readable && len >= LIMITER_STATUS_BODY_LEN;
+  if (body == nullptr)
+    return s;
+  const bool long_enough = len >= LIMITER_STATUS_BODY_LEN;
   if (!long_enough)
     return s;
   s.valid = true;

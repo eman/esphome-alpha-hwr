@@ -210,8 +210,8 @@ MUTATIONS=(
 "limiter-enabled-but-idle-reported-as-clear|components/alpha_hwr/limiter.h|  if (s.any_enabled()) {|  if (false) {"
 # The config record is 18 bytes and the status 6. Reading a short one past its
 # end is the memory-safety half.
-"limiter-config-short-frame-decoded|components/alpha_hwr/limiter.h|  const bool long_enough = body_is_readable && len >= LIMITER_CONFIG_BODY_LEN;|  const bool long_enough = true;"
-"limiter-status-short-frame-decoded|components/alpha_hwr/limiter.h|  const bool long_enough = body_is_readable && len >= LIMITER_STATUS_BODY_LEN;|  const bool long_enough = true;"
+"limiter-config-short-frame-decoded|components/alpha_hwr/limiter.h|  const bool long_enough = len >= LIMITER_CONFIG_BODY_LEN;|  const bool long_enough = true;"
+"limiter-status-short-frame-decoded|components/alpha_hwr/limiter.h|  const bool long_enough = len >= LIMITER_STATUS_BODY_LEN;|  const bool long_enough = true;"
 # Each record is published as it lands rather than when the five-read chain
 # finishes: a reconnect mid-chain resets the transport and drops the rest, which
 # left the entities empty even though most of the family had been read.
