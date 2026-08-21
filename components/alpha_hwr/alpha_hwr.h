@@ -703,6 +703,26 @@ private:
   bool submit_clock_sync_(const char *reason);
 
   /**
+   * @brief Publish the pump-vs-node clock drift, or say why it cannot be had.
+   *
+   * Both callers -- the read chain's pre-sync measurement and the manual "Read
+   * Pump Clock" button -- ask the same question, and until issue #270 each
+   * answered it with its own copy of the clock read and its own copy of the
+   * literal 1609459200. They still differ in one way, so this reports rather
+   * than decides what to publish on failure: the read chain leaves the last
+   * good reading alone (overwriting "how far out was the pump when we found
+   * it" with NAN is the defect #259 fixed), while the manual read publishes
+   * NAN, because someone who pressed the button is owed an answer and
+   * "unknown" is the true one.
+   *
+   * @param pump_time A pump clock already known to be valid.
+   * @param context Placed in the log line, e.g. "before sync".
+   * @return True when a drift was computed and published.
+   */
+  bool publish_clock_drift_(const ESPTime &pump_time, const char *context);
+
+
+  /**
    * Check if daily time sync is due and perform it if needed.
    * Called from update() to sync pump RTC with system time once per day.
    */
@@ -1294,7 +1314,8 @@ public:
             if (this->vacation_text_sensor_) {
               publish_text_sensor_if_changed(
                   this->vacation_text_sensor_,
-                  schedule_service_.format_vacation_display());
+                  schedule_service_.format_vacation_display(
+                      time_service_.now_unix()));
             }
 #endif
           }
@@ -1374,13 +1395,19 @@ public:
       return mktime(&t);
     };
 
-    time_t now = ::time(nullptr);
-    struct tm *lt = ::localtime(&now);
-    if (lt == nullptr || lt->tm_year < 120 /* 2020 */) {
+    // The node's clock, through the one accessor, at the one floor (issue
+    // #270). This used to read ::time(nullptr) and localtime() directly with a
+    // floor of its own (year 2020), which made it the loosest of the four
+    // notions of "now" in the component: it accepted a clock TimeService would
+    // have refused, and it accepted one in a build with no time component at
+    // all -- where libc has no zone loaded, so the anchoring year and every
+    // mktime() below it were resolved against UTC while the pump runs local.
+    ESPTime local_now;
+    if (!time_service_.current_time(local_now)) {
       ESP_LOGW(tag, "System time not synced yet — cannot set a dated event");
       return false;
     }
-    int year = lt->tm_year;  // years since 1900
+    int year = static_cast<int>(local_now.year) - 1900;  // years since 1900
 
     if (!valid_ymd(begin_month, begin_day, year)) {
       ESP_LOGW(tag, "Invalid start date %02d/%02d", begin_month, begin_day);

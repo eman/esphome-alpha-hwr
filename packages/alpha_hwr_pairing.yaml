@@ -205,6 +205,7 @@ alpha_hwr:
    pump_last_link_failure:
      name: "Pump Link Fault"
 
+
    # Link recycle counter and the longest quiet interval seen since boot
    # (issue #176). The fault sensor above shows the reason *during* a
    # reconnect and clears on recovery, so repeated recycles read as a flap you

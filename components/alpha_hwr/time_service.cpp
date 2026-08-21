@@ -74,29 +74,43 @@ void TimeService::get_clock_async(std::function<void(ESPTime)> callback) {
   );
 }
 
-bool TimeService::current_time(ESPTime &out) const {
+bool TimeService::resolve_wall_clock_(ESPTime &out) const {
 #ifdef USE_TIME
-  if (time_id_ == nullptr) {
-    ESP_LOGD(TAG, "time_id not configured - no wall clock to sync from");
-    return false;
-  }
+  if (time_id_ == nullptr) return false;
   ESPTime now = time_id_->now();
-  if (!clock_is_synced(now)) {
-    ESP_LOGD(TAG, "System time not synced yet - nothing to write");
-    return false;
-  }
+  if (!clock_is_synced(now)) return false;
   out = now;
   return true;
 #else
+  // No time component means no timezone loaded either, so libc's answer here
+  // would not merely be unvalidated -- it would be in the wrong zone. Refusing
+  // is the honest answer, and after #270 it is the answer every caller gets.
   (void) out;
-  ESP_LOGD(TAG, "time component not enabled in this build - no wall clock");
   return false;
 #endif
 }
 
+bool TimeService::current_time(ESPTime &out) const {
+  if (resolve_wall_clock_(out)) return true;
+  // Same three causes as before, told apart the same way; only the resolution
+  // moved. Kept distinct because "you did not configure a time source" and "the
+  // one you configured has not answered yet" want different responses from
+  // whoever reads the log, and clock_sync_gate.h acts on that distinction.
+#ifdef USE_TIME
+  if (time_id_ == nullptr) {
+    ESP_LOGD(TAG, "time_id not configured - no wall clock to sync from");
+  } else {
+    ESP_LOGD(TAG, "System time not synced yet - nothing to write");
+  }
+#else
+  ESP_LOGD(TAG, "time component not enabled in this build - no wall clock");
+#endif
+  return false;
+}
+
 uint32_t TimeService::now_unix() const {
   ESPTime now;
-  if (!current_time(now)) return 0;
+  if (!resolve_wall_clock_(now)) return 0;
   // clock_is_synced() floors the year at 2021, so a clock that passed it cannot
   // produce a negative or zero timestamp -- but the cast is from time_t, and
   // this returning 0 has to mean "no clock" and nothing else. Checking costs a
@@ -106,14 +120,8 @@ uint32_t TimeService::now_unix() const {
 }
 
 bool TimeService::wall_clock_is_set() const {
-#ifdef USE_TIME
-  if (time_id_ == nullptr) {
-    return false;
-  }
-  return clock_is_synced(time_id_->now());
-#else
-  return false;
-#endif
+  ESPTime now;
+  return resolve_wall_clock_(now);
 }
 
 void TimeService::send_set_clock_command(const ESPTime &local_now) {

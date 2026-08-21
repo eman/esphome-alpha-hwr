@@ -19,7 +19,10 @@
 // invents the asynchronous half is a mock that can hide the bug it was written
 // to catch.
 
+#include <cmath>
+#include <cstdlib>
 #include <cstring>
+#include <ctime>
 #include <iostream>
 #include <string>
 #include <vector>
@@ -83,6 +86,11 @@ struct Rig {
   // Pump Clock Drift. Attached by default because the only way to see that a
   // disconnect publishes to it is to have it wired (issue #259).
   esphome::sensor::Sensor clock_drift;
+  // The node's own wall clock. NOT attached in the constructor: an unattached
+  // time_id is the sentinel case for every clock caller (issue #270), and it is
+  // the state every test in this file ran in before the clock had a fixture at
+  // all. A test that wants one calls attach_node_clock().
+  esphome::time::RealTimeClock node_clock;
   AlphaHwrComponent component{&client};
 
   BLEService service;
@@ -200,6 +208,18 @@ struct Rig {
   /// Pump Ready waits on unpopulated.
   bool answer_overview{true};
 
+  /// Answer the pump-clock read (Obj 94 Sub 101). Off by default because the
+  /// drift leg's behaviour when the read goes UNANSWERED is itself pinned below
+  /// (issue #259), and because every test written before this fixture existed
+  /// ran against a pump that never answered it.
+  bool answer_clock{false};
+
+  /// Give the node a synced wall clock reading @p epoch.
+  void attach_node_clock(time_t epoch) {
+    node_clock.set_epoch_for_test(epoch);
+    component.set_time_id(&node_clock);
+  }
+
   /// Go completely deaf: answer nothing at all, without consuming the backlog,
   /// so that setting it back to true delivers everything the pump owed. This is
   /// how a quiet interval is produced against the real notification path rather
@@ -282,6 +302,14 @@ void Rig::answer_outstanding_writes() {
                          0x42, 0x0C, 0x00, 0x00,   // 35.0
                          0x42, 0x1B, 0x99, 0x9A,   // 38.9
                          0x00, 0x00, 0x00, 0x00}));
+      } else if (obj == 94 && sub == 101 && answer_clock) {
+        // DateTimeActual (Obj 94 Sub 101), type 322 v1. The body is the bench
+        // capture recorded in time_service.cpp -- 2026-08-15 20:38:55, with the
+        // five trailing bytes nothing reads -- so the parser under test sees
+        // the bytes the pump really sends rather than a tidied version.
+        const uint8_t clock[12] = {0x07, 0xEA, 0x08, 0x0F, 0x14, 0x26,
+                                   0x37, 0x48, 0x00, 0x06, 0x00, 0x01};
+        notify(data_object_frame(0x01, 0x42, clock, sizeof(clock)));
       } else if (obj == 84 && sub == 1 && answer_overview) {
         // ClockProgramOverview (Obj 84 Sub 1) -- the other cache Pump Ready
         // waits on. Built with the same envelope as the write-operation
@@ -1238,6 +1266,177 @@ void test_a_disconnect_does_not_publish_a_drift_reading() {
               "measured a drift");
 }
 
+
+// ── One clock, one floor: what each caller does without one (issue #270) ─────
+//
+// The component used to answer "what time is it" in five places with three
+// different floors, three of them reading ::time(nullptr) directly. The
+// accessors themselves are pinned in tests/test_time_service.cpp, including the
+// two binaries that prove the `#ifndef USE_TIME` half. What is pinned HERE is
+// the other half of the acceptance criterion -- what each *caller* does when
+// the accessor refuses -- for the callers this rig can reach through a public
+// door.
+//
+// Coverage, stated rather than implied:
+//   * build_event_window()      -- both paths, directly, below.
+//   * read_pump_clock()         -- both paths, directly, below.
+//   * the read chain's drift leg -- shares publish_clock_drift_() with
+//     read_pump_clock(); its ONE difference from that caller (it must not
+//     publish NAN) is what test_the_drift_leg_leaves_a_good_reading_alone
+//     covers, and the rest is the same function.
+//   * stop_single_event_active_() -- reached only with a warm single-event
+//     cache behind a run-state reconcile, which this rig does not stage. Its
+//     sentinel is `now_unix() == 0`, swept in test_time_service.cpp.
+//   * the Last Clock Sync stamp -- unreachable without a clock BY CONSTRUCTION:
+//     check_and_sync_time()'s gate refuses to submit a sync at all unless
+//     wall_clock_is_set(), which is pinned in test_clock_sync_gate.cpp. That
+//     unreachability is why the libc fallback there was deleted rather than
+//     converted.
+
+// The pump clock the rig answers with, as an instant. Same local fields as the
+// fixture body, resolved the way TimeService::parse_clock_response() resolves
+// them, so the expected drift is derived rather than copied.
+static time_t fixture_pump_epoch() {
+  esphome::ESPTime t = esphome::ESPTime::from_epoch_local(0);
+  t.year = 2026; t.month = 8; t.day_of_month = 15;
+  t.hour = 20; t.minute = 38; t.second = 55;
+  t.recalc_timestamp_local();
+  return t.timestamp;
+}
+
+void test_the_drift_leg_publishes_the_drift_it_measured() {
+  std::cout << "\n=== The read chain measures the drift against the node clock ==="
+            << std::endl;
+  Rig r;
+  r.answer_clock = true;
+  // 400 s behind the pump's fixture clock -- a value no floor, default or
+  // truncation could produce by accident.
+  r.attach_node_clock(fixture_pump_epoch() - 400);
+  r.setup();
+  r.connect_and_subscribe();
+  r.run_until_ready();
+
+  TEST_ASSERT(r.clock_drift.publish_count > 0, "a drift is published");
+  TEST_ASSERT(!std::isnan(r.clock_drift.state) &&
+                  std::fabs(r.clock_drift.state - 400.0f) < 1.5f,
+              "the pump reads 400 s ahead of the node, and the sign says ahead "
+              "rather than behind");
+}
+
+// The one way the two drift callers differ, and the reason publish_clock_drift_
+// reports rather than decides what to publish on failure. Overwriting "how far
+// out was the pump when we found it" with NAN is the defect issue #259 fixed.
+// Note the PUMP answers here -- what is missing is the node's own clock, which
+// before #270 this leg resolved with its own ::time(nullptr) read against its
+// own copy of the literal 1609459200.
+void test_the_drift_leg_leaves_a_good_reading_alone() {
+  std::cout << "\n=== The read chain's drift leg publishes nothing without a clock ==="
+            << std::endl;
+  Rig r;
+  r.answer_clock = true;  // the PUMP answers; the NODE still has no clock
+  r.setup();
+  r.connect_and_subscribe();
+
+  const int before = r.clock_drift.publish_count;
+  r.run_until_ready();
+
+  TEST_ASSERT(r.clock_drift.publish_count == before,
+              "the chain's drift leg publishes nothing at all -- not a number, "
+              "and not the NAN that would clobber the last good reading");
+}
+
+// The other caller of publish_clock_drift_(), which resolves the same failure
+// the opposite way: somebody pressed "Read Pump Clock" and is owed an answer,
+// and "unknown" is the true one.
+//
+// Submitted immediately after the link comes up rather than after the chain has
+// settled: the transport queue is FIFO and the control poll keeps it fed, so a
+// command submitted late waits behind an unbounded backlog and never reaches
+// the wire inside any window a test can afford.
+void test_a_manual_clock_read_without_a_node_clock_answers_unknown() {
+  std::cout << "\n=== A manual clock read with no node clock publishes NAN ==="
+            << std::endl;
+  Rig r;
+  r.answer_clock = true;
+  r.setup();
+  r.connect_and_subscribe();
+
+  r.component.read_pump_clock();
+  r.run_until_ready();
+
+  TEST_ASSERT(r.clock_drift.publish_count > 0,
+              "somebody pressed the button, so the sensor is answered");
+  TEST_ASSERT(std::isnan(r.clock_drift.state),
+              "and the answer is NAN -- the pump's clock was read fine, the "
+              "node simply cannot say how far out it is");
+}
+
+// ── build_event_window(): the schedule editor's dated-event helper ───────────
+
+void test_build_event_window_refuses_without_a_node_clock() {
+  std::cout << "\n=== A dated event cannot be built without a node clock ==="
+            << std::endl;
+  Rig r;
+  r.setup();
+
+  uint32_t begin = 12345, end = 67890;
+  const bool built = r.component.build_event_window("test", 6, 1, 9, 0, 6, 8, 17, 0,
+                                                    &begin, &end);
+  TEST_ASSERT(!built, "the window is refused");
+  TEST_ASSERT(begin == 12345 && end == 67890,
+              "and the caller's outputs are untouched, so a caller that ignores "
+              "the return value does not get a 1970 window");
+}
+
+void test_build_event_window_anchors_to_the_node_clock() {
+  std::cout << "\n=== A dated event anchors to the node's year ===" << std::endl;
+  Rig r;
+  // 2022-06-15 12:00:00 UTC, and the year is deliberately one the machine
+  // running this test is NOT in.
+  //
+  // That is the whole test. The helper takes month/day/hour/minute and has to
+  // get the YEAR from somewhere; before #270 it took it from libc, i.e. from
+  // the host's own clock. A fixture dated in the CURRENT year cannot tell the
+  // two sources apart -- and the first version of this test used one, so it
+  // passed with the production line reverted. Any year above the 2021 floor
+  // and away from today works.
+  r.attach_node_clock(1655294400);
+  r.setup();
+
+  uint32_t begin = 0, end = 0;
+  const bool built = r.component.build_event_window("test", 6, 1, 9, 0, 6, 8, 17, 0,
+                                                    &begin, &end);
+  TEST_ASSERT(built, "the window is built");
+
+  esphome::ESPTime b = esphome::ESPTime::from_epoch_local(begin);
+  esphome::ESPTime e = esphome::ESPTime::from_epoch_local(end);
+  TEST_ASSERT(b.year == 2022 && e.year == 2022,
+              "both ends land in the node clock's year, not the host's -- the "
+              "fixture year is deliberately not the current one, so this "
+              "assertion can actually fail");
+  TEST_ASSERT(b.month == 6 && b.day_of_month == 1 && b.hour == 9 && b.minute == 0,
+              "the begin carries the fields it was given");
+  TEST_ASSERT(e.month == 6 && e.day_of_month == 8 && e.hour == 17 && e.minute == 0,
+              "and so does the end");
+  TEST_ASSERT(end > begin, "the pair is ordered");
+}
+
+// A clock the node has but that nothing has SET is not a clock. This is the
+// case the retired year-2020 floor let through and the one floor now refuses --
+// and it is the realistic one, since an ESP32 that boots without SNTP has a
+// running clock reading 1970, not a missing one.
+void test_build_event_window_refuses_an_unsynced_clock() {
+  std::cout << "\n=== A dated event refuses a clock nothing has set ===" << std::endl;
+  Rig r;
+  r.attach_node_clock(0);  // 1970-01-01: fields in range, nobody set it
+  r.setup();
+
+  uint32_t begin = 1, end = 2;
+  TEST_ASSERT(!r.component.build_event_window("test", 6, 1, 9, 0, 6, 8, 17, 0,
+                                              &begin, &end),
+              "an unset clock is refused, rather than dating the event to 1970");
+}
+
 // ── Diagnostic suspend (issue #243) ──────────────────────────────────────────
 //
 // The pump holds one BLE connection at a time, so a bonded, connected node owns
@@ -1785,6 +1984,13 @@ void test_an_open_during_a_suspension_is_torn_down_not_adopted() {
 }
 
 int main() {
+  // Pinned so the local<->UTC mapping in the clock fixtures is the same on
+  // every CI machine (issue #270's tests are the first here to have one). The
+  // conversion itself is covered at non-zero offsets in
+  // tests/test_schedule_service.cpp; nothing else in this file reads a zone.
+  setenv("TZ", "UTC", 1);
+  tzset();
+
   std::cout << "===========================================================" << std::endl;
   std::cout << "  Component BLE Wiring Test Suite" << std::endl;
   std::cout << "===========================================================" << std::endl;
@@ -1832,6 +2038,13 @@ int main() {
   test_readiness_recycles_reach_the_counter_an_automation_watches();
   test_the_fault_is_visible_across_the_reconnect_it_describes();
   test_the_default_names_the_fault_without_touching_the_link();
+
+  test_the_drift_leg_publishes_the_drift_it_measured();
+  test_the_drift_leg_leaves_a_good_reading_alone();
+  test_a_manual_clock_read_without_a_node_clock_answers_unknown();
+  test_build_event_window_refuses_without_a_node_clock();
+  test_build_event_window_anchors_to_the_node_clock();
+  test_build_event_window_refuses_an_unsynced_clock();
 
   std::cout << "\n==========================================" << std::endl;
   std::cout << "Results: " << tests_passed << " passed, " << tests_failed

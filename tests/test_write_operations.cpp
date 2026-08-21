@@ -3436,6 +3436,106 @@ static void test_single_event_slot_past_the_protocol_limit_is_invalid() {
               "detail does not blame the link");
 }
 
+// Issue #263. The pump stores single-event windows in LOCAL Unix time, so an
+// instant within the zone's UTC offset of either end of the uint32 the wire
+// carries has no representation there. That shift used to wrap modulo 2^32 --
+// and the two wraps CANCELLED: the confirm readback shifted back by the same
+// offset, wrapped symmetrically, compared equal, and settled the operation
+// ACCEPTED for an event the pump had stored at an instant nobody asked for.
+//
+// This suite pins TZ=UTC, where the offset is zero and no instant can be out of
+// range, so the guard would be permanently unreachable here without a zone that
+// has one. These three tests un-pin it deliberately. (That the pin hides a
+// whole conversion layer, in general, is issue #268.)
+//
+// Fixed-offset zones, no DST: the subject is the arithmetic at the ends of the
+// range, and a transition rule would only add a second reason for a value to
+// move.
+static void test_a_window_past_the_wire_ceiling_is_refused() {
+  std::cout << "\n=== single event: a window the local clock cannot hold -> invalid ===" << std::endl;
+  setenv("TZ", "CET-1", 1);  // +3600, constant
+  tzset();
+  {
+    Harness h;
+    h.prime_cache();
+    h.sim.respond_overview_reads = false;  // the link cannot answer either
+
+    // Ordered in UTC, and 4294967295 + 3600 wrapped to 3599 -- BELOW its own
+    // begin, so the pair arrived at the pump reversed. Both the parser's
+    // ordering check and SingleEvent::is_valid() run on the UTC values, before
+    // the shift, so nothing looked after it.
+    h.write_op.submit_set_single_event(4294960000u, 4294967295u, "tz1");
+    h.advance(25000);
+
+    TEST_ASSERT(h.events_for("tz1") == 1, "exactly one terminal event");
+    const WriteResult *r = h.result_for("tz1");
+    TEST_ASSERT(r && r->status == WriteStatus::INVALID,
+                "an unrepresentable window is invalid, not accepted");
+    TEST_ASSERT(r && r->detail.find("local-time") != std::string::npos,
+                "detail names the local-time clock program as the reason");
+    TEST_ASSERT(r && r->detail.find("overview") == std::string::npos,
+                "detail does not blame the link, which is also down");
+    TEST_ASSERT(h.sim.single_events[0][0] == 0, "nothing reached the wire");
+  }
+  setenv("TZ", "UTC", 1);
+  tzset();
+}
+
+static void test_a_window_below_the_wire_floor_is_refused() {
+  std::cout << "\n=== single event: a window below a westward offset -> invalid ===" << std::endl;
+  setenv("TZ", "PST8", 1);  // -28800, constant
+  tzset();
+  {
+    Harness h;
+    h.prime_cache();
+
+    // 1 - 28800 goes negative and wrapped up into 2106. The inverse wrapped
+    // back, which is what made the confirm agree with itself.
+    h.write_op.submit_set_single_event(1u, 28800u, "tz2");
+    h.advance(25000);
+
+    const WriteResult *r = h.result_for("tz2");
+    TEST_ASSERT(h.events_for("tz2") == 1, "exactly one terminal event");
+    TEST_ASSERT(r && r->status == WriteStatus::INVALID,
+                "a window below the westward offset is invalid");
+    // The DETAIL, not just the status. Any window this guard can refuse is in
+    // 1970, so any other guard that also refuses 1970 windows would make the
+    // status assertion above pass with this one's production line reverted --
+    // which is exactly what happened while the branch also carried #269's
+    // past-window check.
+    TEST_ASSERT(r && r->detail.find("local-time") != std::string::npos,
+                "and it is the representability guard that refused it, named "
+                "in the detail");
+    TEST_ASSERT(h.sim.single_events[0][0] == 0, "nothing reached the wire");
+  }
+  setenv("TZ", "UTC", 1);
+  tzset();
+}
+
+// The positive control, and it is not optional: a guard on the ends of a
+// 136-year range passes every negative case by refusing everything, and this
+// suite's other single-event tests all run at offset zero, where the guard
+// cannot fire at all. Same non-zero zone, an ordinary window.
+static void test_an_ordinary_window_still_writes_at_a_nonzero_offset() {
+  std::cout << "\n=== single event: an ordinary window is unaffected by the guard ===" << std::endl;
+  setenv("TZ", "CET-1", 1);
+  tzset();
+  {
+    Harness h;
+    h.prime_cache();
+
+    h.write_op.submit_set_single_event(EVENT_NEXT_WEEK_BEGIN, EVENT_NEXT_WEEK_END, "tz3");
+    h.advance(25000);
+
+    const WriteResult *r = h.result_for("tz3");
+    TEST_ASSERT(r && r->status == WriteStatus::ACCEPTED,
+                "a normal window at a +1 h offset still settles accepted");
+    TEST_ASSERT(h.sim.single_events[0][0] == 1, "and it reached the wire");
+  }
+  setenv("TZ", "UTC", 1);
+  tzset();
+}
+
 // The complement, and the honest limit of the split: a slot this *pump* lacks
 // but the protocol allows still reports the overview failure when the link is
 // down. Asserting "out of range (pump has N)" would mean claiming a count that
@@ -3510,7 +3610,7 @@ static void test_set_single_event_explicit_slot_is_bounded() {
   h.prime_cache();
   h.sim.max_single_events = 5;
 
-  h.write_op.submit_set_single_event(1000000, 2000000, "sb3", nullptr, 10,
+  h.write_op.submit_set_single_event(EVENT_NEXT_WEEK_BEGIN, EVENT_NEXT_WEEK_END, "sb3", nullptr, 10,
                                      WriteOrigin::ENTITY);
   h.advance(25000);
 
@@ -3528,7 +3628,7 @@ static void test_set_vacation_writes_stop_event() {
   h.prime_cache();
 
   // Multi-day range: begin 1000000, end 2000000.
-  h.write_op.submit_set_vacation(1000000, 2000000, "vac1");
+  h.write_op.submit_set_vacation(EVENT_NEXT_WEEK_BEGIN, EVENT_NEXT_WEEK_END, "vac1");
   h.advance(60000);
 
   TEST_ASSERT(h.events_for("vac1") == 1, "exactly one terminal event");
@@ -3553,7 +3653,7 @@ static void test_a_vacation_stored_as_a_run_event_is_rejected() {
   h.prime_cache();
   h.sim.force_single_event_action = 0x02;  // pump keeps everything else, flips the kind
 
-  h.write_op.submit_set_vacation(1000000, 2000000, "vac_bad");
+  h.write_op.submit_set_vacation(EVENT_NEXT_WEEK_BEGIN, EVENT_NEXT_WEEK_END, "vac_bad");
   h.advance(60000);
 
   TEST_ASSERT(h.events_for("vac_bad") == 1, "exactly one terminal event");
@@ -3575,7 +3675,7 @@ static void test_a_run_event_stored_as_a_stop_is_rejected() {
   h.prime_cache();
   h.sim.force_single_event_action = 0x01;
 
-  h.write_op.submit_set_single_event(1000000, 2000000, "run_bad");
+  h.write_op.submit_set_single_event(EVENT_NEXT_WEEK_BEGIN, EVENT_NEXT_WEEK_END, "run_bad");
   h.advance(60000);
 
   TEST_ASSERT(h.events_for("run_bad") == 1, "exactly one terminal event");
@@ -3592,7 +3692,7 @@ static void test_a_matching_action_still_settles_accepted() {
   Harness h;
   h.prime_cache();
 
-  h.write_op.submit_set_vacation(1000000, 2000000, "vac_ok");
+  h.write_op.submit_set_vacation(EVENT_NEXT_WEEK_BEGIN, EVENT_NEXT_WEEK_END, "vac_ok");
   h.advance(60000);
 
   const WriteResult *r = h.result_for("vac_ok");
@@ -3637,10 +3737,13 @@ static void test_clear_vacation_targets_stop_slot() {
   Harness h;
   h.prime_cache();
   // Slot 1 = a one-time RUN event (action Auto); slot 2 = a vacation (Stop).
-  h.sim.single_events[1][0] = 1; h.sim.single_events[1][1] = 0x02;
-  h.sim.single_events[1][9] = 0x40;  // some future end
-  h.sim.single_events[2][0] = 1; h.sim.single_events[2][1] = 0x01;  // Stop = vacation
-  h.sim.single_events[2][9] = 0x40;
+  // Both live. These used to be poked as `single_events[n][9] = 0x40`, called
+  // "some future end" -- byte 9 is the low byte of a big-endian end timestamp,
+  // so it actually said 1970-01-01 00:01:04. Nothing depended on the value
+  // until find_vacation_slot() learned to tell time (issue #267), and a fixture
+  // whose comment says the opposite of its bytes is a trap either way.
+  h.seed_single_event(1, 0x02, EVENT_TOMORROW_BEGIN, EVENT_TOMORROW_END);
+  h.seed_single_event(2, 0x01, EVENT_TOMORROW_BEGIN, EVENT_TOMORROW_END);
 
   h.write_op.submit_clear_vacation("vac2");
   h.advance(60000);
@@ -3658,8 +3761,7 @@ static void test_clear_vacation_none_active() {
   Harness h;
   h.prime_cache();
   // Only a RUN event present, no Stop event.
-  h.sim.single_events[0][0] = 1; h.sim.single_events[0][1] = 0x02;
-  h.sim.single_events[0][9] = 0x40;
+  h.seed_single_event(0, 0x02, EVENT_TOMORROW_BEGIN, EVENT_TOMORROW_END);
 
   h.write_op.submit_clear_vacation("vac3");
   h.advance(60000);
@@ -3668,6 +3770,250 @@ static void test_clear_vacation_none_active() {
   TEST_ASSERT(h.events_for("vac3") == 1, "exactly one terminal event");
   TEST_ASSERT(r && r->status == WriteStatus::ACCEPTED, "accepted (nothing to clear)");
   TEST_ASSERT(h.sim.single_events[0][0] == 1, "run event untouched");
+}
+
+// ── The cache holds UTC, at an offset that is not zero (issue #268) ──────────
+//
+// main() pins TZ=UTC, and under that pin utc_to_local_unix() and
+// local_unix_to_utc_resolved() are the identity: every single-event fixture
+// round-trips bit for bit and the whole local<->UTC layer is invisible to this
+// suite. So a regression that left cached event timestamps in the pump's local
+// time would pass here.
+//
+// That invariant is load-bearing. The slot picker compares cached
+// `end_timestamp` values against the node's wall clock (#262) and the confirm
+// comparator compares a readback against the requested window; both are correct
+// only because the read path converts the pump's local-Unix wire value back to
+// UTC.
+//
+// **Scope, decided rather than left implicit.** These two tests un-pin the zone;
+// the other ~640 assertions stay under UTC. Running everything twice mostly
+// re-runs assertions with nothing timezone-dependent in them, and it would
+// require every fixture in the file to be re-expressed through the shift --
+// under Pacific the "ended" fixtures shift forward eight hours and become live,
+// which is the seven-assertion failure the review on #266 reported. The
+// conversion only exists at the edge, so the second leg belongs at the edge.
+//
+// **What the fixture models, also decided.** It models the HOST's zone, because
+// that is what utc_to_local_unix() reads. The pump applies its OWN DST rule --
+// `DaylightSavingTime` (94/102) reads enabled on the bench unit with the US
+// rule and a 60-minute offset -- and nothing checks that the two agree. A pump
+// shipped for one market and installed in another, or a node whose time_id zone
+// differs from the pump's locale, would diverge here with no signal. That is
+// its own capability (read 94/102, compare, surface a mismatch) and is not in
+// this change.
+
+/// The wire value the pump would hold for a given UTC instant: the local
+/// wall-clock FIELDS at that instant, re-encoded as if they were UTC.
+///
+/// Written against libc directly rather than through utc_to_local_unix(), so a
+/// test of the conversion cannot be satisfied by the conversion agreeing with
+/// itself.
+static uint32_t pump_wire_value_for(uint32_t utc) {
+  time_t t = static_cast<time_t>(utc);
+  struct tm lt {};
+  localtime_r(&t, &lt);
+  return static_cast<uint32_t>(timegm(&lt));
+}
+
+static void test_the_single_event_cache_holds_utc_at_a_real_offset() {
+  std::cout << "\n=== single events: the cache holds UTC at a non-zero offset (issue #268) ===" << std::endl;
+  setenv("TZ", "PST8PDT,M3.2.0/2,M11.1.0/2", 1);
+  tzset();
+  {
+    // 2026-07-15 09:00 local, inside PDT. Built from explicit fields so the
+    // fixture states an instant rather than borrowing one.
+    struct tm fields {};
+    fields.tm_year = 126;  // 2026
+    fields.tm_mon = 6;     // July
+    fields.tm_mday = 15;
+    fields.tm_hour = 9;
+    fields.tm_isdst = -1;  // let libc resolve PDT
+    const uint32_t utc_begin = static_cast<uint32_t>(mktime(&fields));
+    const uint32_t utc_end = utc_begin + 3600;
+
+    const uint32_t wire_begin = pump_wire_value_for(utc_begin);
+    TEST_ASSERT(wire_begin == utc_begin - 25200u,
+                "the fixture zone really does have an offset -- PDT is -7 h, "
+                "and under the TZ=UTC pin this difference is zero");
+
+    Harness h;
+    h.prime_cache();
+    h.seed_single_event(0, 0x02, wire_begin, pump_wire_value_for(utc_end));
+    h.write_op.submit_refresh_single_events("tzcache");
+    h.advance(60000);
+
+    const auto &cached = h.schedule.get_cached_single_events();
+    TEST_ASSERT(cached.size() == 1, "the slot was read into the cache");
+    if (cached.size() == 1) {
+      TEST_ASSERT(cached[0].begin_timestamp == utc_begin,
+                  "the cached begin is the UTC instant, not the local-Unix "
+                  "value the pump holds");
+      TEST_ASSERT(cached[0].end_timestamp == utc_end,
+                  "...and so is the cached end");
+    }
+  }
+  setenv("TZ", "UTC", 1);
+  tzset();
+}
+
+// The #262 slot picker, re-run at the same real offset. Its fixtures are seeded
+// THROUGH the shift here, so "ended" means ended rather than meaning "ended if
+// you happen to be at offset zero" -- which is the form in which the review on
+// #266 found seven of these assertions failing.
+static void test_the_slot_picker_still_expires_correctly_at_a_real_offset() {
+  std::cout << "\n=== single events: the slot picker at a non-zero offset ===" << std::endl;
+  setenv("TZ", "PST8PDT,M3.2.0/2,M11.1.0/2", 1);
+  tzset();
+  {
+    Harness h;
+    h.prime_cache();
+    h.sim.max_single_events = 5;
+    // Slot 0 ended an hour ago; slots 1-4 are live and run for another day.
+    // Written as the pump would hold them.
+    h.seed_single_event(0, 0x02, pump_wire_value_for(EVENT_ENDED_BEGIN),
+                        pump_wire_value_for(EVENT_ENDED_END));
+    for (uint8_t i = 1; i < 5; i++)
+      h.seed_single_event(i, 0x02, pump_wire_value_for(EVENT_TOMORROW_BEGIN),
+                          pump_wire_value_for(EVENT_TOMORROW_END));
+
+    h.write_op.submit_set_single_event(EVENT_NEXT_WEEK_BEGIN, EVENT_NEXT_WEEK_END, "tzpick");
+    h.advance(60000);
+
+    const WriteResult *r = h.result_for("tzpick");
+    TEST_ASSERT(h.events_for("tzpick") == 1, "exactly one terminal event");
+    TEST_ASSERT(r && r->status == WriteStatus::ACCEPTED,
+                "the pool is not full: one slot really has expired");
+    TEST_ASSERT(r && r->slot == 0,
+                "and it is the expired one that is recycled -- if the read path "
+                "stopped converting, slot 0 would read seven hours later and "
+                "look live, so every slot would");
+    TEST_ASSERT(h.sim_single_event_begin(1) == pump_wire_value_for(EVENT_TOMORROW_BEGIN),
+                "no live slot was overwritten");
+  }
+  setenv("TZ", "UTC", 1);
+  tzset();
+}
+
+// ── A vacation that has already ended (issue #267) ───────────────────────────
+//
+// find_vacation_slot() returned the first enabled Stop event in slot order with
+// no reference to a clock, so a FINISHED vacation in an early slot shadowed a
+// live one later: clear_vacation cleared the finished one and settled
+// `accepted`, telling the user the vacation was over while the pump was still
+// holding itself off. find_free_single_event_slot() one method up had always
+// been clocked; the asymmetry was the whole bug.
+static void test_clear_vacation_skips_one_that_has_ended() {
+  std::cout << "\n=== clear_vacation: a finished vacation does not shadow a live one ===" << std::endl;
+  Harness h;
+  h.prime_cache();
+  // The exact shape from the issue: finished in an early slot, live in a later
+  // one. Slot order alone picks 1; the clock picks 3.
+  h.seed_single_event(1, 0x01, EVENT_ENDED_BEGIN, EVENT_ENDED_END);
+  h.seed_single_event(3, 0x01, NODE_EPOCH_AT_BOOT - 3600, NODE_EPOCH_AT_BOOT + 86400);
+
+  h.write_op.submit_clear_vacation("vacx");
+  h.advance(60000);
+
+  const WriteResult *r = h.result_for("vacx");
+  TEST_ASSERT(h.events_for("vacx") == 1, "exactly one terminal event");
+  TEST_ASSERT(r && r->status == WriteStatus::ACCEPTED, "status is accepted");
+  TEST_ASSERT(r && r->slot == 3, "the LIVE vacation is the one cleared");
+  TEST_ASSERT(h.sim.single_events[3][0] == 0, "the pump is no longer held off");
+  TEST_ASSERT(h.sim.single_events[1][0] == 1,
+              "and the finished one is left where it was -- the user did not "
+              "ask to tidy history");
+}
+
+// With nothing covering now, the next vacation DUE is what the user means --
+// they booked it and are cancelling it. Soonest begin wins, not lowest slot.
+static void test_clear_vacation_prefers_the_next_one_due() {
+  std::cout << "\n=== clear_vacation: the next one due beats a finished one ===" << std::endl;
+  Harness h;
+  h.prime_cache();
+  h.seed_single_event(0, 0x01, EVENT_ENDED_BEGIN, EVENT_ENDED_END);
+  h.seed_single_event(1, 0x01, NODE_EPOCH_AT_BOOT + 30 * 86400,
+                      NODE_EPOCH_AT_BOOT + 37 * 86400);   // next month
+  h.seed_single_event(2, 0x01, EVENT_TOMORROW_BEGIN, EVENT_TOMORROW_END);  // sooner
+
+  h.write_op.submit_clear_vacation("vacy");
+  h.advance(60000);
+
+  const WriteResult *r = h.result_for("vacy");
+  TEST_ASSERT(r && r->status == WriteStatus::ACCEPTED, "status is accepted");
+  TEST_ASSERT(r && r->slot == 2,
+              "the vacation due soonest is cleared, not the lowest slot and "
+              "not the one furthest out");
+}
+
+// The third case, included deliberately rather than by omission. A vacation
+// that has ended is still an enabled Stop event occupying one of five slots, so
+// refusing to clear it would leave no way to reclaim it.
+static void test_clear_vacation_will_still_clear_a_finished_one() {
+  std::cout << "\n=== clear_vacation: a finished vacation is still reclaimable ===" << std::endl;
+  Harness h;
+  h.prime_cache();
+  h.seed_single_event(2, 0x01, EVENT_ENDED_BEGIN, EVENT_ENDED_END);
+
+  h.write_op.submit_clear_vacation("vacz");
+  h.advance(60000);
+
+  const WriteResult *r = h.result_for("vacz");
+  TEST_ASSERT(r && r->status == WriteStatus::ACCEPTED, "status is accepted");
+  TEST_ASSERT(r && r->slot == 2, "the only vacation there is, is the one cleared");
+  TEST_ASSERT(h.sim.single_events[2][0] == 0, "and its slot is reclaimed");
+}
+
+// No clock, no ranking. The picker answers the first stored vacation exactly as
+// it did before it could tell the time, rather than claiming one has ended --
+// the same rule find_free_single_event_slot() follows for expiry (#262).
+static void test_clear_vacation_without_a_clock_does_not_rank() {
+  std::cout << "\n=== clear_vacation: no node clock -> unranked, not wrong ===" << std::endl;
+  Harness h;
+  h.prime_cache();
+  h.set_node_time(0);
+  h.seed_single_event(1, 0x01, EVENT_ENDED_BEGIN, EVENT_ENDED_END);
+  h.seed_single_event(3, 0x01, NODE_EPOCH_AT_BOOT - 3600, NODE_EPOCH_AT_BOOT + 86400);
+
+  h.write_op.submit_clear_vacation("vacn");
+  h.advance(60000);
+
+  const WriteResult *r = h.result_for("vacn");
+  TEST_ASSERT(r && r->status == WriteStatus::ACCEPTED, "status is accepted");
+  TEST_ASSERT(r && r->slot == 1,
+              "with no clock the first stored vacation is returned unranked -- "
+              "a picker that cannot tell the time does not get to decide which "
+              "of these has ended");
+}
+
+// The second symptom of the same defect: format_vacation_display() had the same
+// shape, so the Vacation text sensor named a finished vacation as THE vacation.
+// The sensor answers "is the pump being held off, and until when"; a window
+// that closed last month answers that with "no".
+static void test_the_vacation_display_does_not_name_a_finished_one() {
+  std::cout << "\n=== vacation display: a finished vacation is not the vacation ===" << std::endl;
+  Harness h;
+  h.prime_cache();
+  h.seed_single_event(1, 0x01, EVENT_ENDED_BEGIN, EVENT_ENDED_END);
+  // Warm the cache the way the component does, through a read.
+  h.write_op.submit_refresh_single_events("disp1");
+  h.advance(60000);
+
+  const uint32_t now = static_cast<uint32_t>(NODE_EPOCH_AT_BOOT);
+  TEST_ASSERT(h.schedule.format_vacation_display(now) == "No vacation",
+              "an ended vacation is not presented as active");
+
+  // ...and a live one still is, or the assertion above passes against a
+  // formatter that says "No vacation" unconditionally.
+  Harness h2;
+  h2.prime_cache();
+  h2.seed_single_event(1, 0x01, NODE_EPOCH_AT_BOOT - 3600, NODE_EPOCH_AT_BOOT + 86400);
+  h2.write_op.submit_refresh_single_events("disp2");
+  h2.advance(60000);
+  TEST_ASSERT(h2.schedule.format_vacation_display(now) != "No vacation",
+              "a live vacation is still shown");
+  TEST_ASSERT(h2.schedule.format_vacation_display(now).find(" - ") != std::string::npos,
+              "...as a date range");
 }
 
 static void test_schedule_supersede_keys() {
@@ -4766,12 +5112,22 @@ int main() {
   test_a_matching_action_still_settles_accepted();
   test_clear_single_event_ignores_stale_content_in_a_disabled_slot();
   test_clear_vacation_targets_stop_slot();
+  test_the_single_event_cache_holds_utc_at_a_real_offset();
+  test_the_slot_picker_still_expires_correctly_at_a_real_offset();
+  test_clear_vacation_skips_one_that_has_ended();
+  test_clear_vacation_prefers_the_next_one_due();
+  test_clear_vacation_will_still_clear_a_finished_one();
+  test_clear_vacation_without_a_clock_does_not_rank();
+  test_the_vacation_display_does_not_name_a_finished_one();
   test_clear_vacation_none_active();
   test_clear_single_event();
   test_single_event_slot_bounded_by_pump_capacity();
   test_single_event_last_valid_slot_still_writes();
   test_set_single_event_explicit_slot_is_bounded();
   test_single_event_slot_past_the_protocol_limit_is_invalid();
+  test_a_window_past_the_wire_ceiling_is_refused();
+  test_a_window_below_the_wire_floor_is_refused();
+  test_an_ordinary_window_still_writes_at_a_nonzero_offset();
   test_device_range_defers_to_the_overview_failure();
   test_out_of_range_events_never_enter_the_cache();
   test_schedule_supersede_keys();

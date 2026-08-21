@@ -1763,6 +1763,36 @@ void WriteOperationService::run_single_event_(uint32_t seq) {
     return;
   }
 
+  // The pump stores single-event windows in LOCAL Unix time, so an instant
+  // within the zone's offset of either end of the uint32 the wire carries has
+  // no representation there (issue #263). This used to wrap, and the two wraps
+  // cancelled: the confirm readback shifted back by the same offset, wrapped
+  // symmetrically, compared equal, and settled the operation ACCEPTED for an
+  // event the pump had stored at an instant nobody asked for.
+  //
+  // Settled here, ahead of ensure_overview_(), for the same reason as the slot
+  // check below: the overview read fails on a broken link, and an argument that
+  // is wrong regardless of the device would otherwise settle "overview not
+  // readable" and put the blame on the link.
+  if (op->command == WriteCommand::SET_SINGLE_EVENT) {
+    uint32_t wire = 0;
+    const bool begin_fits = services::utc_to_local_unix(
+        op->begin_ts,
+        services::local_utc_offset_seconds(static_cast<time_t>(op->begin_ts)),
+        &wire);
+    const bool end_fits = services::utc_to_local_unix(
+        op->end_ts,
+        services::local_utc_offset_seconds(static_cast<time_t>(op->end_ts)),
+        &wire);
+    const bool both_ends_fit = begin_fits && end_fits;
+    if (!both_ends_fit) {
+      finish_(seq, WriteStatus::INVALID,
+              "timestamps cannot be represented in the pump's local-time clock "
+              "program at this timezone offset");
+      return;
+    }
+  }
+
   // A slot at or past SINGLE_EVENT_SLOT_LIMIT is not a single-event slot on any
   // pump — SubID 900+slot lands on the weekly schedule's layer records — so it
   // is settled here, ahead of the overview read rather than after it. The
@@ -1799,8 +1829,13 @@ void WriteOperationService::run_single_event_(uint32_t seq) {
       Operation *op = find_(seq);
       if (op == nullptr || op->phase == Phase::DONE) return;
       if (op->clear_by_vacation) {
-        // clear_vacation: target the active Stop (vacation) single-event.
-        int slot = schedule_service_.find_vacation_slot();
+        // clear_vacation: target the Stop (vacation) single-event the caller
+        // means. Which one that is is a question about NOW: this used to take
+        // the first enabled Stop in slot order, so a FINISHED vacation in an
+        // early slot shadowed a live one later and the call reported success
+        // while the pump stayed off (issue #267). Same clock and same 0-means-
+        // unknown sentinel as the free-slot picker below.
+        int slot = schedule_service_.find_vacation_slot(time_service_.now_unix());
         if (slot < 0) {
           finish_(seq, WriteStatus::ACCEPTED, "no active vacation");
           return;

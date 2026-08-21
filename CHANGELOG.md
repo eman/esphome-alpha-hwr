@@ -309,6 +309,134 @@
 
 ### Changed
 
+- **The write-op suite now exercises the local↔UTC conversion at an offset that
+  is not zero** (issue #268). `tests/test_write_operations.cpp` pins `TZ=UTC`,
+  and under that pin `utc_to_local_unix()` and `local_unix_to_utc_resolved()` are
+  the identity — every single-event fixture round-trips bit for bit and the whole
+  conversion layer is invisible to the suite. A regression that left cached event
+  timestamps in the pump's local time would have passed.
+
+  The invariant is load-bearing: the single-event slot picker compares cached
+  `end_timestamp` values against the node's wall clock (#262), and the confirm
+  comparator compares a readback against the requested window. Both are correct
+  only because the read path converts.
+
+  Two tests un-pin the zone to `PST8PDT` — one asserting the cache holds UTC after
+  a read, one re-running the slot picker's expiry decision with its fixtures
+  seeded *through* the shift. The scope is deliberate and recorded in the file:
+  the conversion exists only at the edge, so the second leg belongs at the edge
+  rather than as a second run of all ~640 assertions, most of which have nothing
+  timezone-dependent in them.
+
+  Recorded in the file, because it is a property of the fixture rather than an
+  oversight: it models the **host's** zone, since that is what the conversion
+  reads. Whether the pump's own DST rule agrees with that zone is a separate
+  question and is not answered here — see issue #286. Nor does a host test
+  exercise the conversion the *device* performs; see issue #289, which is why
+  this leg is a test of the algorithm rather than of the shipped behaviour.
+
+- **A vacation that has already ended no longer shadows the live one**
+  (issue #267). `find_vacation_slot()` returned the first enabled Stop
+  single-event in the cache, in slot order, with no reference to a clock. With a
+  finished vacation in slot 1 and a live one in slot 3, `clear_vacation` cleared
+  slot 1 and settled `accepted` — the user was told the vacation was ended while
+  the pump was still holding itself off. `find_free_single_event_slot()` one
+  method up had always been clocked; the asymmetry was the whole bug.
+
+  `format_vacation_display()` had the same shape, which is why the same defect
+  showed up twice: the **Vacation** text sensor named an expired vacation as *the*
+  vacation. Both now go through one ranking, so the rule cannot drift apart
+  again.
+
+  The preference is: a vacation whose window covers now, then the next one due
+  (soonest begin, not lowest slot), then the one that ended most recently. The
+  third case is included deliberately rather than by omission — an ended
+  vacation is still an enabled Stop event occupying one of the five slots this
+  pump has, and refusing to clear it would leave no way to reclaim it. It logs
+  that it fell back. The **Vacation** sensor does not show that case at all: the
+  sensor answers "is the pump being held off, and until when", and a window that
+  closed last month answers that with "no".
+
+  With no synced clock the first stored vacation is returned unranked, as before
+  — a picker that cannot tell the time does not get to decide which of two
+  vacations has ended.
+
+- **A single-event window the pump cannot store in local time is refused, not
+  wrapped** (issue #263). The pump's clock program stores single-event
+  begin/end as **local** Unix time, so every timestamp is shifted by the local
+  UTC offset on its way to the wire and back. That shift wrapped modulo 2^32 at
+  both ends of the range the wire carries.
+
+  What makes it an issue rather than a footnote is that the two wraps **cancel**.
+  The confirm readback shifts back by the same offset, wraps symmetrically, and
+  compares equal — so the operation settled **accepted** for an event the pump
+  had stored at an instant nobody asked for. A byte round trip is not behaviour,
+  and here the round trip was supplied by two wraps agreeing with each other.
+  There is a second failure at the ceiling: a correctly ordered pair whose end
+  is within the offset of `UINT32_MAX` arrives at the pump **reversed**, because
+  both the ordering check and `SingleEvent::is_valid()` run before the shift and
+  nothing looked after it.
+
+  The usable range is `[|min_offset|, UINT32_MAX - max_offset]` — at ±14 h, about
+  a day's worth of instants out of 136 years — so the likelihood is low. A
+  low-likelihood failure that reports success is still worth a guard.
+
+  The two directions are now guarded differently, on purpose. **Encoding
+  refuses**: the caller named an instant this pump cannot store in this zone, and
+  writing a nearby one instead is exactly the silent substitution above. The
+  refusal settles `invalid` ahead of the schedule-overview read, so an argument
+  that is wrong regardless of the device is not reported as a link failure.
+  **Decoding saturates**: the value is already on the pump — written by the GO
+  app, or left by a firmware we never spoke to — so there is nothing to refuse,
+  and the closest representable UTC keeps a pair ordered and keeps "has this
+  ended?" answerable, where wrapping moved the instant 136 years and made an
+  expired event read as live.
+
+  Settled in the same change: `0` is the wire's disabled/cleared sentinel and is
+  never shifted, so an enabled event whose begin was `0` confirmed clean while
+  describing a slot that says "cleared". The service argument parser now floors
+  both epoch fields at 1, and `set_single_event` with `0,4294967295` moves from
+  the accepted table to the rejected one.
+
+- **One accessor answers "what time is it", at one sanity floor** (issue #270).
+  The component resolved the node's wall clock in five places, each with its own
+  source and its own idea of when a clock is trustworthy: `TimeService` floored
+  the year at 2021, `build_event_window()` floored it at 2020, and the two drift
+  measurements and the vacation check tested against the literal `1609459200`.
+  Three floors, two of which agreed by coincidence rather than by construction,
+  and none of which referenced the others.
+
+  Three of the five read `::time(nullptr)` directly, which is where the divergence
+  had teeth. Under `#ifndef USE_TIME` those three fell through to libc while
+  `TimeService` declined to answer — so the same build had one subsystem refusing
+  to act and three acting on a clock nothing had validated, in a zone nothing had
+  loaded. A build with no time component has no timezone, so libc's answer there
+  is not merely unvalidated; it is in the wrong base, against a pump whose clock
+  program runs on local time.
+
+  All five now ask `TimeService`, which answers in whichever of three shapes the
+  caller needs — calendar fields, epoch seconds, or "is there one yet" — from a
+  single read, so they cannot disagree. `CLOCK_SYNCED_YEAR_FLOOR` is the only
+  floor left. Under `#ifndef USE_TIME` every caller refuses, uniformly.
+
+  Nothing here was known to be broken, and the change is filed as prevention
+  rather than repair: issue #262 was caused by one caller substituting the wrong
+  timestamp for "now", and several independent notions of now is the condition
+  that makes that class of bug easy to reintroduce.
+
+  Two behaviour changes are worth naming. `build_event_window()` — the schedule
+  editor's "Add Single Event" and "Set Vacation" buttons — now refuses a clock
+  below year 2021 where it previously accepted year 2020, and refuses outright in
+  a build with no time component where it previously anchored the event to
+  whatever libc said. And the `Last Clock Sync` stamp's libc fallback is deleted
+  rather than converted: it was unreachable (the clock-sync gate will not submit
+  a sync without a synced clock at all), and what it did when reached was stamp
+  the sensor `1970-01-01`.
+
+  The accessors are pinned by a new host test built **twice**, with and without
+  `-DUSE_TIME`, because "the behaviour under `#ifndef USE_TIME` is the same for
+  every caller" is not checked by anything if that build is never built.
+
 - **Every Class 10 write now waits for its own acknowledgement** (issue #253).
   This finishes what #248 began. That change stopped a reply being handed to
   whichever write happened to be waiting; it did not stop replies being left with

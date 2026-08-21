@@ -909,11 +909,38 @@ void ScheduleService::write_single_event_async(
   // Shift UTC -> pump LOCAL-Unix before serializing (the pump's RTC is local
   // Unix time). Serialize a copy so the caller's event stays UTC. ts 0
   // (disabled/cleared) is left untouched by utc_to_local_unix.
+  //
+  // The last stop before an unrepresentable instant reaches the wire (issue
+  // #263). A pair that wrapped here settled ACCEPTED, because the confirm
+  // shifts back by the same offset and the two wraps cancel.
+  //
+  // Unreachable today, and belt-and-braces rather than a fix: the sole caller
+  // is WriteOperationService::write_single_event_(), every path to which runs
+  // run_single_event_()'s representability check first, on the same two
+  // timestamps -- and a CLEAR carries 0/0, the sentinel, which always fits. It
+  // is kept because this is a public method on ScheduleService and the shift is
+  // the only place the offset is known, so the choke point is real rather than
+  // argued. It is deliberately NOT covered by a mutation entry; see the
+  // deliberate absences in tools/mutation_check.sh.
   SingleEvent wire = event;
-  wire.begin_timestamp = utc_to_local_unix(
-      event.begin_timestamp, local_utc_offset_seconds((time_t) event.begin_timestamp));
-  wire.end_timestamp = utc_to_local_unix(
-      event.end_timestamp, local_utc_offset_seconds((time_t) event.end_timestamp));
+  const bool begin_fits = utc_to_local_unix(
+      event.begin_timestamp,
+      local_utc_offset_seconds((time_t) event.begin_timestamp),
+      &wire.begin_timestamp);
+  const bool end_fits = utc_to_local_unix(
+      event.end_timestamp,
+      local_utc_offset_seconds((time_t) event.end_timestamp),
+      &wire.end_timestamp);
+  const bool both_ends_fit = begin_fits && end_fits;
+  if (!both_ends_fit) {
+    ESP_LOGE(TAG,
+             "Single event %" PRIu32 "-%" PRIu32 " cannot be stored in local "
+             "time on this pump; not written",
+             event.begin_timestamp, event.end_timestamp);
+    if (on_complete)
+      on_complete(false);
+    return;
+  }
   wire.to_bytes(apdu + 11);
 
   // Awaited as the short Class 10 ACK it actually gets (issue #253) -- the same
@@ -1032,36 +1059,132 @@ std::string ScheduleService::format_single_events_display() const {
   return result;
 }
 
-int ScheduleService::find_vacation_slot() const {
+const SingleEvent *ScheduleService::pick_vacation_(uint32_t now_ts,
+                                                  VacationWhen *when) const {
+  *when = VacationWhen::NONE;
   if (!single_events_cached_)
-    return -1;
+    return nullptr;
+
+  const SingleEvent *covering = nullptr;
+  const SingleEvent *soonest_upcoming = nullptr;
+  const SingleEvent *latest_ended = nullptr;
+  const SingleEvent *first_stored = nullptr;
+
   for (const auto &ev : cached_single_events_) {
-    if (ev.enabled && ev.action == 0x01)  // Stop = vacation
-      return ev.index;
+    // Only Stop (0x01) events are vacations; a Run event is an ordinary
+    // one-time run and has nothing to do with this.
+    const bool is_vacation = ev.enabled && ev.action == 0x01;
+    if (!is_vacation)
+      continue;
+    if (first_stored == nullptr)
+      first_stored = &ev;
+    if (now_ts == 0)
+      continue;  // ranked below; with no clock there is nothing to rank by
+
+    const bool covers_now =
+        ev.begin_timestamp <= now_ts && now_ts < ev.end_timestamp;
+    if (covers_now) {
+      if (covering == nullptr)
+        covering = &ev;
+      continue;
+    }
+
+    const bool not_begun = ev.begin_timestamp > now_ts;
+    if (not_begun) {
+      // Split in two so each has a pipe-free line to anchor a mutation to;
+      // tools/mutation_check.sh splits its entries on that character.
+      const bool first_upcoming = soonest_upcoming == nullptr;
+      const bool due_sooner =
+          first_upcoming ? false
+                         : ev.begin_timestamp < soonest_upcoming->begin_timestamp;
+      if (first_upcoming || due_sooner)
+        soonest_upcoming = &ev;
+      continue;
+    }
+
+    // Over. Keep the one that ended most recently -- of several finished
+    // vacations it is the likeliest to be the one somebody means.
+    const bool first_ended = latest_ended == nullptr;
+    const bool ended_later =
+        first_ended ? false : ev.end_timestamp > latest_ended->end_timestamp;
+    if (first_ended || ended_later)
+      latest_ended = &ev;
   }
-  return -1;
+
+  if (now_ts == 0) {
+    // A picker that cannot tell the time does not get to claim one vacation has
+    // ended and another has not -- the same rule find_free_single_event_slot()
+    // follows for expiry (issue #262). It answers the first stored one, exactly
+    // as this did before it was clocked at all, and says that is what happened.
+    if (first_stored == nullptr)
+      return nullptr;
+    *when = VacationWhen::UNKNOWN_CLOCK;
+    return first_stored;
+  }
+  if (covering != nullptr) {
+    *when = VacationWhen::COVERS_NOW;
+    return covering;
+  }
+  if (soonest_upcoming != nullptr) {
+    *when = VacationWhen::UPCOMING;
+    return soonest_upcoming;
+  }
+  if (latest_ended != nullptr) {
+    *when = VacationWhen::ENDED;
+    return latest_ended;
+  }
+  return nullptr;
 }
 
-std::string ScheduleService::format_vacation_display() const {
+int ScheduleService::find_vacation_slot(uint32_t now_ts) const {
+  VacationWhen when = VacationWhen::NONE;
+  const SingleEvent *ev = pick_vacation_(now_ts, &when);
+  if (ev == nullptr)
+    return -1;
+  // Every case returns a slot -- including a vacation that is over, which is
+  // still an enabled Stop event holding one of five slots, so refusing to clear
+  // it would leave no way to reclaim it. The two inexact cases say so rather
+  // than passing silently.
+  if (when == VacationWhen::ENDED) {
+    ESP_LOGI(TAG,
+             "No live or upcoming vacation; targeting slot %d, whose vacation "
+             "ended (%" PRIu32 "-%" PRIu32 ")",
+             ev->index, ev->begin_timestamp, ev->end_timestamp);
+  } else if (when == VacationWhen::UNKNOWN_CLOCK) {
+    ESP_LOGW(TAG,
+             "Node clock is not set, so vacation slot %d was chosen without "
+             "considering whether it has ended",
+             ev->index);
+  }
+  return ev->index;
+}
+
+std::string ScheduleService::format_vacation_display(uint32_t now_ts) const {
   if (!single_events_cached_)
     return "unknown";
-  for (const auto &ev : cached_single_events_) {
-    if (!ev.enabled || ev.action != 0x01)  // only Stop events are vacations
-      continue;
-    time_t begin_t = (time_t) ev.begin_timestamp;
-    time_t end_t = (time_t) ev.end_timestamp;
-    struct tm begin_tm, end_tm;
-    localtime_r(&begin_t, &begin_tm);
-    localtime_r(&end_t, &end_tm);
-    char buf[96];
-    snprintf(buf, sizeof(buf), "%04d-%02d-%02d %02d:%02d - %04d-%02d-%02d %02d:%02d",
-             begin_tm.tm_year + 1900, begin_tm.tm_mon + 1, begin_tm.tm_mday,
-             begin_tm.tm_hour, begin_tm.tm_min,
-             end_tm.tm_year + 1900, end_tm.tm_mon + 1, end_tm.tm_mday,
-             end_tm.tm_hour, end_tm.tm_min);
-    return std::string(buf);
-  }
-  return "No vacation";
+
+  VacationWhen when = VacationWhen::NONE;
+  const SingleEvent *ev = pick_vacation_(now_ts, &when);
+  // A vacation that has ENDED is not presented as the vacation. This sensor
+  // answers "is the pump being held off, and until when"; a window that closed
+  // last month answers that with "no", and saying so as a date range was the
+  // second symptom of issue #267.
+  const bool nothing_to_show = ev == nullptr || when == VacationWhen::ENDED;
+  if (nothing_to_show)
+    return "No vacation";
+
+  time_t begin_t = (time_t) ev->begin_timestamp;
+  time_t end_t = (time_t) ev->end_timestamp;
+  struct tm begin_tm, end_tm;
+  localtime_r(&begin_t, &begin_tm);
+  localtime_r(&end_t, &end_tm);
+  char buf[96];
+  snprintf(buf, sizeof(buf), "%04d-%02d-%02d %02d:%02d - %04d-%02d-%02d %02d:%02d",
+           begin_tm.tm_year + 1900, begin_tm.tm_mon + 1, begin_tm.tm_mday,
+           begin_tm.tm_hour, begin_tm.tm_min,
+           end_tm.tm_year + 1900, end_tm.tm_mon + 1, end_tm.tm_mday,
+           end_tm.tm_hour, end_tm.tm_min);
+  return std::string(buf);
 }
 
 // -------------------------------------------------------------------------

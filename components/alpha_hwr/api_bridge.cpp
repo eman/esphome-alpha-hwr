@@ -238,9 +238,17 @@ static bool parse_int_csv(const std::string &data, size_t want, const ParseInt *
 /// limitation rather than the pump's.
 static constexpr ParseInt EPOCH_MAX_TS = 4294967295;
 
+/// The floor is 1, not 0. `0` is the single-event wire's disabled/cleared
+/// sentinel (schedule_service.h), never shifted in either direction, so an
+/// enabled event whose begin is 0 confirms clean -- the readback shifts 0 back
+/// to 0 and the comparator agrees -- while describing a slot that says
+/// "cleared". Both fields carry the floor: an end of 0 is the same sentinel,
+/// and a zero-length window at 0 is refused by the ordering rule anyway.
+/// Settled with issue #263's wrap fix, which is the other half of "the confirm
+/// agreed with itself about a value nobody asked for".
 static bool parse_epoch_field(const std::string &s, uint32_t *out) {
   ParseInt v = 0;
-  if (!parse_int_field(s, 0, EPOCH_MAX_TS, &v)) return false;
+  if (!parse_int_field(s, 1, EPOCH_MAX_TS, &v)) return false;
   *out = static_cast<uint32_t>(v);
   return true;
 }

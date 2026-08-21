@@ -590,6 +590,44 @@ MUTATIONS=(
 "clock-gate-accuses-a-booting-node|components/alpha_hwr/clock_sync_gate.h|  if (uptime_ms < grace_ms) {\n    return ClockSyncAction::WAIT;\n  }|  if (false) {\n    return ClockSyncAction::WAIT;\n  }"
 "clock-gate-grace-boundary-off-by-one|components/alpha_hwr/clock_sync_gate.h|  if (uptime_ms < grace_ms) {|  if (uptime_ms <= grace_ms) {"
 "clock-gate-every-block-warns|components/alpha_hwr/clock_sync_gate.h|  return a == ClockSyncAction::WARN_NO_TIME_ID |  return a != ClockSyncAction::SYNC; //"
+
+# One clock, one floor (issue #270). The component used to resolve "what time is
+# it" in five places with three different floors -- year 2020, year 2021, and
+# the literal 1609459200 -- three of which read ::time(nullptr) directly, so a
+# build without the time component had one subsystem declining to act and three
+# acting on an unvalidated clock in an unset zone. Nothing was known to be
+# broken by it; #262 was caused by one caller substituting the wrong timestamp
+# for "now", and several independent notions of now is what makes that class of
+# bug easy to reintroduce.
+#
+# The first two are the floor itself, which every other assertion in
+# tests/test_time_service.cpp is written relative to and could therefore not
+# certify on its own. 2019 is ESPTime::is_valid()'s own year rule, so that
+# mutant makes the floor a no-op rather than merely a different number.
+"clock-floor-is-a-no-op|components/alpha_hwr/time_service.h|constexpr uint16_t CLOCK_SYNCED_YEAR_FLOOR = 2021;|constexpr uint16_t CLOCK_SYNCED_YEAR_FLOOR = 2019;"
+"clock-floor-not-applied|components/alpha_hwr/time_service.cpp|  if (!clock_is_synced(now)) return false;|  if (false) return false;"
+# ...and that a missing time source is still a refusal, not a fall-through.
+"clock-missing-time-id-answered|components/alpha_hwr/time_service.cpp|  if (time_id_ == nullptr) return false;|  if (false) return false;"
+# The drift callers. publish_clock_drift_() reports rather than decides, so both
+# of its callers can share it while still differing on what to publish when it
+# fails -- the read chain leaves the last good reading alone (issue #259), the
+# manual button publishes NAN.
+"clock-drift-invents-a-node-time|components/alpha_hwr/alpha_hwr.cpp|  if (now_ts == 0) {\n    ESP_LOGI(TAG, \"System time not synced yet; skipping drift calculation\");\n    return false;\n  }|  if (false) {\n    ESP_LOGI(TAG, \"System time not synced yet; skipping drift calculation\");\n    return false;\n  }"
+# build_event_window() takes month/day/hour/minute and has to get the YEAR from
+# somewhere. Before #270 it took it from libc rather than from the node clock.
+"event-window-year-not-from-the-clock|components/alpha_hwr/alpha_hwr.h|    int year = static_cast<int>(local_now.year) - 1900;  // years since 1900|    int year = 120;  // years since 1900"
+#
+# Deliberately absent, both equivalent mutants rather than gaps:
+#   * now_unix()'s `if (now.timestamp <= 0) return 0;` -- unreachable, since
+#     clock_is_synced() has already floored the year at 2021. It is there to
+#     keep the 0 sentinel unambiguous rather than argued, and mutating it
+#     changes no reachable behaviour.
+#   * stop_single_event_active_()'s `if (now_ts == 0) return false;` -- NOT an
+#     equivalent mutant, and not covered either. Reaching it needs a warm
+#     single-event cache behind a run-state reconcile, which no host rig stages
+#     today. Its sentinel is the same now_unix() one swept in
+#     tests/test_time_service.cpp; the caller's own branch is unpinned. Recorded
+#     rather than quietly omitted.
 "link-watchdog-never-fires|components/alpha_hwr/link_watchdog.h|return static_cast<uint32_t>(now_ms - last_inbound_ms) > timeout_ms;|return false;"
 "link-watchdog-rollover-unsafe|components/alpha_hwr/link_watchdog.h|return static_cast<uint32_t>(now_ms - last_inbound_ms) > timeout_ms;|return now_ms > last_inbound_ms + timeout_ms;"
 # Readiness (progress) watchdog, issue #211. The data watchdog above watches
@@ -1023,7 +1061,7 @@ MUTATIONS=(
 # (issue #258), so `setpoint-write-not-declared-as-awaiting-an-ack` went with it.
 # Its sibling below covers the same declaration on the write that remains.
 "control-request-not-declared-as-awaiting-an-ack|components/alpha_hwr/control_service.cpp|      /*expect_short_ack=*/true, /*quiet_timeout=*/true);\n\n  if (queue_commit && schedule_callback_) {|      /*expect_short_ack=*/false, /*quiet_timeout=*/true);\n\n  if (queue_commit && schedule_callback_) {"
-"clock-write-expects-a-type-a-set-cannot-return|components/alpha_hwr/time_service.cpp|      apdu, sizeof(apdu), 0, 0,|      apdu, sizeof(apdu), 0x0141, 0,"
+"clock-write-expects-a-type-a-set-cannot-return|components/alpha_hwr/time_service.cpp|      apdu, sizeof(apdu), 0, 0,\n      [](bool success, const uint8_t * /*data*/, size_t /*len*/) {|      apdu, sizeof(apdu), 0x0141, 0,\n      [](bool success, const uint8_t * /*data*/, size_t /*len*/) {"
 "commit-write-expects-a-type-a-set-cannot-return|components/alpha_hwr/schedule_service.cpp|      apdu, apdu_len, 0, 0,|      apdu, apdu_len, 0xDA01, 0,"
 # Three Object 84 writes made the same mistake, so each gets its own entry: the
 # search strings need the lambda capture list because `apdu, sizeof(apdu), 0, 0,`
@@ -1081,6 +1119,56 @@ MUTATIONS=(
 # across the window (a vacation), 0x02 Run turns it on. A pump that stored the
 # wrong kind settled ACCEPTED, so a vacation could be confirmed as set while
 # the pump was in fact scheduled to run for the whole week.
+# The local<->UTC shift at the ends of the uint32 the wire carries (issue #263).
+# Both directions used to wrap modulo 2^32, and the two wraps CANCELLED: the
+# confirm readback shifted back by the same offset, wrapped symmetrically,
+# compared equal, and settled the operation ACCEPTED for an event the pump had
+# stored at an instant nobody asked for. Low likelihood -- about a day's worth
+# of instants out of 136 years -- and a false success rather than an error,
+# which is the combination worth a guard.
+#
+# The two directions are guarded differently on purpose, so both halves are
+# pinned: encoding REFUSES (the caller named an instant this pump cannot store),
+# decoding SATURATES (the value is already on the pump; there is nothing to
+# refuse, and saturating keeps a pair ordered and its expiry answerable).
+"shift-encode-ceiling-wraps|components/alpha_hwr/schedule_service.h|  if (shifted > static_cast<int64_t>(UINT32_MAX))\n    return false;|  if (false)\n    return false;"
+"shift-encode-floor-wraps|components/alpha_hwr/schedule_service.h|  if (shifted < 1)\n    return false;|  if (false)\n    return false;"
+"shift-decode-floor-not-saturated|components/alpha_hwr/schedule_service.h|  if (shifted < 1)\n    return 1u;|  if (shifted < 1)\n    return 0u;"
+"shift-decode-ceiling-not-saturated|components/alpha_hwr/schedule_service.h|  if (shifted > static_cast<int64_t>(UINT32_MAX))\n    return UINT32_MAX;|  if (false)\n    return UINT32_MAX;"
+# The argument-level refusal, which settles ahead of the overview read so a
+# wrong argument is not reported as a link failure.
+"single-event-unrepresentable-window-accepted|components/alpha_hwr/write_operation_service.cpp|    const bool both_ends_fit = begin_fits && end_fits;|    const bool both_ends_fit = true;"
+# Deliberately absent: the same guard at the wire, in
+# ScheduleService::write_single_event_async(). An equivalent mutant, and by
+# construction rather than by experiment -- its sole caller is
+# WriteOperationService::write_single_event_(), every path to which runs the
+# argument check above on the same two timestamps first, and a CLEAR carries the
+# 0/0 sentinel, which always fits. The guard is kept as a choke point on a
+# public method; adding the entry only produced a survivor.
+#
+# This is the fourth time in three changes that tightening one bound made
+# another unreachable and turned its entry into an equivalent mutant. Worth
+# expecting rather than rediscovering.
+# 0 is the wire's disabled/cleared sentinel, never shifted in either direction,
+# so an enabled event beginning at 0 confirmed clean while describing a slot
+# that says "cleared".
+"epoch-field-accepts-the-cleared-sentinel|components/alpha_hwr/api_bridge.cpp|  if (!parse_int_field(s, 1, EPOCH_MAX_TS, &v)) return false;|  if (!parse_int_field(s, 0, EPOCH_MAX_TS, &v)) return false;"
+# A vacation that has already ended (issue #267). find_vacation_slot() returned
+# the first enabled Stop in slot order with no clock, so a FINISHED vacation in
+# an early slot shadowed a live one later: clear_vacation cleared the finished
+# one and settled `accepted`, telling the user the vacation was over while the
+# pump was still holding itself off.
+"vacation-slot-ignores-the-window|components/alpha_hwr/schedule_service.cpp|    const bool covers_now =\n        ev.begin_timestamp <= now_ts && now_ts < ev.end_timestamp;|    const bool covers_now = true;"
+"vacation-slot-takes-the-furthest-out|components/alpha_hwr/schedule_service.cpp|          : ev.begin_timestamp < soonest_upcoming->begin_timestamp;|          : ev.begin_timestamp > soonest_upcoming->begin_timestamp;"
+# The third case, deliberate rather than by omission: an ended vacation is still
+# an enabled Stop holding one of five slots, so refusing to clear it would leave
+# no way to reclaim it.
+"vacation-slot-cannot-reclaim-a-finished-one|components/alpha_hwr/schedule_service.cpp|  if (latest_ended != nullptr) {\n    *when = VacationWhen::ENDED;|  if (false) {\n    *when = VacationWhen::ENDED;"
+# The second symptom of the same defect: the Vacation text sensor named a
+# finished vacation as THE vacation.
+"vacation-display-names-a-finished-one|components/alpha_hwr/schedule_service.cpp|  const bool nothing_to_show = ev == nullptr |  const bool nothing_to_show = ev == nullptr; //"
+# ...and that the caller hands it a real clock rather than the unknown sentinel.
+"vacation-slot-caller-passes-no-clock|components/alpha_hwr/write_operation_service.cpp|        int slot = schedule_service_.find_vacation_slot(time_service_.now_unix());|        int slot = schedule_service_.find_vacation_slot(0);"
 "single-event-confirm-ignores-the-action|components/alpha_hwr/write_operation_service.cpp|                                  actual.action == op->single_event_action;|                                  true;"
 # ...and the skip for a CLEAR must stay a skip: a cleared slot's window is
 # meaningless, so comparing it would reject every successful clear.
@@ -1190,7 +1278,7 @@ MUTATIONS=(
 "bridge-parser-accepts-leading-junk|components/alpha_hwr/api_bridge.cpp|  if (!starts_cleanly) return false;|  // mutated: let strtol skip whitespace and signs"
 # Timestamps are compared AFTER narrowing to the wire's 32 bits; comparing the
 # wider parse let an ordered pair reach the pump reversed.
-"bridge-epoch-range-not-checked|components/alpha_hwr/api_bridge.cpp|  if (!parse_int_field(s, 0, EPOCH_MAX_TS, &v)) return false;|  if (!parse_int_field(s, 0, 999999999999LL, &v)) return false;"
+"bridge-epoch-range-not-checked|components/alpha_hwr/api_bridge.cpp|  if (!parse_int_field(s, 1, EPOCH_MAX_TS, &v)) return false;|  if (!parse_int_field(s, 1, 999999999999LL, &v)) return false;"
 # The ceiling is the wire's uint32, not time_t's int32: ClockProgramSingleEvent
 # declares `begin` and `end` as uint32_t, so the pump holds instants up to 2106.
 # Stopping at 2147483647 would refuse dates the pump accepts (issue #255).

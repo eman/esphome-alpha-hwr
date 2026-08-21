@@ -43,6 +43,7 @@
 #include "esphome/core/helpers.h"
 #include "esphome/core/log.h"
 #include "schedule_entry.h"
+#include <cstdint>
 #include <ctime>
 #include <functional>
 #include <vector>
@@ -67,11 +68,66 @@ namespace services {
 // helpers do that shift; `SingleEvent` itself always holds UTC. `0` is the
 // disabled/cleared sentinel and is never shifted. `offset_s` = seconds east of
 // UTC (e.g. -25200 for PDT), i.e. `struct tm::tm_gmtoff`.
-inline uint32_t utc_to_local_unix(uint32_t utc, int32_t offset_s) {
-  return utc == 0 ? 0u : static_cast<uint32_t>(static_cast<int64_t>(utc) + offset_s);
+//
+// Both used to wrap modulo 2^32 (issue #263). The usable range is
+// `[|min_offset|, UINT32_MAX - max_offset]`, not `[0, UINT32_MAX]` — about a
+// day's worth of instants out of 136 years, so the likelihood is low. What
+// raised it above a curiosity is that the two wraps CANCEL: the confirm
+// readback shifts back by the same offset, wraps symmetrically, and compares
+// equal, so the operation settled **accepted** for an event the pump had stored
+// at an instant nobody asked for. A byte round trip is not behaviour, and here
+// the round trip was supplied by two wraps agreeing with each other.
+//
+// The two directions are checked differently, on purpose:
+//
+//   * **Encoding refuses.** The caller named an instant this pump cannot store
+//     in this zone. Writing a nearby one instead is not what was asked, and it
+//     is precisely the silent substitution above.
+//   * **Decoding saturates.** The value is already on the pump — written by the
+//     GO app, or left by a firmware we did not talk to — so there is nothing to
+//     refuse. The closest representable UTC keeps the pair ordered and keeps
+//     "has this ended?" answerable, where wrapping moved the instant by 136
+//     years and made an expired event read as live.
+
+/// Shift a UTC epoch onto the pump's LOCAL-Unix wire base.
+///
+/// @param out Receives the wire value when this returns true. Untouched otherwise.
+/// @return False when the shift leaves `[1, UINT32_MAX]`, i.e. the instant
+///   cannot be represented on the wire at this offset. The floor is 1 rather
+///   than 0 because 0 is the disabled/cleared sentinel: a shift landing exactly
+///   on it would write "this slot is cleared" for an instant somebody asked to
+///   schedule.
+inline bool utc_to_local_unix(uint32_t utc, int32_t offset_s, uint32_t *out) {
+  if (out == nullptr)
+    return false;
+  if (utc == 0) {  // the sentinel itself, deliberately not shifted
+    *out = 0u;
+    return true;
+  }
+  const int64_t shifted = static_cast<int64_t>(utc) + offset_s;
+  if (shifted < 1)
+    return false;
+  if (shifted > static_cast<int64_t>(UINT32_MAX))
+    return false;
+  *out = static_cast<uint32_t>(shifted);
+  return true;
 }
+
+/// Shift a LOCAL-Unix wire value back to UTC, saturating rather than wrapping.
+///
+/// See the note above for why this direction saturates where the encoder
+/// refuses. Saturation is visible in the result — 1 or UINT32_MAX are not
+/// plausible event times — and both ends of a pair saturate the same way, so
+/// their ordering survives.
 inline uint32_t local_unix_to_utc(uint32_t local, int32_t offset_s) {
-  return local == 0 ? 0u : static_cast<uint32_t>(static_cast<int64_t>(local) - offset_s);
+  if (local == 0)
+    return 0u;
+  const int64_t shifted = static_cast<int64_t>(local) - offset_s;
+  if (shifted < 1)
+    return 1u;
+  if (shifted > static_cast<int64_t>(UINT32_MAX))
+    return UINT32_MAX;
+  return static_cast<uint32_t>(shifted);
 }
 
 /// Local UTC offset (seconds east of UTC) at the instant `ref`, e.g. -25200 for
@@ -441,14 +497,44 @@ public:
    */
   int find_free_single_event_slot(uint32_t now_ts) const;
 
-  /**
-   * Slot index of the active vacation — the first enabled single-event whose
-   * action is Stop (0x01) — or -1 if none. A vacation is a Stop single-event.
-   */
-  int find_vacation_slot() const;
+  /// Where a stored vacation sits relative to now. Returned alongside the
+  /// event, because the two callers below want different things from an
+  /// ENDED one: `clear_vacation` should still be able to reclaim its slot,
+  /// while the Vacation sensor must not present it as the vacation.
+  enum class VacationWhen {
+    NONE,           ///< No enabled Stop single-event is cached.
+    COVERS_NOW,     ///< begin <= now < end.
+    UPCOMING,       ///< begin > now.
+    ENDED,          ///< end <= now.
+    UNKNOWN_CLOCK,  ///< One exists; with no clock we cannot say which of the above.
+  };
 
-  /** Human-readable active vacation range, or "No vacation". */
-  std::string format_vacation_display() const;
+  /**
+   * Slot index of the vacation a caller means, or -1 if none is stored.
+   *
+   * A vacation is an enabled Stop (0x01) single-event. This used to return the
+   * first one in slot order with no reference to a clock, so a FINISHED
+   * vacation in an early slot shadowed a live one later: `clear_vacation`
+   * cleared the finished one and settled `accepted`, telling the user the
+   * vacation was ended while the pump was still holding itself off (issue
+   * #267). `find_free_single_event_slot()` one method up had always been
+   * clocked; the asymmetry was the whole bug.
+   *
+   * Preference order: one whose window covers now, then the next one due
+   * (soonest begin), then the most recently ended one — the last included
+   * deliberately rather than by omission, since an ended vacation is still an
+   * enabled Stop event occupying one of five slots and refusing to clear it
+   * would leave no way to reclaim it. It just says so in the log.
+   *
+   * @param now_ts The node's wall clock, or 0 for "this node cannot tell the
+   *   time" — in which case the first enabled Stop is returned, unranked, the
+   *   same rule as `find_free_single_event_slot()`: a picker that cannot tell
+   *   the time does not get to claim one event has ended and another has not.
+   */
+  int find_vacation_slot(uint32_t now_ts) const;
+
+  /** Human-readable vacation range, or "No vacation". @see find_vacation_slot */
+  std::string format_vacation_display(uint32_t now_ts) const;
 
   /**
    * Get cached single events.
@@ -624,6 +710,20 @@ public:
   bool send_configuration_commit();
 
 protected:
+  /**
+   * The one ranking behind find_vacation_slot() and format_vacation_display().
+   *
+   * Shared rather than written twice: both used to walk the cache picking the
+   * first enabled Stop, and having the same wrong rule in two places is why
+   * issue #267 showed up as two symptoms -- a clear that targeted the wrong
+   * slot, and a sensor naming an expired vacation as the current one.
+   *
+   * @param now_ts Wall clock, 0 meaning unknown.
+   * @param when Receives where the returned event sits relative to now.
+   * @return The chosen event, or nullptr when none is stored / the cache is cold.
+   */
+  const SingleEvent *pick_vacation_(uint32_t now_ts, VacationWhen *when) const;
+
   // -------------------------------------------------------------------------
   // Internal Helper Methods
   // -------------------------------------------------------------------------
