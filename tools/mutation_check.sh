@@ -790,10 +790,18 @@ MUTATIONS=(
 # is assigned from millis() eleven lines above it.)
 "readiness-watchdog-rearmed-by-activity|components/alpha_hwr/alpha_hwr.cpp|        this->link_last_inbound_ms_ = inbound_now;|        this->link_last_inbound_ms_ = inbound_now;\n        this->link_ready_since_ms_ = inbound_now;"
 "readiness-watchdog-not-checked|components/alpha_hwr/alpha_hwr.cpp|    if (!this->check_link_liveness_())\n      this->check_link_readiness_();|    this->check_link_liveness_();"
-# The split (issue #211): naming ships on, recycling is opt-in. Removing the
-# gate makes every default installation start tearing its link down, which is
-# the bond-erase exposure the split exists to withhold.
-"readiness-recycles-by-default|components/alpha_hwr/alpha_hwr.cpp|  if (!this->link_ready_recycle_) {|  if (false) {"
+# The split (issue #211): naming ships on, recycling is opt-in. A default
+# installation that starts tearing its link down is the bond-erase exposure the
+# split exists to withhold.
+#
+# Issue #257 turned the opt-in from a bool into a bound, so this no longer has a
+# gate of its own to remove -- "off" is now the limit of 0 falling out of the
+# same comparison the bound uses. Hence the off-by-one: it leaves the bound
+# working and flips only the default, from never-recycle to recycle-once, which
+# is the claim this entry has always been about. `return true` is the other
+# entry (ready-recycle-bound-ignored); mutating this to `if (false)` at the call
+# site would have been an equivalent mutant of it and proved nothing new.
+"readiness-recycles-by-default|components/alpha_hwr/readiness_watchdog.h|  return consecutive < limit;|  return consecutive <= limit;"
 # The rank. Both halves of the defect that nearly shipped: taking the default at
 # the call site, and ignoring the parameter inside. force_disconnect() used to
 # hardcode DATA, so the readiness reason was held at the one rank released by
