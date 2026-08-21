@@ -252,6 +252,14 @@ class NodeTotals:
         self.watched_s = 0.0
         self.crc_drops = 0.0
         self.crc_reported = False
+        # Watched time the CRC counter was actually COVERING, which is not the
+        # same as watched_s. link_crc_drops is optional and can be declared
+        # part-way through a run, so a log spanning that change has hours in
+        # watched_s that no counter was watching. Dividing drops by the whole
+        # run understates the rate and -- worse -- tightens the zero-event
+        # confidence bound with hours that never had the instrument in them.
+        self.crc_watched_s = 0.0
+        self._crc_seen = False
         self.resets = 0
         self.ambiguous = 0
         self.snapshots = 0
@@ -300,6 +308,7 @@ class NodeTotals:
             if at - self._prev_at > self._prev.get("watched_s", 0.0):
                 self.ambiguous += 1
 
+        watched_delta = 0.0
         for field, value in current.items():
             previous = 0.0 if reset else self._prev.get(field, 0.0)
             delta = value - previous
@@ -307,12 +316,29 @@ class NodeTotals:
                 delta = value  # a counter that reset on its own
             if field == "watched_s":
                 self.watched_s += delta
+                watched_delta = delta
             elif field == "truncated":
                 self.truncated += delta
             elif field == "crc_drops":
                 self.crc_drops += delta
             else:
                 self.over[int(field[4:])] += delta
+
+        # The watched time this snapshot's CRC delta actually covers.
+        #
+        # Three cases, mirroring the delta rule above exactly. A snapshot that
+        # does not report the counter contributes nothing. The FIRST one that
+        # does -- and the first after a reboot -- carries a since-boot count, so
+        # the time it covers is the whole since-boot watched_s rather than the
+        # interval since the last snapshot. Every one after that contributes its
+        # interval, like any other differenced field.
+        if "crc_drops" in current:
+            first_covered = reset or not self._crc_seen
+            if first_covered:
+                self.crc_watched_s += current["watched_s"]
+            else:
+                self.crc_watched_s += watched_delta
+        self._crc_seen = "crc_drops" in current
 
         # Merge rather than replace. read_node() writes a snapshot after a
         # timeout even when only some states arrived, and replacing wholesale
@@ -519,17 +545,26 @@ def print_crc_drops(nodes: dict[str, NodeTotals]) -> None:
     print("\nBAD-CRC FRAME DROPS  (issue #260)")
     print(f"  {'node':<24} {'watched':>10} {'drops':>8} {'/hour':>10}")
     for node in instrumented:
-        hours = node.watched_s / 3600.0
+        # crc_watched_s, never watched_s: a run that predates the counter has
+        # hours in the latter that no counter was watching.
+        hours = node.crc_watched_s / 3600.0
         rate = node.crc_drops / hours if hours > 0 else float("inf")
-        print(f"  {node.host:<24} {node.days:>9.2f}d {int(node.crc_drops):>8} {rate:>10.4f}")
+        print(f"  {node.host:<24} {hours / 24.0:>9.2f}d {int(node.crc_drops):>8} {rate:>10.4f}")
     total_drops = sum(n.crc_drops for n in instrumented)
-    total_hours = sum(n.watched_s for n in instrumented) / 3600.0
+    total_hours = sum(n.crc_watched_s for n in instrumented) / 3600.0
     pooled = total_drops / total_hours if total_hours > 0 else float("inf")
     print(f"  {'pooled':<24} {total_hours / 24.0:>9.2f}d {int(total_drops):>8} {pooled:>10.4f}")
 
     missing = [n.host for n in nodes.values() if not n.crc_reported]
     if missing:
         print(f"  not reporting this counter: {', '.join(missing)}")
+
+    # Say so when the counter covers less of the run than the gap entities do,
+    # rather than leaving a reader to work out why this table's watched column
+    # disagrees with COVERAGE above.
+    uninstrumented = sum(n.watched_s - n.crc_watched_s for n in instrumented)
+    if uninstrumented > 3600.0:
+        print(f"  {uninstrumented / 86400.0:.2f}d of watched link predates this counter and is excluded from the rate")
     if total_drops == 0:
         # Say what zero does and does not establish, because the first report of
         # a zero on this issue had to be withdrawn for claiming more than it

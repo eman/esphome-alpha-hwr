@@ -25,16 +25,18 @@
   log lines", which has no denominator. Where the run saw zero, the report says
   what bound that supports rather than declaring the link healthy.
 
-  The warning itself now carries the declared length and the leading bytes:
+  The warning itself now carries the received length, the declared length and
+  the leading bytes:
 
   ```
-  Dropping frame with a bad CRC (len=56, declared=59, head=24 37 F8 E7)
+  Dropping frame with a bad CRC (received=59, declared=56, head=24 34 F8 E7)
   ```
 
-  A bit-flip in the payload preserves the frame length, so a length that
-  disagrees with the declared one points at a corrupted length byte or a
-  misassembly across fragments rather than at radio noise. One line, and it turns
-  the next sighting into evidence instead of another anecdote.
+  A bit-flip in the payload preserves the frame length, so `received ==
+  declared` with a bad CRC points at the radio, while `received > declared`
+  means the notification carried bytes past the end of this frame — a
+  misassembly rather than noise. One line, and it turns the next sighting into
+  evidence instead of another anecdote.
 
 - **The pump's own daylight-saving rule is read and checked against the node's
   timezone** (`Pump Clock DST`, issue #286). The pump keeps a DST rule of its own

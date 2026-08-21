@@ -512,15 +512,22 @@ void Transport::on_notification(const uint8_t* data, size_t len) {
        // want to be separate counters rather than one collapsed "drops", or a
        // framing bug reads as radio interference.
        if (this->crc_drops_ < 0xFFFFFFFFu) this->crc_drops_++;
-       // Declared length and the leading bytes, not just the length. The one
-       // occurrence on record was a 56-byte frame where a schedule-layer reply
-       // is 59, and a bit-flip in the payload preserves the frame length -- so a
-       // wrong length points at a corrupted length byte or a misassembly across
-       // fragments rather than plain radio corruption. Printing both separates
-       // those cases on the next sighting instead of producing another anecdote.
+       // What was RECEIVED against what the frame DECLARED, plus the leading
+       // bytes. The received figure is the pre-trim buffer size, and it has to
+       // be: `frame_len` is the trimmed length, and the completion test is `>=`
+       // with expected_packet_length_ never below 4, so frame_len ALWAYS equals
+       // the declared length by the time this line runs. Printing it against
+       // the declaration would have been two names for one number -- caught in
+       // review on the first cut of this.
+       //
+       // The two differ when a notification carried bytes past the end of this
+       // frame, which is the misassembly case worth telling apart from radio
+       // corruption: a bit-flip in the payload preserves the frame length, so
+       // received == declared with a bad CRC points at the radio, while
+       // received > declared points at framing.
        ESP_LOGW(TAG,
-                "Dropping frame with a bad CRC (len=%u, declared=%u, head=%02X %02X %02X %02X)",
-                (unsigned) frame_len, (unsigned) expected_packet_length_,
+                "Dropping frame with a bad CRC (received=%u, declared=%u, head=%02X %02X %02X %02X)",
+                (unsigned) reassembly_buffer_.size(), (unsigned) expected_packet_length_,
                 reassembly_buffer_[0], reassembly_buffer_[1], reassembly_buffer_[2],
                 reassembly_buffer_[3]);
        reassembling_ = false;

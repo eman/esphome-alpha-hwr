@@ -632,16 +632,17 @@ from `link_watch_time`, so declare that one too if you want the report to state 
 rate; the entity itself works alone, and Home Assistant will happily graph the
 raw count.
 
-The warning line names the declared length and the frame's leading bytes as well
-as the length received:
+The warning line names what was received, what the frame declared, and its
+leading bytes:
 
 ```
-Dropping frame with a bad CRC (len=56, declared=59, head=24 37 F8 E7)
+Dropping frame with a bad CRC (received=59, declared=56, head=24 34 F8 E7)
 ```
 
 That distinction is the diagnosis. A bit-flip in the payload preserves the frame
-length, so a length that disagrees with the declared one points at a corrupted
-length byte or a misassembly across fragments rather than at radio noise.
+length, so `received == declared` with a bad CRC points at the radio, while
+`received > declared` means the notification carried bytes past the end of this
+frame — a misassembly across fragments rather than noise.
 
 #### Running a measurement run
 
