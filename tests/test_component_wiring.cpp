@@ -1301,9 +1301,13 @@ void test_suspend_drops_the_link_and_stops_reconnecting() {
   advertise_pump(r);
   r.advance(10000);
 
+  // Deliberately not "the settle path did not hand it back": with the
+  // disconnect-side guard in place the settle path is never armed here, so
+  // there is no timer to decline. What this pins is that NOTHING restored
+  // auto-connect over ten seconds and an advertisement.
   TEST_ASSERT(!r.client.mock_auto_connect(),
-              "  ...and it is STILL suspended ten seconds later: the settle "
-              "path did not hand auto-connect back");
+              "  ...and it is STILL suspended ten seconds and an advertisement "
+              "later; nothing handed auto-connect back");
   TEST_ASSERT(r.component.is_suspended(), "  ...and the component says so");
 }
 
@@ -1415,10 +1419,14 @@ void test_releasing_a_long_suspension_does_not_report_unreachable() {
 
   r.component.set_suspended(false);
 
-  TEST_ASSERT(r.link_status.state != "Unreachable",
-              "releasing restarts the unreachable clock -- the link was down "
-              "on purpose, so the countdown starts from the release, not from "
-              "the last time the pump was ready");
+  // Named, not `!= "Unreachable"`. That form passes on five other strings
+  // including "Suspended" -- i.e. it would hold against a release that never
+  // updated the status at all, which is a different bug and a real one.
+  TEST_ASSERT(r.link_status.state == "Connecting",
+              "releasing restarts the unreachable clock and the status reads "
+              "Connecting -- the link was down on purpose, so the countdown "
+              "starts from the release, not from the last time the pump was "
+              "ready");
 }
 
 // A genuine failure AFTER the release must reach the surface.
@@ -1450,9 +1458,13 @@ void test_a_failure_after_release_is_not_hidden() {
   r.disconnect(ESP_GATT_CONN_TIMEOUT);
   r.advance(3000);
 
-  TEST_ASSERT(r.link_fault.state != "None",
-              "a genuine drop after the release reports, rather than being "
-              "masked until a readiness that may never come");
+  // The exact string, because `!= "None"` cannot tell the genuine new fault
+  // from the stale 0x16 we failed to clear -- both are non-None, and this file
+  // warns about that pattern elsewhere.
+  TEST_ASSERT(r.link_fault.state == "Connection Timeout (0x08)",
+              "a genuine drop after the release reports ITS OWN reason, rather "
+              "than being masked until a readiness that may never come -- or "
+              "showing the teardown we caused");
 }
 
 // Releasing must not spend someone else's reconnect-settle hold.
@@ -1518,6 +1530,42 @@ void test_suspending_does_not_record_an_outage() {
               "against");
 }
 
+// Three things none of the tests above reach.
+//
+// 1. `set_suspended()` ends with evaluate_link_status(), which is what makes
+//    the status flip on the CLICK rather than up to a poll interval later.
+//    Delete that call and every other test still passes, because they all
+//    advance time before reading.
+// 2. The `Suspended` rung sits ahead of every other rung INCLUDING the ready
+//    check. Move it below and the suite stays green, because every other test
+//    suspends a session that is not ready yet.
+// 3. The idempotence guard. Nothing double-suspends.
+void test_suspending_a_ready_link_reports_immediately_and_once() {
+  std::cout << "\n=== Suspending a READY link: immediate, and idempotent ==="
+            << std::endl;
+  Rig r;
+  arm_the_settle_path(r);
+  r.setup();
+  r.connect_and_subscribe();
+  TEST_ASSERT(r.run_until_ready(),
+              "precondition: the pump reached READY, so the ready rung would "
+              "otherwise win");
+  TEST_ASSERT(r.link_status.state == "Connected", "  ...and reads Connected");
+
+  const int before = r.client.mock_disconnect_calls();
+  r.component.set_suspended(true);
+
+  // No advance(), no loop(), no poll. Read it straight after the call.
+  TEST_ASSERT(r.link_status.state == "Suspended",
+              "the status flips on the click, and Suspended outranks the ready "
+              "rung -- the session is still READY at this instant");
+
+  // A second identical call must not tear the link down again.
+  r.component.set_suspended(true);
+  TEST_ASSERT(r.client.mock_disconnect_calls() == before + 1,
+              "  ...and suspending twice disconnects once");
+}
+
 int main() {
   std::cout << "===========================================================" << std::endl;
   std::cout << "  Component BLE Wiring Test Suite" << std::endl;
@@ -1545,6 +1593,7 @@ int main() {
   test_a_failure_after_release_is_not_hidden();
   test_releasing_inside_a_settle_window_does_not_reconnect_early();
   test_suspending_does_not_record_an_outage();
+  test_suspending_a_ready_link_reports_immediately_and_once();
   test_link_gap_baseline_is_published_once_at_zero();
   test_gap_counters_do_not_publish_on_every_tick();
   test_a_quiet_link_fills_the_rungs_end_to_end();
