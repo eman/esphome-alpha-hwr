@@ -18,8 +18,16 @@ namespace services {
 /// ESPTime::is_valid() only bounds the fields and floors the year at 2019,
 /// which a freshly booted RTC can satisfy without any time source having
 /// answered. The pump deserves a clock somebody actually set, so this floor is
-/// the "synced" test. Named because two callers ask the same question and a
-/// second copy of the literal is how they would drift apart.
+/// the "synced" test.
+///
+/// This is the component's ONLY sanity floor for the node's wall clock, and
+/// keeping it that way is the point of issue #270. There used to be three --
+/// 2020, 2021 and the literal 1609459200 (2021-01-01) -- spread across five
+/// call sites that each read the clock their own way, two of them agreeing by
+/// coincidence rather than by construction. #262 was caused by one caller
+/// substituting the wrong timestamp for "now"; several independent notions of
+/// now is the condition that makes that class of bug easy to reintroduce.
+/// A new caller asks TimeService, it does not add a floor.
 constexpr uint16_t CLOCK_SYNCED_YEAR_FLOOR = 2021;
 
 /// True when @p t looks like a clock a time source has actually set.
@@ -113,13 +121,39 @@ class TimeService {
    */
   void send_set_clock_command(const ESPTime &local_now);
 
+  // ---------------------------------------------------------------------
+  // The node's wall clock. One question, two shapes, one floor (issue #270).
+  //
+  // Every caller that needs to know what time it is asks one of the three
+  // below; none of them reads ::time(nullptr) or time_id_ directly, and none
+  // carries a floor of its own. The three answer the same question in the
+  // shape the caller needs -- calendar fields, epoch seconds, or just
+  // "is there one yet" -- and they agree by construction because the lower two
+  // are written in terms of the first.
+  //
+  // The question is specific: **the wall clock the pump's schedules run
+  // against**. It is deliberately not a general "what time is it" utility. A
+  // future caller wanting to stamp a host event (how long did this take, when
+  // did this session start) is asking a different question and should not be
+  // routed here for tidiness -- collapsing the two is the mistake this
+  // consolidation is one step away from.
+  //
+  // Under `#ifndef USE_TIME` all three refuse, uniformly. That is a behaviour
+  // change from what stood before #270, where the same build had one subsystem
+  // declining to act and three falling through to libc and acting on a clock
+  // nothing had validated. Refusing is the honest answer: a build with no time
+  // component has no timezone loaded either, so libc's answer is not merely
+  // unvalidated, it is in the wrong zone. What each caller does when refused is
+  // the caller's decision and is documented at each one.
+  // ---------------------------------------------------------------------
+
   /**
-   * @brief Resolve the node's own wall clock.
+   * @brief Resolve the node's own wall clock, as local calendar fields.
    *
-   * @param out Receives local time when this returns true.
+   * @param out Receives local time when this returns true. Untouched otherwise.
    * @return False when no `time_id` is configured, or when the component has
    *   one but SNTP has not synced yet -- in both cases there is nothing worth
-   *   writing to the pump.
+   *   writing to the pump, and nothing worth dating an event against.
    */
   bool current_time(ESPTime &out) const;
 
@@ -142,6 +176,7 @@ class TimeService {
 
   /// True when a configured time source has produced a plausible wall clock.
   ///
+  ///
   /// The same test current_time() applies, without the logging or the out
   /// parameter, so a caller can ask "is there a clock yet?" every poll without
   /// emitting a line each time it asks. Splitting them is what lets
@@ -154,6 +189,17 @@ class TimeService {
 #ifdef USE_TIME
   time::RealTimeClock *time_id_{nullptr};
 #endif
+
+  /// The one read of the node's clock; the three public accessors are shapes
+  /// of this and cannot disagree with each other.
+  ///
+  /// Deliberately silent. wall_clock_is_set() and now_unix() are asked on poll
+  /// paths, and a log line per ask is what would make callers cache the answer
+  /// -- which is how a fourth notion of "now" gets born. current_time() adds
+  /// the logging, because its callers ask once and want to know why not.
+  ///
+  /// @param out Receives local time when this returns true. Untouched otherwise.
+  bool resolve_wall_clock_(ESPTime &out) const;
 
   /**
    * @brief Parse clock response data.

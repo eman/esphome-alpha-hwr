@@ -309,6 +309,45 @@
 
 ### Changed
 
+- **One accessor answers "what time is it", at one sanity floor** (issue #270).
+  The component resolved the node's wall clock in five places, each with its own
+  source and its own idea of when a clock is trustworthy: `TimeService` floored
+  the year at 2021, `build_event_window()` floored it at 2020, and the two drift
+  measurements and the vacation check tested against the literal `1609459200`.
+  Three floors, two of which agreed by coincidence rather than by construction,
+  and none of which referenced the others.
+
+  Three of the five read `::time(nullptr)` directly, which is where the divergence
+  had teeth. Under `#ifndef USE_TIME` those three fell through to libc while
+  `TimeService` declined to answer — so the same build had one subsystem refusing
+  to act and three acting on a clock nothing had validated, in a zone nothing had
+  loaded. A build with no time component has no timezone, so libc's answer there
+  is not merely unvalidated; it is in the wrong base, against a pump whose clock
+  program runs on local time.
+
+  All five now ask `TimeService`, which answers in whichever of three shapes the
+  caller needs — calendar fields, epoch seconds, or "is there one yet" — from a
+  single read, so they cannot disagree. `CLOCK_SYNCED_YEAR_FLOOR` is the only
+  floor left. Under `#ifndef USE_TIME` every caller refuses, uniformly.
+
+  Nothing here was known to be broken, and the change is filed as prevention
+  rather than repair: issue #262 was caused by one caller substituting the wrong
+  timestamp for "now", and several independent notions of now is the condition
+  that makes that class of bug easy to reintroduce.
+
+  Two behaviour changes are worth naming. `build_event_window()` — the schedule
+  editor's "Add Single Event" and "Set Vacation" buttons — now refuses a clock
+  below year 2021 where it previously accepted year 2020, and refuses outright in
+  a build with no time component where it previously anchored the event to
+  whatever libc said. And the `Last Clock Sync` stamp's libc fallback is deleted
+  rather than converted: it was unreachable (the clock-sync gate will not submit
+  a sync without a synced clock at all), and what it did when reached was stamp
+  the sensor `1970-01-01`.
+
+  The accessors are pinned by a new host test built **twice**, with and without
+  `-DUSE_TIME`, because "the behaviour under `#ifndef USE_TIME` is the same for
+  every caller" is not checked by anything if that build is never built.
+
 - **Every Class 10 write now waits for its own acknowledgement** (issue #253).
   This finishes what #248 began. That change stopped a reply being handed to
   whichever write happened to be waiting; it did not stop replies being left with

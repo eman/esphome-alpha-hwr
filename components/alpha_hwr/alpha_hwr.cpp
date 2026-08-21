@@ -1012,12 +1012,11 @@ void AlphaHwrComponent::evaluate_link_status() {
 // repair is capped at one attempt per connection either way.
 bool AlphaHwrComponent::stop_single_event_active_() const {
   if (!schedule_service_.is_single_events_cached()) return false;
-  time_t now = ::time(nullptr);
-#ifdef USE_TIME
-  if (this->time_id_ != nullptr) now = this->time_id_->now().timestamp;
-#endif
-  if (now < 1609459200) return false;  // System clock not synced yet
-  const uint32_t now_ts = static_cast<uint32_t>(now);
+  // 0 is "this node cannot tell you what time it is", not the epoch (issue
+  // #270). Answering false there is the documented behaviour above: without a
+  // clock the dead-schedule repair wins over a vacation we cannot confirm.
+  const uint32_t now_ts = time_service_.now_unix();
+  if (now_ts == 0) return false;
   for (const auto &ev : schedule_service_.get_cached_single_events()) {
     if (!ev.enabled || ev.action != 0x01) continue;  // 0x01 = Stop (vacation)
     if (ev.begin_timestamp <= now_ts && now_ts < ev.end_timestamp) return true;
@@ -1159,24 +1158,9 @@ void AlphaHwrComponent::trigger_initial_data_reads() {
       // reading; overwriting it with NAN is the same defect with a worse value.
       if (gen != this->read_chain_gen_) return;
       if (pump_time.is_valid()) {
-        time_t now = ::time(nullptr);
-#ifdef USE_TIME
-        if (this->time_id_) now = this->time_id_->now().timestamp;
-#endif
-        if (now > 1609459200) {
-          // Calculate drift (Pump Time - System Time)
-          // If pump is ahead, diff is positive. If pump is behind, diff is
-          // negative.
-          double diff = difftime(pump_time.timestamp, now);
-
-          ESP_LOGI(TAG, "Pump clock drift before sync: %.0f seconds", diff);
-
-          if (this->clock_diff_sensor_) {
-            this->clock_diff_sensor_->publish_state(diff);
-          }
-        } else {
-          ESP_LOGI(TAG, "System time not synced yet; skipping drift calculation");
-        }
+        // Failure leaves the sensor alone on purpose -- see the helper, and the
+        // note above about not clobbering the found-it reading with NAN.
+        this->publish_clock_drift_(pump_time, "before sync");
       } else {
         ESP_LOGW(TAG, "Could not read pump clock for drift measurement");
         // Publish NAN to indicate invalid/unknown drift
@@ -1419,20 +1403,24 @@ bool AlphaHwrComponent::submit_clock_sync_(const char *reason) {
         // stamped from a callback that was hardcoded true, so it advanced
         // whether or not the pump ever received the write.
         if (this->last_clock_sync_sensor_) {
-          char buf[32];
-          bool used_time_id = false;
-#ifdef USE_TIME
-          if (this->time_id_) {
-            this->time_id_->now().strftime(buf, sizeof(buf), "%Y-%m-%d %H:%M:%S");
-            used_time_id = true;
+          // Through the one accessor (issue #270). The libc fallback that used
+          // to sit here is gone rather than converted: it was unreachable --
+          // check_and_sync_time()'s gate refuses to submit a sync at all
+          // without a synced clock, so by the time this callback runs there is
+          // one -- and what it did when reached was stamp the sensor with
+          // 1970-01-01 in whatever zone libc had, which is worse than not
+          // stamping it. If the gate ever changes, the stamp now stays at its
+          // last true value instead of quietly becoming a lie.
+          ESPTime stamped_at;
+          if (this->time_service_.current_time(stamped_at)) {
+            char buf[32];
+            stamped_at.strftime(buf, sizeof(buf), "%Y-%m-%d %H:%M:%S");
+            this->last_clock_sync_sensor_->publish_state(buf);
+          } else {
+            ESP_LOGW(TAG,
+                     "Clock sync settled but the node clock is gone; leaving "
+                     "Last Clock Sync at its previous value");
           }
-#endif
-          if (!used_time_id) {
-            time_t now = ::time(nullptr);
-            const struct tm *tm_info = localtime(&now);
-            strftime(buf, sizeof(buf), "%Y-%m-%d %H:%M:%S", tm_info);
-          }
-          this->last_clock_sync_sensor_->publish_state(buf);
         }
 #endif
       });
@@ -1568,28 +1556,39 @@ void AlphaHwrComponent::read_statistics() {
       });
 }
 
+bool AlphaHwrComponent::publish_clock_drift_(const ESPTime &pump_time,
+                                             const char *context) {
+  // One clock read, one floor (issue #270). now_unix() answers 0 for "this node
+  // cannot tell you what time it is" -- which is not the epoch, and is exactly
+  // the distinction the two ::time(nullptr) reads that used to stand at both
+  // call sites got right only by testing against a magic 1609459200.
+  const uint32_t now_ts = this->time_service_.now_unix();
+  if (now_ts == 0) {
+    ESP_LOGI(TAG, "System time not synced yet; skipping drift calculation");
+    return false;
+  }
+
+  // Pump ahead of the node reads positive.
+  const double diff =
+      difftime(pump_time.timestamp, static_cast<time_t>(now_ts));
+  ESP_LOGI(TAG, "Pump clock drift %s: %.0f seconds", context, diff);
+  if (this->clock_diff_sensor_) {
+    this->clock_diff_sensor_->publish_state(diff);
+  }
+  return true;
+}
+
 void AlphaHwrComponent::read_pump_clock() {
   ESP_LOGI(TAG, "Manual pump clock read requested");
 
   time_service_.get_clock_async([this](ESPTime pump_time) {
     if (pump_time.is_valid()) {
-      time_t now = ::time(nullptr);
-#ifdef USE_TIME
-      if (this->time_id_) now = this->time_id_->now().timestamp;
-#endif
-      if (now > 1609459200) {
-        double diff = difftime(pump_time.timestamp, now);
-
-        ESP_LOGI(TAG, "Pump clock read successful: %04d-%02d-%02d %02d:%02d:%02d",
-                 pump_time.year, pump_time.month, pump_time.day_of_month,
-                 pump_time.hour, pump_time.minute, pump_time.second);
-        ESP_LOGI(TAG, "Clock drift: %.0f seconds", diff);
-
-        if (this->clock_diff_sensor_) {
-          this->clock_diff_sensor_->publish_state(diff);
-        }
-      } else {
-        ESP_LOGW(TAG, "System time not synced yet; cannot calculate drift");
+      ESP_LOGI(TAG, "Pump clock read successful: %04d-%02d-%02d %02d:%02d:%02d",
+               pump_time.year, pump_time.month, pump_time.day_of_month,
+               pump_time.hour, pump_time.minute, pump_time.second);
+      // Someone pressed the button, so answer them either way: a drift if we
+      // can compute one, NAN if the node cannot tell the time.
+      if (!this->publish_clock_drift_(pump_time, "on manual read")) {
         if (this->clock_diff_sensor_) {
           this->clock_diff_sensor_->publish_state(NAN);
         }

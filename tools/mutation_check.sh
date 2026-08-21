@@ -590,6 +590,44 @@ MUTATIONS=(
 "clock-gate-accuses-a-booting-node|components/alpha_hwr/clock_sync_gate.h|  if (uptime_ms < grace_ms) {\n    return ClockSyncAction::WAIT;\n  }|  if (false) {\n    return ClockSyncAction::WAIT;\n  }"
 "clock-gate-grace-boundary-off-by-one|components/alpha_hwr/clock_sync_gate.h|  if (uptime_ms < grace_ms) {|  if (uptime_ms <= grace_ms) {"
 "clock-gate-every-block-warns|components/alpha_hwr/clock_sync_gate.h|  return a == ClockSyncAction::WARN_NO_TIME_ID |  return a != ClockSyncAction::SYNC; //"
+
+# One clock, one floor (issue #270). The component used to resolve "what time is
+# it" in five places with three different floors -- year 2020, year 2021, and
+# the literal 1609459200 -- three of which read ::time(nullptr) directly, so a
+# build without the time component had one subsystem declining to act and three
+# acting on an unvalidated clock in an unset zone. Nothing was known to be
+# broken by it; #262 was caused by one caller substituting the wrong timestamp
+# for "now", and several independent notions of now is what makes that class of
+# bug easy to reintroduce.
+#
+# The first two are the floor itself, which every other assertion in
+# tests/test_time_service.cpp is written relative to and could therefore not
+# certify on its own. 2019 is ESPTime::is_valid()'s own year rule, so that
+# mutant makes the floor a no-op rather than merely a different number.
+"clock-floor-is-a-no-op|components/alpha_hwr/time_service.h|constexpr uint16_t CLOCK_SYNCED_YEAR_FLOOR = 2021;|constexpr uint16_t CLOCK_SYNCED_YEAR_FLOOR = 2019;"
+"clock-floor-not-applied|components/alpha_hwr/time_service.cpp|  if (!clock_is_synced(now)) return false;|  if (false) return false;"
+# ...and that a missing time source is still a refusal, not a fall-through.
+"clock-missing-time-id-answered|components/alpha_hwr/time_service.cpp|  if (time_id_ == nullptr) return false;|  if (false) return false;"
+# The drift callers. publish_clock_drift_() reports rather than decides, so both
+# of its callers can share it while still differing on what to publish when it
+# fails -- the read chain leaves the last good reading alone (issue #259), the
+# manual button publishes NAN.
+"clock-drift-invents-a-node-time|components/alpha_hwr/alpha_hwr.cpp|  if (now_ts == 0) {\n    ESP_LOGI(TAG, \"System time not synced yet; skipping drift calculation\");\n    return false;\n  }|  if (false) {\n    ESP_LOGI(TAG, \"System time not synced yet; skipping drift calculation\");\n    return false;\n  }"
+# build_event_window() takes month/day/hour/minute and has to get the YEAR from
+# somewhere. Before #270 it took it from libc rather than from the node clock.
+"event-window-year-not-from-the-clock|components/alpha_hwr/alpha_hwr.h|    int year = static_cast<int>(local_now.year) - 1900;  // years since 1900|    int year = 120;  // years since 1900"
+#
+# Deliberately absent, both equivalent mutants rather than gaps:
+#   * now_unix()'s `if (now.timestamp <= 0) return 0;` -- unreachable, since
+#     clock_is_synced() has already floored the year at 2021. It is there to
+#     keep the 0 sentinel unambiguous rather than argued, and mutating it
+#     changes no reachable behaviour.
+#   * stop_single_event_active_()'s `if (now_ts == 0) return false;` -- NOT an
+#     equivalent mutant, and not covered either. Reaching it needs a warm
+#     single-event cache behind a run-state reconcile, which no host rig stages
+#     today. Its sentinel is the same now_unix() one swept in
+#     tests/test_time_service.cpp; the caller's own branch is unpinned. Recorded
+#     rather than quietly omitted.
 "link-watchdog-never-fires|components/alpha_hwr/link_watchdog.h|return static_cast<uint32_t>(now_ms - last_inbound_ms) > timeout_ms;|return false;"
 "link-watchdog-rollover-unsafe|components/alpha_hwr/link_watchdog.h|return static_cast<uint32_t>(now_ms - last_inbound_ms) > timeout_ms;|return now_ms > last_inbound_ms + timeout_ms;"
 # Readiness (progress) watchdog, issue #211. The data watchdog above watches
