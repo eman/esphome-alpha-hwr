@@ -1259,11 +1259,16 @@ MUTATIONS=(
 # walk to the pump with the GO app, so the switch is reached for exactly when
 # that string is showing.
 "suspend-release-erases-somebody-elses-fault|components/alpha_hwr/ble_connection_manager.h|    if (last_failure_.rfind(\"Local Host Terminated\", 0) != 0) return;|    // mutated: clear whatever is latched"
-# ...and the hold has to come down with the string. Every other site that writes
-# last_failure_ resets both; failure_hold_admits() refuses later writes while a
-# hold stands, so clearing only the string leaves a surface reading "None" that
-# nothing can ever write to again.
-"suspend-release-leaves-the-failure-hold-standing|components/alpha_hwr/ble_connection_manager.h|    last_failure_.clear();\n    failure_hold_ = FailureHold::NONE;\n  }|    last_failure_.clear();\n  }"
+# Deliberate absence: the `failure_hold_ = NONE` beside that clear. It was
+# load-bearing for one round -- verified, one failing assertion -- and stopped
+# being so when the clear became CONDITIONAL in the same round.
+#
+# The reachability argument: the clear now runs only when the latched string is
+# the local-host teardown, and that string can only BE latched when no hold
+# outranks it, because failure_hold_admits() would otherwise have refused to
+# write it. So by the time the reset runs, the hold is already NONE. Kept
+# because every other site that writes last_failure_ resets both, and a lone
+# exception is how the original defect got in.
 # A connection that opens while suspended must be torn down again, not adopted.
 # ESPHome reads auto_connect only at advertisement match and cannot close a link
 # with no conn_id yet, so an in-flight connect completes and the OPEN reaches the
@@ -1274,9 +1279,16 @@ MUTATIONS=(
 # destructive side effects.
 "suspend-swallows-the-operators-retry|components/alpha_hwr/alpha_hwr.cpp|  if (!suspended && !this->suspended_) return;|  if (suspended == this->suspended_) return;"
 # The sampler's ARMING sites, not just the disarm. on_inbound() self-arms by
-# design and a dispatched OPEN calls on_open(), either of which undoes the disarm
-# inside the asynchronous teardown window.
-"gap-sampler-re-armed-by-an-open-during-a-suspension|components/alpha_hwr/alpha_hwr.cpp|    if (!this->suspended_)\n      this->link_gap_.on_open(this->link_last_open_ms_);|    this->link_gap_.on_open(this->link_last_open_ms_);"
+# design, so one notification in the asynchronous teardown window undoes the
+# disarm and the disconnect behind it samples. A notification needs no open, so
+# this is not covered by the racing-open guard.
+"gap-sampler-re-armed-by-a-notification-during-a-suspension|components/alpha_hwr/alpha_hwr.cpp|        if (!this->suspended_)\n          this->link_gap_.on_inbound(inbound_now);|        this->link_gap_.on_inbound(inbound_now);"
+# Deliberate absence: the matching `!suspended_` guard on link_gap_.on_open().
+# It became an equivalent mutant when the racing-open guard landed in the same
+# round -- that returns from the connection callback before on_open() is
+# reached, so no input distinguishes the inner term. Kept as defence in depth
+# against the outer guard moving; covered in spirit by
+# racing-open-adopted-during-a-suspension, which IS caught.
 # A suspension is not a failed connection attempt. Three of them reach
 # LINK_FAIL_K and publish "Reconnecting", which an automation reads as a fault.
 "suspend-counted-as-a-failed-attempt|components/alpha_hwr/alpha_hwr.cpp|    } else if (!this->suspended_) {|    } else {"
