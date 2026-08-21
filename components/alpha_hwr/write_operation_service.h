@@ -488,6 +488,19 @@ class WriteOperationService {
   void finish_(uint32_t seq, WriteStatus status, const std::string &detail);
   Operation *find_(uint32_t seq);
   void arm_watchdog_(uint32_t seq, uint32_t budget_ms);
+
+  /**
+   * "cleared N of M vacations, the rest still cover now", or empty (issue #290).
+   *
+   * A multi-slot clear that stops part-way has already disabled some slots, and
+   * the pump is still holding itself off under the ones it did not reach. Every
+   * terminal path after the first slot completes has to say so -- not only the
+   * mismatching-readback one, which is where the first cut of this put it.
+   * A readback timeout, the watchdog and a disconnect all leave the same
+   * half-done state, and all three used to report a generic failure with no hint
+   * that anything had changed on the pump.
+   */
+  static std::string vacation_progress_note_(const Operation &op);
   void schedule_(std::function<void()> fn, uint32_t delay_ms);
   /** Resources an operation writes; queued ops with intersecting keys are superseded. */
   static std::vector<std::string> resource_keys_(const Operation &op);

@@ -511,8 +511,11 @@
 
   **Creation is deliberately unchanged.** A second future absence is legitimate,
   and replacing one silently would destroy a stored event — the class of thing
-  #262 exists to prevent. A vacation that has not begun is left alone by a
-  clear, so ending the current absence does not cancel next month's booking.
+  #262 exists to prevent. While a vacation is live, one that has not begun is
+  left alone by a clear, so ending the current absence does not cancel next
+  month's booking. When *nothing* covers now the resolver still falls back to
+  the single-vacation ranking and clears the soonest upcoming one, which is
+  unchanged from #267 and is what makes a future booking cancellable at all.
 
   One judgement stated rather than hidden: a single clear walks at most
   `MAX_VACATIONS_PER_CLEAR` (8) slots, because the watchdog cannot be re-armed

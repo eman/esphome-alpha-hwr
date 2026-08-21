@@ -97,9 +97,12 @@ void EventLogService::read_entries_async(
     // chain would issue that many Class 10 reads. See EVENT_LOG_MAX_CHAIN_ENTRIES
     // for what that costs and why the ceiling is the transport's unwind cap
     // rather than the address map's larger 1001.
-    static_assert(EVENT_LOG_MAX_CHAIN_ENTRIES <= core::Transport::MAX_ABANDON_STEPS,
-                  "an event-log chain longer than the unwind cap strands its "
-                  "caller on a disconnect (issue #259)");
+    static_assert(EVENT_LOG_MAX_CHAIN_ENTRIES + EVENT_LOG_ABANDON_HEADROOM <=
+                      core::Transport::MAX_ABANDON_STEPS,
+                  "the abandon cap bounds the WHOLE drain, not this chain's "
+                  "share of it: a chain sized to the cap exactly leaves no room "
+                  "for the telemetry reads that drain alongside it, and its "
+                  "terminal callback is the one dropped (issues #259, #284)");
     static_assert(EVENT_LOG_MAX_CHAIN_ENTRIES <= EVENT_LOG_ADDRESSABLE_ENTRIES,
                   "the chain must not walk past the sub-ids the object holds");
 

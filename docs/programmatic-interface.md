@@ -291,13 +291,24 @@ slot-recycling note exists to prevent.
 
 The consequence is that `clear_vacation` must clear *all* of them, and it does —
 every enabled Stop event covering the current time, in slot order, as one
-operation with one terminal event. A booking that has not begun yet is left
-alone, so ending the current absence does not cancel next month's.
+operation with one terminal event. **While a vacation is live, a booking that has
+not begun yet is left alone**, so ending the current absence does not cancel next
+month's.
+
+When *nothing* covers the current time the resolver falls back to the
+single-vacation ranking, which picks the soonest upcoming booking (and failing
+that, the one that ended most recently). So calling `clear_vacation` with only
+future bookings stored **does** cancel one of them — the nearest. That is
+deliberate and predates this behaviour: it is what makes a booked-but-not-started
+vacation cancellable at all, since there is no other way to name it. If you mean
+a specific slot, use `clear_single_event`.
 
 When it clears more than one, `detail` says so and names the slots. If a clear
-fails part-way the status is `rejected` and `detail` reports how many were
-cleared and that the rest still cover now — because at that point the pump is
-still holding itself off, and a bare "rejected" would not say that.
+fails part-way — a readback timeout, the watchdog, or a disconnect — the status
+is a failure and `detail` reports how many were cleared and that the rest still
+cover now, because at that point the pump is still holding itself off. The same
+applies if more vacations cover now than one call can clear: that settles
+`rejected`, not `accepted`, since the hold was not lifted.
 
 #### Telling a vacation from a one-time run
 

@@ -4063,6 +4063,34 @@ static void test_clear_vacation_still_prefers_the_live_one_over_an_ended_one() {
               "#267: the ended one is left alone -- only what covers now is cleared");
 }
 
+// The fallback, which review caught the docs overclaiming about. When NOTHING
+// covers now, find_vacation_slots() defers to the single-vacation ranking and
+// clears the soonest upcoming booking. That is #267 behaviour, unchanged, and it
+// is what makes a booked-but-not-started vacation cancellable at all -- there is
+// no other way to name it. Pinned so the documented wording and the code agree.
+static void test_clear_vacation_falls_back_to_the_soonest_upcoming() {
+  std::cout << "\n=== clear_vacation: with nothing live, the soonest booking is cleared (#290) ==="
+            << std::endl;
+  Harness h;
+  h.prime_cache();
+  // Two future bookings, neither live. Slot 1 is the nearer one.
+  h.seed_single_event(0, 0x01, EVENT_NEXT_WEEK_BEGIN, EVENT_NEXT_WEEK_END);
+  h.seed_single_event(1, 0x01, EVENT_TOMORROW_BEGIN, EVENT_TOMORROW_END);
+
+  h.write_op.submit_clear_vacation("vac_fallback");
+  h.advance(120000);
+
+  TEST_ASSERT(h.events_for("vac_fallback") == 1, "#290: exactly one terminal event");
+  const WriteResult *r = h.result_for("vac_fallback");
+  TEST_ASSERT(r && r->status == WriteStatus::ACCEPTED, "#290: status is accepted");
+  TEST_ASSERT(r && r->slot == 1, "#290: the SOONEST upcoming booking is the one cleared");
+  TEST_ASSERT(h.sim.single_events[1][0] == 0, "#290: ...and it really is cleared");
+  TEST_ASSERT(h.sim.single_events[0][0] == 1,
+              "#290: the later booking is untouched -- the fallback clears one, not all");
+  TEST_ASSERT(r && r->detail.find("cleared") == std::string::npos,
+              "#290: a single fallback clear does not claim a multi-slot sweep");
+}
+
 static void test_clear_vacation_none_active() {
   std::cout << "\n=== clear_vacation: no active vacation settles accepted ===" << std::endl;
   Harness h;
@@ -5433,6 +5461,7 @@ int main() {
   test_clear_vacation_clears_every_live_vacation();
   test_clear_vacation_leaves_a_future_booking_alone();
   test_clear_vacation_still_prefers_the_live_one_over_an_ended_one();
+  test_clear_vacation_falls_back_to_the_soonest_upcoming();
   test_clear_vacation_none_active();
   test_clear_single_event();
   test_single_event_slot_bounded_by_pump_capacity();

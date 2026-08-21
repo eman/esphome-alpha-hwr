@@ -260,6 +260,16 @@ void WriteOperationService::start_front_() {
   }
 }
 
+std::string WriteOperationService::vacation_progress_note_(const Operation &op) {
+  if (!op.clear_by_vacation) return "";
+  if (op.vacation_slots.size() <= 1) return "";
+  // The cursor, not the list: it counts slots that actually completed their
+  // confirm, which is what "cleared" has to mean here.
+  return format_detail("; cleared %u of %u vacations, the rest still cover now",
+                       static_cast<unsigned>(op.vacation_cursor),
+                       static_cast<unsigned>(op.vacation_slots.size()));
+}
+
 void WriteOperationService::arm_watchdog_(uint32_t seq, uint32_t budget_ms) {
   // Without a scheduler the "delayed" watchdog would fire inline and kill the
   // operation before its first wire step; skip it (production always wires one).
@@ -271,7 +281,8 @@ void WriteOperationService::arm_watchdog_(uint32_t seq, uint32_t budget_ms) {
              write_command_to_string(op->command), static_cast<unsigned>(seq),
              static_cast<unsigned>(budget_ms));
     finish_(seq, WriteStatus::TIMEOUT,
-            format_detail("no pump confirmation within %u ms", static_cast<unsigned>(budget_ms)));
+            format_detail("no pump confirmation within %u ms", static_cast<unsigned>(budget_ms)) +
+                vacation_progress_note_(*op));
   }, budget_ms);
 }
 
@@ -465,7 +476,12 @@ void WriteOperationService::on_disconnect() {
   seqs.reserve(queue_.size());
   for (auto &op : queue_) seqs.push_back(op.seq);
   for (uint32_t seq : seqs) {
-    finish_(seq, WriteStatus::TIMEOUT, "disconnected");
+    // A vacation clear cut off part-way has already disabled some slots, and
+    // "disconnected" alone would not say that the pump is still held off under
+    // the rest (issue #290).
+    const Operation *op = find_(seq);
+    const std::string note = (op != nullptr) ? vacation_progress_note_(*op) : std::string();
+    finish_(seq, WriteStatus::TIMEOUT, "disconnected" + note);
   }
 }
 
@@ -2065,7 +2081,8 @@ void WriteOperationService::confirm_single_event_(uint32_t seq) {
           schedule_([this, seq]() { confirm_single_event_(seq); }, SCHED_RETRY_DELAY_MS);
           return;
         }
-        finish_(seq, WriteStatus::TIMEOUT, "single event readback failed");
+        finish_(seq, WriteStatus::TIMEOUT,
+                "single event readback failed" + vacation_progress_note_(*op));
         return;
       }
 
@@ -2124,12 +2141,20 @@ void WriteOperationService::confirm_single_event_(uint32_t seq) {
           detail = format_detail("cleared %u vacations (slots %s)", cleared, slots.c_str());
         }
         if (op->vacation_unhandled > 0) {
-          // The cap bound. Reported rather than swallowed: the pump is still
-          // held off, and a caller told "accepted" with nothing else would have
-          // no way to know that.
+          // The cap bound, and the pump is STILL HELD OFF. That is not an
+          // accepted clear however much of it succeeded.
+          //
+          // The first cut of this settled ACCEPTED with the shortfall in the
+          // detail, which review caught: ACCEPTED means "the pump confirmed the
+          // requested value", it drives `done(true)`, and an automation reading
+          // the bool would conclude the hold was lifted. Reporting the truth in
+          // a string nobody parses while the status says success is the exact
+          // failure #290 exists to end, reintroduced one level up.
           if (!detail.empty()) detail += "; ";
           detail += format_detail("%u more vacation(s) still cover now; clear again",
                                   static_cast<unsigned>(op->vacation_unhandled));
+          finish_(seq, WriteStatus::REJECTED, detail);
+          return;
         }
         finish_(seq, WriteStatus::ACCEPTED, detail);
         return;
@@ -2143,16 +2168,8 @@ void WriteOperationService::confirm_single_event_(uint32_t seq) {
       op->begin_ts = actual.begin_timestamp;
       op->end_ts = actual.end_timestamp;
       op->single_event_action = actual.action;
-      std::string why = "slot readback does not match written event";
-      if (op->clear_by_vacation && op->vacation_slots.size() > 1) {
-        // A multi-slot clear that failed part-way has left the pump held off
-        // under whatever it did not reach, and the caller has to be told that
-        // rather than just which slot misbehaved (issue #290).
-        why += format_detail("; cleared %u of %u vacations, the rest still cover now",
-                             static_cast<unsigned>(op->vacation_cursor),
-                             static_cast<unsigned>(op->vacation_slots.size()));
-      }
-      finish_(seq, WriteStatus::REJECTED, why);
+      finish_(seq, WriteStatus::REJECTED,
+              "slot readback does not match written event" + vacation_progress_note_(*op));
     });
 }
 
