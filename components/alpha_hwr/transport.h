@@ -292,12 +292,30 @@ class Transport {
   void on_notification(const uint8_t* data, size_t len);
 
   /**
-   * Reset transport state.
-   * 
-   * Clears reassembly buffer and flags. Should be called on:
-   * - BLE disconnection
-   * - Fatal errors
-   * - Manual reset request
+   * Reset transport state: the link is gone.
+   *
+   * Clears the reassembly buffer, the pending response handlers and the FSM,
+   * and FAILS every queued command -- each callback is invoked with
+   * `(false, nullptr, 0)`, the same shape a timeout delivers (issue #259).
+   *
+   * That last part is the contract, and it used to be the opposite. The queue
+   * was cleared silently, so a service with a read in flight never heard
+   * anything again: no success, no failure, no timeout, because the timeout
+   * went with the queue entry. Every caller of an async read had to be told
+   * about the drop by some other route, and each one that was is a separate
+   * hand-written hook -- WriteOperationService::on_disconnect(), the read-chain
+   * generation counter, ControlService::invalidate_cache(). A caller that
+   * nobody remembered to wire up simply waited forever.
+   *
+   * Failing the queue instead lets a multi-command read unwind through the
+   * failure branch it already has. A chain that continues after a failed step
+   * queues its next command from inside the callback; those are taken too, so
+   * nothing survives into the next connection -- which is what clearing the
+   * queue was for in the first place.
+   *
+   * Callers: BLE disconnection. NOT the inbound overflow path, which is a loss
+   * of frame sync on a LIVE link and has no business cancelling commands the
+   * pump may still answer -- see on_notification().
    */
   void reset();
 
@@ -431,6 +449,43 @@ class Transport {
   /// suppression itself and must not be counted again.
   void note_reply_owed_(bool already_suppressed);
 
+  /// Settle the command at the head of the queue, having taken it OFF the queue
+  /// first. Every completion goes through here, success and failure alike. See
+  /// the note at the definition: the callback is service code, it can queue,
+  /// clear and reset the transport, and it must not be able to reach the entry
+  /// it belongs to while it runs.
+  void complete_front_command_(bool ok, const uint8_t *data, size_t len);
+
+  /// complete_front_command_(false, nullptr, 0) -- the shape a timeout reports.
+  void fail_front_command_();
+
+  /// Fail every queued command, and everything their callbacks queue in turn.
+  ///
+  /// Iterative, not recursive, and that is not a style preference. A read chain
+  /// unwinds one command per failure, and the longest of them is as long as the
+  /// pump says it is -- EventLogService reads `min(available_entries,
+  /// max_entries)` entries, both uint16 fields straight off the wire. Letting
+  /// send_command() invoke the callback inline would put that whole chain on the
+  /// stack at once, on a part with about 8 KB of it. So the queue is drained in
+  /// a loop and re-queued commands are pulled into the same drain.
+  ///
+  /// Bounded, for the same reason: a chain that answers every failure with
+  /// another send would otherwise spin here until the task watchdog fires. Past
+  /// the cap the remainder is dropped the old way -- silently, which strands
+  /// that caller, but a stranded read is recoverable and a panic is not. The
+  /// cap is reported, never silent.
+  void abandon_queue_();
+
+  /// True while abandon_queue_() owns the queue, so a reset() reached from one
+  /// of the callbacks it is invoking does not start a second drain over the
+  /// same commands.
+  bool abandoning_{false};
+
+  /// Unwind steps allowed in one abandon_queue_() call. Far above any real
+  /// chain: the longest in the tree is one command per event-log entry, and a
+  /// pump that reports more entries than this is not one we can serve anyway.
+  static constexpr size_t MAX_ABANDON_STEPS = 512;
+
   /**
    * Extract expected packet length from buffer.
    * 
@@ -532,7 +587,18 @@ class Transport {
 
   // Constants
   static constexpr size_t MAX_PACKET_SIZE = 256;  ///< Maximum GENI packet size (safety limit)
-  static constexpr size_t BLE_MTU_LIMIT = 20;     ///< BLE write size limit (MTU - headers)
+  /// How much of a frame goes into one GATT write. NOT a ceiling imposed by the
+  /// negotiated MTU, whatever the name suggests, and the difference is the point:
+  /// **this pump ignores a frame that is not split into 20-byte writes**,
+  /// however large the MTU has been negotiated to be. Reported from the Python
+  /// client on a link with a 65-byte MTU, where a 27-byte frame fits inside one
+  /// ATT write and the pump does nothing with it at all -- no reply, no refusal.
+  ///
+  /// So raising this after an MTU negotiation, which is exactly the shape of a
+  /// plausible optimisation, silently stops every write from working while
+  /// leaving reads intact. It is a protocol requirement of the peer, not a
+  /// transport limit of ours.
+  static constexpr size_t BLE_MTU_LIMIT = 20;
   static constexpr uint8_t FRAME_START_RESPONSE = 0x24;  ///< Response frame start byte
   static constexpr uint8_t FRAME_START_REQUEST = 0x27;   ///< Request frame start byte (echo)
   static constexpr size_t MAX_PENDING_HANDLERS = 10;     ///< Maximum pending response handlers

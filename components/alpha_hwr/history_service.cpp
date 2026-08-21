@@ -68,9 +68,16 @@ void HistoryService::read_trends_async(
   // whole chain (plus `trends` and `on_complete`) leaks once per invocation --
   // i.e. on every reconnect. Hold a weak_ptr here and let the transport command
   // queue hold the only strong reference, so the chain is released either by the
-  // final pop_front() or by command_queue_.clear() in Transport::reset() when a
-  // disconnect abandons it mid-flight. Nulling the pointer in the terminal branch
-  // would not cover that second case.
+  // final pop_front() or, when a disconnect abandons it mid-flight, by
+  // Transport::reset() draining the queue. Nulling the pointer in the terminal
+  // branch would not cover that second case.
+  //
+  // reset() used to CLEAR the queue, which released the chain without ever
+  // running it; since issue #259 it fails each queued command instead, so the
+  // chain unwinds through the failure branch below and does reach its terminal
+  // branch. The ownership argument is unchanged -- the strong reference still
+  // lives in the queued callback and dies with it -- but the old wording named
+  // a clear() that no longer happens.
   std::weak_ptr<std::function<void(size_t)>> read_next_weak = read_next;
 
   *read_next = [this, trends, on_complete, read_next_weak](size_t idx) {
@@ -78,6 +85,22 @@ void HistoryService::read_trends_async(
     if (!self)
       return;  // chain abandoned (disconnect) -- nothing left to continue
     if (idx >= NUM_TRENDS) {
+      // The same gate this function opens with, applied at the other end.
+      // Transport::reset() now fails the queue instead of dropping it (issue
+      // #259), so a disconnect mid-chain unwinds through the failure branch
+      // below and arrives here -- with whatever channels had already landed.
+      // Missing channels are ordinarily fine (see the branch below: not every
+      // pump populates all four), which is exactly why this case needs telling
+      // apart: caching two channels as the answer would replace a good display
+      // with a truncated one on every dropped link. Session::on_disconnected()
+      // runs before the transport is reset, so this is false by the time the
+      // unwind reaches here.
+      if (!session_.is_ready()) {
+        ESP_LOGD(TAG, "Trend read abandoned with %zu of %zu channels; keeping the previous data",
+                 trends->size(), NUM_TRENDS);
+        if (on_complete) on_complete(false, cached_trends_);
+        return;
+      }
       cached_trends_ = *trends;
       trends_cached_ = true;
       ESP_LOGI(TAG, "Read %zu trend channels", trends->size());

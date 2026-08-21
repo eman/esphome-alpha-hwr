@@ -12,6 +12,7 @@
 #include "response_match.h"
 #include <algorithm>
 #include <cinttypes>
+#include <utility>
 
 namespace esphome {
 namespace alpha_hwr {
@@ -76,10 +77,7 @@ void Transport::loop() {
 
       if (!this->write_callback_) {
         ESP_LOGW(TAG, "Write callback not set, dropping command");
-        if (cmd.callback) {
-          cmd.callback(false, nullptr, 0);
-        }
-        this->command_queue_.pop_front();
+        this->fail_front_command_();
         this->state_ = State::IDLE;
         break;
       }
@@ -113,10 +111,7 @@ void Transport::loop() {
           this->peer_resync_pending_ = true;
           this->peer_resync_started_ms_ = now;
         }
-        if (cmd.callback) {
-          cmd.callback(false, nullptr, 0);
-        }
-        this->command_queue_.pop_front();
+        this->fail_front_command_();
         this->state_ = State::IDLE;
       }
       break;
@@ -164,10 +159,7 @@ void Transport::loop() {
         // open from 1.1 s to 4 s. `quiet_timeout` means "do not log this at
         // warning" and nothing else.
         this->note_reply_owed_(cmd.suppressed_a_frame);
-        if (cmd.callback) {
-          cmd.callback(false, nullptr, 0);
-        }
-        this->command_queue_.pop_front();
+        this->fail_front_command_();
         this->state_ = State::IDLE;
       }
       break;
@@ -320,18 +312,30 @@ void Transport::on_notification(const uint8_t* data, size_t len) {
 
   // Safety: Check buffer overflow
   if (reassembly_buffer_.size() > MAX_PACKET_SIZE) {
-    ESP_LOGW(TAG, "Reassembly buffer overflow (%d bytes), clearing", 
-             reassembly_buffer_.size());
-    // reset() clears the peer-resync hold, which is right on a disconnect and
-    // wrong here: this path runs on a LIVE link, so a partial frame we left at
-    // the pump is still sitting there. Preserve the hold across it rather than
-    // letting an inbound overflow hand the next command straight back into the
-    // wreckage.
-    const bool hold = peer_resync_pending_;
-    const uint32_t hold_started = peer_resync_started_ms_;
-    reset();
-    peer_resync_pending_ = hold;
-    peer_resync_started_ms_ = hold_started;
+    ESP_LOGW(TAG, "Reassembly buffer overflow (%d bytes); dropping the partial frame",
+             (int) reassembly_buffer_.size());
+    // Inbound frame sync, and nothing else. This used to call reset(), which
+    // cancels the command queue -- so one corrupt fragment on a LIVE link could
+    // strand every read in flight, which is issue #259's whole subject. The two
+    // paths are not the same event:
+    //
+    //   - reset() is the disconnect. The commands cannot be answered because
+    //     there is no link, and the component terminal-events every consumer in
+    //     the same breath (invalidate_cache, write_op_service.on_disconnect,
+    //     the read-chain generation bump).
+    //   - This is a live link that has lost track of where a frame begins. The
+    //     commands are still outstanding and the pump may well still answer
+    //     them. Nothing here tells any consumer that anything happened, and
+    //     nothing needs to: if the frame we lost was a reply someone was
+    //     waiting for, that command's own timeout reports the failure, which is
+    //     the path every caller already handles.
+    //
+    // Leaving the queue alone also means the peer-resync hold and the reply
+    // debt survive on their own, instead of being saved and restored around a
+    // call that should never have been made here.
+    reassembling_ = false;
+    reassembly_buffer_.clear();
+    expected_packet_length_ = 0;
     return;
   }
 
@@ -395,29 +399,111 @@ void Transport::reset() {
   reassembling_ = false;
   reassembly_buffer_.clear();
   expected_packet_length_ = 0;
-  // Discard any queued commands and pending response handlers so stale BLE
-  // writes from the previous connection do not execute on the next connect.
-  command_queue_.clear();
   pending_handlers_.clear();
   // The peer's partial frame died with the link, so a hold armed before the
-  // drop would stall the first second of the next connection for nothing.
-  //
-  // True of the disconnect caller, which is what this is for. reset() is also
-  // reached from on_notification()'s buffer-overflow path on a LIVE link, where
-  // it is NOT true -- that call site saves and restores the hold itself rather
-  // than relying on this.
+  // drop would stall the first second of the next connection for nothing. This
+  // is the disconnect path and only the disconnect path; the inbound overflow
+  // in on_notification() no longer comes through here, so it no longer has to
+  // save and restore this around the call.
   peer_resync_pending_ = false;
   // Same reasoning for the reply debt (issue #248): a reply owed by a command on
   // the connection that just died is not coming, and carrying the debt across
   // would spend the next connection's first acknowledgement paying it off.
-  //
-  // The live-link overflow caller is the awkward case here as well: on that path
-  // a reply genuinely may still arrive. Clearing is the safer of the two errors
-  // -- it costs at most one misattributed frame, where keeping it costs a real
-  // acknowledgement -- and the overflow path has already lost frame sync anyway.
   owed_pending_ = false;
   owed_replies_ = 0;
   state_ = State::IDLE;
+  // Last, because the callbacks it invokes run service code, and that code must
+  // see a transport that is already down rather than one still holding the
+  // wreckage of the connection it is being told about.
+  abandon_queue_();
+}
+
+void Transport::complete_front_command_(bool ok, const uint8_t *data, size_t len) {
+  if (this->command_queue_.empty()) return;
+  // Off the queue BEFORE the callback runs, which is the opposite of the order
+  // this used to be in, and the order matters for three reasons.
+  //
+  // `cmd` at every call site is a REFERENCE into the deque. A callback is
+  // service code and service code touches the transport: it queues the next
+  // read of a chain, and it may reach reset(). Either way the reference is
+  // dangling by the time the `pop_front()` that used to follow it ran -- and if
+  // the queue had been emptied, that pop ran on an empty deque.
+  //
+  // Worse, moving the command out here steals the std::function's heap target
+  // from the deque element. If the element were still reachable, the closure
+  // could be freed while its own operator() was executing -- which the read
+  // chains make concrete, since the queued callback holds the only strong
+  // reference to the closure that owns it.
+  //
+  // The third reason arrived with issue #259. reset() now FAILS the queue
+  // rather than clearing it, so a reset() reached from this callback would find
+  // this very command still sitting at the front and invoke its callback a
+  // second time, re-entrantly, from inside itself. Taking it off the queue
+  // first removes it from anything the callback can reach.
+  //
+  // This applies to EVERY completion, not only the failures. The first cut of
+  // the issue-#259 fix converted the three failure paths and left the three
+  // success paths in try_dispatch_response() with the old shape -- an asymmetry
+  // with no defence, since a callback does not become safe by having succeeded.
+  // A skeptic reproduced all three symptoms on the success path under ASan:
+  // double invocation, heap-use-after-free of the executing closure, and a
+  // pop_front() on an empty deque.
+  Command cmd = std::move(this->command_queue_.front());
+  this->command_queue_.pop_front();
+  if (cmd.callback) {
+    cmd.callback(ok, data, len);
+  }
+}
+
+void Transport::fail_front_command_() { this->complete_front_command_(false, nullptr, 0); }
+
+void Transport::abandon_queue_() {
+  if (this->command_queue_.empty()) return;
+  // Reached from a callback this drain is already running. The outer loop still
+  // owns the queue and will collect whatever that callback left in it.
+  if (this->abandoning_) return;
+
+  this->abandoning_ = true;
+  std::deque<Command> abandoned;
+  abandoned.swap(this->command_queue_);
+
+  size_t steps = 0;
+  while (!abandoned.empty()) {
+    if (steps >= MAX_ABANDON_STEPS) {
+      // Never silent. Reaching this means a chain is answering every failure
+      // with another send, and the caller it belongs to is about to be stranded
+      // the way every caller used to be -- worth a line in the log saying so.
+      ESP_LOGE(TAG,
+               "Abandon drain hit its %zu-step cap with %zu command(s) still queued; "
+               "dropping them without telling their callers",
+               (size_t) MAX_ABANDON_STEPS, abandoned.size());
+      break;
+    }
+    steps++;
+
+    Command cmd = std::move(abandoned.front());
+    abandoned.pop_front();
+    if (cmd.callback) {
+      cmd.callback(false, nullptr, 0);
+    }
+
+    // A chain that continues past a failed step sends its next read from inside
+    // that callback. Take those too: the point of clearing the queue was that a
+    // write from the dead connection must not run on the next one, and a
+    // half-unwound chain left sitting in the queue is exactly that write.
+    while (!this->command_queue_.empty()) {
+      abandoned.push_back(std::move(this->command_queue_.front()));
+      this->command_queue_.pop_front();
+    }
+  }
+
+  this->abandoning_ = false;
+  // No clear() here. The inner drain above runs at the end of every iteration
+  // and the cap breaks at the top of one, so the queue is already empty at both
+  // exits -- a clear() would be dead code, and a skeptic confirmed deleting it
+  // changes nothing observable.
+  this->state_ = State::IDLE;
+  ESP_LOGD(TAG, "Abandoned %zu queued command(s)", steps);
 }
 
 void Transport::register_response_handler(uint16_t object_id, uint16_t sub_id, ResponseCallback callback) {
@@ -507,10 +593,7 @@ bool Transport::try_dispatch_response(const uint8_t* data, size_t len) {
       // only two classes could reach it and silently reports 7 for every other.
       ESP_LOGV(TAG, "Class %u response matched (wildcard match by class byte)",
                static_cast<unsigned>(data[4]));
-      if (cmd.callback) {
-        cmd.callback(true, data, len);
-      }
-      this->command_queue_.pop_front();
+      this->complete_front_command_(true, data, len);
       this->state_ = State::IDLE;
       return true;
     }
@@ -640,10 +723,7 @@ bool Transport::try_dispatch_response(const uint8_t* data, size_t len) {
                    protocol::apdu_ack_name(ack));
         }
       }
-      if (cmd.callback) {
-        cmd.callback(success, data, len);
-      }
-      this->command_queue_.pop_front();
+      this->complete_front_command_(success, data, len);
       this->state_ = State::IDLE;
       return true;
     }
@@ -903,10 +983,7 @@ bool Transport::try_dispatch_response(const uint8_t* data, size_t len) {
     if (matched) {
       ESP_LOGV(TAG, "Command response matched for Obj %d (Sub %d -> %d)", 
                packet_type_low_ver, cmd.expect_type_high, packet_type_high);
-      if (cmd.callback) {
-        cmd.callback(true, payload, payload_len);
-      }
-      this->command_queue_.pop_front();
+      this->complete_front_command_(true, payload, payload_len);
       this->state_ = State::IDLE;
       return true;
      } else {

@@ -191,7 +191,16 @@ void AlphaHwrComponent::setup() {
     // The chain re-runs fresh on reconnect, so nothing is lost.
     this->read_chain_gen_++;
     this->session_.on_disconnected();
-    // Clears command queue, pending handlers, reassembly buffer, and FSM state.
+    // Fails every queued command -- each callback is invoked with failure, the
+    // same shape a timeout reports (issue #259) -- and clears the pending
+    // handlers, the reassembly buffer and the FSM state.
+    //
+    // Everything above this line runs FIRST on purpose, and that order is
+    // load-bearing rather than incidental: the callbacks invoked here are
+    // service code, and they are inert only because the caches are already
+    // invalidated, every write operation is already terminal, and the read-chain
+    // generation has already moved. Moving reset() earlier would run them
+    // against a component that still believes the link is up.
     this->transport_.reset();
 
     // Pump Link Status: a connection ended. If it had reached READY this is a
@@ -986,7 +995,21 @@ void AlphaHwrComponent::trigger_initial_data_reads() {
     ESP_LOGD(TAG, "Measuring pump clock drift...");
 
     // First read the pump clock to measure drift
-    this->time_service_.get_clock_async([this](ESPTime pump_time) {
+    this->time_service_.get_clock_async([this, gen](ESPTime pump_time) {
+      // The generation check every other leg of this chain has, and the one
+      // this leg was missing (issue #259). Since reset() started failing what
+      // it abandons, a disconnect while this read is queued invokes this
+      // callback with an invalid time and the else-branch below publishes NAN
+      // -- to a user-facing sensor, on every dropped link, for as long as the
+      // read sits in the queue behind the rest of the chain. That is a wide
+      // window, not a race: a queued command has no timeout of its own, which
+      // is the whole subject of #259.
+      //
+      // It is also the clobber this leg already guards against one level up.
+      // The note on the timeout above says the drift figure is "how far out was
+      // the pump when we found it" and must not be overwritten by a later
+      // reading; overwriting it with NAN is the same defect with a worse value.
+      if (gen != this->read_chain_gen_) return;
       if (pump_time.is_valid()) {
         time_t now = ::time(nullptr);
 #ifdef USE_TIME

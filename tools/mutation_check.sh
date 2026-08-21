@@ -18,6 +18,7 @@
 # Usage:
 #   ./tools/mutation_check.sh              # run every mutation
 #   ./tools/mutation_check.sh --list       # just show them
+#   ./tools/mutation_check.sh --verify     # do they all still point at real code?
 #   ./tools/mutation_check.sh continuation # only names containing "continuation"
 #   JOBS=8 ./tools/mutation_check.sh       # more parallel build jobs (default 4)
 #   SCOPED=0 ./tools/mutation_check.sh     # rebuild/run everything per mutation
@@ -230,13 +231,29 @@ MUTATIONS=(
 # refuses every realistic setpoint -- a total loss of the mode, and one that
 # nothing in the suite could see until constant flow got a range assertion of
 # its own. The pressure conversion was covered from the start; this one was not.
-# The in-flight guard must be released on disconnect, not only on completion.
-# Transport::reset() drops a queued command WITHOUT invoking its callback, so a
-# link drop mid-chain kills the chain silently: the guard stays set, every later
-# read answers "already in flight", and every setpoint write is permanently back
-# on the fallback constants for the life of the node -- visible only as a DEBUG
-# line. One ordinary BLE drop inside a ~200 ms window does it.
-"setpoint-range-guard-is-a-one-way-latch|components/alpha_hwr/control_service.h|     setpoint_ranges_reading_ = false;\n     // Drop any in-flight mode command|     // Drop any in-flight mode command"
+# Deliberate absence, as of issue #259: the in-flight guard released in
+# invalidate_cache() is now an EQUIVALENT MUTANT, and the entry that covered it
+# has been removed rather than left to survive.
+#
+# It was written for issue #273 and it was load-bearing then. The defect: the
+# range chain sets a flag so a second chain cannot start, and only `finish`
+# cleared it -- but Transport::reset() dropped a queued command WITHOUT invoking
+# its callback, so a link drop mid-chain killed the chain silently. The guard
+# stayed set, every later read answered "already in flight", and every setpoint
+# write was permanently back on the fallback constants for the life of the node,
+# visible only as a DEBUG line. One ordinary BLE drop inside a ~200 ms window.
+#
+# #259 removed the mechanism. reset() now fails what it abandons, so the chain's
+# own callback runs `finish` and releases the flag on every path that can strand
+# it. Verified in two steps rather than assumed: with the guard deleted the suite
+# passes (619/619), and with the guard deleted AND reset() put back to
+# command_queue_.clear() the same three assertions fail again. There is no
+# reachable input left that distinguishes the line.
+#
+# The line stays. It is one assignment, it is correct, and the failure it guards
+# is silent and permanent -- deleting correct defensive code because a test can
+# no longer see it is the wrong trade. What goes is the entry that claimed to
+# prove it.
 "setpoint-range-flow-conversion-dropped|components/alpha_hwr/control_service.cpp|      return native * 3600.0f;   // m³/s -> m³/h|      return native;"
 "setpoint-range-chain-continues-past-a-failure|components/alpha_hwr/control_service.cpp|    if (!a) { finish(false); return; }|    (void) a;"
 # The setpoint readback waits SETPOINT_CONFIRM_DELAY_MS after the write so the
@@ -345,7 +362,12 @@ MUTATIONS=(
 # instead of being told immediately. The second leaves the failed command at the
 # head of the queue, which wedges the link for every command after it -- far
 # worse than the one write that was lost.
-"transport-send-failure-silent|components/alpha_hwr/transport.cpp|          this->peer_resync_started_ms_ = now;\n        }\n        if (cmd.callback) {\n          cmd.callback(false, nullptr, 0);\n        }|          this->peer_resync_started_ms_ = now;\n        }"
+#
+# Both were retargeted for issue #259: the branches call fail_front_command_()
+# now instead of inlining callback-then-pop, so each mutation replaces that call
+# with a bare pop_front() -- the command still leaves the queue, its caller is
+# still never told.
+"transport-send-failure-silent|components/alpha_hwr/transport.cpp|          this->peer_resync_started_ms_ = now;\n        }\n        this->fail_front_command_();|          this->peer_resync_started_ms_ = now;\n        }\n        this->command_queue_.pop_front();"
 "transport-send-failure-wedges-queue|components/alpha_hwr/transport.cpp|        ESP_LOGE(TAG, \"Failed to send chunk, dropping command\");|        ESP_LOGE(TAG, \"Failed to send chunk\"); if (true) break;"
 # The queue-advance property ON ITS OWN. The entry above drops the failure report
 # and the pop in one edit, so the report assertions kill it and it proves nothing
@@ -357,7 +379,12 @@ MUTATIONS=(
 # writes cannot tell the second command being sent from the first being re-sent,
 # so five assertions passed against a transport that never advanced. The test
 # asserts on the payload byte now.
-"transport-failed-command-stays-queued|components/alpha_hwr/transport.cpp|          this->peer_resync_started_ms_ = now;\n        }\n        if (cmd.callback) {\n          cmd.callback(false, nullptr, 0);\n        }\n        this->command_queue_.pop_front();|          this->peer_resync_started_ms_ = now;\n        }\n        if (cmd.callback) {\n          cmd.callback(false, nullptr, 0);\n        }"
+# Retargeted for issue #259: the three failure paths no longer inline the
+# callback-then-pop, they call fail_front_command_(). Removing the pop there
+# removes it from all three at once, which is a wider mutation than the original
+# but the same defect -- the failed command stays at the head of the queue and
+# wedges the link for everything behind it.
+"transport-failed-command-stays-queued|components/alpha_hwr/transport.cpp|  Command cmd = std::move(this->command_queue_.front());\n  this->command_queue_.pop_front();|  Command cmd = this->command_queue_.front();"
 # The peer-resync hold, in the three ways it can be got wrong. A write that dies
 # part-way through a packet leaves the peer holding the head of a frame whose
 # length byte promises more; a receiver built like ours appends whatever comes
@@ -380,7 +407,7 @@ MUTATIONS=(
 # than at some comfortable fraction of it for this reason; with a looser probe
 # this mutant survives.
 "transport-peer-resync-window-too-short|components/alpha_hwr/transport.h|  static constexpr uint32_t PEER_RESYNC_HOLD_MS = REASSEMBLY_TIMEOUT_MS + 100;|  static constexpr uint32_t PEER_RESYNC_HOLD_MS = 700;"
-"transport-missing-writer-silent|components/alpha_hwr/transport.cpp|ESP_LOGW(TAG, \"Write callback not set, dropping command\");\n        if (cmd.callback) {\n          cmd.callback(false, nullptr, 0);\n        }|ESP_LOGW(TAG, \"Write callback not set, dropping command\");"
+"transport-missing-writer-silent|components/alpha_hwr/transport.cpp|ESP_LOGW(TAG, \"Write callback not set, dropping command\");\n        this->fail_front_command_();|ESP_LOGW(TAG, \"Write callback not set, dropping command\");\n        this->command_queue_.pop_front();"
 # Restores issue #179's off-by-one: a seven-byte Class 7 header instead of six,
 # which cost every device-info string its first character. It survived for as
 # long as it did because the only test fixture was generated from the same wrong
@@ -853,6 +880,72 @@ MUTATIONS=(
 # And the window, which bounds how long an unpaid debt lingers.
 "stale-reply-window-never-expires|components/alpha_hwr/transport.cpp|  if (millis() - this->owed_since_ms_ >= STALE_REPLY_WINDOW_MS) {|  if (false) {"
 "stale-reply-window-too-short-for-the-tail|components/alpha_hwr/transport.h|  static constexpr uint32_t STALE_REPLY_WINDOW_MS = 500;|  static constexpr uint32_t STALE_REPLY_WINDOW_MS = 60;"
+# Issue #259: what happens to a command nobody will ever answer.
+#
+# reset() used to clear the queue in silence, so a service with a read in flight
+# heard nothing again -- no reply, no failure, and no timeout either, because the
+# timeout lived in the queue entry that was just discarded. The suite pinned that
+# as a hazard rather than testing against it. These say the repair holds.
+"reset-drops-callbacks-silently|components/alpha_hwr/transport.cpp|  abandon_queue_();|  command_queue_.clear();"
+"reset-reports-success-to-what-it-abandons|components/alpha_hwr/transport.cpp|    if (cmd.callback) {\n      cmd.callback(false, nullptr, 0);|    if (cmd.callback) {\n      cmd.callback(true, nullptr, 0);"
+# A read chain continues past a failed step by sending the next read from inside
+# the callback. Those land back in the queue the drain just emptied; without this
+# loop the chain stops half-unwound and its caller's on_complete is never
+# reached -- the original hang, moved one command along.
+"reset-leaves-half-unwound-chains-queued|components/alpha_hwr/transport.cpp|    while (!this->command_queue_.empty()) {|    while (false) {"
+# And the command being failed must be off the queue BEFORE its callback runs.
+# `cmd` in loop() is a reference into the deque; a callback that reaches reset()
+# would otherwise find its own entry still at the head and be invoked a second
+# time from inside itself. This mutation restores the old order exactly.
+"command-still-on-the-queue-during-its-callback|components/alpha_hwr/transport.cpp|  Command cmd = std::move(this->command_queue_.front());\n  this->command_queue_.pop_front();\n  if (cmd.callback) {\n    cmd.callback(ok, data, len);\n  }|  Command &cmd = this->command_queue_.front();\n  if (cmd.callback) {\n    cmd.callback(ok, data, len);\n  }\n  this->command_queue_.pop_front();"
+# The drain is bounded, because a chain that re-sends on every failure would
+# otherwise spin until the task watchdog fires. Mutated to a cap of zero rather
+# than to no cap at all: removing it entirely makes the suite HANG, which this
+# script reports as its own outcome and which would cost every full sweep the
+# whole test timeout.
+#
+# Two entries, because the cap has to be BOTH present and large enough. A cap of
+# 8 survived the whole suite when a skeptic tried it, and a cap of 8 would strand
+# every read chain longer than eight commands on a disconnect -- the exact
+# failure this change exists to fix. The tests now pin the count exactly.
+"abandon-drain-cap-stops-it-dead|components/alpha_hwr/transport.h|  static constexpr size_t MAX_ABANDON_STEPS = 512;|  static constexpr size_t MAX_ABANDON_STEPS = 0;"
+"abandon-drain-cap-too-small-for-a-real-chain|components/alpha_hwr/transport.h|  static constexpr size_t MAX_ABANDON_STEPS = 512;|  static constexpr size_t MAX_ABANDON_STEPS = 8;"
+# The inbound overflow is the other half. It runs on a LIVE link -- a corrupt
+# fragment declaring a long frame is enough -- and it used to reach reset(), so
+# one bad fragment cancelled every read in flight with nothing telling any
+# caller. Two entries: the guard has to fire, and firing it must not cancel
+# commands the pump may still answer.
+"inbound-overflow-never-drops-the-partial|components/alpha_hwr/transport.cpp|  if (reassembly_buffer_.size() > MAX_PACKET_SIZE) {|  if (false) {"
+"inbound-overflow-cancels-the-queue|components/alpha_hwr/transport.cpp|  if (reassembly_buffer_.size() > MAX_PACKET_SIZE) {|  if (reassembly_buffer_.size() > MAX_PACKET_SIZE) { reset(); return; } if (false) {"
+# And the reply debt survives it. This is the one genuine REVERSAL in the
+# overflow half of the change -- the old path cleared the debt deliberately, on
+# the argument that clearing was "the safer of the two errors". It is not:
+# clearing lets a reply owed by an abandoned command be taken for the next
+# write's acknowledgement, which is the misattribution issue #248 exists to
+# prevent. It shipped with no test until a skeptic put the old clear back and
+# watched all 31 binaries pass.
+"inbound-overflow-forgives-the-reply-debt|components/alpha_hwr/transport.cpp|    reassembling_ = false;\n    reassembly_buffer_.clear();\n    expected_packet_length_ = 0;\n    return;|    reassembling_ = false;\n    reassembly_buffer_.clear();\n    expected_packet_length_ = 0;\n    owed_pending_ = false;\n    owed_replies_ = 0;\n    return;"
+# Reporting the failure is only half of it. The chain now reaches its terminal
+# branch on the abandoned exit too, and that branch is where the display cache is
+# written -- so both of these services need the readiness gate they already open
+# with applied at the far end as well. Without it every dropped link replaces a
+# good display with however many entries happened to land first, and it looks
+# exactly like a short log rather than a truncated read.
+"abandoned-history-read-cached-as-the-answer|components/alpha_hwr/history_service.cpp|      if (!session_.is_ready()) {|      if (false) {"
+"abandoned-event-log-read-cached-as-the-answer|components/alpha_hwr/event_log_service.cpp|        if (!session_.is_ready()) {|        if (false) {"
+# The re-entrancy guard, which this file previously recorded as a deliberate
+# absence and an "equivalent mutant confirmed by experiment". Both halves of that
+# were wrong, and the note contradicted itself two sentences later.
+#
+# The experiment behind it only removed the guard and ran the suite -- and the
+# suite's only re-entrant case reset WITHOUT queueing first, so the nested call
+# returned at abandon_queue_()'s emptiness check and never reached the guard at
+# all. A read chain does the opposite: it sends the next command and could reach
+# reset() after, and then the queue is not empty and the guard is the only thing
+# standing between this and one recursive drain per chain step. MAX_ABANDON_STEPS
+# does not help, because it is counted per call and each nested drain starts at
+# zero. A skeptic reproduced the SIGSEGV.
+"abandon-drain-re-enters-itself-per-chain-step|components/alpha_hwr/transport.cpp|  if (this->abandoning_) return;|  // mutated: no re-entrancy guard"
 # Issue #253: the other four Class 10 sends, and the gate that lets any of them
 # be answered.
 #
@@ -1071,6 +1164,54 @@ MUTATIONS=(
 if [[ "${1:-}" == "--list" ]]; then
   echo "Mutations:"
   for m in "${MUTATIONS[@]}"; do echo "  - ${m%%|*}"; done
+  exit 0
+fi
+
+# Does every entry still point at code that exists? An entry whose search string
+# stopped matching is scored "(not applied)" and turns the sweep red -- correctly,
+# but only after the better part of an hour, and only for the entries a filter
+# happened to select. This answers the same question in about seven seconds, for
+# all of them, without building anything.
+#
+# It exists because retargeting entries after a refactor is easy to half-do:
+# issue #259 moved three failure paths behind one helper and left three entries
+# anchored on the code it replaced. One was noticed, and two were found by the
+# sweep rather than by anyone reading the diff.
+#
+# Run always, not just under --verify: a filtered run is exactly where a stale
+# entry hides, because the filter selects around it.
+verify_entries() {
+  local rc=0 m name file search count
+  for m in "${MUTATIONS[@]}"; do
+    IFS='|' read -r name file search _ <<< "$m"
+    if [ ! -f "$PROJECT_DIR/$file" ]; then
+      echo -e "${RED}✗ $name: no such file: $file${NC}" >&2
+      rc=1
+      continue
+    fi
+    count=$(SEARCH="$search" python3 - "$PROJECT_DIR/$file" <<'PY'
+import os, sys
+print(open(sys.argv[1]).read().count(os.environ["SEARCH"].replace("\\n", "\n")))
+PY
+)
+    if [ "$count" != "1" ]; then
+      echo -e "${RED}✗ $name: search string matches $count times in $file (need exactly 1)${NC}" >&2
+      rc=1
+    fi
+  done
+  return "$rc"
+}
+
+# Note this checks EVERY entry, before any filter is applied.
+if ! verify_entries; then
+  echo "" >&2
+  echo "The code these mutations target moved or changed. Retarget them rather" >&2
+  echo "than deleting them -- the coverage they prove is real." >&2
+  exit 2
+fi
+
+if [[ "${1:-}" == "--verify" ]]; then
+  echo "All ${#MUTATIONS[@]} mutations still point at code that exists."
   exit 0
 fi
 

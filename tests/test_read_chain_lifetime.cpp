@@ -18,15 +18,25 @@
  * implementation's own pointer, so the tests stay valid if it is renamed.
  *
  * Both exit paths matter. A chain that runs to completion must release, and so
- * must one abandoned mid-flight -- Transport::reset() clears the command queue
- * without invoking callbacks, so an abandoned chain never reaches its terminal
- * branch. Nulling the pointer there would pass the first test and fail the
- * second, which is why that fix was rejected.
+ * must one abandoned mid-flight. When these were written Transport::reset()
+ * cleared the command queue without invoking callbacks, so an abandoned chain
+ * never reached its terminal branch at all: nulling the pointer there would have
+ * passed the first test and failed the second, which is why that fix was
+ * rejected. reset() now fails what it abandons (issue #259) and the chain does
+ * reach its terminal branch, so that particular argument no longer holds -- but
+ * the weak_ptr is still what makes the ownership right, and these tests still
+ * pin both exits.
+ *
+ * The second half of the file is about what the caller HEARS on the abandoned
+ * exit, which is issue #259's actual subject: a read that ends must say so, and
+ * a read that ended early must not be cached as though it were the whole answer.
  */
 
 #include <cstdint>
 #include <iostream>
 #include <memory>
+#include <cstring>
+#include <string>
 #include <vector>
 
 #include "fixture_crc.h"
@@ -210,6 +220,196 @@ static void test_single_events_abandoned() {
               "single events: chain released (re-runs on every HA refresh)");
 }
 
+// ---------------------------------------------------------------------------
+// What the caller hears when a chain is abandoned (issue #259)
+// ---------------------------------------------------------------------------
+
+/// One trend channel's reply: 3-byte Class 10 sub-header then the 29-byte
+/// TrendData body, whose first four bytes are the current value as a big-endian
+/// float. 32 bytes is the minimum the handler accepts.
+static std::vector<uint8_t> trend_reply(float current) {
+  std::vector<uint8_t> body{0x00, 0x00, 0x1D};
+  uint32_t bits;
+  static_assert(sizeof(bits) == sizeof(current), "float is not 32-bit here");
+  memcpy(&bits, &current, sizeof(bits));
+  body.push_back((bits >> 24) & 0xFF);
+  body.push_back((bits >> 16) & 0xFF);
+  body.push_back((bits >> 8) & 0xFF);
+  body.push_back(bits & 0xFF);
+  while (body.size() < 32) body.push_back(0x01);
+  return with_crc(class10_response(0x0000, 0x0000, body));
+}
+
+/// Drive the four trend reads to a complete answer.
+static void answer_all_four_trends(Rig &rig) {
+  for (int i = 0; i < 4; i++) {
+    step(rig.transport, 2);
+    auto reply = trend_reply(1.0f + i);
+    rig.transport.on_notification(reply.data(), reply.size());
+  }
+  step(rig.transport, 2);
+}
+
+/// The whole point of the issue. A disconnect used to leave this callback
+/// unfired forever: no success, no failure, and no timeout either, because the
+/// timeout went with the discarded queue entry.
+static void test_abandoned_history_read_reports_failure() {
+  Rig rig;
+  services::HistoryService svc(rig.transport, rig.session);
+
+  int calls = 0;
+  bool reported = true;
+  svc.read_trends_async(
+      [&](bool ok, const std::vector<services::TrendSeries> &) {
+        calls++;
+        reported = ok;
+      });
+
+  step(rig.transport, 2);              // one channel read in flight
+  rig.session.on_disconnected();       // the component's order: session first,
+  rig.transport.reset();               // then the transport
+
+  TEST_ASSERT(calls == 1,
+              "history: the caller is told the read is over, rather than "
+              "waiting on a reply the link can no longer carry");
+  TEST_ASSERT(!reported,
+              "history: ...and told it FAILED, not that a two-channel read "
+              "succeeded");
+
+  step(rig.transport, 20);
+  TEST_ASSERT(calls == 1, "history: ...exactly once");
+}
+
+/// Reporting failure is not enough on its own: the chain still arrives at its
+/// terminal branch with whatever landed before the drop, and that branch is
+/// where the display cache is written. Missing channels are ordinarily
+/// legitimate -- not every pump populates all four -- so the abandoned case has
+/// to be told apart or every dropped link truncates the display.
+static void test_abandoned_history_read_keeps_the_previous_data() {
+  Rig rig;
+  services::HistoryService svc(rig.transport, rig.session);
+
+  svc.read_trends_async([](bool, const std::vector<services::TrendSeries> &) {});
+  answer_all_four_trends(rig);
+  const std::string full = svc.format_display();
+  TEST_ASSERT(full.find("Power-on Time") != std::string::npos,
+              "history: the first read landed all four channels");
+
+  // A second read, abandoned after one channel.
+  svc.read_trends_async([](bool, const std::vector<services::TrendSeries> &) {});
+  step(rig.transport, 2);
+  auto reply = trend_reply(9.0f);
+  rig.transport.on_notification(reply.data(), reply.size());
+  step(rig.transport, 2);
+  rig.session.on_disconnected();
+  rig.transport.reset();
+
+  TEST_ASSERT(svc.format_display() == full,
+              "history: a read cut short by a disconnect does not replace the "
+              "display with the one channel it managed");
+}
+
+/// The same rule in the event log, where a single failed entry is tolerated by
+/// design -- so a chain that ends after three entries of twenty looks exactly
+/// like a log that is three entries long.
+static void test_abandoned_event_log_read_reports_failure() {
+  Rig rig;
+  services::EventLogService svc(rig.transport, rig.session);
+
+  int calls = 0;
+  bool reported = true;
+  svc.read_entries_async(
+      [&](bool ok, const std::vector<services::EventLogEntry> &) {
+        calls++;
+        reported = ok;
+      });
+
+  step(rig.transport, 2);
+  auto meta = with_crc(class10_response(0x0000, 0xF301,
+                                        {0x00, 0x00, 0x00,
+                                         0x00, 0x01,    // cycle counter
+                                         0x00, 0x04,    // available entries
+                                         0x00, 0x14,    // max entries
+                                         0x00}));
+  const int before = rig.commands_sent;
+  rig.transport.on_notification(meta.data(), meta.size());
+  step(rig.transport, 2);
+  TEST_ASSERT(rig.commands_sent > before,
+              "event log: an entry read went out, so the chain is live");
+
+  rig.session.on_disconnected();
+  rig.transport.reset();
+
+  TEST_ASSERT(calls == 1 && !reported,
+              "event log: the abandoned read reports failure, not a four-entry "
+              "log with no entries in it");
+}
+
+/// One event-log entry's reply. The entry read uses the register-read shape, so
+/// there is no 3-byte sub-header: `EventLogEntry::from_bytes` reads the payload
+/// directly and takes the timestamp from bytes 10-13. A non-zero timestamp is
+/// what makes the entry count -- zero ones are dropped.
+static std::vector<uint8_t> event_entry_reply(uint32_t stamp) {
+  std::vector<uint8_t> body(16, 0x00);
+  body[4] = 0x01;   // cycle counter
+  body[9] = 0x01;   // event type: Start
+  body[10] = (stamp >> 24) & 0xFF;
+  body[11] = (stamp >> 16) & 0xFF;
+  body[12] = (stamp >> 8) & 0xFF;
+  body[13] = stamp & 0xFF;
+  return with_crc(class10_response(0x0000, 0xF402, body));
+}
+
+static std::vector<uint8_t> event_meta_reply(uint16_t available) {
+  return with_crc(class10_response(0x0000, 0xF301,
+                                   {0x00, 0x00, 0x00,
+                                    0x00, 0x01,                            // cycle
+                                    (uint8_t) (available >> 8), (uint8_t) available,
+                                    0x00, 0x14,                            // max entries
+                                    0x00}));
+}
+
+/// The other half of the event-log gate, and the half nothing asserted.
+///
+/// The gate does two things: report failure, and leave the cache alone. The
+/// verdict assertion above covers only the first, so a one-sided gate that
+/// reported false and cached the truncated read anyway would pass. This is the
+/// event-log analogue of test_abandoned_history_read_keeps_the_previous_data.
+static void test_abandoned_event_log_read_keeps_the_previous_data() {
+  Rig rig;
+  services::EventLogService svc(rig.transport, rig.session);
+
+  svc.read_entries_async(
+      [](bool, const std::vector<services::EventLogEntry> &) {});
+  step(rig.transport, 2);
+  auto meta = event_meta_reply(2);
+  rig.transport.on_notification(meta.data(), meta.size());
+  for (uint32_t i = 0; i < 2; i++) {
+    step(rig.transport, 2);
+    auto entry = event_entry_reply(1700000000u + i * 3600u);
+    rig.transport.on_notification(entry.data(), entry.size());
+  }
+  step(rig.transport, 2);
+
+  const std::string full = svc.format_display();
+  TEST_ASSERT(full.find("Start") != std::string::npos,
+              "event log: the first read landed real entries");
+
+  // A second read, abandoned after the metadata but before any entry lands.
+  svc.read_entries_async(
+      [](bool, const std::vector<services::EventLogEntry> &) {});
+  step(rig.transport, 2);
+  auto meta2 = event_meta_reply(2);
+  rig.transport.on_notification(meta2.data(), meta2.size());
+  step(rig.transport, 2);
+  rig.session.on_disconnected();
+  rig.transport.reset();
+
+  TEST_ASSERT(svc.format_display() == full,
+              "event log: a read cut short by a disconnect leaves the previous "
+              "entries in place instead of publishing an empty log");
+}
+
 /// The failure mode is unbounded growth, not a single stranded allocation, so
 /// assert repetition explicitly: N invocations must retain nothing.
 static void test_no_accumulation() {
@@ -247,6 +447,11 @@ int main() {
   test_event_log_abandoned();
   test_single_events_abandoned();
   test_no_accumulation();
+
+  test_abandoned_history_read_reports_failure();
+  test_abandoned_history_read_keeps_the_previous_data();
+  test_abandoned_event_log_read_reports_failure();
+  test_abandoned_event_log_read_keeps_the_previous_data();
 
   std::cout << "\n==========================================" << std::endl;
   std::cout << "Results: " << tests_passed << " passed, " << tests_failed

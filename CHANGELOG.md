@@ -1078,7 +1078,98 @@
   `on_authenticated()` after a disconnect would drive the session to READY. That
   safety lives in the callers, not in the FSM, and the test now says so.
 
+### Changed
+
+- `tools/mutation_check.sh` checks every entry's search string before it builds
+  anything, and grew a `--verify` flag that does only that. An entry pointing at
+  code that has moved is scored `(not applied)` and turns the sweep red — which
+  is correct, but only after the better part of an hour, and only for the
+  entries a filter happened to select. The static check answers the same
+  question for all of them in about seven seconds. Retargeting the three entries issue
+  #259 invalidated is what prompted it: one was noticed while writing the
+  change, two were found by the sweep.
+
 ### Fixed
+
+- **A read in flight when the link dropped was never told, and one corrupt
+  inbound fragment could do the same thing to a live link** (issue #259).
+  `Transport::reset()` cleared the command queue without invoking the queued
+  commands' callbacks. A service waiting on a reply therefore heard nothing ever
+  again — no reply, no failure, and no timeout either, because the timeout lived
+  in the queue entry that had just been discarded.
+
+  Every consumer that survives this today survives it because somebody wired it
+  a *separate* hook for the same event: `WriteOperationService::on_disconnect()`
+  (issue #92), the read-chain generation counter (issue #18),
+  `ControlService::invalidate_cache()`. That is three hand-written compensations
+  for one missing contract, and a fourth caller — the next `*_async` read anyone
+  adds — gets none of them. The opening sequence used to carry a whole-sequence
+  backstop for exactly this and it went away with the sequence (issue #229),
+  which is what the reporter noticed.
+
+  `reset()` now fails what it abandons: each queued callback is invoked with
+  `(false, nullptr, 0)`, the same verdict a timeout delivers, so a multi-command
+  read unwinds through the failure branch it already has and reaches its
+  caller's `on_complete`. A chain that continues past a failed step sends its
+  next read from inside that callback, so those are taken into the same drain —
+  otherwise the unwind stops half-done and the hang has only moved one command
+  along. The drain is a loop rather than a recursion because the longest chain
+  in the tree is as long as the pump says it is (`EventLogService` reads
+  `min(available_entries, max_entries)`, both straight off the wire), and it is
+  capped so that a chain re-sending on every failure cannot spin the task
+  watchdog into a panic.
+
+  The second half is the live-link path the reporter supplied evidence for. When
+  the reassembly buffer overflows, `on_notification()` used to call `reset()` —
+  so one corrupt fragment declaring a long frame cancelled every read in flight,
+  with nothing telling any caller, on a link that was still up. It now drops the
+  partial frame and nothing else. Losing track of where a frame begins says
+  nothing about whether the pump will answer the commands we already sent; if
+  the frame that overflowed *was* someone's reply, that command's own timeout
+  reports it, through the path every caller already handles. The peer-resync
+  hold and the reply debt now survive that path on their own, instead of being
+  saved and restored by hand around a call that should not have been there.
+
+  One consequence needed handling on the way. Because an abandoned chain now
+  reaches its terminal branch, and that branch is where the trend and event-log
+  display caches are written, a dropped link would have replaced a good display
+  with however many entries happened to land first — indistinguishable, at that
+  point, from a genuinely short log. Both services already open with a
+  readiness check; they now apply the same check at the far end, so a read cut
+  short keeps the previous data instead of publishing a truncated one.
+
+  An adversarial review pass found three more consequences, all now fixed and
+  pinned. `Pump Clock Drift` published NAN on every disconnect that landed while
+  its read was queued — the one leg of the initial read chain that captured the
+  component but not the read-chain generation, so it was the only consumer the
+  new callbacks reached uncompensated. The same move-then-pop discipline the
+  failure paths got was missing from the three *success* completions, where the
+  consequence is worse (a `pop_front()` on a deque the callback emptied); a
+  callback does not become safe by having succeeded. And the drain's re-entrancy
+  guard was documented as an equivalent mutant on the strength of an experiment
+  that could not reach it — a chain that queues its next read *before* resetting
+  recurses one drain per step, and the cap is counted per call, so it is no help
+  at all.
+
+  It also retires a guard added only two changes ago. `ControlService`'s
+  setpoint-range read carries an in-flight flag, and issue #273 had
+  `invalidate_cache()` release it because a disconnect mid-chain would otherwise
+  leave it set for the life of the node — silently, and with every setpoint
+  write back on the fallback constants. That was a symptom of this bug, so the
+  flag is now released by the chain's own callback on every path. The line stays
+  (it is one assignment, and the failure it guards is silent and permanent) but
+  the mutation that proved it is retired as an equivalent mutant, verified in
+  two steps: the suite passes with the line deleted, and fails again with the
+  line deleted *and* `reset()` put back to clearing its queue.
+
+  A command being failed is now taken off the queue *before* its callback runs,
+  which the old order got away with only because `reset()` did not invoke
+  anything. `cmd` in `Transport::loop()` is a reference into the deque, and a
+  callback is service code: it queues the next read of a chain, and it can reach
+  `reset()`. With the new contract a callback that resets would have found its
+  own entry still at the head of the queue and been invoked a second time from
+  inside itself — and the `pop_front()` that used to follow it was already
+  running on a deque a callback could have emptied.
 
 - **Setpoint validation used hardcoded ranges; the pump publishes its own, per
   mode, and they are much narrower** (issue #273). `run_set_setpoint_` bounded a
