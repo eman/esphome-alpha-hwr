@@ -134,5 +134,38 @@ inline uint32_t link_readiness_timeout_next(uint32_t current_ms, uint32_t cap_ms
   return link_data_timeout_next(current_ms, cap_ms);
 }
 
+/**
+ * May the readiness watchdog recycle the link this time? (issue #257)
+ *
+ * `ready_recycle` used to be a boolean -- off, or forever -- and the case the
+ * reporter cared about is neither. If a bonded, connected link that will not
+ * finish its opening GENI reads is a one-off glitch, one reconnect clears it;
+ * if it is not, another fifty will not either, while each one takes another run
+ * at the encryption-on-open window that can erase a bond (issue #14). So the
+ * option is a count: 0 never recycles, N recycles at most N consecutive times
+ * and then leaves the fault standing for an automation to notice.
+ *
+ * @param limit       Configured allowance. 0 = never; READY_RECYCLE_FOREVER
+ *                    (0xFFFFFFFF) = unbounded, which is what a YAML `true`
+ *                    still maps to.
+ * @param consecutive Recycles already spent in THIS episode --
+ *                    link_recycles_without_ready_, which the pump becoming
+ *                    ready resets. Read before the caller increments it, so a
+ *                    limit of N yields exactly N recycles.
+ *
+ * The unbounded case needs no special-casing: nothing reaches 0xFFFFFFFF
+ * consecutive recycles, so the same comparison covers it.
+ */
+inline bool link_ready_may_recycle(uint32_t limit, uint32_t consecutive) {
+  // One comparison, and both special cases fall out of it rather than being
+  // guarded. A limit of 0 needs no test: `consecutive` is unsigned, so nothing
+  // is below zero. READY_RECYCLE_FOREVER needs none either: nothing reaches
+  // 0xFFFFFFFF consecutive recycles. An explicit `if (limit == 0) return false`
+  // stood here first and was removed as dead -- it could not be mutated,
+  // because removing it changes no outcome, which is the definition of the
+  // equivalent mutant this repo has been bitten by before (issue #282).
+  return consecutive < limit;
+}
+
 }  // namespace alpha_hwr
 }  // namespace esphome

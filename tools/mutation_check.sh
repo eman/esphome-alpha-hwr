@@ -493,6 +493,21 @@ MUTATIONS=(
 # transport in front of it. That is a real gap, and it is filed rather than
 # papered over.
 "class7-runt-guard-too-strict|components/alpha_hwr/device_info_service.cpp|      static const size_t MIN_FRAME_LEN = HEADER_LEN + CRC_LEN;|      static const size_t MIN_FRAME_LEN = 20;"
+# ---------------------------------------------------------------------------
+# ready_recycle is a bounded COUNT, not off-or-forever (issue #257)
+#
+# The reporter's case is a bonded, connected link that never finishes its
+# opening GENI reads. One reconnect clears a glitch; fifty will not clear
+# anything a glitch did not cause, while each takes another run at the
+# encryption-on-open window that can erase a bond (issue #14). Killing this
+# makes every configured bound unlimited again.
+# ---------------------------------------------------------------------------
+"ready-recycle-bound-ignored|components/alpha_hwr/readiness_watchdog.h|  return consecutive < limit;|  return true;"
+# The bound is judged against the CONSECUTIVE counter, which the pump becoming
+# ready resets -- so an allowance is per episode rather than per boot. Reading a
+# lifetime counter instead would let a node spend its allowance on unrelated
+# episodes months apart and then never recycle again.
+"ready-recycle-allowance-never-restored|components/alpha_hwr/alpha_hwr.cpp|        this->link_recycles_without_ready_ = 0;|        // mutated: the allowance is never restored"
 "response-crc-enforcement|components/alpha_hwr/transport.cpp|if (!protocol::frame_crc_valid(reassembly_buffer_.data(), frame_len)) {|if (false) {"
 "response-crc-trim|components/alpha_hwr/transport.cpp|if (expected_packet_length_ >= 4 && frame_len > expected_packet_length_) {|if (false) {"
 "register-read-vetoes-type-match|components/alpha_hwr/transport.cpp|bool wildcard_command = (cmd.expect_type_low_ver == 0x0000 && cmd.expect_type_high == 0x0000);|bool wildcard_command = true;"

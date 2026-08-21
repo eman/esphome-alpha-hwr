@@ -334,7 +334,19 @@ public:
   // another run at the encryption-on-open window that can erase a bond
   // (issue #14) -- and on a configuration nobody has yet observed (issue #244)
   // it may do that forever. So the diagnosis ships on and the remedy is opt-in.
-  void set_ready_recycle(bool enabled) { link_ready_recycle_ = enabled; }
+  // A COUNT, not a flag (issue #257). 0 never recycles; N recycles at most N
+  // consecutive times and then stops, leaving the fault standing;
+  // READY_RECYCLE_FOREVER is the unbounded behaviour a `true` in YAML still
+  // means.
+  //
+  // The bound is what the reporter asked for and the reasoning is theirs: if a
+  // link that will not finish its opening reads is a one-off glitch, one
+  // reconnect clears it, and if it is not, another fifty will not either --
+  // while each one takes another run at the window that can erase the bond
+  // (issue #14). A bound of 1 or 2 caps the exposure at something you can
+  // reason about, and lets an automation see a fault that has stopped moving
+  // rather than a link that flaps forever.
+  void set_ready_recycle_limit(uint32_t limit) { link_ready_recycle_limit_ = limit; }
   void set_ready_timeout(uint32_t ms) {
     this->link_ready_timeout_ms_ = ms;
     this->link_ready_timeout_current_ms_ = ms;
@@ -450,7 +462,22 @@ private:
   // and the schema disagreed, every host test inherited a budget no shipped
   // config produced.
   uint32_t link_ready_timeout_ms_{300000};  // Readiness watchdog budget (ms); 0 = disabled
-  bool link_ready_recycle_{false};          // ...and whether expiry also recycles the link
+ public:
+  /// `ready_recycle: true` -- recycle without a bound. Not a magic number the
+  /// user ever types: the schema maps a YAML boolean onto it, so configs
+  /// written before issue #257 keep meaning exactly what they meant.
+  static constexpr uint32_t READY_RECYCLE_FOREVER = 0xFFFFFFFFu;
+
+ private:
+  // How many CONSECUTIVE readiness recycles are allowed before the component
+  // stops and leaves the fault standing (issue #257). 0 = never recycle, which
+  // is the default and the half of issue #211's feature that carries no hazard.
+  //
+  // Compared against link_recycles_without_ready_, which is the consecutive
+  // count and is reset by the one thing that refutes the fault -- the pump
+  // actually becoming ready. So the bound is "N tries per episode", not N per
+  // boot: a link that recovers gets its full allowance again next time.
+  uint32_t link_ready_recycle_limit_{0};
 
   uint32_t control_state_poll_interval_ms_{30000};  // Control state poll interval (ms); default 30s (fixes #54)
   uint32_t last_control_state_poll_time_{0};        // Timestamp of last control state poll

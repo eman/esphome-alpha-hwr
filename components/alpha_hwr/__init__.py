@@ -82,12 +82,63 @@ CONF_INLET_PRESSURE = "inlet_pressure"
 CONF_HEAD_RATE = "head_rate"
 CONF_PAIRING_STATUS = "pairing_status"
 CONF_READY_STATUS = "ready_status"
+# Renamed from `enable_pairing` (issue #245). The old name reads as a property
+# of the LINK -- "this node will not bond" -- and that is a guarantee no ESPHome
+# component can make: when the pump initiates, `BLEClientBase::gap_event_handler()`
+# has already consented on our behalf, unconditionally, before this component
+# sees the event. A node with the old option set to false was observed bonding
+# four times in twenty minutes, 252 ms after logging "Skipping encryption
+# request - pairing disabled".
+#
+# What the option actually governs is OUR side of the negotiation: whether this
+# component initiates pairing and configures security parameters. `initiate_`
+# carries that distinction in the name, which is where the wrong expectation was
+# being formed.
+CONF_INITIATE_PAIRING = "initiate_pairing"
 CONF_ENABLE_PAIRING = "enable_pairing"
 CONF_RECONNECT_SETTLE_TIME = "reconnect_settle_time"
 CONF_CONTROL_STATE_POLL_INTERVAL = "control_state_poll_interval"
 CONF_DATA_TIMEOUT = "data_timeout"
 CONF_READY_TIMEOUT = "ready_timeout"
 CONF_READY_RECYCLE = "ready_recycle"
+
+# `ready_recycle: true` -- recycle without a bound. Mirrors
+# AlphaHwrComponent::READY_RECYCLE_FOREVER; the user never types this number.
+READY_RECYCLE_FOREVER = 0xFFFFFFFF
+# An upper bound on what anyone can usefully type. Each recycle takes another
+# run at the window that can erase a bond (issue #14), so a config asking for
+# hundreds is far likelier to be a mistake than an intention, and "unbounded"
+# already has a spelling: `true`.
+READY_RECYCLE_MAX = 100
+
+
+def validate_ready_recycle(value):
+    """`ready_recycle` is a COUNT, and still accepts the boolean it used to be.
+
+    Issue #257: as a boolean this was off-or-forever, and the case the reporter
+    cared about is neither -- if a link that will not finish its opening reads
+    is a one-off glitch, one reconnect clears it, and if it is not, another
+    fifty will not either while each takes another run at the bond-erase
+    window. So `0` never recycles, `N` recycles at most N consecutive times and
+    then leaves the fault standing.
+
+    A boolean still means what it always meant, so no existing config changes
+    behaviour: `false` is 0 and `true` is unbounded. Booleans are tested FIRST
+    and deliberately -- `bool` is a subclass of `int` in Python, so an integer
+    validator would silently accept `true` as the number 1 and quietly turn
+    "recycle forever" into "recycle once" in configs written before this issue.
+    """
+    if isinstance(value, bool):
+        return READY_RECYCLE_FOREVER if value else 0
+    if isinstance(value, str):
+        # YAML quoting, or the words ESPHome accepts for a boolean elsewhere.
+        try:
+            return READY_RECYCLE_FOREVER if cv.boolean(value) else 0
+        except cv.Invalid:
+            pass
+    return cv.int_range(min=0, max=READY_RECYCLE_MAX)(value)
+
+
 CONF_ALARMS = "alarms"
 CONF_WARNINGS = "warnings"
 CONF_SCHEDULE_HASH = "schedule_hash"
@@ -130,13 +181,41 @@ CONF_FLOW_LIMITER = "flow_limiter"
 CONF_FLOW_LIMITED = "flow_limited"
 CONF_TIME_ID = "time_id"
 
+
+def resolve_pairing_alias(config):
+    """Fold the old `enable_pairing` spelling onto `initiate_pairing` (#245).
+
+    Both are optional in the schema so that either may be written, and exactly
+    one reaches `to_code()`. A config setting both to the same value is fine and
+    silent; setting them to DIFFERENT values is refused rather than resolved,
+    because there is no reading of that config which is obviously what the
+    author meant, and guessing would silently pair or not pair a pump.
+    """
+    legacy = config.pop(CONF_ENABLE_PAIRING, None)
+    current = config.get(CONF_INITIATE_PAIRING)
+    if legacy is not None and current is not None and legacy != current:
+        raise cv.Invalid(
+            f"{CONF_ENABLE_PAIRING} and {CONF_INITIATE_PAIRING} disagree "
+            f"({legacy} vs {current}). {CONF_ENABLE_PAIRING} is the old name for "
+            f"the same option; set only {CONF_INITIATE_PAIRING}."
+        )
+    if current is None:
+        config[CONF_INITIATE_PAIRING] = legacy if legacy is not None else False
+    return config
+
+
 CONFIG_SCHEMA = (
     cv.Schema(
         {
             cv.GenerateID(): cv.declare_id(AlphaHwrComponent),
             cv.Required("ble_client_id"): cv.use_id(ble_client.BLEClient),
             cv.Optional(CONF_TIME_ID): cv.use_id(time.RealTimeClock),
-            cv.Optional(CONF_ENABLE_PAIRING, default=False): cv.boolean,
+            cv.Optional(CONF_INITIATE_PAIRING): cv.boolean,
+            # The old spelling, still accepted so no config breaks. Kept
+            # undocumented rather than deprecated-with-a-warning: it means
+            # exactly what it always meant, and the rename is about what the
+            # name IMPLIES rather than about a behaviour change (issue #245).
+            cv.Optional(CONF_ENABLE_PAIRING): cv.boolean,
             # 2s default: covers the pump's measured post-boot vulnerability window
             # (bounded at 320-720ms, during which an encryption request fails with
             # 0x61 and erases the bond) with ~2.8x margin even assuming zero
@@ -182,7 +261,7 @@ CONFIG_SCHEMA = (
             # signal at the noise floor) and it bonded within 252 ms regardless
             # (issue #245). So the diagnosis ships on and the remedy waits for
             # someone who wants it and can see their node reaches ready today.
-            cv.Optional(CONF_READY_RECYCLE, default=False): cv.boolean,
+            cv.Optional(CONF_READY_RECYCLE, default=False): validate_ready_recycle,
             cv.Optional(CONF_FLOW): sensor.sensor_schema(
                 unit_of_measurement="m³/h",
                 accuracy_decimals=3,
@@ -454,6 +533,7 @@ CONFIG_SCHEMA = (
     )
     .extend(cv.COMPONENT_SCHEMA)
     .extend(esp32_ble_tracker.ESP_BLE_DEVICE_SCHEMA)
+    .add_extra(resolve_pairing_alias)
 )
 
 
@@ -523,12 +603,12 @@ async def to_code(config):
         cg.add(var.set_time_id(time_))
 
     # Set pairing enabled flag
-    cg.add(var.set_pairing_enabled(config[CONF_ENABLE_PAIRING]))
+    cg.add(var.set_pairing_enabled(config[CONF_INITIATE_PAIRING]))
 
     cg.add(var.set_reconnect_settle_time(config[CONF_RECONNECT_SETTLE_TIME]))
     cg.add(var.set_data_timeout(config[CONF_DATA_TIMEOUT]))
     cg.add(var.set_ready_timeout(config[CONF_READY_TIMEOUT]))
-    cg.add(var.set_ready_recycle(config[CONF_READY_RECYCLE]))
+    cg.add(var.set_ready_recycle_limit(config[CONF_READY_RECYCLE]))
     if config[CONF_RECONNECT_SETTLE_TIME].total_milliseconds > 0:
         # Register as an esp32_ble_tracker listener (at codegen, so the count
         # macro that enables the listener path is defined) — this is what makes

@@ -185,7 +185,11 @@ alpha_hwr:
    id: pump
    ble_client_id: hwr_pump_client
    time_id: hwr_time
-   enable_pairing: true  # Enable BLE pairing for enhanced telemetry and control
+   # This node initiates pairing. It does NOT control whether a bond forms --
+   # the pump can initiate and ESPHome consents before this component sees the
+   # event, so a node with this false can still bond (issue #245). Renamed from
+   # `enable_pairing`, which is still accepted.
+   initiate_pairing: true
     
    # Pairing Status
    pairing_status:
