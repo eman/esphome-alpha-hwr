@@ -1181,6 +1181,38 @@ void AlphaHwrComponent::trigger_initial_data_reads() {
     this->update_schedule_display();
   });
 
+  // The limiter family (issue #274). Read once per connection because the
+  // *configuration* only changes when somebody edits it in the GO app; the
+  // status half is re-read on the control poll, since whether a limiter is
+  // biting changes with the load.
+  //
+  // Five frames, and only when an entity is attached to receive the answer.
+  this->set_timeout(5000, [this, gen]() {
+    if (gen != this->read_chain_gen_) return;
+    if (!this->limiter_entities_wanted_()) return;
+    ESP_LOGD(TAG, "Reading flow limiters...");
+    // Publish as each record lands rather than when the chain finishes: the
+    // chain is five reads and a reconnect mid-way resets the transport and
+    // drops the rest, which used to leave the entities empty even though most
+    // of the family had been read.
+    control_service_.set_limiter_update_callback([this]() { this->publish_limiter_state_(); });
+    control_service_.read_limiters([this, gen](bool ok) {
+      if (gen != this->read_chain_gen_) return;
+      if (!ok) {
+        ESP_LOGD(TAG, "Limiter family not readable on this pump");
+        return;
+      }
+      this->publish_limiter_state_();
+      // Worth a line at INFO on connect, once: an enabled limiter is the
+      // explanation for a setpoint that settles `accepted` and is not
+      // delivered, and issue #274 exists because that had no signal at all.
+      const services::LimiterState &s = control_service_.limiter_state();
+      if (s.any_enabled()) {
+        ESP_LOGI(TAG, "Flow limiter: %s", services::format_limiter_state(s).c_str());
+      }
+    });
+  });
+
   // Read event log, then chain history, then single events
   this->set_timeout(6000, [this, gen]() {
     if (gen != this->read_chain_gen_) return;
@@ -1365,11 +1397,24 @@ void AlphaHwrComponent::update() {
         // (1000ms delay to avoid collision with schedule poll at 500ms)
         this->set_timeout("control_state_poll", 1000, [this]() {
           ESP_LOGD(TAG, "Polling control state to detect out-of-band changes (issue #54)");
-          control_service_.get_mode_async([](bool success, services::ControlMode mode) {
+          control_service_.get_mode_async([this](bool success, services::ControlMode mode) {
             if (success) {
               ESP_LOGD(TAG, "Control state poll succeeded (mode=%d)", static_cast<uint8_t>(mode));
             } else {
               ESP_LOGW(TAG, "Control state poll failed");
+            }
+            // Whether a limiter is *limiting* changes with the load, so it
+            // belongs on the poll rather than being read once at connect
+            // (issue #274). Whether one is *enabled* changes only when somebody
+            // edits it in the GO app, so the configuration records are NOT
+            // re-read here -- three frames per poll rather than five.
+            //
+            // Without this the entities froze at their connection-time state
+            // and never showed a limiter starting or stopping, which is most of
+            // what they exist for.
+            if (this->limiter_entities_wanted_()) {
+              control_service_.poll_limiter_status(
+                  [this](bool) { this->publish_limiter_state_(); });
             }
           });
         });
@@ -1596,6 +1641,32 @@ bool AlphaHwrComponent::publish_clock_drift_(const ESPTime &pump_time,
     this->clock_diff_sensor_->publish_state(diff);
   }
   return true;
+}
+
+bool AlphaHwrComponent::limiter_entities_wanted_() const {
+  if (this->flow_limiter_active_binary_sensor_ != nullptr)
+    return true;
+#ifdef USE_TEXT_SENSOR
+  if (this->flow_limiter_text_sensor_ != nullptr)
+    return true;
+#endif
+  return false;
+}
+
+void AlphaHwrComponent::publish_limiter_state_() {
+  const services::LimiterState &s = control_service_.limiter_state();
+
+  if (this->flow_limiter_active_binary_sensor_ != nullptr) {
+    // BinarySensor::publish_state() de-duplicates, unlike the others, so this
+    // is safe to call on every poll (see publish_gate.h / issue #129).
+    this->flow_limiter_active_binary_sensor_->publish_state(s.limiting());
+  }
+#ifdef USE_TEXT_SENSOR
+  if (this->flow_limiter_text_sensor_ != nullptr) {
+    publish_text_sensor_if_changed(this->flow_limiter_text_sensor_,
+                                   services::format_limiter_state(s));
+  }
+#endif
 }
 
 void AlphaHwrComponent::read_pump_clock() {

@@ -199,20 +199,70 @@ MUTATIONS=(
 # any test provoked one. This entry is the proof that net works: reversing the
 # fused control request's address turns it red.
 "control-request-addressed-sub-first|components/alpha_hwr/control_service.cpp|  apdu[2] = 0x56;  // Object id 86, the start/stop request\n  apdu[3] = 0x00;  // Sub-id high\n  apdu[4] = 0x06;  // Sub-id low -- 86/6, overall_operation_local_request_obj|  apdu[2] = 0x00;  // mutated: the sub-first layout the deleted write used\n  apdu[3] = 0x06;\n  apdu[4] = 0x00;"
-# Setpoint bounds come from the pump, not from the constants in our source
-# (issue #273). The fallback constants are inherited guesses, wrong in both
-# directions on every mode this pump has -- 500 RPM where it will not go below
-# 1650, 10 m3/h where its ceiling is 2.5, and 0.5 m for proportional pressure
-# where the floor is 2.6. Ignoring the pump's answer puts all of that back, and
-# the operation still settles ACCEPTED afterwards because the pump clamps, so
-# only a test that looks at the BOUND can see it.
-"setpoint-bounds-ignore-the-pump|components/alpha_hwr/write_operation_service.cpp|  const bool from_pump = control_.get_setpoint_range(op->mode, pump_lo, pump_hi);|  const bool from_pump = false;"
-# ...and the fallback has to stay reachable. Claiming the pump's range when none
-# was read hands the validation NAN bounds -- and every comparison against NAN
-# is false, so it ACCEPTS every setpoint, in a mode the pump never answered for.
-# The validation stops existing rather than becoming stricter, which is the
-# quieter of the two failures.
-"setpoint-bounds-claim-a-range-that-was-never-read|components/alpha_hwr/write_operation_service.cpp|  if (from_pump) {\n    lo = pump_lo;\n    hi = pump_hi;\n  }|  lo = pump_lo;\n  hi = pump_hi;"
+# The pump's flow limiters (issue #274). The limiter constrains the pump BELOW
+# what it was asked for while every signal we publish says the write worked --
+# because it did. Measured with MaxFlow at 1.6 gpm: 3000 RPM commanded, 1883
+# delivered, settled `accepted`, with the pump reporting 3000 back from its own
+# 86/7. Every fixture in tests/test_limiter.cpp is a real frame.
+"limiter-enable-byte-ignored|components/alpha_hwr/limiter.h|  c.enabled = body[1] != 0;|  c.enabled = true;"
+"limiter-status-byte-ignored|components/alpha_hwr/limiter.h|  s.limiting = body[1] != 0;|  s.limiting = false;"
+# "Not read" must stay distinguishable from "no limiter". Reporting an all-clear
+# for a pump we could not ask is the same false reassurance the issue is about.
+"limiter-unread-reads-as-all-clear|components/alpha_hwr/limiter.h|  bool known() const {\n    return max_flow.valid |  bool known() const {\n    return true; //"
+# An enabled limiter that is not biting yet is its own state: it starts biting
+# the moment the setpoint rises, and a user told "no limiter" will not
+# understand the clamp when it arrives.
+"limiter-enabled-but-idle-reported-as-clear|components/alpha_hwr/limiter.h|  if (s.any_enabled()) {|  if (false) {"
+# The config record is 18 bytes and the status 6. Reading a short one past its
+# end is the memory-safety half.
+"limiter-config-short-frame-decoded|components/alpha_hwr/limiter.h|  const bool long_enough = len >= LIMITER_CONFIG_BODY_LEN;|  const bool long_enough = true;"
+"limiter-status-short-frame-decoded|components/alpha_hwr/limiter.h|  const bool long_enough = len >= LIMITER_STATUS_BODY_LEN;|  const bool long_enough = true;"
+# Each record is published as it lands rather than when the five-read chain
+# finishes: a reconnect mid-chain resets the transport and drops the rest, which
+# left the entities empty even though most of the family had been read.
+"limiter-published-only-on-chain-completion|components/alpha_hwr/control_service.cpp|        } else if (on_limiter_update_) {|        } else if (false) {"
+# ...which is exactly why an all-clear needs BOTH configuration records. One
+# enabled limiter is enough to say "a limiter is enabled"; saying "no limiter is
+# enabled" is a claim about both, and a link that drops between 86/600 and
+# 86/601 must not produce it.
+"limiter-half-read-config-reads-as-all-clear|components/alpha_hwr/limiter.h|  if (!s.config_complete())\n    return \"unknown\";|  if (false)\n    return \"unknown\";"
+# The read chains stop at the first failure. A reply carries no request
+# identifier and the records within each family share a type code, so a late
+# reply to a timed-out read satisfies the NEXT request -- caching MaxFlow's cap
+# as MinFlow's.
+"limiter-config-chain-continues-past-a-failure|components/alpha_hwr/control_service.cpp|      ESP_LOGD(TAG, \"Limiter config chain stopped at 86/600\");\n      limiters_reading_ = false;\n      if (callback) callback(false);\n      return;|      ESP_LOGD(TAG, \"Limiter config chain stopped at 86/600\");\n      limiters_reading_ = false;"
+"limiter-status-chain-continues-past-a-failure|components/alpha_hwr/control_service.cpp|      ESP_LOGD(TAG, \"Limiter status chain stopped at 86/640\");\n      limiters_reading_ = false;\n      if (callback) callback(false);\n      return;|      ESP_LOGD(TAG, \"Limiter status chain stopped at 86/640\");\n      limiters_reading_ = false;"
+# One limiter chain at a time. The connect read is five requests and the control
+# poll starts another three; without the guard the two overlap, and every record
+# within a family shares a type code, so the poll's reply satisfies whichever
+# request is at the head of the queue. Found by a host test asserting all five
+# addresses are read on a healthy pump -- they were not, the poll's chain cut
+# the connect chain off after its third read, every time.
+"limiter-overlapping-chains-allowed|components/alpha_hwr/control_service.cpp|  if (limiters_reading_) {\n    ESP_LOGD(TAG, \"Limiter read already in flight; skipping this poll\");|  if (false) {\n    ESP_LOGD(TAG, \"Limiter read already in flight; skipping this poll\");"
+
+# The family belongs to the pump we were talking to. Left standing across a
+# disconnect the entities reported the previous connection's caps indefinitely.
+"limiter-state-survives-a-disconnect|components/alpha_hwr/control_service.h|     limiters_ = LimiterState{};|     // mutated: the previous pump's limiters stay"
+
+# The pump's published range EXPLAINS a clamp; it does not gate the write
+# (issue #276). #273/#275 made it a gate, against the pump's own type-301
+# min_set_point / max_set_point. The bounds were right and the gate was still
+# wrong: with a flow limiter enabled there is no maximum speed -- the pump takes
+# the setpoint and manages run speed to hold the flow bound, and where it lands
+# is a property of the loop's hydraulics. Measured, constant speed with MaxFlow
+# at 1.6 gpm: 3000 commanded, 1883 delivered. 1883 is not in the type-301 range,
+# not in the limiter record, and not anywhere else.
+#
+# So the range survives only in the settle detail, and only when the pump is the
+# source -- the constants this code used to fall back on were wrong in both
+# directions on all four modes, and printing one as though the pump had said it
+# turns an explanation into a fabrication.
+"setpoint-clamp-detail-drops-the-range|components/alpha_hwr/write_operation_service.cpp|      if (control_.get_setpoint_range(op->mode, pump_lo, pump_hi)) {|      if (false) {"
+"setpoint-clamp-detail-quotes-a-range-never-read|components/alpha_hwr/write_operation_service.cpp|      if (control_.get_setpoint_range(op->mode, pump_lo, pump_hi)) {|      if (true) {"
+# A NaN is still refused before the wire, and not for a reason about range: the
+# all-ones float doubles as the SETPOINT_KEEP sentinel, so a NaN reads as "leave
+# the setpoint alone" -- a write that silently does nothing rather than fails.
+"setpoint-nan-reaches-the-wire|components/alpha_hwr/write_operation_service.cpp|  if (std::isnan(op->value)) {|  if (false) {"
 # The range read must reject a degenerate answer rather than caching it, so that
 # setpoint_ranges_known() does not claim a complete set off the back of one.
 # Note what this does NOT do: get_setpoint_range() re-checks max > min on every

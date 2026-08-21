@@ -205,6 +205,20 @@ alpha_hwr:
    pump_last_link_failure:
      name: "Pump Link Fault"
 
+   # The pump's MaxFlow/MinFlow limiters (issue #274). These are set from the
+   # Grundfos GO app, separately from the setpoint, and they constrain the pump
+   # BELOW what it was asked for -- while every other signal says the write
+   # worked, because it did. Measured on one installation with MaxFlow at
+   # 1.6 gpm: 3000 RPM commanded, 1883 delivered, settled `accepted`, with the
+   # pump reporting 3000 back as its own stored value.
+   #
+   # "Pump Flow Limiter" names which limiter is enabled or limiting and at what
+   # cap; "Pump Flow Limited" is the one-bit form to put in an automation. The
+   # reads are only issued when at least one of these is configured.
+   flow_limiter:
+     name: "Pump Flow Limiter"
+   flow_limited:
+     name: "Pump Flow Limited"
 
    # Link recycle counter and the longest quiet interval seen since boot
    # (issue #176). The fault sensor above shows the reason *during* a
