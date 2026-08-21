@@ -829,6 +829,19 @@ void AlphaHwrComponent::set_suspended(bool suspended) {
     this->ble_manager_.suspend_link();
   } else {
     ESP_LOGI(TAG, "Releasing BLE suspend; reconnecting to the pump");
+    // Restart the Unreachable clock. It is `now - link_last_open_ms_ >
+    // LINK_UNREACHABLE_MS`, and that stamp only advances while the session is
+    // READY -- so it stopped moving the moment we took the link down. Without
+    // this, releasing any suspension longer than 20 s resumes through a
+    // spurious `Unreachable` in the half second before the link reopens: the
+    // countdown would be measured from the last time the pump was ready, which
+    // was before a gap we created on purpose.
+    //
+    // Reported by @jfriend00, who wrote the same bug in their own version and
+    // caught it at 85 seconds. A short bench session cannot surface it -- the
+    // failure needs a suspension longer than the threshold, which is precisely
+    // what this switch is for.
+    this->link_last_open_ms_ = millis();
     if (this->parent_ != nullptr) {
       this->parent_->set_auto_connect(true);
     }

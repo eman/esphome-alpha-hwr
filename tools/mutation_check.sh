@@ -1229,6 +1229,13 @@ MUTATIONS=(
 # reads -- the fault mask in particular outlasts the suspension deliberately, so
 # releasing does not republish the node's own 0x16 for the ~15 s it takes to get
 # back to Pump Ready.
+# Releasing a long suspension must restart the Unreachable clock. That rung is
+# `now - link_last_open_ms_ > LINK_UNREACHABLE_MS`, and the stamp only advances
+# while the session is READY, so it stops the moment the link goes down --
+# leaving any suspension past the threshold to resume through a spurious
+# Unreachable. Reported by the person who wrote the same bug in their own
+# implementation and caught it at 85 seconds.
+"suspend-release-leaves-the-unreachable-clock-stopped|components/alpha_hwr/alpha_hwr.cpp|    this->link_last_open_ms_ = millis();\n    if (this->parent_ != nullptr) {\n      this->parent_->set_auto_connect(true);\n    }|    if (this->parent_ != nullptr) {\n      this->parent_->set_auto_connect(true);\n    }"
 "suspended-link-reads-as-a-failed-one|components/alpha_hwr/alpha_hwr.cpp|  if (this->suspended_) {\n    // Ahead of every other rung|  if (false) {\n    // Ahead of every other rung"
 "suspend-fault-mask-removed|components/alpha_hwr/alpha_hwr.cpp|    bool show_none = this->suspend_fault_mask_;|    bool show_none = false;"
 "bridge-parse-failure-settles-rejected|components/alpha_hwr/api_bridge.cpp|  result.status = WriteStatus::INVALID;|  result.status = WriteStatus::REJECTED;"

@@ -1386,6 +1386,41 @@ void test_a_suspended_link_reads_as_suspended_not_as_a_fault() {
 }
 
 
+// Releasing a LONG suspension must not resume through a spurious "Unreachable".
+//
+// Reported by @jfriend00, who wrote the same bug and caught it on an 85 second
+// suspension. The Unreachable rung is `now - link_last_open_ms_ >
+// LINK_UNREACHABLE_MS`, and that stamp only advances while the session is
+// READY -- so it stops moving the moment the link goes down. Suspend for longer
+// than the threshold and the first status evaluation after release, in the half
+// second before the link reopens, lands on Unreachable.
+//
+// A short bench session cannot see it: the whole failure needs a suspension
+// longer than 20 s, which is exactly what this switch is for.
+void test_releasing_a_long_suspension_does_not_report_unreachable() {
+  std::cout << "\n=== A long suspension does not resume via Unreachable ==="
+            << std::endl;
+  Rig r;
+  arm_the_settle_path(r);
+  r.setup();
+  r.connect_and_subscribe();
+  r.advance(2000);
+
+  r.component.set_suspended(true);
+  r.disconnect(ESP_GATT_CONN_TERMINATE_LOCAL_HOST);
+  r.advance(85000);   // the reporter's figure, and well past LINK_UNREACHABLE_MS
+  TEST_ASSERT(r.link_status.state == "Suspended",
+              "precondition: still suspended after 85 s, so the Unreachable "
+              "clock has been stopped that whole time");
+
+  r.component.set_suspended(false);
+
+  TEST_ASSERT(r.link_status.state != "Unreachable",
+              "releasing restarts the unreachable clock -- the link was down "
+              "on purpose, so the countdown starts from the release, not from "
+              "the last time the pump was ready");
+}
+
 int main() {
   std::cout << "===========================================================" << std::endl;
   std::cout << "  Component BLE Wiring Test Suite" << std::endl;
@@ -1409,6 +1444,7 @@ int main() {
   test_release_restores_the_link();
   test_a_suspend_during_a_settle_window_is_not_undone_by_the_timer();
   test_a_suspended_link_reads_as_suspended_not_as_a_fault();
+  test_releasing_a_long_suspension_does_not_report_unreachable();
   test_link_gap_baseline_is_published_once_at_zero();
   test_gap_counters_do_not_publish_on_every_tick();
   test_a_quiet_link_fills_the_rungs_end_to_end();
