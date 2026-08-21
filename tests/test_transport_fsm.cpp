@@ -651,16 +651,52 @@ void test_a_frame_start_declaring_less_than_a_telegram_is_refused() {
   // ...and the floor stops exactly where the protocol does. An 8-byte Unknown
   // Class refusal declares 4 and must still be received: it is the shape that
   // only ever appears in a refusal, which is why the corpus does not contain it.
-  esphome::alpha_hwr::core::Transport transport;
-  std::vector<std::vector<uint8_t>> packets;
-  transport.set_packet_callback([&packets](const uint8_t *d, size_t n) {
-    packets.push_back(std::vector<uint8_t>(d, d + n));
-  });
-  auto refusal = with_crc({0x24, 0x04, 0xF8, 0xE7, 0x0A, 0x40, 0x00, 0x00});
-  transport.on_notification(refusal.data(), refusal.size());
-  TEST_ASSERT(packets.size() == 1,
-              "  ...and a length of 4 -- an 8-byte Unknown Class refusal -- is "
-              "still a frame, which is where a floor of 5 would have broken it");
+  {
+    esphome::alpha_hwr::core::Transport transport;
+    std::vector<std::vector<uint8_t>> packets;
+    transport.set_packet_callback([&packets](const uint8_t *d, size_t n) {
+      packets.push_back(std::vector<uint8_t>(d, d + n));
+    });
+    auto refusal = with_crc({0x24, 0x04, 0xF8, 0xE7, 0x0A, 0x40, 0x00, 0x00});
+    transport.on_notification(refusal.data(), refusal.size());
+    TEST_ASSERT(packets.size() == 1,
+                "  ...and a length of 4 -- an 8-byte Unknown Class refusal -- is "
+                "still a frame, which is where a floor of 5 would have broken it");
+  }
+
+  // The cost of having no floor, which is NOT visible on the fragment itself.
+  //
+  // A sub-minimum declaration that arrives complete is caught by the CRC a
+  // moment later either way, so the two behaviours are indistinguishable there
+  // -- which is why the assertions above pass with the floor deleted, and why
+  // this case has to exist. The damage is to the frame BEHIND it: a short
+  // notification declaring a length it has not reached leaves reassembly armed,
+  // and the next real frame is appended to it as a continuation. Two frames are
+  // then lost rather than one, and the second was perfectly good.
+  {
+    esphome::alpha_hwr::core::Transport transport;
+    std::vector<std::vector<uint8_t>> packets;
+    transport.set_packet_callback([&packets](const uint8_t *d, size_t n) {
+      packets.push_back(std::vector<uint8_t>(d, d + n));
+    });
+
+    // Declares 1 -- below the floor -- and stops after three bytes, so it does
+    // not satisfy its own expected length of 5.
+    const std::vector<uint8_t> runt = {0x24, 0x01, 0xAA};
+    transport.on_notification(runt.data(), runt.size());
+
+    auto good = with_crc({0x24, 0x05, 0xF8, 0xE7, 0x0A, 0x01, 0x00, 0x00, 0x00});
+    transport.on_notification(good.data(), good.size());
+
+    TEST_ASSERT(packets.size() == 1,
+                "the frame arriving behind a sub-minimum declaration is "
+                "received -- without the floor it is swallowed as that "
+                "declaration's continuation");
+    if (packets.size() == 1) {
+      TEST_ASSERT(packets[0].size() == good.size(),
+                  "  ...whole, rather than as the tail of something else");
+    }
+  }
 }
 
 // A Class 10 read that the pump declines is answered with the same nine bytes a
