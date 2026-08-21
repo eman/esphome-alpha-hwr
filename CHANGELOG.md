@@ -4,6 +4,67 @@
 
 ### Added
 
+- **The pump's flow limiters are read and surfaced** (`Pump Flow Limiter` and
+  `Pump Flow Limited`, issue #274). The pump has MaxFlow and MinFlow limiters,
+  set from the Grundfos GO app and entirely separate from the setpoint. This
+  component read none of it.
+
+  That is the worst shape a diagnostic hole comes in, because **every signal the
+  component publishes says the write worked — and it did.** Measured by
+  @jfriend00 on a real installation with MaxFlow at 1.6 gpm, constant speed:
+  1700 RPM commanded delivered 1701, and 3000 RPM commanded delivered 1883, with
+  flow pinned at 1.59 gpm. Every write settled `accepted`, and the pump reported
+  the commanded setpoint back from its own 86/7 each time. At 3000 RPM it
+  delivered 63% of what was asked, and nothing said so.
+
+  `Pump Flow Limiter` distinguishes four states, and the distinctions are the
+  point: `No limiter enabled`, `MaxFlow enabled at 1.60 gpm (not limiting)` —
+  switched on but not yet biting, which it will the moment the setpoint rises —
+  `MaxFlow limiting at 1.60 gpm`, and `unknown`, because a pump that has not
+  answered is not a pump with no limiter. `Pump Flow Limited` is the same thing
+  as one bit, for automations.
+
+  Caps are reported in gallons per minute, the unit they were entered in: the
+  values land on the wire in m³/s and every limit value seen on two pumps
+  converts to an exact gpm figure.
+
+  The configuration is read once per connection; the status is re-read on the
+  control poll, because whether a limiter is *limiting* changes with the load
+  while whether one is *enabled* changes only when somebody edits it in the app.
+  One chain runs at a time — the records within each family share a type code
+  and replies carry no request identifier, so two overlapping chains would feed
+  each other's requests — and a chain stops at its first failure for the same
+  reason.
+  The whole family is dropped on a disconnect — it describes the pump we were
+  talking to, and a limiter changed in the app while the link was down would
+  otherwise be reported wrongly for as long as the node stayed up.
+
+  Six addresses are read — 86/600, 601 (config), 640, 641 (status) and 660 (the
+  manager, which names *which* limiter is binding) — and **not a sweep**. The
+  profile declares twenty slots per family; all fifty-four others answer a
+  nine-byte `OPERATION_FAILED` frame that is below the receiver's `len >= 11`
+  gate, so it never matches and each one costs a full read timeout. Two
+  independent client implementations hit that.
+
+  Reading only. Enabling a limiter silently caps the pump, which is not a change
+  to make as a side effect. The reads are issued only when one of the entities is
+  configured.
+
+- **`Cycle Flow` is documented, including that the vendor does not offer it**
+  (issue #280). The control sets the flow the pump targets during the ON periods
+  of Cycle Time Control. It regulates — bench-measured within 1% across four
+  setpoints, with motor speed moving to hold it — and the Grundfos GO app has no
+  equivalent, while the manual says the mode has no flow parameter at all.
+
+  It stays, deliberately: the register split is what the pump's own layout says
+  (Object 91 Sub 421's first field is a flow setpoint; Sub 430 has no flow
+  field), and being undocumented by the vendor is not a reason to remove
+  something that works. It is also **not** the MaxFlow limiter under another
+  name — 2.0 and 3.0 gpm cycle-flow runs were delivered in full with MaxFlow
+  enabled at 1.4 and 1.6 gpm. The discrepancy is now recorded in
+  `docs/configuration.md` and beside the code, so the next person to notice it
+  finds the answer rather than repeating the investigation.
+
 - **A watchdog for links that are connected, streaming, and never usable**
   (`ready_timeout`, issue #211). Reported from a live installation: connected,
   pairing on, telemetry updating in Home Assistant, `Pump Ready` off
@@ -503,6 +564,55 @@
   The accessors are pinned by a new host test built **twice**, with and without
   `-DUSE_TIME`, because "the behaviour under `#ifndef USE_TIME` is the same for
   every caller" is not checked by anything if that build is never built.
+- **A setpoint outside the pump's range is clamped by the pump and explained,
+  not refused before the wire** (issue #276). This takes back out the check
+  #273/#275 added, and the reason is worth recording because the bounds it
+  validated against were *correct*.
+
+  @jfriend00 found the flaw: **with a flow limiter enabled there is no maximum
+  speed.** The pump takes the setpoint and manages actual run speed to hold the
+  flow bound, and where it lands is a property of the loop's hydraulics rather
+  than of the pump. Measured on their installation, constant speed with MaxFlow
+  at 1.6 gpm:
+
+  | commanded | delivered |
+  | --- | --- |
+  | 1700 RPM | 1701 |
+  | 1900 RPM | 1903 |
+  | 2000 RPM | 1892 |
+  | 3000 RPM | 1883 |
+
+  1883 RPM is not in the type-301 range, not in the limiter record, and not
+  anywhere else — the pump discovers it by running the loop, and does not know it
+  in advance either. So there is no number to narrow to, and a check that *looks*
+  authoritative is worse than no check, because it is wrong in a way no client
+  can detect.
+
+  The type-301 range is therefore not "the bound"; it is "the bound in the
+  absence of a limiter". It now survives as an **explanation** rather than a
+  gate: when the pump clamps, the settle detail says so and quotes the range —
+
+  ```
+  clamped: pump stored 3671; its range for this mode is 1650-3671 RPM
+  ```
+
+  — and quotes it **only when the pump is the source**. The fallback constants
+  this code used to carry were wrong in both directions on all four modes, so
+  printing one as though the pump had said it would turn an explanation into a
+  fabrication.
+
+  This also settles the slider question the issue was filed for, by removing it:
+  if writes clamp instead of being refused, no slider offers a value that gets
+  refused, so nothing has to track the pump's bounds at runtime and the Home
+  Assistant entity-registry problem goes away with it. The behaviour a user sees
+  is the one that was there before #275 — drag the slider, watch it settle on
+  what the pump could do — with the settle event now saying why.
+
+  One thing is still refused before the wire, for a reason that is not about
+  range: a setpoint that is **not a number**. There is nothing for the pump to
+  clamp to, and the all-ones float doubles as the `SETPOINT_KEEP` sentinel on the
+  wire, so a NaN would read as "leave the setpoint alone" — a write that silently
+  does nothing rather than one that fails.
 
 - **Every Class 10 write now waits for its own acknowledgement** (issue #253).
   This finishes what #248 began. That change stopped a reply being handed to

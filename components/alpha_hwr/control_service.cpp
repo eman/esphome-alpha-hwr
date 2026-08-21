@@ -313,6 +313,20 @@ float native_to_display(ControlMode mode, float native) {
 }
 }  // namespace
 
+const char *ControlService::setpoint_unit(ControlMode mode) {
+  switch (mode) {
+    case ControlMode::CONSTANT_SPEED:
+      return "RPM";
+    case ControlMode::CONSTANT_FLOW:
+      return "m³/h";
+    case ControlMode::CONSTANT_PRESSURE:
+    case ControlMode::PROPORTIONAL_PRESSURE:
+      return "m";
+    default:
+      return "";
+  }
+}
+
 bool ControlService::get_setpoint_range(ControlMode mode, float &min_out, float &max_out) const {
   const SetpointRange *r = nullptr;
   switch (mode) {
@@ -329,6 +343,148 @@ bool ControlService::get_setpoint_range(ControlMode mode, float &min_out, float 
   min_out = r->min;
   max_out = r->max;
   return true;
+}
+
+void ControlService::read_one_limiter_(uint16_t sub, bool is_config,
+                                       std::function<void(bool)> callback) {
+  uint8_t apdu[5] = {0x0A, 0x03, 86, static_cast<uint8_t>(sub >> 8),
+                     static_cast<uint8_t>(sub & 0xFF)};
+  // Type 895 v1 (config) and 896 v1 (status). Reply header bytes are
+  // `00 03 7F 01` and `00 03 80 01`, so TypeH is 0x0003 and (TypeL << 8) |
+  // Version is 0x7F01 / 0x8001 -- the same encoding read_one_setpoint_range_()
+  // uses, and a real type expectation, so this takes the exact-match path.
+  const uint16_t type_low_ver = is_config ? 0x7F01 : 0x8001;
+  this->transport_.send_apdu_command(
+      apdu, 5, type_low_ver, 0x0003,
+      [this, sub, is_config, callback](bool ok, const uint8_t *payload, size_t payload_len) {
+        if (!ok) {
+          ESP_LOGD(TAG, "Limiter read failed for Obj 86 Sub %u",
+                   static_cast<unsigned>(sub));
+          if (callback) callback(false);
+          return;
+        }
+        // Same size-header skip as the setpoint ranges: the pump prefixes a
+        // three-byte size that is not part of the record.
+        const size_t offset =
+            (payload_len >= 3 && payload[0] == 0x00 && payload[1] == 0x00) ? 3 : 0;
+        const uint8_t *body = payload + offset;
+        const size_t body_len = payload_len - offset;
+
+        bool decoded = false;
+        if (is_config) {
+          const LimiterConfig c = decode_limiter_config(body, body_len);
+          decoded = c.valid;
+          if (c.valid) {
+            if (sub == SUB_LIMITER_CONFIG_MAX_FLOW) limiters_.max_flow = c;
+            if (sub == SUB_LIMITER_CONFIG_MIN_FLOW) limiters_.min_flow = c;
+            ESP_LOGD(TAG, "Limiter %u: %s %s at %.2f gpm", static_cast<unsigned>(sub),
+                     limiter_name_string(c.name), c.enabled ? "enabled" : "disabled",
+                     c.limit_gpm());
+          }
+        } else {
+          const LimiterStatus s = decode_limiter_status(body, body_len);
+          decoded = s.valid;
+          if (s.valid) {
+            if (sub == SUB_LIMITER_STATUS_MAX_FLOW) limiters_.max_flow_status = s;
+            if (sub == SUB_LIMITER_STATUS_MIN_FLOW) limiters_.min_flow_status = s;
+            if (sub == SUB_LIMITATION_MANAGER) limiters_.manager = s;
+            ESP_LOGD(TAG, "Limiter status %u: %s %s ref %.1f",
+                     static_cast<unsigned>(sub), limiter_name_string(s.name),
+                     s.limiting ? "LIMITING" : "idle", s.reference);
+          }
+        }
+        if (!decoded) {
+          ESP_LOGW(TAG, "Limiter reply for Sub %u too short (len=%zu)",
+                   static_cast<unsigned>(sub), payload_len);
+        } else if (on_limiter_update_) {
+          // Per record, not per chain: see set_limiter_update_callback().
+          on_limiter_update_();
+        }
+        if (callback) callback(decoded);
+      },
+      // Same 3 s as the setpoint ranges, and for the same reason: nothing waits
+      // on these, and five chained reads is five timeouts on a pump that does
+      // not implement them.
+      3000);
+}
+
+void ControlService::read_limiters(std::function<void(bool)> callback) {
+  if (limiters_reading_) {
+    ESP_LOGD(TAG, "Limiter read already in flight");
+    if (callback) callback(false);
+    return;
+  }
+  limiters_reading_ = true;
+  // Configuration first, then status. Sequential, and **stopping at the first
+  // failure** -- the same rule read_setpoint_ranges() follows, for the same
+  // reason, which I documented here and then did not implement.
+  //
+  // A reply carries no request identifier. The two config records share one
+  // type code (895 v1) and the three status records share another (896 v1), so
+  // a read that has timed out and whose reply arrives late satisfies the NEXT
+  // request in the chain. Carrying on past a failure is therefore not merely
+  // wasteful: a late 86/600 reply gets cached as MinFlow, and the entity
+  // reports a cap against the wrong limiter. Stopping is what keeps positional
+  // correlation honest.
+  read_one_limiter_(SUB_LIMITER_CONFIG_MAX_FLOW, true, [this, callback](bool ok) {
+    if (!ok) {
+      ESP_LOGD(TAG, "Limiter config chain stopped at 86/600");
+      limiters_reading_ = false;
+      if (callback) callback(false);
+      return;
+    }
+    read_one_limiter_(SUB_LIMITER_CONFIG_MIN_FLOW, true, [this, callback](bool ok2) {
+      if (!ok2) {
+        ESP_LOGD(TAG, "Limiter config chain stopped at 86/601");
+        limiters_reading_ = false;
+        if (callback) callback(false);
+        return;
+      }
+      // Straight into the status chain, without releasing the flag: the two
+      // are one chain from the caller's point of view, and releasing between
+      // them would let the poll in exactly where the overlap hurts.
+      read_status_chain_(callback);
+    });
+  });
+}
+
+void ControlService::poll_limiter_status(std::function<void(bool)> callback) {
+  if (limiters_reading_) {
+    ESP_LOGD(TAG, "Limiter read already in flight; skipping this poll");
+    if (callback) callback(false);
+    return;
+  }
+  limiters_reading_ = true;
+  read_status_chain_(callback);
+}
+
+void ControlService::read_status_chain_(std::function<void(bool)> callback) {
+  // Same rule, same reason: all three expect type 896 v1, so a late 86/640
+  // reply would be consumed as 86/641 and the records would shift down the
+  // chain into the manager slot.
+  read_one_limiter_(SUB_LIMITER_STATUS_MAX_FLOW, false, [this, callback](bool ok) {
+    if (!ok) {
+      ESP_LOGD(TAG, "Limiter status chain stopped at 86/640");
+      limiters_reading_ = false;
+      if (callback) callback(false);
+      return;
+    }
+    read_one_limiter_(SUB_LIMITER_STATUS_MIN_FLOW, false, [this, callback](bool ok2) {
+      if (!ok2) {
+        ESP_LOGD(TAG, "Limiter status chain stopped at 86/641");
+        limiters_reading_ = false;
+        if (callback) callback(false);
+        return;
+      }
+      read_one_limiter_(SUB_LIMITATION_MANAGER, false, [this, callback](bool ok3) {
+        // The manager is the last read, so a failure here shifts nothing.
+        // Its absence costs the name of the binding limiter and no more --
+        // LimiterState falls back to the per-limiter records for that.
+        limiters_reading_ = false;
+        if (callback) callback(ok3);
+      });
+    });
+  });
 }
 
 void ControlService::read_one_setpoint_range_(ControlMode mode, uint16_t sub,
