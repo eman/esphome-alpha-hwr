@@ -6,6 +6,7 @@
 #ifdef USE_TIME
 #include "esphome/components/time/real_time_clock.h"
 #endif
+#include "dst_rule.h"
 #include "transport.h"
 #include <ctime>
 
@@ -85,6 +86,23 @@ class TimeService {
    * - Invalid dates (year < 1970) indicate unset clock
    */
   void get_clock_async(std::function<void(ESPTime)> callback);
+
+  /**
+   * @brief Read the pump's own daylight-saving rule.
+   *
+   * Object 94, SubID 102 (DaylightSavingTime), type 323 version 1. Ten bytes
+   * after the size header; see dst_rule.h for the layout and for why the
+   * component cares.
+   *
+   * The short version: the pump shifts its own clock twice a year by its own
+   * stored rule, single-event windows are stored in its local time, and
+   * utc_to_local_unix() takes that offset from the HOST's zone. The two have to
+   * agree, and nothing checked that they did (issue #286).
+   *
+   * @param callback Called with the decoded rule; `valid` is false when the
+   *   read failed or the frame was too short. Never called with a guess.
+   */
+  void get_dst_rule_async(std::function<void(DstRule)> callback);
 
   /**
    * @brief Wire primitive: write the pump's real-time clock.

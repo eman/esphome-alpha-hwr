@@ -1171,6 +1171,11 @@ void AlphaHwrComponent::trigger_initial_data_reads() {
       }
 
       // No sync submitted here; see the note above this timeout.
+
+      // Same leg, because it is the same question asked one level up: the drift
+      // above says whether the two clocks agree NOW, and this says whether they
+      // will still agree in November (issue #286).
+      this->check_pump_dst_rule_(gen);
     });
   });
 
@@ -1577,6 +1582,59 @@ bool AlphaHwrComponent::publish_clock_drift_(const ESPTime &pump_time,
     this->clock_diff_sensor_->publish_state(diff);
   }
   return true;
+}
+
+void AlphaHwrComponent::check_pump_dst_rule_(uint32_t gen) {
+#ifdef USE_TEXT_SENSOR
+  if (this->pump_clock_dst_text_sensor_ == nullptr)
+    return;  // nobody is asking, so do not spend a round trip on it
+#endif
+  this->time_service_.get_dst_rule_async([this, gen](services::DstRule pump_rule) {
+    // The generation guard every leg of this chain carries (issue #259): a
+    // disconnect while this read is queued fails it, and publishing "unknown"
+    // over a good answer on every dropped link is the same defect the drift
+    // leg above was fixed for.
+    if (gen != this->read_chain_gen_) return;
+
+    // The host's rule is asked for THIS year rather than cached: zones change
+    // their rules, and the answer that matters is the one for the year the
+    // pump is about to run a schedule in. Costs a few hundred localtime_r
+    // calls once per connection.
+    int year = 0;
+    ESPTime now;
+    if (this->time_service_.current_time(now))
+      year = static_cast<int>(now.year);
+
+    services::DstRule host_rule{};
+    if (year > 0)
+      host_rule = services::probe_host_dst_rule(year);
+
+    const services::DstAgreement agreement =
+        services::compare_dst_rules(pump_rule, host_rule);
+
+    // WARN rather than INFO on a mismatch, and once per connection rather than
+    // per poll. The symptom this exists to pre-empt -- "my schedule moved an
+    // hour in November" -- shows up months after the cause, so the log line has
+    // to be findable in a search rather than merely present.
+    if (agreement == services::DstAgreement::UNKNOWN) {
+      ESP_LOGD(TAG, "Pump DST rule not comparable yet (rule read or node clock missing)");
+    } else if (!services::dst_rules_agree(agreement)) {
+      ESP_LOGW(TAG, "Pump DST rule disagrees with this node's timezone: %s",
+               services::format_dst_agreement(agreement, pump_rule, host_rule).c_str());
+      ESP_LOGW(TAG, "Stored schedule windows will be an hour out on one side of "
+                    "a DST transition until this is resolved (issue #286)");
+    } else {
+      ESP_LOGI(TAG, "Pump DST rule agrees with this node's timezone");
+    }
+
+#ifdef USE_TEXT_SENSOR
+    if (this->pump_clock_dst_text_sensor_ != nullptr) {
+      publish_text_sensor_if_changed(
+          this->pump_clock_dst_text_sensor_,
+          services::format_dst_agreement(agreement, pump_rule, host_rule));
+    }
+#endif
+  });
 }
 
 void AlphaHwrComponent::read_pump_clock() {

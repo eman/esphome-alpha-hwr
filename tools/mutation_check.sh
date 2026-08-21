@@ -591,6 +591,26 @@ MUTATIONS=(
 "clock-gate-grace-boundary-off-by-one|components/alpha_hwr/clock_sync_gate.h|  if (uptime_ms < grace_ms) {|  if (uptime_ms <= grace_ms) {"
 "clock-gate-every-block-warns|components/alpha_hwr/clock_sync_gate.h|  return a == ClockSyncAction::WARN_NO_TIME_ID |  return a != ClockSyncAction::SYNC; //"
 
+# The pump's own DST rule against the node's timezone (issue #286). The pump
+# shifts its own clock twice a year by its own stored rule; schedule windows are
+# stored in its LOCAL time and converted using the HOST's offset, so the two
+# have to agree or every stored window is an hour out on one side of a
+# transition. The symptom appears months after the cause.
+"dst-enabled-bit-ignored|components/alpha_hwr/dst_rule.h|  r.enabled = body[0] != 0;|  r.enabled = true;"
+"dst-offset-not-compared|components/alpha_hwr/dst_rule.h|  const bool same_amount = pump.offset_minutes == host.offset_minutes;|  const bool same_amount = true;"
+"dst-dates-not-compared|components/alpha_hwr/dst_rule.h|  const bool same_dates = pump.start == host.start && pump.end == host.end;|  const bool same_dates = true;"
+# "Last Sunday in October" is the fifth occurrence in some years and the fourth
+# in others. Collapsing that distinction the wrong way reports a mismatch for a
+# correct EU pump in an EU zone, in some years only.
+"dst-last-occurrence-is-a-mismatch|components/alpha_hwr/dst_rule.h|    const bool both_last = occurrence >= 4 && o.occurrence >= 4;|    const bool both_last = false;"
+# The southern hemisphere starts its year in daylight time, so the first
+# transition of the calendar year is the one OFF it. Reading them in calendar
+# order makes every southern installation a mismatch.
+"dst-transitions-read-backwards|components/alpha_hwr/dst_rule.h|  const bool first_is_the_spring_shift = offset_after_first > offset_before_first;|  const bool first_is_the_spring_shift = true;"
+# A frame too short to hold the rule must not be read past the end, and must not
+# be reported as a rule.
+"dst-short-frame-decoded|components/alpha_hwr/dst_rule.h|  if (body == nullptr |  if (false) return r; //"
+
 # One clock, one floor (issue #270). The component used to resolve "what time is
 # it" in five places with three different floors -- year 2020, year 2021, and
 # the literal 1609459200 -- three of which read ::time(nullptr) directly, so a
@@ -1061,7 +1081,7 @@ MUTATIONS=(
 # (issue #258), so `setpoint-write-not-declared-as-awaiting-an-ack` went with it.
 # Its sibling below covers the same declaration on the write that remains.
 "control-request-not-declared-as-awaiting-an-ack|components/alpha_hwr/control_service.cpp|      /*expect_short_ack=*/true, /*quiet_timeout=*/true);\n\n  if (queue_commit && schedule_callback_) {|      /*expect_short_ack=*/false, /*quiet_timeout=*/true);\n\n  if (queue_commit && schedule_callback_) {"
-"clock-write-expects-a-type-a-set-cannot-return|components/alpha_hwr/time_service.cpp|      apdu, sizeof(apdu), 0, 0,|      apdu, sizeof(apdu), 0x0141, 0,"
+"clock-write-expects-a-type-a-set-cannot-return|components/alpha_hwr/time_service.cpp|      apdu, sizeof(apdu), 0, 0,\n      [](bool success, const uint8_t * /*data*/, size_t /*len*/) {|      apdu, sizeof(apdu), 0x0141, 0,\n      [](bool success, const uint8_t * /*data*/, size_t /*len*/) {"
 "commit-write-expects-a-type-a-set-cannot-return|components/alpha_hwr/schedule_service.cpp|      apdu, apdu_len, 0, 0,|      apdu, apdu_len, 0xDA01, 0,"
 # Three Object 84 writes made the same mistake, so each gets its own entry: the
 # search strings need the lambda capture list because `apdu, sizeof(apdu), 0, 0,`

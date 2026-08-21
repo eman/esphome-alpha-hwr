@@ -309,6 +309,45 @@
 
 ### Changed
 
+- **The pump's own daylight-saving rule is read and checked against the node's
+  timezone** (`Pump Clock DST`, issue #286). The pump keeps a DST rule of its own
+  and applies it to its own clock, twice a year, independently of anything the
+  node believes. `DaylightSavingTime` (Object 94 SubID 102, type 323 v1), read
+  from the bench unit: enabled, second Sunday of March to first Sunday of
+  November at 02:00, 60-minute offset — the US rule.
+
+  Schedule windows are stored in the pump's **local** time, and
+  `utc_to_local_unix()` takes that offset from the **host's** zone. The
+  conversion preserves the user's wall clock across a transition — an 07:00
+  event stays at 07:00 — but only while the two rules agree. They can differ
+  without anyone doing anything strange: a pump shipped for one market and
+  installed in another (the rule is stored per unit and is writable), a node
+  whose `time_id` zone is not the pump's locale, or a pump with DST disabled on a
+  node whose zone observes it. That last one moves every stored event by an hour
+  relative to the pump's clock, twice a year, silently.
+
+  The failure is the same shape as #263 — an event stored at an instant nobody
+  asked for, confirming clean, because the confirm applies the same wrong offset
+  in reverse. #263 fixed the case where the arithmetic *wraps*; this is the case
+  where it is against the wrong rule, and an hour is comfortably inside every
+  bound the component has.
+
+  The new `Pump Clock DST` text sensor reads `OK` with the rule spelled out when
+  they agree, and names **both** rules when they do not — "my schedule moved an
+  hour in November" shows up months after the cause, so a bare "mismatch" would
+  leave the user no closer to it. The node's own rule is derived by observation
+  (sample the year, bisect for the transition) rather than by parsing a TZ
+  string, because there is no portable way to ask libc for its rule.
+
+  **Reported, never corrected.** The Grundfos GO app, this component and the
+  Python library all write this pump's clock, and the pump cannot say which base
+  a value arrived in — a component that silently rewrote the pump's rule would be
+  the third party in a fight the user cannot see. Whether the component should
+  ever write 94/102 is left open deliberately.
+
+  The read is only issued when the entity is configured, so a node that does not
+  display it does not spend a round trip per connection on it.
+
 - **The write-op suite now exercises the local↔UTC conversion at an offset that
   is not zero** (issue #268). `tests/test_write_operations.cpp` pins `TZ=UTC`,
   and under that pin `utc_to_local_unix()` and `local_unix_to_utc_resolved()` are
