@@ -1515,9 +1515,13 @@ public:
             if (this->cycle_timestamps_text_sensor_) {
               std::string display;
               for (const auto &ts : timestamps) {
-                // ESPTime, not localtime() -- see issue #289: on the ESP32
-                // libc has no timezone, so these rendered in UTC.
-                ESPTime lt = ESPTime::from_epoch_local(static_cast<time_t>(ts));
+                // from_epoch_**utc**: these are the pump's own clock, read raw
+                // off Object 88 with no conversion, and its clock runs local.
+                // Taking the fields verbatim is the correct rendering; shifting
+                // them would move a local wall clock by the offset a second
+                // time. Same distinction as the event log -- see the note in
+                // event_log_service.cpp (issue #289).
+                ESPTime lt = ESPTime::from_epoch_utc(static_cast<time_t>(ts));
                 char buf[32];
                 lt.strftime(buf, sizeof(buf), "%Y-%m-%d %H:%M");
                 if (!display.empty())

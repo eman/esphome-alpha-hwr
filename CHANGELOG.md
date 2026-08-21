@@ -331,6 +331,16 @@
   timezone and never consult libc. So on the device **`localtime_r`, `mktime`
   and `gmtime_r` all answer UTC**, while `ESPTime` is correct.
 
+  Two domains had to be told apart, and conflating them is the trap here. A
+  **cached single event** has already been through `local_unix_to_utc_resolved()`
+  on read, so it is a true UTC epoch and wants converting to local for display.
+  An **event-log or cycle timestamp** comes off the wire raw — nothing converts
+  it, because it is the pump's own clock, which runs local — so it must be
+  rendered verbatim. Shifting one of those "to local" moves a local wall clock by
+  the offset a second time. (That also fixes the host side of those two displays,
+  where the old `localtime_r` did shift and was wrong; on the device it was right
+  only because libc had no zone to shift by.)
+
   This component used libc in five places. The one that mattered was
   `local_utc_offset_seconds()`, which returned **0** on hardware — so the
   UTC↔local shift that puts a single event on the pump's clock was a **no-op**.

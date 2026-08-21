@@ -608,6 +608,13 @@ MUTATIONS=(
 # where ESPTime's zone deliberately disagrees with the process TZ.
 "tz-offset-taken-as-utc|components/alpha_hwr/schedule_service.h|  ESPTime local_fields = ESPTime::from_epoch_local(ref);|  ESPTime local_fields = ESPTime::from_epoch_utc(ref);"
 "tz-event-window-encoded-as-utc|components/alpha_hwr/alpha_hwr.h|      t.recalc_timestamp_local();|      t.recalc_timestamp_utc(false);"
+# The other half of the same distinction, and the one I got wrong first. Event
+# log and cycle timestamps come off the wire RAW -- nothing converts them,
+# because they are the pump's own clock, which runs local. Rendering them
+# "to local" shifts a local wall clock by the offset a SECOND time. Cached
+# single events are the opposite case: local_unix_to_utc_resolved() has already
+# made them UTC epochs in our domain, so they do want shifting.
+"tz-event-log-shifted-twice|components/alpha_hwr/event_log_service.cpp|    const ESPTime lt = ESPTime::from_epoch_utc(static_cast<time_t>(e.timestamp));|    const ESPTime lt = ESPTime::from_epoch_local(static_cast<time_t>(e.timestamp));"
 
 # One clock, one floor (issue #270). The component used to resolve "what time is
 # it" in five places with three different floors -- year 2020, year 2021, and
