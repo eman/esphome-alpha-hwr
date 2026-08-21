@@ -353,6 +353,62 @@ static void test_the_same_dates_with_a_different_shift_is_a_mismatch() {
               "the offset and not about something else");
 }
 
+// One end at a time. The EU-versus-US case below moves BOTH transitions, so
+// either half of the date comparison could be deleted with it still reporting
+// RULES_DIFFER -- which is what CI's mutation sweep found. A pump and a node
+// can genuinely disagree at one end only: the US moved its start date in 2007
+// and left its end in the same month, and a pump carrying a pre-2007 rule
+// against a current zone is exactly that shape.
+static void test_a_start_date_that_differs_alone_is_a_mismatch() {
+  std::cout << "\n=== A start date differing alone -> mismatch ===" << std::endl;
+  DstRule pump{};
+  pump.valid = true;
+  pump.enabled = true;
+  pump.start = DstTransition{3, 7, 2, 2};   // second Sunday of March, the current US rule
+  pump.end = DstTransition{11, 7, 1, 2};    // first Sunday of November
+  pump.offset_minutes = 60;
+
+  DstRule host = pump;
+  host.start = DstTransition{4, 7, 1, 2};   // first Sunday of APRIL, the pre-2007 rule
+
+  TEST_ASSERT(transitions_coincide(pump.end, host.end, 2026),
+              "the two agree on when DST ENDS");
+  TEST_ASSERT(!transitions_coincide(pump.start, host.start, 2026),
+              "and disagree only on when it starts");
+  TEST_ASSERT(compare_dst_rules(pump, host, 2026) == DstAgreement::RULES_DIFFER,
+              "which is a mismatch -- for three weeks every spring every stored "
+              "window is an hour out");
+
+  host.start = pump.start;
+  TEST_ASSERT(compare_dst_rules(pump, host, 2026) == DstAgreement::AGREE,
+              "and restoring the start date is enough to make them agree, so "
+              "the assertion above is about the start and nothing else");
+}
+
+static void test_an_end_date_that_differs_alone_is_a_mismatch() {
+  std::cout << "\n=== An end date differing alone -> mismatch ===" << std::endl;
+  DstRule pump{};
+  pump.valid = true;
+  pump.enabled = true;
+  pump.start = DstTransition{3, 7, 2, 2};
+  pump.end = DstTransition{11, 7, 1, 2};    // first Sunday of November
+  pump.offset_minutes = 60;
+
+  DstRule host = pump;
+  host.end = DstTransition{10, 7, 5, 2};    // last Sunday of OCTOBER, the EU end
+
+  TEST_ASSERT(transitions_coincide(pump.start, host.start, 2026),
+              "the two agree on when DST STARTS");
+  TEST_ASSERT(!transitions_coincide(pump.end, host.end, 2026),
+              "and disagree only on when it ends");
+  TEST_ASSERT(compare_dst_rules(pump, host, 2026) == DstAgreement::RULES_DIFFER,
+              "which is a mismatch");
+
+  host.end = pump.end;
+  TEST_ASSERT(compare_dst_rules(pump, host, 2026) == DstAgreement::AGREE,
+              "and restoring the end date is enough to make them agree");
+}
+
 static void test_an_unread_rule_is_unknown_not_a_mismatch() {
   std::cout << "\n=== An unread rule is unknown, not an accusation ===" << std::endl;
   DstRule unread{};  // valid == false, as before the read lands
@@ -405,6 +461,8 @@ int main() {
   test_the_date_arithmetic();
   test_impossible_transition_fields_are_refused();
   test_the_same_dates_with_a_different_shift_is_a_mismatch();
+  test_a_start_date_that_differs_alone_is_a_mismatch();
+  test_an_end_date_that_differs_alone_is_a_mismatch();
   test_an_unread_rule_is_unknown_not_a_mismatch();
   test_neither_shifting_is_agreement();
 
