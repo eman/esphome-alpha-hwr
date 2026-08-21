@@ -1184,8 +1184,16 @@ MUTATIONS=(
 # 8 survived the whole suite when a skeptic tried it, and a cap of 8 would strand
 # every read chain longer than eight commands on a disconnect -- the exact
 # failure this change exists to fix. The tests now pin the count exactly.
-"abandon-drain-cap-stops-it-dead|components/alpha_hwr/transport.h|  static constexpr size_t MAX_ABANDON_STEPS = 512;|  static constexpr size_t MAX_ABANDON_STEPS = 0;"
-"abandon-drain-cap-too-small-for-a-real-chain|components/alpha_hwr/transport.h|  static constexpr size_t MAX_ABANDON_STEPS = 512;|  static constexpr size_t MAX_ABANDON_STEPS = 8;"
+#
+# Both mutate the comparison rather than MAX_ABANDON_STEPS itself. Shrinking the
+# constant no longer compiles: issue #284 gave EventLogService a static_assert
+# that its chain plus headroom fits under the cap, so a cap of 0 or 8 is now a
+# build error and the suite never runs -- an entry that proves nothing about
+# coverage. The static_assert is real protection, but it guards the chain's size
+# against the cap; these entries are about the drain honouring the cap at run
+# time, which is a different claim and lives at the comparison.
+"abandon-drain-cap-stops-it-dead|components/alpha_hwr/transport.cpp|    if (steps >= MAX_ABANDON_STEPS) {|    if (true) {"
+"abandon-drain-cap-too-small-for-a-real-chain|components/alpha_hwr/transport.cpp|    if (steps >= MAX_ABANDON_STEPS) {|    if (steps >= 8) {"
 # Issue #278: what the receiver will accept as a frame at all. The length field
 # is bounded from both ends and the delimiter from one, and each bound has been
 # got wrong at least once -- including while writing this change, where a floor
