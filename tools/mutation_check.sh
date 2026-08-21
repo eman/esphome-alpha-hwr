@@ -1169,6 +1169,15 @@ MUTATIONS=(
 # that cannot tell the time must not call somebody else's timestamp stale -- is
 # the point, not because the arithmetic needs it.
 
+# The read path converts the pump's LOCAL-Unix wire value back to UTC, and the
+# cache invariant that it does is load-bearing: the slot picker compares cached
+# end_timestamps against the node clock (#262) and the confirm compares a
+# readback against the request. The write-op suite pins TZ=UTC, where the
+# conversion is the identity, so both of these mutants used to pass it (issue
+# #268). They are caught by the two tests that un-pin the zone.
+"tz-read-path-leaves-the-cache-in-local-time|components/alpha_hwr/schedule_service.cpp|            ev.begin_timestamp = local_unix_to_utc_resolved(ev.begin_timestamp);\n            ev.end_timestamp = local_unix_to_utc_resolved(ev.end_timestamp);|            // mutated: cache keeps the pump's local-Unix values"
+"tz-single-slot-read-leaves-local-time|components/alpha_hwr/schedule_service.cpp|        ev.begin_timestamp = local_unix_to_utc_resolved(ev.begin_timestamp);\n        ev.end_timestamp = local_unix_to_utc_resolved(ev.end_timestamp);|        // mutated: single-slot read keeps the pump's local-Unix values"
+
 # A vacation that has already ended (issue #267). find_vacation_slot() returned
 # the first enabled Stop in slot order with no clock, so a FINISHED vacation in
 # an early slot shadowed a live one later: clear_vacation cleared the finished

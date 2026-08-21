@@ -3842,6 +3842,129 @@ static void test_clear_vacation_none_active() {
   TEST_ASSERT(h.sim.single_events[0][0] == 1, "run event untouched");
 }
 
+// ── The cache holds UTC, at an offset that is not zero (issue #268) ──────────
+//
+// main() pins TZ=UTC, and under that pin utc_to_local_unix() and
+// local_unix_to_utc_resolved() are the identity: every single-event fixture
+// round-trips bit for bit and the whole local<->UTC layer is invisible to this
+// suite. So a regression that left cached event timestamps in the pump's local
+// time would pass here.
+//
+// That invariant is load-bearing. The slot picker compares cached
+// `end_timestamp` values against the node's wall clock (#262) and the confirm
+// comparator compares a readback against the requested window; both are correct
+// only because the read path converts the pump's local-Unix wire value back to
+// UTC.
+//
+// **Scope, decided rather than left implicit.** These two tests un-pin the zone;
+// the other ~640 assertions stay under UTC. Running everything twice mostly
+// re-runs assertions with nothing timezone-dependent in them, and it would
+// require every fixture in the file to be re-expressed through the shift --
+// under Pacific the "ended" fixtures shift forward eight hours and become live,
+// which is the seven-assertion failure the review on #266 reported. The
+// conversion only exists at the edge, so the second leg belongs at the edge.
+//
+// **What the fixture models, also decided.** It models the HOST's zone, because
+// that is what utc_to_local_unix() reads. The pump applies its OWN DST rule --
+// `DaylightSavingTime` (94/102) reads enabled on the bench unit with the US
+// rule and a 60-minute offset -- and nothing checks that the two agree. A pump
+// shipped for one market and installed in another, or a node whose time_id zone
+// differs from the pump's locale, would diverge here with no signal. That is
+// its own capability (read 94/102, compare, surface a mismatch) and is not in
+// this change.
+
+/// The wire value the pump would hold for a given UTC instant: the local
+/// wall-clock FIELDS at that instant, re-encoded as if they were UTC.
+///
+/// Written against libc directly rather than through utc_to_local_unix(), so a
+/// test of the conversion cannot be satisfied by the conversion agreeing with
+/// itself.
+static uint32_t pump_wire_value_for(uint32_t utc) {
+  time_t t = static_cast<time_t>(utc);
+  struct tm lt {};
+  localtime_r(&t, &lt);
+  return static_cast<uint32_t>(timegm(&lt));
+}
+
+static void test_the_single_event_cache_holds_utc_at_a_real_offset() {
+  std::cout << "\n=== single events: the cache holds UTC at a non-zero offset (issue #268) ===" << std::endl;
+  setenv("TZ", "PST8PDT,M3.2.0/2,M11.1.0/2", 1);
+  tzset();
+  {
+    // 2026-07-15 09:00 local, inside PDT. Built from explicit fields so the
+    // fixture states an instant rather than borrowing one.
+    struct tm fields {};
+    fields.tm_year = 126;  // 2026
+    fields.tm_mon = 6;     // July
+    fields.tm_mday = 15;
+    fields.tm_hour = 9;
+    fields.tm_isdst = -1;  // let libc resolve PDT
+    const uint32_t utc_begin = static_cast<uint32_t>(mktime(&fields));
+    const uint32_t utc_end = utc_begin + 3600;
+
+    const uint32_t wire_begin = pump_wire_value_for(utc_begin);
+    TEST_ASSERT(wire_begin == utc_begin - 25200u,
+                "the fixture zone really does have an offset -- PDT is -7 h, "
+                "and under the TZ=UTC pin this difference is zero");
+
+    Harness h;
+    h.prime_cache();
+    h.seed_single_event(0, 0x02, wire_begin, pump_wire_value_for(utc_end));
+    h.write_op.submit_refresh_single_events("tzcache");
+    h.advance(60000);
+
+    const auto &cached = h.schedule.get_cached_single_events();
+    TEST_ASSERT(cached.size() == 1, "the slot was read into the cache");
+    if (cached.size() == 1) {
+      TEST_ASSERT(cached[0].begin_timestamp == utc_begin,
+                  "the cached begin is the UTC instant, not the local-Unix "
+                  "value the pump holds");
+      TEST_ASSERT(cached[0].end_timestamp == utc_end,
+                  "...and so is the cached end");
+    }
+  }
+  setenv("TZ", "UTC", 1);
+  tzset();
+}
+
+// The #262 slot picker, re-run at the same real offset. Its fixtures are seeded
+// THROUGH the shift here, so "ended" means ended rather than meaning "ended if
+// you happen to be at offset zero" -- which is the form in which the review on
+// #266 found seven of these assertions failing.
+static void test_the_slot_picker_still_expires_correctly_at_a_real_offset() {
+  std::cout << "\n=== single events: the slot picker at a non-zero offset ===" << std::endl;
+  setenv("TZ", "PST8PDT,M3.2.0/2,M11.1.0/2", 1);
+  tzset();
+  {
+    Harness h;
+    h.prime_cache();
+    h.sim.max_single_events = 5;
+    // Slot 0 ended an hour ago; slots 1-4 are live and run for another day.
+    // Written as the pump would hold them.
+    h.seed_single_event(0, 0x02, pump_wire_value_for(EVENT_ENDED_BEGIN),
+                        pump_wire_value_for(EVENT_ENDED_END));
+    for (uint8_t i = 1; i < 5; i++)
+      h.seed_single_event(i, 0x02, pump_wire_value_for(EVENT_TOMORROW_BEGIN),
+                          pump_wire_value_for(EVENT_TOMORROW_END));
+
+    h.write_op.submit_set_single_event(EVENT_NEXT_WEEK_BEGIN, EVENT_NEXT_WEEK_END, "tzpick");
+    h.advance(60000);
+
+    const WriteResult *r = h.result_for("tzpick");
+    TEST_ASSERT(h.events_for("tzpick") == 1, "exactly one terminal event");
+    TEST_ASSERT(r && r->status == WriteStatus::ACCEPTED,
+                "the pool is not full: one slot really has expired");
+    TEST_ASSERT(r && r->slot == 0,
+                "and it is the expired one that is recycled -- if the read path "
+                "stopped converting, slot 0 would read seven hours later and "
+                "look live, so every slot would");
+    TEST_ASSERT(h.sim_single_event_begin(1) == pump_wire_value_for(EVENT_TOMORROW_BEGIN),
+                "no live slot was overwritten");
+  }
+  setenv("TZ", "UTC", 1);
+  tzset();
+}
+
 // ── A vacation that has already ended (issue #267) ───────────────────────────
 //
 // find_vacation_slot() returned the first enabled Stop event in slot order with
@@ -5062,6 +5185,8 @@ int main() {
   test_a_matching_action_still_settles_accepted();
   test_clear_single_event_ignores_stale_content_in_a_disabled_slot();
   test_clear_vacation_targets_stop_slot();
+  test_the_single_event_cache_holds_utc_at_a_real_offset();
+  test_the_slot_picker_still_expires_correctly_at_a_real_offset();
   test_clear_vacation_skips_one_that_has_ended();
   test_clear_vacation_prefers_the_next_one_due();
   test_clear_vacation_will_still_clear_a_finished_one();

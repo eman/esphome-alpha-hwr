@@ -309,6 +309,32 @@
 
 ### Changed
 
+- **The write-op suite now exercises the local↔UTC conversion at an offset that
+  is not zero** (issue #268). `tests/test_write_operations.cpp` pins `TZ=UTC`,
+  and under that pin `utc_to_local_unix()` and `local_unix_to_utc_resolved()` are
+  the identity — every single-event fixture round-trips bit for bit and the whole
+  conversion layer is invisible to the suite. A regression that left cached event
+  timestamps in the pump's local time would have passed.
+
+  The invariant is load-bearing: the single-event slot picker compares cached
+  `end_timestamp` values against the node's wall clock (#262), and the confirm
+  comparator compares a readback against the requested window. Both are correct
+  only because the read path converts.
+
+  Two tests un-pin the zone to `PST8PDT` — one asserting the cache holds UTC after
+  a read, one re-running the slot picker's expiry decision with its fixtures
+  seeded *through* the shift. The scope is deliberate and recorded in the file:
+  the conversion exists only at the edge, so the second leg belongs at the edge
+  rather than as a second run of all ~640 assertions, most of which have nothing
+  timezone-dependent in them.
+
+  Also recorded there, because it is a real gap rather than an omission: the
+  fixture models the **host's** zone, since that is what the conversion reads. The
+  pump applies its own DST rule — `DaylightSavingTime` (94/102) reads enabled on
+  the bench unit, US rule, 60-minute offset — and nothing checks that the two
+  agree. A pump shipped for one market and installed in another would diverge
+  with no signal.
+
 - **A vacation that has already ended no longer shadows the live one**
   (issue #267). `find_vacation_slot()` returned the first enabled Stop
   single-event in the cache, in slot order, with no reference to a clock. With a
