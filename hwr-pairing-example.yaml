@@ -31,7 +31,7 @@ esphome:
 #    - Subsequent connections will use stored keys (no re-pairing needed)
 #
 # Note: BLE pairing is required to access voltage and current sensors.
-# The component handles this automatically when enable_pairing: true.
+# The component handles this automatically when initiate_pairing: true.
 # ==============================================================================
 
 substitutions:

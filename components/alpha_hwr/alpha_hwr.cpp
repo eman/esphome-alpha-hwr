@@ -727,7 +727,16 @@ void AlphaHwrComponent::check_link_readiness_() {
   const uint32_t rearm_ms = millis();
   this->link_ready_since_ms_ = rearm_ms;
 
-  if (!this->link_ready_recycle_) {
+  // The bound (issue #257). link_recycles_without_ready_ is the CONSECUTIVE
+  // count and is not incremented until the recycling branch below, so on the
+  // first expiry of an episode it is 0 -- which makes this test "have we used
+  // fewer than our allowance", and a limit of N give exactly N recycles.
+  // READY_RECYCLE_FOREVER needs no special case: nothing reaches it.
+  const bool recycling_enabled = this->link_ready_recycle_limit_ > 0;
+  const bool may_recycle = link_ready_may_recycle(this->link_ready_recycle_limit_,
+                                                  this->link_recycles_without_ready_);
+
+  if (!may_recycle) {
     // Naming without recycling: the default, and the half of this feature that
     // carries no hazard. It is also the half the reporter of issue #211 said he
     // could not build from outside -- an automation can already see that Pump
@@ -736,25 +745,51 @@ void AlphaHwrComponent::check_link_readiness_() {
     //
     // Deliberately does NOT touch link_recycles_without_ready_: nothing was
     // recycled, and counting one on a surface called "recycles" would be a lie
-    // an automation thresholds on.
-    ESP_LOGW(TAG,
-             "Pump connected %" PRIu32 " ms without becoming ready while %s "
-             "(next report in %" PRIu32 " ms; set ready_recycle to reconnect)",
-             expired_ms, this->session_.get_state_name(),
-             this->link_ready_timeout_current_ms_);
+    // an automation thresholds on. That matters more now the counter is also
+    // what the bound is judged against -- incrementing it here would let a
+    // node with recycling off consume an allowance it never used.
+    if (recycling_enabled) {
+      // The bound is spent. Said distinctly, because "stopped trying" is the
+      // state the reporter wanted their automation to be able to see, and it is
+      // otherwise indistinguishable from recycling being off.
+      ESP_LOGE(TAG,
+               "Pump connected %" PRIu32 " ms without becoming ready while %s - "
+               "recycled %" PRIu32 " time(s), the configured bound; leaving the "
+               "fault standing (next report in %" PRIu32 " ms)",
+               expired_ms, this->session_.get_state_name(),
+               this->link_recycles_without_ready_,
+               this->link_ready_timeout_current_ms_);
+    } else {
+      ESP_LOGW(TAG,
+               "Pump connected %" PRIu32 " ms without becoming ready while %s "
+               "(next report in %" PRIu32 " ms; set ready_recycle to reconnect)",
+               expired_ms, this->session_.get_state_name(),
+               this->link_ready_timeout_current_ms_);
+    }
     this->ble_manager_.note_failure(reason, core::FailureHold::READY);
     return;
   }
 
   this->link_recycles_without_ready_++;
 
-  ESP_LOGE(TAG,
-           "Pump connected %" PRIu32 " ms without becoming ready while %s - "
-           "recycling the link (consecutive: %" PRIu32 ", next window %" PRIu32
-           " ms)",
-           expired_ms, this->session_.get_state_name(),
-           this->link_recycles_without_ready_,
-           this->link_ready_timeout_current_ms_);
+  if (this->link_ready_recycle_limit_ == READY_RECYCLE_FOREVER) {
+    ESP_LOGE(TAG,
+             "Pump connected %" PRIu32 " ms without becoming ready while %s - "
+             "recycling the link (consecutive: %" PRIu32 ", next window %" PRIu32
+             " ms)",
+             expired_ms, this->session_.get_state_name(),
+             this->link_recycles_without_ready_,
+             this->link_ready_timeout_current_ms_);
+  } else {
+    ESP_LOGE(TAG,
+             "Pump connected %" PRIu32 " ms without becoming ready while %s - "
+             "recycling the link (%" PRIu32 " of %" PRIu32 ", next window %" PRIu32
+             " ms)",
+             expired_ms, this->session_.get_state_name(),
+             this->link_recycles_without_ready_,
+             this->link_ready_recycle_limit_,
+             this->link_ready_timeout_current_ms_);
+  }
 
   // Same reasoning as the liveness watchdog: by this watchdog's own evidence
   // the connection never worked, whatever the session state says.

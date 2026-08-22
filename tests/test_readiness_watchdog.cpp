@@ -28,6 +28,7 @@
 #include "../components/alpha_hwr/readiness_watchdog.h"
 
 using esphome::alpha_hwr::LINK_READY_TIMEOUT_BACKOFF_CAP_MS;
+using esphome::alpha_hwr::link_ready_may_recycle;
 using esphome::alpha_hwr::link_readiness_timeout_expired;
 using esphome::alpha_hwr::link_readiness_timeout_next;
 
@@ -156,6 +157,46 @@ static void test_the_two_watchdogs_share_one_ceiling() {
               "to one question would be a distinction with no reason");
 }
 
+// ---------------------------------------------------------------------------
+// Issue #257: ready_recycle is a bounded COUNT, not off-or-forever
+// ---------------------------------------------------------------------------
+//
+// The reporter's case is a bonded, connected link that never finishes its
+// opening GENI reads. One reconnect probably clears a glitch; fifty will not
+// clear anything a glitch did not cause, and each one takes another run at the
+// encryption-on-open window that can erase a bond (issue #14).
+static void test_the_recycle_allowance_is_a_count() {
+  // Off is off, whatever the episode has already done. This is the default and
+  // the half of issue #211's feature that carries no hazard.
+  TEST_ASSERT(!link_ready_may_recycle(0, 0), "a limit of 0 never recycles");
+  TEST_ASSERT(!link_ready_may_recycle(0, 5), "...still not after five");
+
+  // A limit of 1 -- what the reporter said they would set -- gives exactly one.
+  TEST_ASSERT(link_ready_may_recycle(1, 0), "a limit of 1 allows the first recycle");
+  TEST_ASSERT(!link_ready_may_recycle(1, 1), "...and stops after it");
+
+  // The boundary, walked, because an off-by-one here either wastes the last
+  // allowance or spends one more run at the bond-erase window than was asked
+  // for.
+  TEST_ASSERT(link_ready_may_recycle(3, 0), "limit 3: the 1st is allowed");
+  TEST_ASSERT(link_ready_may_recycle(3, 1), "limit 3: the 2nd is allowed");
+  TEST_ASSERT(link_ready_may_recycle(3, 2), "limit 3: the 3rd is allowed");
+  TEST_ASSERT(!link_ready_may_recycle(3, 3), "limit 3: the 4th is not");
+  TEST_ASSERT(!link_ready_may_recycle(3, 9), "limit 3: nor is the tenth");
+}
+
+// `ready_recycle: true` still means forever, so no config written before this
+// issue changes behaviour. The sentinel is the schema's business, not the
+// user's -- and the comparison covers it with no special case, since nothing
+// reaches 0xFFFFFFFF consecutive recycles.
+static void test_the_unbounded_sentinel_never_runs_out() {
+  const uint32_t forever = 0xFFFFFFFFu;
+  TEST_ASSERT(link_ready_may_recycle(forever, 0), "unbounded allows the first");
+  TEST_ASSERT(link_ready_may_recycle(forever, 100), "unbounded allows the hundredth");
+  TEST_ASSERT(link_ready_may_recycle(forever, 0xFFFFFFFEu),
+              "unbounded still allows one short of the sentinel");
+}
+
 int main() {
   std::cout << "==========================================" << std::endl;
   std::cout << "Readiness Watchdog Tests" << std::endl;
@@ -169,6 +210,8 @@ int main() {
   test_the_clock_survives_a_rollover();
   test_the_backoff_bounds_a_link_that_cannot_recover();
   test_the_two_watchdogs_share_one_ceiling();
+  test_the_recycle_allowance_is_a_count();
+  test_the_unbounded_sentinel_never_runs_out();
 
   std::cout << "\n==========================================" << std::endl;
   std::cout << "Results: " << tests_passed << " passed, " << tests_failed
