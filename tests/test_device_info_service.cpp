@@ -29,6 +29,7 @@
 #include <vector>
 
 #include "fixture_crc.h"
+#include "../components/alpha_hwr/class7_string.h"
 #include "../components/alpha_hwr/device_info_service.h"
 #include "../components/alpha_hwr/session.h"
 #include "../components/alpha_hwr/transport.h"
@@ -302,6 +303,13 @@ void test_no_string_is_rewritten_after_decoding() {
 // OUTCOME rather than which guard produced it. That is still worth having: it is
 // the regression test for anyone who lowers the transport's floor, and it is why
 // the service's own guard stays even though no input can now distinguish it.
+// NOTE (issue #282): this test drives the runt frames THROUGH a transport, and
+// since #278 gave Transport::on_notification() a length floor of its own, what
+// it proves is that floor -- the frames no longer reach the decode at all. The
+// service's own guard is proven by
+// test_the_decode_guard_is_reachable_without_a_transport() below, which calls
+// the pure decoder directly. Both are kept: this one pins that a runt cannot
+// produce a string by ANY route, which is the property a user cares about.
 void test_runt_frames_are_rejected_before_the_length_arithmetic() {
   std::cout << "\n=== Frames too short to hold a string are rejected ==="
             << std::endl;
@@ -393,6 +401,106 @@ void test_a_failed_read_is_reported() {
               "The four that did land are kept");
 }
 
+// ---------------------------------------------------------------------------
+// Issue #282: the memory-safety guard, proven rather than merely protected
+// ---------------------------------------------------------------------------
+//
+// The decode used to live in a lambda inside a private method, so the only way
+// to reach it was through a Transport. When #278 gave the transport a length
+// floor the two guards began masking each other's mutations, and CI found the
+// equivalent mutant (266/267 on #279). These call the decoder directly, with no
+// transport in front of it, so relaxing CLASS7_MIN_FRAME_LEN is visible again.
+void test_the_decode_guard_is_reachable_without_a_transport() {
+  std::cout << "\n=== The Class 7 guard is directly testable (#282) ==="
+            << std::endl;
+
+  using esphome::alpha_hwr::protocol::Class7Status;
+  using esphome::alpha_hwr::protocol::decode_class7_string;
+
+  // Every length that would make `len - HEADER_LEN - CRC_LEN` wrap. The bytes
+  // are a well-formed Class 7 head so that ONLY the length can reject them --
+  // a fixture that also failed the class test would prove the wrong guard.
+  const uint8_t head[8] = {0x24, 0x01, 0xF8, 0xE7, 0x07, 0x00, 0x00, 0x00};
+  for (size_t len = 0; len < 8; len++) {
+    const auto result = decode_class7_string(head, len);
+    TEST_ASSERT(result.status == Class7Status::FRAME_TOO_SHORT,
+                std::string("#282: a ") + std::to_string(len) +
+                    "-byte frame is refused before the length arithmetic");
+    TEST_ASSERT(result.value.empty(),
+                std::string("#282: ...and a ") + std::to_string(len) +
+                    "-byte frame yields no string");
+  }
+
+  // Exactly at the floor: eight bytes is a header plus a CRC, a legitimate
+  // zero-length string. Asserted so the guard cannot be "fixed" by raising it --
+  // that direction is what the surviving mutation entry already covers, and this
+  // is the boundary it moves against.
+  const auto at_floor = decode_class7_string(head, 8);
+  TEST_ASSERT(at_floor.status == Class7Status::OK,
+              "#282: eight bytes is the shortest legitimate frame, not a runt");
+  TEST_ASSERT(at_floor.string_bytes == 0 && at_floor.value.empty(),
+              "#282: ...and it carries a zero-length string");
+
+  // A null pointer is refused on the same branch, so a caller cannot reach the
+  // byte reads by passing a plausible length with no buffer.
+  TEST_ASSERT(decode_class7_string(nullptr, 64).status == Class7Status::NO_DATA,
+              "#282: a null buffer is refused whatever the length claims");
+
+  // The class byte is a separate rejection from the length, and reported as
+  // such -- collapsing the two would make a layout change look like corruption.
+  uint8_t wrong_class[9] = {0x24, 0x05, 0xF8, 0xE7, 0x0A, 0x01, 0x00, 0x00, 0x00};
+  TEST_ASSERT(decode_class7_string(wrong_class, 9).status == Class7Status::NOT_CLASS_7,
+              "#282: a non-Class-7 frame is refused on its class, not its length");
+}
+
+// The decode itself, at the boundary, without a transport. These are the cases
+// that were only ever exercised through a 9-byte captured frame before.
+void test_the_pure_decode_matches_the_captured_behaviour() {
+  std::cout << "\n=== The pure Class 7 decode (#282) ===" << std::endl;
+
+  using esphome::alpha_hwr::protocol::Class7Status;
+  using esphome::alpha_hwr::protocol::decode_class7_string;
+  using esphome::alpha_hwr::protocol::CLASS7_MAX_STRING_LEN;
+
+  // The captured product-name frame: count 0x0A, "ALPHA HWR\0" in 18 bytes.
+  const uint8_t product[18] = {0x24, 0x0E, 0xF8, 0xE7, 0x07, 0x0A,
+                               'A', 'L', 'P', 'H', 'A', ' ', 'H', 'W', 'R', 0x00,
+                               0x00, 0x00};
+  const auto name = decode_class7_string(product, sizeof(product));
+  TEST_ASSERT(name.status == Class7Status::OK && name.value == "ALPHA HWR",
+              "#282: the captured product name decodes whole, first character included");
+  TEST_ASSERT(!name.count_disagrees,
+              "#282: ...and its count byte agrees with the frame length");
+
+  // A count byte that disagrees is reported but does NOT bound the copy. The
+  // frame length does that; trusting a radio-supplied count is an overread
+  // waiting to happen from the other direction.
+  uint8_t lying[18];
+  for (size_t i = 0; i < sizeof(product); i++) lying[i] = product[i];
+  lying[5] = 0x7F;  // claims 127 string bytes in an 18-byte frame
+  const auto lied = decode_class7_string(lying, sizeof(lying));
+  TEST_ASSERT(lied.status == Class7Status::OK && lied.value == "ALPHA HWR",
+              "#282: an overstated count byte does not extend the copy");
+  TEST_ASSERT(lied.count_disagrees,
+              "#282: ...and the disagreement is reported to the caller");
+
+  // Trailing whitespace is trimmed; an interior space is not.
+  const uint8_t padded[16] = {0x24, 0x0C, 0xF8, 0xE7, 0x07, 0x08,
+                              'A', ' ', 'B', ' ', ' ', '\t', 0x00, 0x00, 0x00, 0x00};
+  TEST_ASSERT(decode_class7_string(padded, sizeof(padded)).value == "A B",
+              "#282: trailing whitespace is trimmed and an interior space is kept");
+
+  // Longer than the cap: truncated, and said so rather than silently.
+  std::vector<uint8_t> big{0x24, 0x00, 0xF8, 0xE7, 0x07, 0x00};
+  for (size_t i = 0; i < 200; i++) big.push_back('x');
+  big.push_back(0x00);
+  big.push_back(0x00);
+  const auto cut = decode_class7_string(big.data(), big.size());
+  TEST_ASSERT(cut.value.size() == CLASS7_MAX_STRING_LEN,
+              "#282: an overlong string is cut at the cap");
+  TEST_ASSERT(cut.truncated, "#282: ...and the truncation is reported");
+}
+
 int main() {
   std::cout << "==========================================" << std::endl;
   std::cout << "Device Info Service Tests" << std::endl;
@@ -404,6 +512,8 @@ int main() {
   test_runt_frames_are_rejected_before_the_length_arithmetic();
   test_an_empty_string_reads_as_success();
   test_a_failed_read_is_reported();
+  test_the_decode_guard_is_reachable_without_a_transport();
+  test_the_pure_decode_matches_the_captured_behaviour();
 
   std::cout << "\n==========================================" << std::endl;
   std::cout << "Results: " << tests_passed << " passed, " << tests_failed
