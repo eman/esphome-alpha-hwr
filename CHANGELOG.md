@@ -532,13 +532,18 @@
   metadata HACS requires, and that the plugin file is where HACS looks.
 
   It found two gaps on its first run. **The repository had no LICENSE file** —
-  fixed, see Added above, and that check now gates rather than being ignored.
-  The other, that the README has no images, is a default-store criterion rather
-  than a custom-repository one, so it does not affect installing today; it is
-  ignored explicitly and annotated with what fixing it takes, rather than left
-  somewhere failures go to be forgotten. Everything else gates, including the
-  `hacs.json` schema check — the failure a hand audit misses and a user
-  discovers.
+  fixed, see Added above. The other, that the README has no images, is a
+  default-store criterion rather than a custom-repository one and does not
+  affect installing today.
+
+  Both are ignored in the job, and the licence one carries a note to remove it
+  after this merges: that check reads GitHub's repository-level licence field,
+  which GitHub derives from the **default branch**, so a `LICENSE` that exists
+  only on a feature branch cannot satisfy it. Adding the file and removing the
+  ignore in the same PR cannot both pass — worth knowing before someone tries.
+
+  Everything else gates, including the `hacs.json` schema check — the failure a
+  hand audit misses and a user discovers.
 
   `hacs.json` carries only `name` and `filename`. An earlier draft added
   `render_readme` and a `homeassistant` minimum version; both were dropped as
