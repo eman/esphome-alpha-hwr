@@ -26,7 +26,7 @@ events fire.
 | --- | --- | --- | --- |
 | `ble_client_id` | string | **required** | BLE client ID for pump connection |
 | `time_id` | ID | none | A `time:` component to sync the pump's clock from. Optional in the schema, but see below — without it the pump's clock is never set. |
-| `enable_pairing` | boolean | `false` | Enable BLE pairing for control and enhanced telemetry |
+| `initiate_pairing` | boolean | `false` | Whether **this node** initiates BLE pairing and configures security parameters. It does *not* prevent bonding — see below. (Formerly `enable_pairing`, still accepted.) |
 | `reconnect_settle_time` | time | `2s` | Delay after disconnect before reconnecting |
 | `control_state_poll_interval` | time | `30s` | Interval for periodic control state polling. Set to `0s` to disable. |
 | `data_timeout` | time | `60s` | Tear the BLE link down after this long with no data from the pump, so the normal reconnect runs. Set to `0s` to disable. |
@@ -191,7 +191,24 @@ which base a value arrived in — two clients disagreeing is worse than either
 being wrong alone. If the rules disagree, change the one that is wrong: the
 pump's rule through the GO app, or the node's zone in your `time:` block.
 
-### `enable_pairing`
+### `initiate_pairing`
+
+> **This option cannot stop the node bonding, and its old name implied it
+> could.** It was called `enable_pairing`, which reads as a property of the
+> link — "this node will not bond". No ESPHome component can promise that. When
+> the pump initiates, ESPHome's own `BLEClientBase::gap_event_handler()` has
+> already consented on our behalf, unconditionally, before this component sees
+> the event. A node with the option off was observed bonding **four times in
+> twenty minutes**, 252 ms after logging `Skipping encryption request - pairing
+> disabled` ([#245](https://github.com/eman/esphome-alpha-hwr/issues/245)).
+>
+> What it governs is *our side of the negotiation*: whether this component asks,
+> and what security parameters it sets. It has never meant "do not bond"; it
+> means "do not ask, but say yes if asked".
+>
+> `enable_pairing` is still accepted and means exactly what it always did, so no
+> existing configuration changes behaviour. Setting both names to different
+> values is refused rather than resolved.
 
 Pairing is initiated by the pump, not by this node. On an unbonded connection
 the node stays silent and waits for the pump's security request, because a
@@ -225,7 +242,7 @@ own pump (see [#229](https://github.com/eman/esphome-alpha-hwr/pull/229)):
    whether a link is established.
 6. If nothing happens, press it again. It commonly takes several attempts.
 
-Then let the node reconnect. **Set `enable_pairing: true` before any of this**,
+Then let the node reconnect. **Set `initiate_pairing: true` before any of this**,
 or the pump's offer goes nowhere: with it false this component configures no IO
 capability, no bonding requirement and no key distribution, so nothing is set up
 to complete a bond. (ESPHome's own BLE client answers the pump's request
@@ -264,7 +281,7 @@ which points at radio trouble — and the radio is fine; the connections succeed
 Three cycles rather than one, so an ordinary dropped link is not reported as a
 pairing problem — and three specific cycles. A connection that carried data is
 not counted, so an unbonded node running read-only telemetry (the default, since
-`enable_pairing` is `false`) does not accumulate them on its ordinary
+`initiate_pairing` is `false`) does not accumulate them on its ordinary
 reconnects. Neither is a link the node dropped itself: a `data_timeout` recycle
 looks identical in every other respect, and blaming pairing for a pump that is
 simply not answering would replace a true diagnosis with a false one. Neither,
@@ -814,7 +831,7 @@ alpha_hwr:
 ```yaml
 alpha_hwr:
   ble_client_id: hwr_pump_client
-  enable_pairing: true
+  initiate_pairing: true
   control_state_poll_interval: 30s
   flow:
     name: "Flow Rate"

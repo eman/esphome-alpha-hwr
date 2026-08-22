@@ -2,8 +2,28 @@
 # ALPHA HWR Base Package
 # ==============================================================================
 # 
-# This package provides basic telemetry from the Grundfos ALPHA HWR pump
-# without BLE pairing/bonding. Use this for simple monitoring scenarios.
+# This package provides basic telemetry from the Grundfos ALPHA HWR pump, with
+# this node never INITIATING BLE pairing. Use it for simple monitoring.
+#
+# It used to say "without BLE pairing/bonding", and that claim could not be
+# supported (issues #244 and #245). Two separate problems with it:
+#
+#   1. Not initiating is not the same as not bonding. The pump can initiate, and
+#      ESPHome consents on our behalf before this component sees the event -- a
+#      node on this package was observed bonding four times in twenty minutes
+#      (#245). So this package does not deliver an unbonded node, and never did.
+#
+#   2. Whether an unbonded link WORKS on this pump is still open (#244). The
+#      sibling client's docs record a measured ~1.8 s drop of an unbonded
+#      connection, in seven places, traced to a debugging episode rather than
+#      assumed; on the ESP32 the pump accepts the connection, completes
+#      discovery, accepts the CCCD write and then hangs up at ~2.02 s, having
+#      sent zero GENI frames across 90 measured cycles. Nobody has yet reported
+#      a node on this package reaching Pump Ready without a bond.
+#
+# So: use this package for monitoring, and expect to pair the pump. If you are
+# running it unpaired and it works, please say so on #244 -- one "yes" settles
+# a question the repo has asserted in four places and measured in none.
 #
 # Telemetry Included:
 # - Flow Rate (m³/h)

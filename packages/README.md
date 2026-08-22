@@ -190,7 +190,7 @@ See the root directory for complete example configurations:
 - Use `esphome logs` to see BLE scan results
 
 ### Pairing Fails
-- Ensure `enable_pairing: true` is set
+- Ensure `initiate_pairing: true` is set (formerly `enable_pairing`, still accepted)
 - Try erasing NVS flash: `esphome run --erase-nvs`
 - Check logs for pairing error messages
 

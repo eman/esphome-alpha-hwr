@@ -534,6 +534,21 @@ MUTATIONS=(
 # booking too -- which is the destruction "leave creation alone" was chosen to
 # avoid.
 "clear-vacation-takes-every-stored-stop|components/alpha_hwr/schedule_service.cpp|      if (covers_now)|      if (true)"
+# ---------------------------------------------------------------------------
+# ready_recycle is a bounded COUNT, not off-or-forever (issue #257)
+#
+# The reporter's case is a bonded, connected link that never finishes its
+# opening GENI reads. One reconnect clears a glitch; fifty will not clear
+# anything a glitch did not cause, while each takes another run at the
+# encryption-on-open window that can erase a bond (issue #14). Killing this
+# makes every configured bound unlimited again.
+# ---------------------------------------------------------------------------
+"ready-recycle-bound-ignored|components/alpha_hwr/readiness_watchdog.h|  return consecutive < limit;|  return true;"
+# The bound is judged against the CONSECUTIVE counter, which the pump becoming
+# ready resets -- so an allowance is per episode rather than per boot. Reading a
+# lifetime counter instead would let a node spend its allowance on unrelated
+# episodes months apart and then never recycle again.
+"ready-recycle-allowance-never-restored|components/alpha_hwr/alpha_hwr.cpp|        this->link_recycles_without_ready_ = 0;|        // mutated: the allowance is never restored"
 "response-crc-enforcement|components/alpha_hwr/transport.cpp|if (!protocol::frame_crc_valid(reassembly_buffer_.data(), frame_len)) {|if (false) {"
 "response-crc-trim|components/alpha_hwr/transport.cpp|if (expected_packet_length_ >= 4 && frame_len > expected_packet_length_) {|if (false) {"
 "register-read-vetoes-type-match|components/alpha_hwr/transport.cpp|bool wildcard_command = (cmd.expect_type_low_ver == 0x0000 && cmd.expect_type_high == 0x0000);|bool wildcard_command = true;"
@@ -816,10 +831,18 @@ MUTATIONS=(
 # is assigned from millis() eleven lines above it.)
 "readiness-watchdog-rearmed-by-activity|components/alpha_hwr/alpha_hwr.cpp|        this->link_last_inbound_ms_ = inbound_now;|        this->link_last_inbound_ms_ = inbound_now;\n        this->link_ready_since_ms_ = inbound_now;"
 "readiness-watchdog-not-checked|components/alpha_hwr/alpha_hwr.cpp|    if (!this->check_link_liveness_())\n      this->check_link_readiness_();|    this->check_link_liveness_();"
-# The split (issue #211): naming ships on, recycling is opt-in. Removing the
-# gate makes every default installation start tearing its link down, which is
-# the bond-erase exposure the split exists to withhold.
-"readiness-recycles-by-default|components/alpha_hwr/alpha_hwr.cpp|  if (!this->link_ready_recycle_) {|  if (false) {"
+# The split (issue #211): naming ships on, recycling is opt-in. A default
+# installation that starts tearing its link down is the bond-erase exposure the
+# split exists to withhold.
+#
+# Issue #257 turned the opt-in from a bool into a bound, so this no longer has a
+# gate of its own to remove -- "off" is now the limit of 0 falling out of the
+# same comparison the bound uses. Hence the off-by-one: it leaves the bound
+# working and flips only the default, from never-recycle to recycle-once, which
+# is the claim this entry has always been about. `return true` is the other
+# entry (ready-recycle-bound-ignored); mutating this to `if (false)` at the call
+# site would have been an equivalent mutant of it and proved nothing new.
+"readiness-recycles-by-default|components/alpha_hwr/readiness_watchdog.h|  return consecutive < limit;|  return consecutive <= limit;"
 # The rank. Both halves of the defect that nearly shipped: taking the default at
 # the call site, and ignoring the parameter inside. force_disconnect() used to
 # hardcode DATA, so the readiness reason was held at the one rank released by

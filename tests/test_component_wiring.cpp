@@ -121,7 +121,7 @@ struct Rig {
     // The shipped defaults: naming on at 300s, recycling off. A test that
     // wants the link torn down asks for it, exactly as a user must.
     component.set_ready_timeout(300000);
-    component.set_ready_recycle(false);
+    component.set_ready_recycle_limit(0);
     component.set_link_recycles_sensor(&recycles);
     component.set_link_gaps_truncated_sensor(&gaps_truncated);
     component.set_link_watch_time_sensor(&watch_time);
@@ -1129,7 +1129,7 @@ void test_a_link_that_never_becomes_ready_is_recycled() {
 
   Rig r;
   r.answer_writes = false;  // the reads go out and nothing answers them
-  r.component.set_ready_recycle(true);  // this test is about the opt-in half
+  r.component.set_ready_recycle_limit(AlphaHwrComponent::READY_RECYCLE_FOREVER);  // this test is about the opt-in half
   r.setup();
   r.connect_and_subscribe();
 
@@ -1150,6 +1150,86 @@ void test_a_link_that_never_becomes_ready_is_recycled() {
   TEST_ASSERT(r.link_fault.state.find("never became ready") != std::string::npos,
               "...and the fault says what was wrong, in the terms an operator "
               "can act on rather than as a BLE error code");
+}
+
+// ---------------------------------------------------------------------------
+// Issue #257: the recycle allowance is spent, and then it stops
+// ---------------------------------------------------------------------------
+//
+// The predicate is pinned in test_readiness_watchdog.cpp. This is the half that
+// only exists in alpha_hwr.cpp: that the allowance is actually CONSUMED per
+// recycle, that the counter it is judged against is the one the pump becoming
+// ready resets, and that a spent bound leaves the fault standing rather than
+// going quiet.
+void test_the_recycle_bound_stops_the_link_being_torn_down() {
+  std::cout << "\n=== A bounded ready_recycle stops after its allowance (#257) ==="
+            << std::endl;
+
+  Rig r;
+  r.answer_writes = false;  // the opening reads go out and nothing answers
+  r.component.set_ready_recycle_limit(2);
+  r.setup();
+  r.connect_and_subscribe();
+
+  const int before = r.client.mock_disconnect_calls();
+
+  // Each expiry widens the window, so walk well past several of them. The
+  // backoff is what makes "keep advancing" the right shape here rather than
+  // stepping one budget at a time.
+  for (int i = 0; i < 12; i++) {
+    advance_with_telemetry(r, 300000);
+  }
+
+  const int recycles = r.client.mock_disconnect_calls() - before;
+  TEST_ASSERT(recycles == 2,
+              std::string("#257: exactly the configured 2 recycles happened, "
+                          "then it stopped (got ") +
+                  std::to_string(recycles) + ")");
+
+  // Stopping is not going quiet. The fault has to stay readable, because "it
+  // stopped trying" is precisely the state the reporter wanted an automation to
+  // be able to see.
+  TEST_ASSERT(!r.ready_is_on(), "#257: the pump is still not ready");
+  TEST_ASSERT(r.link_fault.state.find("never became ready") != std::string::npos,
+              "#257: ...and the fault is still standing, not cleared by giving up");
+}
+
+// The counter the bound is judged against is CONSECUTIVE -- reset by the pump
+// actually becoming ready -- so a link that recovers gets its full allowance
+// again. Without that, a node would spend its lifetime allowance on unrelated
+// episodes months apart and then never recycle again.
+void test_the_recycle_allowance_is_restored_by_becoming_ready() {
+  std::cout << "\n=== The recycle allowance is per episode, not per boot (#257) ==="
+            << std::endl;
+
+  Rig r;
+  r.answer_writes = false;
+  r.component.set_ready_recycle_limit(1);
+  r.setup();
+  r.connect_and_subscribe();
+
+  const int before = r.client.mock_disconnect_calls();
+  for (int i = 0; i < 6; i++) advance_with_telemetry(r, 300000);
+  const int first_episode = r.client.mock_disconnect_calls() - before;
+  TEST_ASSERT(first_episode == 1, "#257: the first episode spent its one recycle");
+
+  // Now let the pump actually become ready, which is the one thing that
+  // refutes the fault and so the one thing that restores the allowance.
+  r.answer_writes = true;
+  r.connect_and_subscribe();
+  TEST_ASSERT(r.run_until_ready(), "#257: the pump reached ready");
+
+  // A second EPISODE, which needs a fresh link: while the component is still
+  // holding a connection it has seen become ready, the readiness watchdog is
+  // correctly not its business, so nothing would expire on the old one however
+  // long the test ran.
+  r.answer_writes = false;
+  r.disconnect(ESP_GATT_CONN_TERMINATE_PEER_USER);
+  r.connect_and_subscribe();
+  const int before_second = r.client.mock_disconnect_calls();
+  for (int i = 0; i < 6; i++) advance_with_telemetry(r, 300000);
+  TEST_ASSERT(r.client.mock_disconnect_calls() - before_second == 1,
+              "#257: a second episode gets its own recycle, not a spent one");
 }
 
 void test_the_readiness_fault_is_visible_while_the_session_is_ready() {
@@ -1180,7 +1260,7 @@ void test_a_healthy_link_never_trips_the_readiness_watchdog() {
   Rig r;
   // Recycling ON for the same reason: a healthy link not being torn down is
   // only evidence when a teardown was possible.
-  r.component.set_ready_recycle(true);
+  r.component.set_ready_recycle_limit(AlphaHwrComponent::READY_RECYCLE_FOREVER);
   r.setup();
   r.connect_and_subscribe();
   TEST_ASSERT(r.run_until_ready(), "Reaches Pump Ready normally");
@@ -1241,7 +1321,7 @@ void test_a_node_without_the_ready_entity_is_not_recycled_forever() {
   // Recycling ON, because that is what makes this test mean anything: with
   // it off "was not recycled" is trivially true and the mutation that reads
   // readiness back off the absent entity survives unnoticed.
-  r.component.set_ready_recycle(true);
+  r.component.set_ready_recycle_limit(AlphaHwrComponent::READY_RECYCLE_FOREVER);
   r.setup();
   r.connect_and_subscribe();
   // Long enough for the read chain to complete and the caches to fill. There is
@@ -1264,7 +1344,7 @@ void test_readiness_recycles_reach_the_counter_an_automation_watches() {
   // because a readiness recycle never touches the data counter.
   Rig r;
   r.answer_writes = false;
-  r.component.set_ready_recycle(true);  // this test is about the opt-in half
+  r.component.set_ready_recycle_limit(AlphaHwrComponent::READY_RECYCLE_FOREVER);  // this test is about the opt-in half
   r.setup();
   r.connect_and_subscribe();
   advance_with_telemetry(r, 400000);
@@ -2552,6 +2632,8 @@ int main() {
   test_the_pump_offering_to_pair_takes_the_fault_back_off();
   test_a_stall_does_not_bury_a_bond_erasing_pairing_failure();
   test_a_link_that_never_becomes_ready_is_recycled();
+  test_the_recycle_bound_stops_the_link_being_torn_down();
+  test_the_recycle_allowance_is_restored_by_becoming_ready();
   test_the_readiness_fault_is_visible_while_the_session_is_ready();
   test_a_healthy_link_never_trips_the_readiness_watchdog();
   test_the_readiness_fault_survives_the_telemetry_that_masks_it();
