@@ -442,9 +442,16 @@ cp secrets.yaml components/alpha_hwr/secrets.yaml
 
 ## Optional Lovelace schedule card
 
-The schedule card source ships in this repo at
-`homeassistant/www/alpha-hwr-schedule-card.js`. It is a separate Home Assistant
-frontend resource, so ESPHome does not install it automatically.
+The schedule card ships in this repo at `dist/alpha-hwr-schedule-card.js`. It is
+a separate Home Assistant frontend resource, so ESPHome does not install it —
+**install it through HACS** so it stays in step with the firmware.
+
+That matters more than it sounds. The card has drifted out of step with the
+firmware twice, and both times silently: a required service argument it never
+picked up made every write a no-op, and a display change left the Quick Run list
+empty in a way indistinguishable from "no events exist". Neither raised an
+error. HACS pins the card to a release and tells you when a newer one exists,
+which removes that whole class.
 
 ### Prerequisites
 
@@ -454,10 +461,28 @@ frontend resource, so ESPHome does not install it automatically.
 - Use `alpha_hwr_schedule_editor.yaml` so Home Assistant gets the
   `esphome.<node_name>_*` services the card calls when you edit schedules.
 
-### Install the card in Home Assistant
+### Install the card with HACS (recommended)
 
-1. Copy `homeassistant/www/alpha-hwr-schedule-card.js` from this repo into your
-   Home Assistant `www` directory.
+1. In Home Assistant, open **HACS → ⋮ → Custom repositories**.
+2. Add `https://github.com/eman/esphome-alpha-hwr` with type **Dashboard**.
+3. Find **Alpha HWR Schedule Card** in HACS and install it.
+4. Refresh the browser.
+
+HACS registers the dashboard resource itself, so there is no Resources step, and
+it raises an update notification when a newer release exists. The version it
+installs is the release tag, so the card matches the firmware it was tested
+against.
+
+This repo is not (yet) in the HACS default store, which is why the URL has to be
+pasted once.
+
+### Install the card by hand (fallback)
+
+For installs not running HACS. Nothing tells you when this copy goes stale, so
+check it against the release you are running after each firmware update.
+
+1. Copy `dist/alpha-hwr-schedule-card.js` from this repo into your Home
+   Assistant `www` directory.
    - Home Assistant OS / Supervised: usually `/config/www/alpha-hwr-schedule-card.js`
    - Container installs: copy it into the mounted config directory under `www/`
 2. In Home Assistant, open **Settings → Dashboards → Resources** and add:
@@ -465,6 +490,10 @@ frontend resource, so ESPHome does not install it automatically.
    - **Resource type**: `JavaScript Module`
 3. Refresh the browser, or reload the frontend resources if Home Assistant does
    not pick up the new card immediately.
+
+To check which version a hand-copied card is, look at the header line or the
+browser console — the card logs its version once on load. That version is the
+alpha_hwr release it shipped with.
 
 ### Lovelace example
 
@@ -536,3 +565,7 @@ so dragging and editing are unaffected.
 - ESPHome BLE client docs: <https://esphome.io/components/ble_client/>
 - Architecture notes: [docs/architecture.md](docs/architecture.md)
 - Schedule service usage: [docs/schedule-management.md](docs/schedule-management.md)
+
+## License
+
+MIT — see [LICENSE](LICENSE).

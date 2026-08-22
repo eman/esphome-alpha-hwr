@@ -336,6 +336,22 @@ class ControlService {
    /** Get cached cycle time OFF minutes (-1 = not yet read). */
    int8_t get_cached_cycle_time_off() const { return cached_cycle_time_off_; }
    /**
+    * The pump's own commissioning value, not something this component invented.
+    *
+    * Issue #280 opened as "bonus capability or unsupported feature?", because
+    * the Grundfos GO app shows no such control on any ordinary screen and the
+    * manual (§9.3.4) says this mode runs on its maximum curve with only time
+    * parameters. Reading the app settled it: its COMMISSIONING flow has an
+    * input widget bound to this field and a recommendation engine that computes
+    * the value from the largest supply pipe dimension and the pipe material.
+    * It is a flow limit for the recirculation loop, sized to the piping.
+    *
+    * So: supported, hidden after setup, and preserved across ordinary app use
+    * (changing cycle times in the GO app leaves it alone). It is also NOT the
+    * MaxFlow limiter under another name -- that limiter does not apply to this
+    * mode, verified by delivering 2.0 and 3.0 gpm here with MaxFlow enabled at
+    * 1.4 and 1.6.
+    *
     * Get the cycle-mode stored flow setpoint in m³/h (Obj 91 Sub 421; NAN until
     * the DHW config has been read). The wire float is SI m³/s (issue #107).
     */

@@ -577,6 +577,35 @@ class WriteOperationService {
   static constexpr uint32_t SETPOINT_RETRY_DELAY_MS = 1500;
   static constexpr uint8_t SETPOINT_MAX_ATTEMPTS = 2;
   static constexpr uint32_t CONFIG_STEP2_DELAY_MS = 400;
+  // 1200 ms, and measured rather than assumed (issue #250).
+  //
+  // The worry was the Grundfos GO app's 2500 ms `afterSetSendPause`: if the pump
+  // needs longer than this to make a write visible to a read, the confirm sees
+  // pre-write values and settles `clamped` or `rejected` for a write that
+  // landed.
+  //
+  // Measured on the bench by rebuilding with this cut and CONFIG_MAX_ATTEMPTS
+  // at 0, so no retry could mask what the FIRST readback saw. At 50 ms: five
+  // writes, five accepted, each carrying back the value just written. At
+  // 200 ms: the same. A stale readback would have settled REJECTED and a silent
+  // one TIMEOUT; neither occurred in ten writes. So the value is visible far
+  // sooner than this constant waits, and nothing argues for moving toward 2500.
+  //
+  // What the margin actually belongs to: settle is 0.7-0.8 s even at a 50 ms
+  // delay, because the write sequence itself is several round trips (mode
+  // request SET, limits-tail read, Obj 91 SET, commit), each acknowledgement
+  // taking ~120 ms. The measurement cannot separate "the pump applies
+  // instantly" from "the sequence is long enough that this delay is
+  // irrelevant" -- so if the sequence is ever shortened, the margin does not
+  // automatically carry over and this wants re-measuring.
+  //
+  // Both callers measured, not one: SET_CYCLE_TIMES was run the same way and
+  // gave the same answer -- five writes, five accepted, every readback carrying
+  // the values just written. One of those settled in 5.4 s against 0.8-1.0 s
+  // for the rest, from somewhere inside the write sequence rather than from a
+  // confirm retry (there were none); it still settled accepted with correct
+  // values, and it is noted here because a long settle looks like a
+  // confirm-delay problem to anyone reading settle times and is not one.
   static constexpr uint32_t CONFIG_CONFIRM_DELAY_MS = 1200;
   static constexpr uint32_t CONFIG_RETRY_DELAY_MS = 1500;
   static constexpr uint8_t CONFIG_MAX_ATTEMPTS = 1;

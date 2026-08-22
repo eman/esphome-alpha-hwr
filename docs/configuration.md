@@ -954,33 +954,116 @@ on two pumps converts to an exact gpm figure.
 one of them is configured — five frames per connection and three per control poll
 otherwise buy nothing.
 
-**Reading only.** Enabling or changing a limiter from here is not implemented:
-switching one on silently caps the pump, which is not a change to make as a side
-effect. Set them in the Grundfos GO app.
+### Where the limiter actually binds
 
-## Cycle Flow: a control the vendor does not offer
+An enabled limiter is **not** a general explanation for a setpoint that is not
+reached. It applies to some modes and not others, bench-established across a
+full afternoon (issue #274):
+
+| mode | GO app shows it | limiter binds | evidence |
+| --- | --- | --- | --- |
+| Constant Curve | Max + Min Flow | **yes** | a 1.6 cap gives 1.59 gpm, 1.4 gives 1.40 |
+| Constant Pressure | Max + Min Flow | **yes** | a 1.4 cap gives 1.416 gpm, 1.0 gives 0.997 |
+| Temperature Control | "Flow Rate Setting" | presumed | shares the same value; untested operationally |
+| **Cycle Time** | nothing | **no** | 2.0 gpm delivered against a 1.4 cap |
+| Constant Flow | setpoint only | untested | the setpoint is itself a flow |
+
+Where it binds, **flow follows the cap rather than the setpoint**: a commanded
+3000 RPM delivered 1885 RPM and 1.59 gpm against a 1.6 cap. In cycle time the cap
+is ignored outright — a cycle flow setpoint of 2.0 delivered 2.008 gpm while
+MaxFlow was 1.4, sustained, while the limiter was demonstrably active in other
+modes the same afternoon.
+
+The first three modes **share one value**: change the max flow under Constant
+Pressure and Constant Curve and Temperature Control follow. That is one register,
+not three kept in sync — a sweep of the whole declared range found only limiter
+indices 1 and 2 exist.
+
+Two things worth knowing about that table:
+
+- **The app's display is an accurate map of scope.** Every mode where it shows
+  the setting is a mode where the limiter binds, and the one mode where it hides
+  it is the one where it does not. That makes Temperature Control's linked value
+  reasonable evidence rather than a guess, which matters because that mode is
+  impractical to test directly — you would have to manufacture return-line
+  conditions, and a hot water draw changes the hydraulics you are trying to
+  measure.
+- **The manual agrees.** §9.3.1 (AUTOADAPT), §9.3.2 (temperature control) and
+  §9.3.3 (24/7) all mention flow limits; §9.3.4 (cycle time) and §9.3.7 (constant
+  flow) do not.
+
+**None of this has to be encoded, and deliberately is not.** The entities above
+are driven from the pump's *status* registers (86/640, 641 and the manager at
+86/660), never from the enable flag — so in cycle time they read "not limiting"
+because the pump is not limiting, with no mode table to maintain and no scope
+rules to keep in step with firmware. A signal driven from the enable flag would
+report a limiter "active" in cycle time and be wrong in the more misleading
+direction: telling you a setpoint is being held down while it is being delivered
+exactly.
+
+### Reading only, for now
+
+Enabling or changing a limiter from here is not implemented: switching one on
+silently caps the pump, which is not a change to make as a side effect. Set them
+in the Grundfos GO app.
+
+That leaves a real gap, and it is worth naming. **This component exposes the flow
+limit the app hides, and hides the flow limit the app shows on three screens.**
+Cycle Flow (below) appears nowhere in the app's ordinary UI and is a control
+here; the MaxFlow limiter appears on the constant curve, constant pressure and
+temperature screens and is read-only here. For three modes the limiter *is* the
+flow control — constant curve and constant pressure regulate speed and head, so
+flow drifts with hydraulics and the cap is the only thing bounding it, and per
+§9.3.2 temperature control deliberately runs up its maximum curve *until it
+reaches the flow limit*, which makes the limit the operating point rather than a
+safety net.
+
+The vendor's stated reasons for capping flow are ordinary owner concerns, not
+commissioning-only ones: §10.4 gives system noise, and §9.3.2 and §9.3.3 give
+flow-accelerated corrosion.
+
+## Cycle Flow: the vendor sets it, but never shows it
 
 **Cycle Flow** sets the flow the pump targets during the ON periods of Cycle Time
 Control. It works — bench-measured within 1% across four setpoints, with motor
-speed moving to hold it — and **the Grundfos GO app has no equivalent control**.
-The manual is stronger than silent: §9.3.4 says the pump "operates at its maximum
-curve" in this mode, starting and stopping on time parameters, and mentions no
-flow setting at all.
+speed moving to hold it.
 
-It is exposed anyway, deliberately. The register split is what the pump's own
-layout says — Object 91 Sub 421's first field is a flow setpoint and Sub 430 has
-no flow field — and being undocumented by the vendor is not a reason to remove
-something that regulates correctly.
+### It is a supported field, not one this component invented
 
-It is also **not** the MaxFlow limiter under another name. The limiter does not
-apply to this mode: 2.0 and 3.0 gpm cycle-flow runs were delivered in full with
-MaxFlow enabled at 1.4 and 1.6 gpm. Two mechanisms, two objects, different
-scopes.
+This started as a doubt: **the Grundfos GO app has no equivalent control**, and
+the manual is stronger than silent — §9.3.4 says the pump "operates at its
+maximum curve" in this mode, starting and stopping on time parameters, with no
+flow setting mentioned at all. That looked like grounds to treat it as a
+happens-to-work capability.
 
-Why the vendor omits it is unknown. Shared firmware across the product family and
-a withdrawn feature are both consistent with what can be seen from outside, and
-they are indistinguishable from here. Treat it as a capability that happens to
-work rather than a supported one.
+Reading the app settled it the other way (issue #280). **The GO app's
+commissioning flow writes this field.** It has an input widget bound to it and a
+recommendation engine that computes the value from the largest supply pipe
+dimension and the pipe material. So it is a flow limit for the recirculation
+loop, sized to the piping — not an arbitrary setpoint, and not dead space the
+component repurposed.
+
+The vendor's own setup flow computing and storing a value here makes it
+supported by any reasonable definition, even though it reaches no ordinary
+settings screen afterwards.
+
+### Three things worth knowing before you go looking
+
+- **It appears on no ordinary app screen**, and it is not in the manual. Searching
+  for it with a distinctive value planted found it nowhere in the normal UI. If
+  you go hunting and come up empty, that is the expected result — not evidence
+  that the component made it up.
+- **It survives normal app use.** Changing cycle times in the GO app preserves
+  the value, so setting it from Home Assistant is not something the app will
+  quietly undo on its next write.
+- **It is not the MaxFlow limiter under another name.** The limiter does not
+  apply to this mode at all: 2.0 and 3.0 gpm cycle-flow runs were delivered in
+  full with MaxFlow enabled at 1.4 and 1.6 gpm. Two mechanisms, two objects,
+  different scopes — and this component exposes the flow limit the app hides
+  while the app shows the one on three other screens.
+
+The register split is what the pump's own layout says: Object 91 Sub 421's first
+field is a flow setpoint, and Sub 430 has no flow field.
 
 ## Control State Polling
 

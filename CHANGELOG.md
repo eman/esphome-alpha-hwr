@@ -4,6 +4,13 @@
 
 ### Added
 
+- **The repository is MIT licensed** (`LICENSE`). It had no licence at all,
+  which the HACS validator surfaced while working on issue #183 — and it
+  mattered well beyond HACS. A public repository with no licence is *all rights
+  reserved* by default, so strictly nobody had permission to use, copy or modify
+  what the README invites them to install. The text is byte-for-byte canonical
+  MIT, which is what GitHub's licence detection matches on.
+
 - **The Class 7 string decode is a pure function, so its memory-safety guard is
   provable again** (issue #282). `read_class7_string_async()`'s callback computes
   `string_len = len - HEADER_LEN - CRC_LEN` in `size_t` arithmetic; a frame under
@@ -488,6 +495,126 @@
   only configuration where renaming the rpm sensor fails.
 
 ### Changed
+
+- **The Lovelace card installs through HACS, and moved to `dist/`** (issue
+  #183). The card is a Home Assistant frontend resource, so ESPHome cannot
+  install it — and the only documented path was copying it into `/config/www`
+  by hand. That meant every installation ran whatever version the user last
+  remembered to copy, and the card has drifted out of step with the firmware
+  **twice, both times silently**: a required service argument it never picked up
+  made every write a no-op, and a display change left the Quick Run list empty
+  in a way indistinguishable from "no events exist".
+
+  Add this repo as a HACS **Dashboard** custom repository and HACS installs the
+  card, registers the dashboard resource itself, pins it to a release tag and
+  raises update notifications. The manual copy stays documented for installs not
+  running HACS.
+
+  **Two corrections to the plan the issue sketched**, both from checking the
+  HACS documentation rather than building on the assumption:
+
+  - HACS resolves a plugin file from **`dist/` first**, then the latest release,
+    then the repo root — not "release assets, then `dist/`, then root". A `dist/`
+    file therefore shadows a release asset entirely, so attaching the card to the
+    release would not have done what was intended.
+  - Version pinning does not need release assets anyway. HACS resolves the
+    version from the release tag and installs the tree at that tag, so a card in
+    `dist/` is pinned for free.
+
+  That settles the issue's open question — move the card or publish a copy — in
+  favour of moving it. A published copy alongside a source of truth is two paths
+  that can diverge, which is the same shape as the drift this change exists to
+  prevent.
+
+  CI now runs **HACS's own validator** (`hacs/action`, category `plugin`), so
+  "does this still install through HACS" is a checked fact rather than a claim.
+  It covers what a hand audit cannot: `hacs.json`'s schema, the repository
+  metadata HACS requires, and that the plugin file is where HACS looks.
+
+  It found two gaps on its first run. **The repository had no LICENSE file** —
+  fixed, see Added above. The other, that the README has no images, is a
+  default-store criterion rather than a custom-repository one and does not
+  affect installing today.
+
+  Both are ignored in the job, and the licence one carries a note to remove it
+  after this merges: that check reads GitHub's repository-level licence field,
+  which GitHub derives from the **default branch**, so a `LICENSE` that exists
+  only on a feature branch cannot satisfy it. Adding the file and removing the
+  ignore in the same PR cannot both pass — worth knowing before someone tries.
+
+  Everything else gates, including the `hacs.json` schema check — the failure a
+  hand audit misses and a user discovers.
+
+  `hacs.json` carries only `name` and `filename`. An earlier draft added
+  `render_readme` and a `homeassistant` minimum version; both were dropped as
+  unverified — `render_readme` is absent from the current key list and has open
+  bugs, and a minimum-version floor nobody has tested is a guess that can lock
+  users out.
+
+  The card also carried a local `v6` marker unrelated to any release, so nobody
+  could tell which firmware a given card matched. It now carries the release
+  version, stamped by `tools/bump_version.sh` (which covered the example YAMLs
+  and packages but not the card), and logs it to the browser console once on
+  load — the only place a hand-copied card can be identified.
+
+- **Where the flow limiter actually binds is documented** (issue #274). An
+  enabled limiter is *not* a general explanation for a setpoint that is not
+  reached, and treating it as one would be wrong in the more misleading
+  direction. Bench-established across five modes: it binds in constant curve and
+  constant pressure (flow follows the cap, not the setpoint — a commanded
+  3000 RPM delivered 1885 RPM and 1.59 gpm against a 1.6 cap), is presumed to
+  bind in temperature control, and is **ignored outright in cycle time**, where a
+  2.0 gpm setpoint was delivered in full against a MaxFlow of 1.4.
+
+  The app's display turns out to be an accurate map of that scope, and the manual
+  agrees — §9.3.1–9.3.3 mention flow limits, §9.3.4 and §9.3.7 do not.
+
+  None of it is encoded, and the reason is now written down: the entities read
+  the pump's **status** registers (86/640, 641, 660), never the enable flag, so
+  they report "not limiting" in cycle time because the pump is not limiting —
+  with no mode table to keep in step with firmware. A finding that cost an
+  afternoon of bench work was living only in an issue comment.
+
+- **Cycle Flow is documented as a supported field the vendor hides, not a
+  happens-to-work capability** (issue #280). The doubt was reasonable: the
+  Grundfos GO app shows no such control on any ordinary screen, and the manual
+  (§9.3.4) says the mode runs on its maximum curve with only time parameters.
+
+  Reading the app settled it the other way. Its **commissioning** flow writes
+  this field — an input widget bound to it, and a recommendation engine that
+  computes the value from the largest supply pipe dimension and the pipe
+  material. It is a flow limit for the recirculation loop, sized to the piping.
+  The vendor's own setup flow computing and storing a value there makes it
+  supported by any reasonable definition, whatever the settings screens show.
+
+  Two things recorded so the next person does not repeat the search: it appears
+  on no ordinary app screen (finding nothing is the expected result, not
+  evidence the component invented it), and it survives normal app use — changing
+  cycle times in the GO app preserves it. The docs previously ended on "treat it
+  as a capability that happens to work rather than a supported one", which is
+  now the opposite of what is known.
+
+- **`CONFIG_CONFIRM_DELAY_MS` carries its measurement** (issue #250). The
+  constant is unchanged at 1200 ms; what changed is that it is now measured
+  rather than assumed. Rebuilt with the delay cut and `CONFIG_MAX_ATTEMPTS` at 0
+  so no retry could mask the first readback: at **50 ms**, five writes settled
+  five `accepted`, each carrying back the value just written, and the same at
+  200 ms. A stale readback would have settled `rejected`, a silent one
+  `timeout`; neither occurred in ten writes.
+
+  So the failure mode the issue was filed about — an early readback settling
+  `clamped`/`rejected` for a write that landed — is not reachable by reading
+  early on this pump, and 1200 ms has ≥24× margin. Nothing argues for moving
+  toward the app's 2500 ms.
+
+  `SET_CYCLE_TIMES` was measured the same way and gave the same answer, so both
+  callers of the constant are covered rather than one measured and one assumed.
+
+  The comment records what the margin actually belongs to: settle is 0.7–0.8 s
+  even at a 50 ms delay, because the write sequence is several round trips of
+  its own. The measurement cannot separate "the pump applies instantly" from
+  "the sequence is long enough that this delay is irrelevant", so shortening the
+  sequence would require re-measuring.
 
 - **`ready_recycle` is a bounded count, not off-or-forever** (issue #257). As a
   boolean it offered two shapes and the useful one was neither. The reporter's

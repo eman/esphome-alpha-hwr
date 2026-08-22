@@ -1,5 +1,5 @@
 /**
- * Host tests for homeassistant/www/alpha-hwr-schedule-card.js.
+ * Host tests for dist/alpha-hwr-schedule-card.js.
  *
  * The card is ~2000 lines that had no automated check beyond `node --check`,
  * and it has already shipped broken twice for want of one: every service call
@@ -139,7 +139,11 @@ function timerCount() { return timers.size; }
 
 /* ─── Load the card ─── */
 
-const CARD_PATH = path.join(__dirname, '..', '..', 'homeassistant', 'www',
+// dist/, not homeassistant/www/ -- the card moved there so HACS can find it
+// (issue #183). dist/ is the FIRST place HACS looks for a plugin file, ahead of
+// release assets and the repo root, so it is the single source of truth rather
+// than a published copy that can drift from one.
+const CARD_PATH = path.join(__dirname, '..', '..', 'dist',
                             'alpha-hwr-schedule-card.js');
 
 const registry = new Map();
