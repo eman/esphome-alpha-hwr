@@ -522,10 +522,16 @@
   CI now runs **HACS's own validator** (`hacs/action`, category `plugin`), so
   "does this still install through HACS" is a checked fact rather than a claim.
   It covers what a hand audit cannot: `hacs.json`'s schema, the repository
-  metadata HACS requires, and that the plugin file is where HACS looks. It runs
-  the stricter default-store ruleset deliberately — default-store submission is
-  the follow-up this issue names, and this keeps the repo eligible rather than
-  finding a gap at submission time.
+  metadata HACS requires, and that the plugin file is where HACS looks.
+
+  It found two gaps on its first run, both **default-store** criteria rather
+  than custom-repository ones, so neither affects installing today: **the
+  repository has no LICENSE file**, and the README has no images. Both are
+  ignored explicitly in the job and annotated with what fixing them takes, so
+  the list is a to-do for the default-store follow-up rather than somewhere
+  failures go to be forgotten. The other six checks gate, including the
+  `hacs.json` schema check — the failure a hand audit misses and a user
+  discovers.
 
   `hacs.json` carries only `name` and `filename`. An earlier draft added
   `render_readme` and a `homeassistant` minimum version; both were dropped as
