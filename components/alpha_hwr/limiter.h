@@ -205,6 +205,24 @@ struct LimiterState {
   /// changes its `limiter_name` from 0 to 1 when MaxFlow becomes the binding
   /// constraint, so it answers the question directly. The per-limiter records
   /// are the fallback for a firmware that does not answer 660.
+  /// Driven from the STATUS registers, never from the enable flag -- and that
+  /// is what makes this correct across modes for free (issue #274).
+  ///
+  /// The limiter does not apply to every mode. Bench-established: it binds in
+  /// constant curve and constant pressure (flow follows the cap, not the
+  /// setpoint -- a commanded 3000 RPM delivered 1885 RPM and 1.59 gpm against a
+  /// 1.6 cap), is presumed to bind in temperature control (same shared value,
+  /// impractical to test without manufacturing return-line conditions), and does
+  /// NOT bind in cycle time -- a 2.0 gpm cycle setpoint was delivered in full
+  /// against a MaxFlow of 1.4, sustained, while the limiter was demonstrably
+  /// active in other modes the same afternoon. The manual agrees: §9.3.4 cycle
+  /// time and §9.3.7 constant flow mention no flow limits where §9.3.1-9.3.3 do.
+  ///
+  /// A signal keyed on `enabled` would therefore have to carry a mode table and
+  /// keep it in step with firmware -- and would be wrong in the more misleading
+  /// direction in cycle time, reporting a setpoint held down while it is being
+  /// delivered exactly. The pump already answers the question per poll, so this
+  /// asks it rather than modelling it.
   bool limiting() const {
     if (manager.valid && manager.limiting)
       return true;

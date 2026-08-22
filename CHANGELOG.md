@@ -458,6 +458,24 @@
 
 ### Changed
 
+- **Where the flow limiter actually binds is documented** (issue #274). An
+  enabled limiter is *not* a general explanation for a setpoint that is not
+  reached, and treating it as one would be wrong in the more misleading
+  direction. Bench-established across five modes: it binds in constant curve and
+  constant pressure (flow follows the cap, not the setpoint — a commanded
+  3000 RPM delivered 1885 RPM and 1.59 gpm against a 1.6 cap), is presumed to
+  bind in temperature control, and is **ignored outright in cycle time**, where a
+  2.0 gpm setpoint was delivered in full against a MaxFlow of 1.4.
+
+  The app's display turns out to be an accurate map of that scope, and the manual
+  agrees — §9.3.1–9.3.3 mention flow limits, §9.3.4 and §9.3.7 do not.
+
+  None of it is encoded, and the reason is now written down: the entities read
+  the pump's **status** registers (86/640, 641, 660), never the enable flag, so
+  they report "not limiting" in cycle time because the pump is not limiting —
+  with no mode table to keep in step with firmware. A finding that cost an
+  afternoon of bench work was living only in an issue comment.
+
 - **Cycle Flow is documented as a supported field the vendor hides, not a
   happens-to-work capability** (issue #280). The doubt was reasonable: the
   Grundfos GO app shows no such control on any ordinary screen, and the manual
