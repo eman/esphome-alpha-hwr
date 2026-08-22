@@ -223,8 +223,13 @@ void WriteOperationService::start_front_() {
     case WriteCommand::SET_SCHEDULE_ENABLED:  budget = WATCHDOG_SCHED_ENABLED_MS; break;
     case WriteCommand::SET_REMOTE_MODE:       budget = WATCHDOG_REMOTE_MODE_MS; break;
     case WriteCommand::SET_CLOCK:             budget = WATCHDOG_SET_CLOCK_MS; break;
-    case WriteCommand::SET_SINGLE_EVENT:
-    case WriteCommand::CLEAR_SINGLE_EVENT:    budget = WATCHDOG_SINGLE_EVENT_MS; break;
+    case WriteCommand::SET_SINGLE_EVENT:      budget = WATCHDOG_SINGLE_EVENT_MS; break;
+    case WriteCommand::CLEAR_SINGLE_EVENT:
+      // A vacation clear walks every slot covering now (issue #290), so it gets
+      // the wider budget; an ordinary single-slot clear does not.
+      budget = op.clear_by_vacation ? WATCHDOG_CLEAR_VACATION_MS
+                                    : WATCHDOG_SINGLE_EVENT_MS;
+      break;
     case WriteCommand::REFRESH_SCHEDULE:      budget = WATCHDOG_REFRESH_SCHEDULE_MS; break;
     case WriteCommand::REFRESH_SINGLE_EVENTS: budget = WATCHDOG_REFRESH_EVENTS_MS; break;
     case WriteCommand::UPLOAD_SCHEDULE:       budget = WATCHDOG_UPLOAD_MS; break;
@@ -255,6 +260,16 @@ void WriteOperationService::start_front_() {
   }
 }
 
+std::string WriteOperationService::vacation_progress_note_(const Operation &op) {
+  if (!op.clear_by_vacation) return "";
+  if (op.vacation_slots.size() <= 1) return "";
+  // The cursor, not the list: it counts slots that actually completed their
+  // confirm, which is what "cleared" has to mean here.
+  return format_detail("; cleared %u of %u vacations, the rest still cover now",
+                       static_cast<unsigned>(op.vacation_cursor),
+                       static_cast<unsigned>(op.vacation_slots.size()));
+}
+
 void WriteOperationService::arm_watchdog_(uint32_t seq, uint32_t budget_ms) {
   // Without a scheduler the "delayed" watchdog would fire inline and kill the
   // operation before its first wire step; skip it (production always wires one).
@@ -266,7 +281,8 @@ void WriteOperationService::arm_watchdog_(uint32_t seq, uint32_t budget_ms) {
              write_command_to_string(op->command), static_cast<unsigned>(seq),
              static_cast<unsigned>(budget_ms));
     finish_(seq, WriteStatus::TIMEOUT,
-            format_detail("no pump confirmation within %u ms", static_cast<unsigned>(budget_ms)));
+            format_detail("no pump confirmation within %u ms", static_cast<unsigned>(budget_ms)) +
+                vacation_progress_note_(*op));
   }, budget_ms);
 }
 
@@ -460,7 +476,12 @@ void WriteOperationService::on_disconnect() {
   seqs.reserve(queue_.size());
   for (auto &op : queue_) seqs.push_back(op.seq);
   for (uint32_t seq : seqs) {
-    finish_(seq, WriteStatus::TIMEOUT, "disconnected");
+    // A vacation clear cut off part-way has already disabled some slots, and
+    // "disconnected" alone would not say that the pump is still held off under
+    // the rest (issue #290).
+    const Operation *op = find_(seq);
+    const std::string note = (op != nullptr) ? vacation_progress_note_(*op) : std::string();
+    finish_(seq, WriteStatus::TIMEOUT, "disconnected" + note);
   }
 }
 
@@ -1881,18 +1902,43 @@ void WriteOperationService::run_single_event_(uint32_t seq) {
       Operation *op = find_(seq);
       if (op == nullptr || op->phase == Phase::DONE) return;
       if (op->clear_by_vacation) {
-        // clear_vacation: target the Stop (vacation) single-event the caller
-        // means. Which one that is is a question about NOW: this used to take
-        // the first enabled Stop in slot order, so a FINISHED vacation in an
-        // early slot shadowed a live one later and the call reported success
-        // while the pump stayed off (issue #267). Same clock and same 0-means-
-        // unknown sentinel as the free-slot picker below.
-        int slot = schedule_service_.find_vacation_slot(time_service_.now_unix());
-        if (slot < 0) {
+        // clear_vacation: target the Stop (vacation) single-events the caller
+        // means. Which ones those are is a question about NOW.
+        //
+        // Two defects lived here in turn. It used to take the first enabled Stop
+        // in slot order with no clock, so a FINISHED vacation in an early slot
+        // shadowed a live one later and the call reported success while the pump
+        // stayed off (issue #267). Clocking it fixed WHICH one is meant -- but a
+        // ranking orders a set without bounding its size, and setting a vacation
+        // while one is stored writes a SECOND one, so clearing the best-ranked
+        // and stopping left the pump held off under the other (issue #290).
+        //
+        // So: every enabled Stop covering now, cleared in slot order, one
+        // write -> settle -> confirm cycle each, and one terminal event at the
+        // end. Same clock and same 0-means-unknown sentinel as the free-slot
+        // picker below.
+        std::vector<uint8_t> slots;
+        const auto when =
+            schedule_service_.find_vacation_slots(time_service_.now_unix(), &slots);
+        if (slots.empty()) {
           finish_(seq, WriteStatus::ACCEPTED, "no active vacation");
           return;
         }
-        op->slot = static_cast<int16_t>(slot);
+        if (slots.size() > MAX_VACATIONS_PER_CLEAR) {
+          op->vacation_unhandled =
+              static_cast<uint8_t>(slots.size() - MAX_VACATIONS_PER_CLEAR);
+          slots.resize(MAX_VACATIONS_PER_CLEAR);
+        }
+        // Only COVERS_NOW can carry more than one slot; the other rankings
+        // yield at most one, so nothing below changes their behaviour.
+        if (when == services::ScheduleService::VacationWhen::COVERS_NOW &&
+            slots.size() > 1) {
+          ESP_LOGI(TAG, "clear_vacation: %u vacations cover now; clearing all of them",
+                   static_cast<unsigned>(slots.size()));
+        }
+        op->vacation_slots = std::move(slots);
+        op->vacation_cursor = 0;
+        op->slot = static_cast<int16_t>(op->vacation_slots[0]);
         write_single_event_(seq);
         return;
       }
@@ -2035,7 +2081,8 @@ void WriteOperationService::confirm_single_event_(uint32_t seq) {
           schedule_([this, seq]() { confirm_single_event_(seq); }, SCHED_RETRY_DELAY_MS);
           return;
         }
-        finish_(seq, WriteStatus::TIMEOUT, "single event readback failed");
+        finish_(seq, WriteStatus::TIMEOUT,
+                "single event readback failed" + vacation_progress_note_(*op));
         return;
       }
 
@@ -2055,9 +2102,61 @@ void WriteOperationService::confirm_single_event_(uint32_t seq) {
       const bool content_is_a_verdict = want_enabled ? window_matches : true;
       bool match = actual.enabled == want_enabled && content_is_a_verdict;
       if (match) {
+        // A vacation clear may have more slots to walk (issue #290). Advancing
+        // here rather than finishing is what keeps the one-terminal-event
+        // contract across a multi-slot write: finish_() is reached exactly once,
+        // on the last slot or on the first failure.
+        const bool more_vacation_slots =
+            op->clear_by_vacation &&
+            static_cast<size_t>(op->vacation_cursor) + 1 < op->vacation_slots.size();
+        if (more_vacation_slots) {
+          op->vacation_cursor++;
+          op->slot = static_cast<int16_t>(op->vacation_slots[op->vacation_cursor]);
+          // Each slot gets its own retry ladder. Carrying the previous slot's
+          // count forward would let one flaky readback exhaust the attempts for
+          // every slot after it.
+          op->attempts = 0;
+          write_single_event_(seq);
+          return;
+        }
+
         // Empty for the ordinary case; set when the auto-slot resolver
         // recycled a slot that still held an expired event (issue #262).
-        finish_(seq, WriteStatus::ACCEPTED, op->slot_note);
+        std::string detail = op->slot_note;
+        const unsigned cleared = static_cast<unsigned>(op->vacation_cursor) + 1;
+        if (op->clear_by_vacation && cleared > 1) {
+          // Say how many, and which. "Vacation cleared" over a pump that was
+          // holding itself off under two of them is the sentence this issue
+          // exists to stop being printed.
+          //
+          // Counted from the CURSOR, not from the resolved list: the two are
+          // equal on this path, and using the list would let the sentence
+          // describe what was intended rather than what happened -- which is the
+          // exact failure mode this issue is about, one level up.
+          std::string slots;
+          for (uint8_t i = 0; i <= op->vacation_cursor; i++) {
+            if (!slots.empty()) slots += ", ";
+            slots += std::to_string(op->vacation_slots[i]);
+          }
+          detail = format_detail("cleared %u vacations (slots %s)", cleared, slots.c_str());
+        }
+        if (op->vacation_unhandled > 0) {
+          // The cap bound, and the pump is STILL HELD OFF. That is not an
+          // accepted clear however much of it succeeded.
+          //
+          // The first cut of this settled ACCEPTED with the shortfall in the
+          // detail, which review caught: ACCEPTED means "the pump confirmed the
+          // requested value", it drives `done(true)`, and an automation reading
+          // the bool would conclude the hold was lifted. Reporting the truth in
+          // a string nobody parses while the status says success is the exact
+          // failure #290 exists to end, reintroduced one level up.
+          if (!detail.empty()) detail += "; ";
+          detail += format_detail("%u more vacation(s) still cover now; clear again",
+                                  static_cast<unsigned>(op->vacation_unhandled));
+          finish_(seq, WriteStatus::REJECTED, detail);
+          return;
+        }
+        finish_(seq, WriteStatus::ACCEPTED, detail);
         return;
       }
       if (op->attempts < SCHED_MAX_ATTEMPTS) {
@@ -2069,7 +2168,8 @@ void WriteOperationService::confirm_single_event_(uint32_t seq) {
       op->begin_ts = actual.begin_timestamp;
       op->end_ts = actual.end_timestamp;
       op->single_event_action = actual.action;
-      finish_(seq, WriteStatus::REJECTED, "slot readback does not match written event");
+      finish_(seq, WriteStatus::REJECTED,
+              "slot readback does not match written event" + vacation_progress_note_(*op));
     });
 }
 

@@ -71,18 +71,61 @@ void EventLogService::read_metadata_async(
 
 void EventLogService::read_entries_async(
     std::function<void(bool, const std::vector<EventLogEntry> &)> on_complete) {
+  // One chain at a time (issue #284). The clamp below bounds how long a single
+  // chain can be; this is what stops a second one being queued behind it. The
+  // re-arm backoff bumps the read generation, which retires the timers but does
+  // NOT stop commands already sitting in the transport queue -- so without this
+  // a slow chain gets a duplicate queued behind it and a slow read becomes an
+  // unbounded one.
+  if (entries_reading_) {
+    ESP_LOGD(TAG, "Event log read already in flight; not queuing a second chain");
+    if (on_complete) on_complete(false, cached_entries_);
+    return;
+  }
+  entries_reading_ = true;
 
   // First read metadata to know how many entries
   read_metadata_async([this, on_complete](bool success, const EventLogMetadata &meta) {
     if (!success) {
+      entries_reading_ = false;
       if (on_complete) on_complete(false, std::vector<EventLogEntry>{});
       return;
     }
 
+    // Both operands are uint16 fields straight off the wire, and until issue
+    // #284 nothing bounded either one -- so `count` could be 65,535 and the
+    // chain would issue that many Class 10 reads. See EVENT_LOG_MAX_CHAIN_ENTRIES
+    // for what that costs and why the ceiling is the transport's unwind cap
+    // rather than the address map's larger 1001.
+    static_assert(EVENT_LOG_MAX_CHAIN_ENTRIES + EVENT_LOG_ABANDON_HEADROOM <=
+                      core::Transport::MAX_ABANDON_STEPS,
+                  "the abandon cap bounds the WHOLE drain, not this chain's "
+                  "share of it: a chain sized to the cap exactly leaves no room "
+                  "for the telemetry reads that drain alongside it, and its "
+                  "terminal callback is the one dropped (issues #259, #284)");
+    static_assert(EVENT_LOG_MAX_CHAIN_ENTRIES <= EVENT_LOG_ADDRESSABLE_ENTRIES,
+                  "the chain must not walk past the sub-ids the object holds");
+
     uint16_t count = std::min(meta.available_entries, meta.max_entries);
+    if (count > EVENT_LOG_MAX_CHAIN_ENTRIES) {
+      // Reported, never silent. A short read of a log is a different thing from
+      // a complete one, and a user comparing entry counts against the pump's
+      // own display needs to know which they are looking at.
+      ESP_LOGW(TAG,
+               "Pump reports %u event log entries (available=%u, max=%u); "
+               "reading the first %u",
+               (unsigned) count, (unsigned) meta.available_entries,
+               (unsigned) meta.max_entries, (unsigned) EVENT_LOG_MAX_CHAIN_ENTRIES);
+      count = EVENT_LOG_MAX_CHAIN_ENTRIES;
+    }
+    // Note what is NOT collapsed here: a metadata read that FAILED returned
+    // early above with success=false, so reaching this line with count == 0
+    // means the pump answered and said the log is empty. "We do not know" and
+    // "there are none" stay different answers.
     if (count == 0) {
       cached_entries_.clear();
       entries_cached_ = true;
+      entries_reading_ = false;
       ESP_LOGI(TAG, "Event log is empty");
       if (on_complete) on_complete(true, cached_entries_);
       return;
@@ -100,8 +143,14 @@ void EventLogService::read_entries_async(
 
     *read_next = [this, entries, on_complete, count, read_next_weak](uint16_t idx) {
       auto self = read_next_weak.lock();
-      if (!self)
-        return;  // chain abandoned (disconnect)
+      if (!self) {
+        // The chain was abandoned without reaching either terminal branch
+        // below -- a disconnect dropped the transport's strong reference. The
+        // flag has to be released here too, or the event log is never read
+        // again for the life of the boot.
+        entries_reading_ = false;
+        return;
+      }
       if (idx >= count) {
         // The same gate read_metadata_async() opens with -- which is the
         // first thing read_entries_async() calls -- applied at the other end.
@@ -113,6 +162,7 @@ void EventLogService::read_entries_async(
         // three entries of twenty would leave the display claiming the log is
         // three entries long.
         if (!session_.is_ready()) {
+          entries_reading_ = false;
           ESP_LOGD(TAG, "Event log read abandoned with %zu of %u entries; keeping the previous data",
                    entries->size(), (unsigned) count);
           if (on_complete) on_complete(false, cached_entries_);
@@ -120,6 +170,7 @@ void EventLogService::read_entries_async(
         }
         cached_entries_ = *entries;
         entries_cached_ = true;
+        entries_reading_ = false;
         ESP_LOGI(TAG, "Read %zu event log entries", entries->size());
         if (on_complete) on_complete(true, cached_entries_);
         return;

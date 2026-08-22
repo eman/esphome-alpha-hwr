@@ -241,6 +241,20 @@ class Transport {
 
   Transport();
 
+  /// Unwind steps allowed in one abandon_queue_() call. Far above any real
+  /// chain: the longest in the tree is one command per event-log entry.
+  ///
+  /// "A pump that reports more entries than this is not one we can serve
+  /// anyway" is what this comment used to say, and nothing enforced it -- so a
+  /// pump reporting more simply issued thousands of commands and only the
+  /// UNWIND gave up, stranding the caller without a terminal callback, which is
+  /// the hazard issue #259 closed. EventLogService now bounds its own chain
+  /// against this constant with a static_assert, so the two agree by
+  /// construction rather than by comment (issue #284). That is why this is
+  /// public: it is a contract with the chain builders, not an implementation
+  /// detail.
+  static constexpr size_t MAX_ABANDON_STEPS = 512;
+
   void set_write_callback(WriteCallback callback) { write_callback_ = callback; }
 
   /// Frames dropped for a bad CRC since boot (issue #260). See crc_drops_.
@@ -538,11 +552,6 @@ class Transport {
   /// of the callbacks it is invoking does not start a second drain over the
   /// same commands.
   bool abandoning_{false};
-
-  /// Unwind steps allowed in one abandon_queue_() call. Far above any real
-  /// chain: the longest in the tree is one command per event-log entry, and a
-  /// pump that reports more entries than this is not one we can serve anyway.
-  static constexpr size_t MAX_ABANDON_STEPS = 512;
 
   /**
    * Extract expected packet length from buffer.

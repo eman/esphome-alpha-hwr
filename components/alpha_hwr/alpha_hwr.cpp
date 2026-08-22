@@ -196,6 +196,10 @@ void AlphaHwrComponent::setup() {
     // Terminal-event every pending write operation (issue #92): a client
     // waiting on a settle event must never be left hanging across a BLE drop.
     this->write_op_service_.on_disconnect();
+    // Same idea one service across: release the event-log chain's in-flight
+    // flag, so a chain whose terminal callback was lost to a full abandon drain
+    // cannot block every later read for the life of the boot (issue #284).
+    this->event_log_service_.on_disconnect();
     
     if (this->ready_sensor_) {
       this->ready_sensor_->publish_state(false);
