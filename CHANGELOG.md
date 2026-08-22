@@ -4,6 +4,13 @@
 
 ### Added
 
+- **The repository is MIT licensed** (`LICENSE`). It had no licence at all,
+  which the HACS validator surfaced while working on issue #183 — and it
+  mattered well beyond HACS. A public repository with no licence is *all rights
+  reserved* by default, so strictly nobody had permission to use, copy or modify
+  what the README invites them to install. The text is byte-for-byte canonical
+  MIT, which is what GitHub's licence detection matches on.
+
 - **The Class 7 string decode is a pure function, so its memory-safety guard is
   provable again** (issue #282). `read_class7_string_async()`'s callback computes
   `string_len = len - HEADER_LEN - CRC_LEN` in `size_t` arithmetic; a frame under
@@ -524,12 +531,12 @@
   It covers what a hand audit cannot: `hacs.json`'s schema, the repository
   metadata HACS requires, and that the plugin file is where HACS looks.
 
-  It found two gaps on its first run, both **default-store** criteria rather
-  than custom-repository ones, so neither affects installing today: **the
-  repository has no LICENSE file**, and the README has no images. Both are
-  ignored explicitly in the job and annotated with what fixing them takes, so
-  the list is a to-do for the default-store follow-up rather than somewhere
-  failures go to be forgotten. The other six checks gate, including the
+  It found two gaps on its first run. **The repository had no LICENSE file** —
+  fixed, see Added above, and that check now gates rather than being ignored.
+  The other, that the README has no images, is a default-store criterion rather
+  than a custom-repository one, so it does not affect installing today; it is
+  ignored explicitly and annotated with what fixing it takes, rather than left
+  somewhere failures go to be forgotten. Everything else gates, including the
   `hacs.json` schema check — the failure a hand audit misses and a user
   discovers.
 

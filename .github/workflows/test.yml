@@ -439,30 +439,31 @@ jobs:
       # metadata HACS requires, and that the plugin file is where HACS looks for
       # it -- dist/ first, ahead of release assets and the repo root.
       #
-      # Two checks are ignored, and only two. Both are DEFAULT-STORE criteria
-      # rather than custom-repository ones, so neither affects whether this
-      # installs today -- which is the scope issue #183 shipped:
+      # One check ignored, and only one:
       #
-      #   license  the repo has no LICENSE file. A real gap, and a bigger one
-      #            than HACS: a public repo with no licence is "all rights
-      #            reserved" by default, so strictly nobody has permission to
-      #            use it. Choosing one is the owner's call, not CI's.
       #   images   the README has no images. HACS wants a screenshot; the card
-      #            has never had one.
+      #            has never had one. A DEFAULT-STORE criterion rather than a
+      #            custom-repository one, so it does not affect installing
+      #            today -- which is the scope issue #183 shipped.
       #
-      # The other six still gate: topics, description, archived, issues,
-      # information, and hacsjson -- that last one is the schema check that
-      # makes this job worth having, since a malformed hacs.json is the failure
-      # a hand audit misses and a user discovers.
+      # `license` was on this list for one commit. The validator's first run
+      # found the repository had no LICENSE at all, which mattered well beyond
+      # HACS: a public repo with no licence is "all rights reserved" by default,
+      # so strictly nobody had permission to use what the README invites them to
+      # install. It is MIT now, so the check gates rather than being ignored.
       #
-      # Fixing the two unblocks default-store submission, which is the follow-up
-      # this issue names. Drop them from `ignore` when they are addressed rather
-      # than leaving the list to rot.
+      # Everything else gates: topics, description, archived, issues,
+      # information, license, and hacsjson -- that last one is the schema check
+      # that makes this job worth having, since a malformed hacs.json is the
+      # failure a hand audit misses and a user discovers.
+      #
+      # Drop `images` from the list when a screenshot lands, rather than leaving
+      # it to rot.
       - name: HACS validation
         uses: hacs/action@main
         with:
           category: plugin
-          ignore: license images
+          ignore: images
 
       - name: Syntax check
         run: node --check dist/alpha-hwr-schedule-card.js

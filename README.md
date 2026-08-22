@@ -565,3 +565,7 @@ so dragging and editing are unaffected.
 - ESPHome BLE client docs: <https://esphome.io/components/ble_client/>
 - Architecture notes: [docs/architecture.md](docs/architecture.md)
 - Schedule service usage: [docs/schedule-management.md](docs/schedule-management.md)
+
+## License
+
+MIT — see [LICENSE](LICENSE).
