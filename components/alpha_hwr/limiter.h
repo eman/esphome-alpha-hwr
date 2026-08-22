@@ -98,6 +98,19 @@ struct LimiterConfig {
   bool enabled{false};
   float limit_m3s{0.0f};  ///< The cap, in the pump's native m³/s.
 
+  /// The three PID floats that follow the cap in the record, kept as raw wire
+  /// bytes (issue #299).
+  ///
+  /// Nothing here interprets them, and nothing should: they are kept so a WRITE
+  /// can echo them back verbatim. Type 895 is one struct, so setting the cap
+  /// means rewriting the whole record -- and a write that zeroed these would
+  /// silently re-tune the pump's limiter loop, which is a far worse change than
+  /// the one the caller asked for. `write_dhw_config()` echoes its stored
+  /// setpoint bytes for exactly the same reason.
+  ///
+  /// Only meaningful when `valid`.
+  uint8_t pid_raw[12]{};
+
   /// The same value in gallons per minute, which is the unit it was entered in.
   ///
   /// Not a convenience: the conversion is EXACT on every limit value seen, on
@@ -136,6 +149,10 @@ struct LimiterStatus {
 
 /// Bytes of payload each record carries, after the 3-byte size header.
 static constexpr size_t LIMITER_CONFIG_BODY_LEN = 18;
+/// Where the three PID floats start in the config record, and how many bytes
+/// they occupy: `[name][enable][limit f32]` is six, leaving twelve (issue #299).
+static constexpr size_t LIMITER_CONFIG_PID_OFFSET = 6;
+static constexpr size_t LIMITER_CONFIG_PID_LEN = 12;
 static constexpr size_t LIMITER_STATUS_BODY_LEN = 6;
 
 /// Sub-ids. Named because "the sub-id indexes the limiter, not the mode" is the
@@ -172,6 +189,12 @@ inline LimiterConfig decode_limiter_config(const uint8_t *body, size_t len) {
   c.name = limiter_name_from_byte(body[0]);
   c.enabled = body[1] != 0;
   c.limit_m3s = protocol::decode_float_be(body, 2);
+  // Bytes 6..17: kp, ti, td. Copied rather than decoded -- a float round trip
+  // is not guaranteed to reproduce the exact bytes, and the point of keeping
+  // them is that a write puts back precisely what the pump had.
+  for (size_t i = 0; i < LIMITER_CONFIG_PID_LEN; i++) {
+    c.pid_raw[i] = body[LIMITER_CONFIG_PID_OFFSET + i];
+  }
   return c;
 }
 

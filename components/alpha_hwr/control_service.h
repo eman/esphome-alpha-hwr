@@ -900,6 +900,36 @@ class ControlService {
                         const uint8_t *setpoint_be4 = nullptr);
 
   /**
+   * Write one flow-limiter configuration record (Object 86, Sub 600 or 601,
+   * type 895 v1). Issue #299.
+   *
+   * **Read-modify-write, and it must be.** Type 895 is one struct --
+   * `[name][enable][limit f32][kp][ti][td]` -- so setting the cap means
+   * rewriting all eighteen bytes. The three PID floats are echoed verbatim from
+   * the cached record; a write that zeroed them would silently re-tune the
+   * pump's limiter control loop, which is a bigger change than the one the
+   * caller asked for and an invisible one. Same reason `write_dhw_config()`
+   * echoes its stored setpoint bytes.
+   *
+   * Returns false without sending when the limiter has not been read, rather
+   * than writing blind over unread state -- the clobber class issue #92 bans.
+   * The caller reads first; `WriteOperationService` does that in its run step.
+   *
+   * The limiter's NAME is echoed too rather than derived from the sub-id. The
+   * sub-id indexes the limiter and the name byte says which one it is, and on
+   * this pump they agree (600 = MaxFlow, 601 = MinFlow) -- but only the pump's
+   * own byte is evidence of that on a unit nobody here has seen.
+   *
+   * @param sub        SUB_LIMITER_CONFIG_MAX_FLOW or ..._MIN_FLOW.
+   * @param enabled    Whether the limiter should be on.
+   * @param limit_m3s  The cap in the pump's native m3/s. Callers holding gpm
+   *                   divide by 15850.323f.
+   * @param on_ack     Called with whether the pump answered.
+   */
+  bool write_limiter_config(uint16_t sub, bool enabled, float limit_m3s,
+                            std::function<void(bool)> on_ack);
+
+  /**
    * Read Object 91 Sub 430 (temperature range, AutoAdapt, cycle times) and
    * refresh the corresponding caches. Extracted from sync_cache_async() so the
    * write-operation layer can confirm config writes without re-reading the mode.

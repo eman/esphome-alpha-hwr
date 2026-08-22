@@ -58,6 +58,7 @@ class AlphaHwrApiBridge : public api::CustomAPIDevice {
   void on_set_setpoint(std::string mode, float value, std::string op_id);
   void on_set_temperature_range(float min_c, float max_c, bool autoadapt, std::string op_id);
   void on_set_cycle_times(float on_minutes, float off_minutes, float flow, std::string op_id);
+  void on_set_flow_limiter(std::string limiter, bool enabled, float limit_gpm, std::string op_id);
   void on_set_pump_state(std::string state, std::string op_id);  // "off" | "engaged" | "scheduled"
 
   // Schedule services, migrated from packages/alpha_hwr_schedule_editor.yaml

@@ -274,6 +274,7 @@ working); `op_id` is a new optional argument.
 | `clear_single_event` | `slot` | Clear one single-event slot |
 | `refresh_single_events` | *(no data)* | Re-read all single-event slots |
 | `upload_schedule` | v1 payload (below) | **Bulk full-state upload** of the entire 7×5 grid in one call |
+| `set_flow_limiter` | `limiter` (`maxflow`\|`minflow`), `enabled`, `limit_gpm` (0 = keep) | Enable/disable a flow limiter and set its cap. Read-modify-write: the pump's PID terms are preserved. **Does nothing in Cycle Time mode** — see below |
 | `set_vacation` | `begin_ts,end_ts` (epoch seconds) | A multi-day Stop event overriding the weekly schedule. Settles as `set_single_event` with `event_type: "stop"` — a vacation *is* a single-event slot, not a command of its own |
 | `clear_vacation` | *(no data)* | End the active vacation. Clears **every** enabled Stop event covering now, not just one. Settles as `clear_single_event` |
 
@@ -309,6 +310,38 @@ is a failure and `detail` reports how many were cleared and that the rest still
 cover now, because at that point the pump is still holding itself off. The same
 applies if more vacations cover now than one call can clear: that settles
 `rejected`, not `accepted`, since the hold was not lifted.
+
+#### The flow limiter does not apply to every mode
+
+`set_flow_limiter` writes a real constraint, and it is worth knowing where that
+constraint has any effect before wiring it to a control:
+
+| mode | limiter binds |
+| --- | --- |
+| Constant Curve | **yes** |
+| Constant Pressure | **yes** |
+| Temperature Control | presumed (shares the same value) |
+| **Cycle Time** | **no** — the cap is ignored outright |
+| Constant Flow | untested (the setpoint is itself a flow) |
+
+So a `set_flow_limiter` that settles `accepted` in Cycle Time mode has stored
+exactly what it says and will change nothing about how the pump runs. That is
+not a failure and it is not reported as one — the pump accepted the record.
+See [configuration.md](configuration.md#where-the-limiter-actually-binds).
+
+For the three modes where it does bind, the limiter *is* the flow control:
+constant curve and constant pressure regulate speed and head, so flow drifts
+with hydraulics, and in temperature control the pump deliberately runs up its
+maximum curve until it reaches the limit.
+
+#### Reading the limiter back needs its entities
+
+The write is always available. The ongoing signal — *is it limiting right now,
+and at what reference* — comes from the optional `flow_limiter` /
+`flow_limited` entities, which are off by default. Without them the settle event
+still reports the record the pump confirmed, but nothing publishes the state
+afterwards; the component logs a warning at WARN once per write when that is
+the case.
 
 #### Telling a vacation from a one-time run
 

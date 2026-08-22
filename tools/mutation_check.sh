@@ -544,6 +544,30 @@ MUTATIONS=(
 # makes every configured bound unlimited again.
 # ---------------------------------------------------------------------------
 "ready-recycle-bound-ignored|components/alpha_hwr/readiness_watchdog.h|  return consecutive < limit;|  return true;"
+# ---------------------------------------------------------------------------
+# Setting a flow limiter is a read-modify-write (issue #299)
+#
+# Type 895 is one struct -- [name][enable][limit][kp][ti][td] -- so setting the
+# cap rewrites all eighteen bytes. The three PID floats are echoed verbatim from
+# a mandatory pre-write read; zeroing them would re-tune the pump's limiter
+# control loop invisibly, which is a bigger change than the one the caller asked
+# for and one nothing would report.
+# ---------------------------------------------------------------------------
+"limiter-write-drops-the-pid-terms|components/alpha_hwr/limiter.h|    c.pid_raw[i] = body[LIMITER_CONFIG_PID_OFFSET + i];|    c.pid_raw[i] = 0;"
+# And the guard that makes the read mandatory rather than advisory: without a
+# cached record there are no PID terms to echo at all.
+"limiter-write-without-a-read|components/alpha_hwr/control_service.cpp|  if (!cached->valid) {|  if (false) {"
+# The settle must report what the pump HOLDS on a non-accepted verdict, not what
+# was requested -- otherwise a clamp names the value the caller asked for and
+# reads as though the pump complied.
+#
+# Its sibling hazard has no entry and cannot have a useful one: settling those
+# fields BEFORE the retry made every mismatch settle ACCEPTED, because the retry
+# then compared the requested value against itself. That was the first cut's
+# real bug, caught by the clamp and reject tests. Any mutation expressing it
+# has to move a statement rather than replace a line, which this format cannot
+# do -- so it is written down here instead.
+"limiter-settle-reports-the-request-not-the-pump|components/alpha_hwr/write_operation_service.cpp|    settle_fields();|    // mutated: leave the requested values in place"
 # The bound is judged against the CONSECUTIVE counter, which the pump becoming
 # ready resets -- so an allowance is per episode rather than per boot. Reading a
 # lifetime counter instead would let a node spend its allowance on unrelated

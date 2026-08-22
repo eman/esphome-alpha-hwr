@@ -981,6 +981,32 @@ public:
                               const std::string &op_id) {
     write_op_service_.submit_set_cycle_times(on_minutes, off_minutes, flow, op_id);
   }
+  void submit_set_flow_limiter(uint16_t sub, bool enabled, float limit_gpm,
+                               const std::string &op_id) {
+    // The write is always available; the ONGOING visibility is not, and that
+    // asymmetry is the hazard the limiter write was deferred over (issue #299).
+    //
+    // The argument for taking the write was that "silently caps the pump" was a
+    // property of the old blindness rather than of the write -- true, but only
+    // where the read is switched on, and `flow_limiter` / `flow_limited` are
+    // optional and off by default. On a node without them nothing polls the
+    // limiter, so a cap applied here would constrain the pump with nothing
+    // reporting it.
+    //
+    // The settle event still carries the confirmed record either way, so this
+    // is never fully silent. What is missing without the entities is the
+    // answer to "is it limiting right now", which is the question that matters
+    // afterwards. Said once per write, at WARN, rather than made a config
+    // error: refusing a write because a diagnostic entity is undeclared would
+    // be a worse trade.
+    if (!limiter_entities_wanted_()) {
+      ESP_LOGW(TAG,
+               "Setting a flow limiter, but no flow_limiter/flow_limited entity is "
+               "declared -- the cap will apply with nothing publishing whether it "
+               "is limiting. Declare one to see it.");
+    }
+    write_op_service_.submit_set_flow_limiter(sub, enabled, limit_gpm, op_id);
+  }
   void submit_set_schedule_entry(uint8_t layer, uint8_t day_index, uint8_t begin_hour,
                                  uint8_t begin_minute, uint8_t end_hour, uint8_t end_minute,
                                  const std::string &op_id) {

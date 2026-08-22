@@ -1001,11 +1001,41 @@ report a limiter "active" in cycle time and be wrong in the more misleading
 direction: telling you a setpoint is being held down while it is being delivered
 exactly.
 
-### Reading only, for now
+### Setting a limiter
 
-Enabling or changing a limiter from here is not implemented: switching one on
-silently caps the pump, which is not a change to make as a side effect. Set them
-in the Grundfos GO app.
+`set_flow_limiter` enables or disables a limiter and sets its cap:
+
+```yaml
+service: esphome.hwr_pump_set_flow_limiter
+data:
+  limiter: maxflow      # or minflow
+  enabled: true
+  limit_gpm: 1.6        # 0 keeps the stored cap and changes only `enabled`
+  op_id: my-write
+```
+
+It is a **read-modify-write**, and it has to be. The type 895 record is one
+struct — `[name][enable][limit][kp][ti][td]` — so setting the cap rewrites all
+eighteen bytes, and the three PID floats are echoed back verbatim from a
+mandatory pre-write read. A write that zeroed them would re-tune the pump's
+limiter control loop invisibly, which is a bigger change than the one asked for.
+If the limiter cannot be read, the write is refused rather than sent blind.
+
+The cap settles against the pump's factory bounds (86/620-621: MaxFlow
+0.5–11.0 gpm, MinFlow 1.0–13.0 on the bench unit). A cap outside them settles
+`clamped` with the stored value reported; a pump that keeps its old cap settles
+`rejected`. The two are different answers and worth acting on differently.
+
+**It does nothing in Cycle Time mode**, per the scope table above — the write
+succeeds and the pump stores it, and the cap is then ignored while that mode
+runs.
+
+This was deferred for a while on the argument that enabling a limiter *silently*
+caps the pump. That was right when nothing could see the limiter; it is not a
+property of the write. The entities above are what removed it — so if you set a
+limiter, declare them: the component warns when you write one without any
+limiter entity configured, because the cap will apply with nothing publishing
+whether it is limiting.
 
 That leaves a real gap, and it is worth naming. **This component exposes the flow
 limit the app hides, and hides the flow limit the app shows on three screens.**

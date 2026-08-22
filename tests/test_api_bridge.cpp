@@ -158,6 +158,7 @@ static void test_the_registered_service_surface() {
       {"set_setpoint", {"mode", "value", "op_id"}},
       {"set_temperature_range", {"min_c", "max_c", "autoadapt", "op_id"}},
       {"set_cycle_times", {"on_minutes", "off_minutes", "flow", "op_id"}},
+      {"set_flow_limiter", {"limiter", "enabled", "limit_gpm", "op_id"}},
       {"set_pump_state", {"state", "op_id"}},
       {"upload_schedule", {"data", "op_id"}},
       {"set_schedule_entry", {"data", "op_id"}},
@@ -172,7 +173,7 @@ static void test_the_registered_service_surface() {
   };
 
   TEST_ASSERT(mock_registered_services().size() == expected.size(),
-              "exactly 16 services are registered");
+              "exactly 17 services are registered");
 
   for (const auto &want : expected) {
     const esphome::api::MockServiceRegistration *got = nullptr;
@@ -219,6 +220,8 @@ static void test_each_service_settles_as_the_command_it_is_named_for() {
       {"set_setpoint", "set_setpoint", "", {std::string("constant_speed"), 1500.0f, std::string("t3")}},
       {"set_temperature_range", "set_temperature_range", "", {35.0f, 45.0f, false, std::string("t4")}},
       {"set_cycle_times", "set_cycle_times", "", {5.0f, 15.0f, 1.0f, std::string("t5")}},
+      {"set_flow_limiter", "set_flow_limiter", "",
+       {std::string("maxflow"), true, 1.6f, std::string("t5b")}},
       {"upload_schedule", "upload_schedule", "", {std::string("v1,1;0,0,6,0,7,0"), std::string("t6")}},
       {"set_schedule_entry", "set_schedule_entry", "", {std::string("0,0,6,0,8,0"), std::string("t7")}},
       {"clear_schedule_entry", "clear_schedule_entry", "", {std::string("0,0"), std::string("t8")}},

@@ -25,6 +25,7 @@ enum class WriteCommand : uint8_t {
   SET_SETPOINT,
   SET_TEMPERATURE_RANGE,
   SET_CYCLE_TIMES,
+  SET_FLOW_LIMITER,  // MaxFlow / MinFlow cap and enable (issue #299)
   SET_SCHEDULE_ENTRY,
   CLEAR_SCHEDULE_ENTRY,
   SET_SCHEDULE_ENABLED,
@@ -114,6 +115,14 @@ struct WriteResult {
   int16_t on_minutes{-1};
   int16_t off_minutes{-1};
   float flow{NAN};              // cycle-mode stored flow, m³/h (issue #107)
+  // SET_FLOW_LIMITER (issue #299). `limiter_sub` names which limiter (600
+  // MaxFlow, 601 MinFlow) and `limiter_limit_gpm` the cap the pump SETTLED on,
+  // reported in gallons per minute because that is the unit these values were
+  // authored in -- every limit seen on two pumps converts to an exact gpm
+  // figure and to nothing round in m³/h.
+  int16_t limiter_sub{-1};
+  int8_t limiter_enabled{-1};   // -1 unknown, 0 off, 1 on
+  float limiter_limit_gpm{NAN};
 
   // Schedule commands
   int16_t layer{-1};
@@ -314,6 +323,25 @@ class WriteOperationService {
                                  std::function<void(bool)> done = nullptr,
                                  WriteOrigin origin = WriteOrigin::SERVICE);
   /** Vacation = a multi-day Stop single-event overriding the weekly schedule. */
+  /**
+   * Enable/disable a flow limiter and set its cap (issue #299).
+   *
+   * Read-modify-write: the run step reads the limiter family first, because the
+   * type 895 record carries three PID floats alongside the cap and they have to
+   * be echoed back verbatim. A write with nothing cached is refused rather than
+   * sent blind.
+   *
+   * @param sub       600 (MaxFlow) or 601 (MinFlow). Anything else is INVALID.
+   * @param enabled   Whether the limiter should constrain the pump.
+   * @param limit_gpm The cap in gallons per minute, the unit these values were
+   *                  authored in. NAN keeps the stored cap and changes only the
+   *                  enable flag.
+   */
+  void submit_set_flow_limiter(uint16_t sub, bool enabled, float limit_gpm,
+                               const std::string &op_id,
+                               std::function<void(bool)> done = nullptr,
+                               WriteOrigin origin = WriteOrigin::SERVICE);
+
   void submit_set_vacation(uint32_t begin_ts, uint32_t end_ts, const std::string &op_id,
                            std::function<void(bool)> done = nullptr,
                            WriteOrigin origin = WriteOrigin::SERVICE);
@@ -437,6 +465,20 @@ class WriteOperationService {
     // 0x01 = Stop (vacation / pump-off period). clear_by_vacation makes a
     // CLEAR_SINGLE_EVENT auto-resolve to the active Stop (vacation) slot.
     uint8_t single_event_action{0x02};
+
+    // SET_FLOW_LIMITER (issue #299). `limiter_sub` is 600 (MaxFlow) or 601
+    // (MinFlow); `limiter_limit_gpm` is the cap in the unit it was entered in,
+    // converted to the pump's m3/s at the wire step.
+    //
+    // `pre_limiter_*` are the values the mandatory pre-write read found, and
+    // drive the same REJECTED-vs-CLAMPED distinction pre_value does for a
+    // setpoint: a pump that kept its old cap is a refusal, one that stored a
+    // different cap clamped.
+    uint16_t limiter_sub{0};
+    bool limiter_enabled{false};
+    float limiter_limit_gpm{NAN};
+    int8_t pre_limiter_enabled{-1};
+    float pre_limiter_limit_gpm{NAN};
     bool clear_by_vacation{false};
     // clear_vacation clears EVERY enabled Stop event covering now, not just the
     // best-ranked one (issue #290). These carry that walk across the
@@ -516,6 +558,8 @@ class WriteOperationService {
   void confirm_temperature_range_(uint32_t seq);
   void run_set_cycle_times_(uint32_t seq);
   void confirm_cycle_times_(uint32_t seq);
+  void run_set_flow_limiter_(uint32_t seq);
+  void confirm_set_flow_limiter_(uint32_t seq);
   void run_schedule_entry_(uint32_t seq);
   void confirm_schedule_entry_(uint32_t seq);
   void run_remote_mode_(uint32_t seq);
@@ -701,6 +745,10 @@ class WriteOperationService {
   // confirm which would have succeeded settles on the watchdog instead, which
   // reports TIMEOUT and waits 15 minutes.
   static constexpr uint32_t WATCHDOG_SET_CLOCK_MS = 30000;
+  // Read (the limiter family, up to five frames) + write + settle + readback
+  // + margin. Wider than a plain config write because the mandatory pre-write
+  // read is a chain rather than one frame (issue #299).
+  static constexpr uint32_t WATCHDOG_FLOW_LIMITER_MS = 45000;
   static constexpr uint32_t WATCHDOG_SINGLE_EVENT_MS = 60000;
   /**
    * Most vacations one `clear_vacation` will clear (issue #290).

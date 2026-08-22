@@ -2,6 +2,7 @@
 #ifdef ALPHA_HWR_HAS_API_BRIDGE
 
 #include <cerrno>
+#include <cctype>
 #include <cmath>
 #include <cstdint>
 #include <cstdio>
@@ -65,6 +66,12 @@ void AlphaHwrApiBridge::setup(AlphaHwrComponent *component) {
                    {"min_c", "max_c", "autoadapt", "op_id"});
   register_service(&AlphaHwrApiBridge::on_set_cycle_times, name(WriteCommand::SET_CYCLE_TIMES),
                    {"on_minutes", "off_minutes", "flow", "op_id"});
+  // The limiter is named rather than numbered (issue #299). "600"/"601" are
+  // sub-ids, and a service argument that takes a raw address invites a caller
+  // to try a third one -- which the operation layer would then refuse. The two
+  // that exist have names the Grundfos app already uses.
+  register_service(&AlphaHwrApiBridge::on_set_flow_limiter, name(WriteCommand::SET_FLOW_LIMITER),
+                   {"limiter", "enabled", "limit_gpm", "op_id"});
   register_service(&AlphaHwrApiBridge::on_set_pump_state, name(WriteCommand::SET_PUMP_STATE),
                    {"state", "op_id"});
 
@@ -371,6 +378,21 @@ void AlphaHwrApiBridge::fire_write_settled(const WriteResult &result) {
       if (result.off_minutes >= 0) data["off_minutes"] = std::to_string(result.off_minutes);
       put_float("flow", result.flow, "%.3f");
       break;
+    case WriteCommand::SET_FLOW_LIMITER:
+      // Which limiter, by name rather than sub-id: the service takes a name,
+      // so the event answering it should too (issue #299).
+      if (result.limiter_sub == static_cast<int16_t>(services::SUB_LIMITER_CONFIG_MAX_FLOW)) {
+        data["limiter"] = "maxflow";
+      } else if (result.limiter_sub ==
+                 static_cast<int16_t>(services::SUB_LIMITER_CONFIG_MIN_FLOW)) {
+        data["limiter"] = "minflow";
+      }
+      // `limiter_enabled`, not `enabled`, for the reason the remote-mode case
+      // below gives: that key already carries the pump's run state and the
+      // schedule flag, and a third meaning would be one too many.
+      put_bool("limiter_enabled", result.limiter_enabled);
+      put_float("limit_gpm", result.limiter_limit_gpm, "%.2f");
+      break;
     case WriteCommand::SET_REMOTE_MODE:
       // `remote_enabled`, not `enabled`: that key already carries two
       // meanings -- the pump's run state on the control commands, the
@@ -488,6 +510,31 @@ void AlphaHwrApiBridge::on_set_cycle_times(float on_minutes, float off_minutes, 
   }
   component_->submit_set_cycle_times(static_cast<uint8_t>(on_minutes),
                                      static_cast<uint8_t>(off_minutes), flow, op_id);
+}
+
+void AlphaHwrApiBridge::on_set_flow_limiter(std::string limiter, bool enabled, float limit_gpm,
+                                            std::string op_id) {
+  // Name to sub-id. Case-insensitive on the two the pump declares; anything
+  // else is refused here rather than reaching the wire, so the error names what
+  // is available instead of echoing an address back.
+  std::string key;
+  for (char c : limiter) key += static_cast<char>(::tolower(static_cast<unsigned char>(c)));
+  uint16_t sub = 0;
+  if (key == "maxflow" || key == "max_flow" || key == "max") {
+    sub = services::SUB_LIMITER_CONFIG_MAX_FLOW;
+  } else if (key == "minflow" || key == "min_flow" || key == "min") {
+    sub = services::SUB_LIMITER_CONFIG_MIN_FLOW;
+  } else {
+    reject_(WriteCommand::SET_FLOW_LIMITER, op_id,
+            "unknown limiter '" + echo_arg(limiter) + "' (maxflow|minflow)");
+    return;
+  }
+
+  // 0 means keep-existing, matching set_cycle_times' sentinel (issue #107):
+  // a service variable cannot carry NAN, so the API's 0 becomes the operation
+  // layer's NAN and only the enable flag changes.
+  const float cap = (limit_gpm == 0.0f) ? NAN : limit_gpm;
+  component_->submit_set_flow_limiter(sub, enabled, cap, op_id);
 }
 
 void AlphaHwrApiBridge::on_set_pump_state(std::string state, std::string op_id) {
