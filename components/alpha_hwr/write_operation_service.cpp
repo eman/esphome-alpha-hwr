@@ -1453,7 +1453,7 @@ void WriteOperationService::confirm_set_flow_limiter_(uint32_t seq) {
       schedule_([this, seq]() { confirm_set_flow_limiter_(seq); }, CONFIG_RETRY_DELAY_MS);
       return;
     }
-    settle_fields();
+    settle_fields();  // the pump's values, not the request
 
     // REJECTED vs CLAMPED, the same distinction the setpoint write draws: a
     // pump still holding its old cap refused, one holding a different cap

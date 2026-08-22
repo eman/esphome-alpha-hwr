@@ -567,7 +567,14 @@ MUTATIONS=(
 # real bug, caught by the clamp and reject tests. Any mutation expressing it
 # has to move a statement rather than replace a line, which this format cannot
 # do -- so it is written down here instead.
-"limiter-settle-reports-the-request-not-the-pump|components/alpha_hwr/write_operation_service.cpp|    settle_fields();|    // mutated: leave the requested values in place"
+# The trailing comment is load-bearing for the SEARCH, not for the reader: this
+# script matches its search field as a SUBSTRING, so a bare "    settle_fields();"
+# also matches the six-space call inside the accepted branch above and the entry
+# is refused for matching twice. Anchoring on the comment makes the terminal
+# call unique. (Targeting the accepted-branch call instead would be an
+# equivalent mutant -- on an accepted write the requested and settled values are
+# the same by definition.)
+"limiter-settle-reports-the-request-not-the-pump|components/alpha_hwr/write_operation_service.cpp|    settle_fields();  // the pump's values, not the request|    // mutated: leave the requested values in place"
 # The bound is judged against the CONSECUTIVE counter, which the pump becoming
 # ready resets -- so an allowance is per episode rather than per boot. Reading a
 # lifetime counter instead would let a node spend its allowance on unrelated
