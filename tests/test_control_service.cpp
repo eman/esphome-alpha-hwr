@@ -243,6 +243,80 @@ static void test_readback_change_gate() {
               "#265: no prior reading outranks an unchanged comparison");
 }
 
+// ---------------------------------------------------------------------------
+// Issue #299: a limiter write refuses to echo what it has not read
+// ---------------------------------------------------------------------------
+//
+// Against the PURE builder, not the write primitive, and deliberately.
+// `write_limiter_config()` is private -- AGENTS §8.4 makes WriteOperationService
+// the one write path -- and WriteOperationService checks the record decoded
+// before calling it, so a guard living only in the primitive is masked by that
+// outer check and its mutation survives. CI found exactly that: 341/342, with
+// `limiter-write-without-a-read` surviving. This is issue #282's remedy applied
+// again: move the decision somewhere a test can reach it.
+static void test_limiter_write_body_refuses_without_a_read() {
+  std::cout << "\n=== limiter write body: no read, no write (#299) ===" << std::endl;
+  using esphome::alpha_hwr::services::build_limiter_write_body;
+  using esphome::alpha_hwr::services::LimiterConfig;
+  using esphome::alpha_hwr::services::LIMITER_CONFIG_BODY_LEN;
+
+  uint8_t body[LIMITER_CONFIG_BODY_LEN];
+  for (size_t i = 0; i < LIMITER_CONFIG_BODY_LEN; i++) body[i] = 0xEE;
+
+  // Nothing read: there are no PID terms to echo, and writing zeros there would
+  // re-tune the pump's limiter control loop invisibly.
+  LimiterConfig unread{};
+  TEST_ASSERT(!build_limiter_write_body(unread, true, 1.0e-4f, body),
+              "#299: an unread record refuses to produce a write body");
+  bool untouched = true;
+  for (size_t i = 0; i < LIMITER_CONFIG_BODY_LEN; i++) untouched = untouched && body[i] == 0xEE;
+  TEST_ASSERT(untouched, "#299: ...and leaves the caller's buffer alone");
+
+  TEST_ASSERT(!build_limiter_write_body(unread, true, 1.0e-4f, nullptr),
+              "#299: a null buffer is refused too");
+}
+
+// The echo itself, which is the whole reason the read is mandatory.
+static void test_limiter_write_body_echoes_the_pid_terms() {
+  std::cout << "\n=== limiter write body: the PID terms are echoed (#299) ===" << std::endl;
+  using esphome::alpha_hwr::services::build_limiter_write_body;
+  using esphome::alpha_hwr::services::LimiterConfig;
+  using esphome::alpha_hwr::services::LimiterName;
+  using esphome::alpha_hwr::services::LIMITER_CONFIG_BODY_LEN;
+  using esphome::alpha_hwr::services::LIMITER_CONFIG_PID_LEN;
+  using esphome::alpha_hwr::services::LIMITER_CONFIG_PID_OFFSET;
+
+  LimiterConfig cached{};
+  cached.valid = true;
+  cached.name = LimiterName::MAX_FLOW;
+  cached.enabled = false;
+  // Distinctive and non-zero, so an implementation that zeroed them fails here
+  // rather than passing by coincidence.
+  for (size_t i = 0; i < LIMITER_CONFIG_PID_LEN; i++) {
+    cached.pid_raw[i] = static_cast<uint8_t>(0xA0 + i);
+  }
+
+  uint8_t body[LIMITER_CONFIG_BODY_LEN]{};
+  TEST_ASSERT(build_limiter_write_body(cached, true, 1.0094431e-04f, body),
+              "#299: a read record produces a write body");
+
+  TEST_ASSERT(body[0] == static_cast<uint8_t>(LimiterName::MAX_FLOW),
+              "#299: the pump's own name byte is echoed, not derived from a sub-id");
+  TEST_ASSERT(body[1] == 0x01, "#299: the enable flag is the one asked for");
+
+  bool pid_ok = true;
+  for (size_t i = 0; i < LIMITER_CONFIG_PID_LEN; i++) {
+    pid_ok = pid_ok && body[LIMITER_CONFIG_PID_OFFSET + i] == static_cast<uint8_t>(0xA0 + i);
+  }
+  TEST_ASSERT(pid_ok, "#299: the three PID floats are echoed byte for byte");
+
+  // And the cap really is encoded, so the test cannot pass on a body that only
+  // copied the tail.
+  const float back = esphome::alpha_hwr::protocol::decode_float_be(body, 2);
+  TEST_ASSERT(std::fabs(back - 1.0094431e-04f) < 1e-9f,
+              "#299: the cap round-trips through the encoder (1.6 gpm)");
+}
+
 int main() {
   std::cout << "==========================================" << std::endl;
   std::cout << "ControlService State Tests (real service)" << std::endl;
@@ -253,6 +327,8 @@ int main() {
   test_control_source_drives_remote_state();
   test_setpoint_cached_per_mode();
   test_readback_change_gate();
+  test_limiter_write_body_refuses_without_a_read();
+  test_limiter_write_body_echoes_the_pid_terms();
 
   std::cout << "\n==========================================" << std::endl;
   std::cout << "Results: " << tests_passed << " passed, " << tests_failed

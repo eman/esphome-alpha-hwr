@@ -544,6 +544,45 @@ MUTATIONS=(
 # makes every configured bound unlimited again.
 # ---------------------------------------------------------------------------
 "ready-recycle-bound-ignored|components/alpha_hwr/readiness_watchdog.h|  return consecutive < limit;|  return true;"
+# ---------------------------------------------------------------------------
+# Setting a flow limiter is a read-modify-write (issue #299)
+#
+# Type 895 is one struct -- [name][enable][limit][kp][ti][td] -- so setting the
+# cap rewrites all eighteen bytes. The three PID floats are echoed verbatim from
+# a mandatory pre-write read; zeroing them would re-tune the pump's limiter
+# control loop invisibly, which is a bigger change than the one the caller asked
+# for and one nothing would report.
+# ---------------------------------------------------------------------------
+"limiter-write-drops-the-pid-terms|components/alpha_hwr/limiter.h|    c.pid_raw[i] = body[LIMITER_CONFIG_PID_OFFSET + i];|    c.pid_raw[i] = 0;"
+# And the guard that makes the read mandatory rather than advisory: without a
+# cached record there are no PID terms to echo at all.
+#
+# Retargeted onto the PURE builder after this exact entry survived at 341/342.
+# It sat in ControlService's private write primitive, which WriteOperationService
+# only calls after its own validity check -- so the outer check masked it, the
+# suite could not reach it, and the mutation lived. Issue #282's shape, and its
+# remedy: move the decision somewhere a test can call directly. Both guards
+# stay; the operation layer's produces a useful settle status, this one makes
+# the function safe to call at all.
+"limiter-write-without-a-read|components/alpha_hwr/limiter.h|  if (!cached.valid)|  if (false)"
+# The settle must report what the pump HOLDS on a non-accepted verdict, not what
+# was requested -- otherwise a clamp names the value the caller asked for and
+# reads as though the pump complied.
+#
+# Its sibling hazard has no entry and cannot have a useful one: settling those
+# fields BEFORE the retry made every mismatch settle ACCEPTED, because the retry
+# then compared the requested value against itself. That was the first cut's
+# real bug, caught by the clamp and reject tests. Any mutation expressing it
+# has to move a statement rather than replace a line, which this format cannot
+# do -- so it is written down here instead.
+# The trailing comment is load-bearing for the SEARCH, not for the reader: this
+# script matches its search field as a SUBSTRING, so a bare "    settle_fields();"
+# also matches the six-space call inside the accepted branch above and the entry
+# is refused for matching twice. Anchoring on the comment makes the terminal
+# call unique. (Targeting the accepted-branch call instead would be an
+# equivalent mutant -- on an accepted write the requested and settled values are
+# the same by definition.)
+"limiter-settle-reports-the-request-not-the-pump|components/alpha_hwr/write_operation_service.cpp|    settle_fields();  // the pump's values, not the request|    // mutated: leave the requested values in place"
 # The bound is judged against the CONSECUTIVE counter, which the pump becoming
 # ready resets -- so an allowance is per episode rather than per boot. Reading a
 # lifetime counter instead would let a node spend its allowance on unrelated

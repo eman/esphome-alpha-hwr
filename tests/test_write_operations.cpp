@@ -174,6 +174,33 @@ struct PumpSim {
   // `24 05 F8 E7 0A 01 00 AE A2`. A simulator that stayed silent
   // would make each of these writes time out, and each timeout records a reply
   // debt that costs the NEXT write its acknowledgement.
+  // Flow limiters (issue #299). Two records at 86/600 and 86/601, type 895:
+  // [name][enable][limit f32][kp][ti][td]. The PID bytes are distinctive
+  // on purpose -- a write that dropped them would otherwise be invisible.
+  bool respond_limiter_reads{true};
+  bool honor_limiter_writes{true};
+  bool ack_limiter_write{true};
+  bool limiter_max_enabled{false};
+  bool limiter_min_enabled{false};
+  float limiter_max_gpm{1.5f};
+  float limiter_min_gpm{2.5f};
+  /// Factory bounds from 86/620-621 on the bench pump, PER LIMITER: MaxFlow
+  /// 0.5-11.0 gpm, MinFlow 1.0-13.0. A write outside them is stored at the
+  /// bound, which is the CLAMPED case.
+  ///
+  /// Separate pairs deliberately. One shared pair (MaxFlow's) clamped a MinFlow
+  /// write at 11.0 instead of 13.0, so the harness could not exercise the
+  /// MinFlow path the entities newly expose -- latent, since no test wrote
+  /// MinFlow, and wrong the moment one did.
+  float limiter_max_cap_gpm{11.0f};
+  float limiter_max_floor_gpm{0.5f};
+  float limiter_min_cap_gpm{13.0f};
+  float limiter_min_floor_gpm{1.0f};
+  uint8_t limiter_max_pid[12]{0x11, 0x22, 0x33, 0x44, 0x55, 0x66,
+                              0x77, 0x88, 0x99, 0xAA, 0xBB, 0xCC};
+  uint8_t limiter_min_pid[12]{0xC0, 0xFF, 0xEE, 0x01, 0x02, 0x03,
+                              0x04, 0x05, 0x06, 0x07, 0x08, 0x09};
+
   bool ack_control_write{true};       // the fused Obj 0601 write
   bool ack_clock_write{true};         // Obj 94 Sub 100
   // The Object 84 writes -- schedule layer, single event, overview/commit. All
@@ -340,6 +367,9 @@ struct Harness {
   std::vector<WriteResult> results;
 
   // Frame statistics for wire-shape assertions
+  int frames_limiter_read{0};
+  int frames_limiter_write{0};
+  std::vector<uint8_t> last_limiter_write;  // the whole 18-byte struct
   int frames_0601{0};       // fused control writes
   int frames_layer_write{0};  // whole-layer 42-byte schedule writes
   int frames_0a01{0};       // unfused mode changes
@@ -498,6 +528,9 @@ struct Harness {
         return -1;
       case 86:  // operation request / control-mode request, both type 303
         if (sub == 6 || sub == 10) return 16;        // 7-byte struct
+        // Flow limiter config, type 895 (issue #299). 18-byte struct:
+        // 1 obj + 2 sub + 2 type + 1 version + 3 size + 18 data = 27.
+        if (sub == 600 || sub == 601) return 27;
         return -1;
       case 91:
         if (sub == 421) return 15;                   // DHW config, 6
@@ -628,6 +661,38 @@ struct Harness {
           default: inject_setpoint_range_frame(sim.range_cf); break;
         }
       }
+    } else if (opspec == 0x03 && apdu_len >= 5 && apdu[2] == 86 &&
+               ((apdu[3] << 8) | apdu[4]) >= 600 && ((apdu[3] << 8) | apdu[4]) <= 660) {
+      // Flow limiter family reads (issue #299): 600/601 config, 640/641/660
+      // status. read_limiters() walks config then status as one chain.
+      const uint16_t lsub = static_cast<uint16_t>((apdu[3] << 8) | apdu[4]);
+      frames_limiter_read++;
+      if (sim.respond_limiter_reads) {
+        if (lsub == 600) inject_limiter_config_frame(true);
+        else if (lsub == 601) inject_limiter_config_frame(false);
+        else if (lsub == 640) inject_limiter_status_frame(0x01);
+        else if (lsub == 641) inject_limiter_status_frame(0x02);
+        else if (lsub == 660) inject_limiter_status_frame(0x00);
+      }
+    } else if (opspec == 0x9B && apdu_len >= 29 && apdu[2] == 0x56) {
+      // Flow limiter config write (issue #299). OpSpec 0x9B = SET + 27.
+      const uint16_t lsub = static_cast<uint16_t>((apdu[3] << 8) | apdu[4]);
+      frames_limiter_write++;
+      last_limiter_write.assign(apdu + 11, apdu + 29);
+      if (sim.honor_limiter_writes) {
+        const bool on = apdu[12] != 0;
+        float gpm = protocol::decode_float_be(apdu + 13) * 15850.323f;
+        // Each limiter against ITS OWN factory bounds, which is what makes a
+        // CLAMPED verdict reachable and correct for both.
+        const bool is_max = lsub == 600;
+        const float cap = is_max ? sim.limiter_max_cap_gpm : sim.limiter_min_cap_gpm;
+        const float floor_gpm = is_max ? sim.limiter_max_floor_gpm : sim.limiter_min_floor_gpm;
+        if (gpm > cap) gpm = cap;
+        if (gpm < floor_gpm) gpm = floor_gpm;
+        if (is_max) { sim.limiter_max_enabled = on; sim.limiter_max_gpm = gpm; }
+        else { sim.limiter_min_enabled = on; sim.limiter_min_gpm = gpm; }
+      }
+      if (sim.ack_limiter_write) inject_short_ack();
     } else if (opspec == 0x03 && apdu_len >= 5 && apdu[2] == 91 && apdu[3] == 0x01 && apdu[4] == 0xAE) {
       // Obj 91 Sub 430 config read
       if (sim.drop_obj91_reads > 0) {
@@ -856,6 +921,40 @@ struct Harness {
     f.push_back(0xAA);
     f.push_back(0xBB);
     f[1] = static_cast<uint8_t>(f.size() - 4);
+    inject(std::move(f));
+  }
+
+  /// One type 895 limiter config record (86/600 or 86/601), issue #299.
+  ///
+  /// Shape checked against the frame the component expects: bytes 6-9 are
+  /// 00 03 7F 01 (type 895 v1), then a three-byte size of 18, then the struct.
+  /// Total 33 bytes, so the length byte is 29 and the APDU length 25.
+  void inject_limiter_config_frame(bool is_max) {
+    const float gpm = is_max ? sim.limiter_max_gpm : sim.limiter_min_gpm;
+    const bool on = is_max ? sim.limiter_max_enabled : sim.limiter_min_enabled;
+    const uint8_t *pid = is_max ? sim.limiter_max_pid : sim.limiter_min_pid;
+    std::vector<uint8_t> f = {0x24, 0x1D, 0xF8, 0xE7, 0x0A, 0x19,
+                              0x00, 0x03, 0x7F, 0x01,
+                              0x00, 0x00, 0x12,
+                              static_cast<uint8_t>(is_max ? 1 : 2),
+                              static_cast<uint8_t>(on ? 1 : 0),
+                              0, 0, 0, 0};
+    protocol::encode_float_be(gpm / 15850.323f, f.data() + 15);
+    for (size_t i = 0; i < 12; i++) f.push_back(pid[i]);
+    f.push_back(0xAA);
+    f.push_back(0xBB);
+    inject(std::move(f));
+  }
+
+  /// One type 896 status record (86/640, 641 or 660). `limiting` is always
+  /// false here: these tests are about the WRITE, and #274's own tests cover
+  /// the limiting states.
+  void inject_limiter_status_frame(uint8_t name_byte) {
+    std::vector<uint8_t> f = {0x24, 0x11, 0xF8, 0xE7, 0x0A, 0x0D,
+                              0x00, 0x03, 0x80, 0x01,
+                              0x00, 0x00, 0x06,
+                              name_byte, 0x00, 0, 0, 0, 0,
+                              0xAA, 0xBB};
     inject(std::move(f));
   }
 
@@ -4091,6 +4190,177 @@ static void test_clear_vacation_falls_back_to_the_soonest_upcoming() {
               "#290: a single fallback clear does not claim a multi-slot sweep");
 }
 
+// ---------------------------------------------------------------------------
+// Issue #299: setting a flow limiter
+//
+// For three modes the limiter IS the flow control -- constant curve and
+// constant pressure regulate speed and head, so flow drifts with hydraulics and
+// the cap is the only thing bounding it, and in temperature control the pump
+// deliberately runs up its maximum curve until it reaches the limit. It was
+// readable and not settable.
+// ---------------------------------------------------------------------------
+
+static void test_set_flow_limiter_accepted() {
+  std::cout << "\n=== set_flow_limiter: enable and cap (#299) ===" << std::endl;
+  Harness h;
+  h.prime_cache();
+
+  h.write_op.submit_set_flow_limiter(600, true, 1.6f, "lim1");
+  h.advance(45000);
+
+  TEST_ASSERT(h.events_for("lim1") == 1, "#299: exactly one terminal event");
+  const WriteResult *r = h.result_for("lim1");
+  TEST_ASSERT(r && r->status == WriteStatus::ACCEPTED, "#299: status is accepted");
+  TEST_ASSERT(h.sim.limiter_max_enabled, "#299: the pump has MaxFlow enabled");
+  TEST_ASSERT(std::fabs(h.sim.limiter_max_gpm - 1.6f) < 0.01f,
+              "#299: ...at the cap that was asked for");
+  TEST_ASSERT(r && r->limiter_sub == 600 && r->limiter_enabled == 1,
+              "#299: the settle names the limiter and its state");
+  TEST_ASSERT(r && std::fabs(r->limiter_limit_gpm - 1.6f) < 0.01f,
+              "#299: ...and the cap the pump settled on");
+}
+
+// The whole reason the read is mandatory. Type 895 carries three PID floats
+// beside the cap, so setting the cap rewrites the record -- and a write that
+// zeroed them would silently re-tune the pump's limiter loop.
+static void test_set_flow_limiter_preserves_the_pid_terms() {
+  std::cout << "\n=== set_flow_limiter: the PID terms survive (#299) ===" << std::endl;
+  Harness h;
+  h.prime_cache();
+
+  h.write_op.submit_set_flow_limiter(600, true, 2.0f, "lim_pid");
+  h.advance(45000);
+
+  TEST_ASSERT(h.result_for("lim_pid") &&
+                  h.result_for("lim_pid")->status == WriteStatus::ACCEPTED,
+              "#299: the write was accepted");
+  TEST_ASSERT(h.last_limiter_write.size() == 18,
+              "#299: the whole 18-byte record went on the wire");
+  bool pid_intact = h.last_limiter_write.size() == 18;
+  for (size_t i = 0; i < 12 && pid_intact; i++) {
+    pid_intact = h.last_limiter_write[6 + i] == h.sim.limiter_max_pid[i];
+  }
+  TEST_ASSERT(pid_intact,
+              "#299: the three PID floats were echoed back byte for byte, not zeroed");
+  // And the fixture bites: the PID bytes are non-zero, so echoing zeros would
+  // have failed rather than passed by coincidence.
+  TEST_ASSERT(h.sim.limiter_max_pid[0] != 0x00,
+              "#299: ...and the fixture's PID bytes are not zero to begin with");
+}
+
+// A pump that stores a different cap CLAMPED; one that keeps its old cap
+// REJECTED. Same distinction the setpoint write draws.
+static void test_set_flow_limiter_clamps_against_the_factory_bound() {
+  std::cout << "\n=== set_flow_limiter: a cap above the factory bound clamps (#299) ==="
+            << std::endl;
+  Harness h;
+  h.prime_cache();
+  // 86/620 gives MaxFlow's factory range as 0.5-11.0 gpm on the bench pump.
+  h.write_op.submit_set_flow_limiter(600, true, 25.0f, "lim_clamp");
+  h.advance(45000);
+
+  TEST_ASSERT(h.events_for("lim_clamp") == 1, "#299: exactly one terminal event");
+  const WriteResult *r = h.result_for("lim_clamp");
+  TEST_ASSERT(r && r->status == WriteStatus::CLAMPED,
+              "#299: a cap above the factory bound settles clamped, not accepted");
+  TEST_ASSERT(r && std::fabs(r->limiter_limit_gpm - 11.0f) < 0.01f,
+              "#299: ...and the settle reports what the pump actually holds");
+  TEST_ASSERT(r && r->detail.find("25.00") != std::string::npos,
+              "#299: ...naming what was requested as well as what was stored");
+}
+
+// A pump that ignores the write keeps its old cap, which is a refusal rather
+// than a clamp -- the two are different answers and a client acts on them
+// differently.
+static void test_set_flow_limiter_rejected_when_unchanged() {
+  std::cout << "\n=== set_flow_limiter: an ignored write settles rejected (#299) ==="
+            << std::endl;
+  Harness h;
+  h.prime_cache();
+  h.sim.honor_limiter_writes = false;  // acknowledged, but nothing stored
+
+  h.write_op.submit_set_flow_limiter(600, true, 3.0f, "lim_rej");
+  h.advance(45000);
+
+  TEST_ASSERT(h.events_for("lim_rej") == 1, "#299: exactly one terminal event");
+  const WriteResult *r = h.result_for("lim_rej");
+  TEST_ASSERT(r && r->status == WriteStatus::REJECTED,
+              "#299: a pump still holding its old cap refused, it did not clamp");
+  // The detail must describe the REQUEST on the requested side. It read the
+  // already-settled field before review caught it, so a request to ENABLE a
+  // limiter that stayed off reported "requested disabled ... pump holds
+  // disabled" -- both halves the same, and both wrong about the ask.
+  TEST_ASSERT(r && r->detail.find("requested enabled at 3.00 gpm") != std::string::npos,
+              std::string("#299: the detail names what was asked for (got \"") +
+                  (r ? r->detail : std::string()) + "\")");
+  TEST_ASSERT(r && r->detail.find("pump holds disabled") != std::string::npos,
+              "#299: ...and what the pump actually holds");
+}
+
+// Keep-existing: NAN leaves the cap alone and changes only the enable flag,
+// the same sentinel shape set_cycle_times uses.
+static void test_set_flow_limiter_keeps_the_cap_when_not_asserted() {
+  std::cout << "\n=== set_flow_limiter: NAN keeps the stored cap (#299) ===" << std::endl;
+  Harness h;
+  h.prime_cache();
+  h.sim.limiter_max_gpm = 1.4f;
+
+  h.write_op.submit_set_flow_limiter(600, true, NAN, "lim_keep");
+  h.advance(45000);
+
+  const WriteResult *r = h.result_for("lim_keep");
+  TEST_ASSERT(r && r->status == WriteStatus::ACCEPTED, "#299: accepted");
+  TEST_ASSERT(h.sim.limiter_max_enabled, "#299: the limiter was enabled");
+  TEST_ASSERT(std::fabs(h.sim.limiter_max_gpm - 1.4f) < 0.01f,
+              "#299: ...and the stored cap is untouched");
+}
+
+// Refused before the wire: only the two limiters the pump declares exist.
+static void test_set_flow_limiter_refuses_an_unknown_sub() {
+  std::cout << "\n=== set_flow_limiter: an unknown sub-id is invalid (#299) ===" << std::endl;
+  Harness h;
+  h.prime_cache();
+  const int writes_before = h.frames_limiter_write;
+
+  h.write_op.submit_set_flow_limiter(602, true, 1.6f, "lim_bad");
+  h.advance(45000);
+
+  const WriteResult *r = h.result_for("lim_bad");
+  TEST_ASSERT(h.events_for("lim_bad") == 1, "#299: exactly one terminal event");
+  TEST_ASSERT(r && r->status == WriteStatus::INVALID, "#299: an unknown sub-id is invalid");
+  TEST_ASSERT(h.frames_limiter_write == writes_before,
+              "#299: ...and nothing reached the wire");
+  // A terminal reached before any readback must claim NOTHING about the pump.
+  // These fields carried the request before review caught it, so a rejected cap
+  // read to an automation as the active one.
+  TEST_ASSERT(r && r->limiter_enabled == -1,
+              "#299: a pre-write terminal reports the enable state as unknown");
+  TEST_ASSERT(r && std::isnan(r->limiter_limit_gpm),
+              "#299: ...and the cap as unknown, not as the request");
+  TEST_ASSERT(r && r->requested_limiter_enabled == 1,
+              "#299: the request is still reported, under requested_*");
+}
+
+// The read is not optional. Without a cached record there are no PID terms to
+// echo, so refusing is the only safe answer.
+static void test_set_flow_limiter_refuses_when_the_read_fails() {
+  std::cout << "\n=== set_flow_limiter: no read, no write (#299) ===" << std::endl;
+  Harness h;
+  h.prime_cache();
+  h.sim.respond_limiter_reads = false;
+  const int writes_before = h.frames_limiter_write;
+
+  h.write_op.submit_set_flow_limiter(600, true, 1.6f, "lim_noread");
+  h.advance(45000);
+
+  const WriteResult *r = h.result_for("lim_noread");
+  TEST_ASSERT(h.events_for("lim_noread") == 1, "#299: exactly one terminal event");
+  TEST_ASSERT(r && r->status == WriteStatus::REJECTED,
+              "#299: an unreadable limiter refuses the write");
+  TEST_ASSERT(h.frames_limiter_write == writes_before,
+              "#299: ...without writing blind over the PID terms");
+}
+
 static void test_clear_vacation_none_active() {
   std::cout << "\n=== clear_vacation: no active vacation settles accepted ===" << std::endl;
   Harness h;
@@ -5006,6 +5276,7 @@ static void test_command_strings() {
       {WriteCommand::SET_SETPOINT, "set_setpoint"},
       {WriteCommand::SET_TEMPERATURE_RANGE, "set_temperature_range"},
       {WriteCommand::SET_CYCLE_TIMES, "set_cycle_times"},
+      {WriteCommand::SET_FLOW_LIMITER, "set_flow_limiter"},
       {WriteCommand::SET_SCHEDULE_ENTRY, "set_schedule_entry"},
       {WriteCommand::CLEAR_SCHEDULE_ENTRY, "clear_schedule_entry"},
       {WriteCommand::SET_SCHEDULE_ENABLED, "set_schedule_enabled"},
@@ -5461,6 +5732,13 @@ int main() {
   test_clear_vacation_clears_every_live_vacation();
   test_clear_vacation_leaves_a_future_booking_alone();
   test_clear_vacation_still_prefers_the_live_one_over_an_ended_one();
+  test_set_flow_limiter_accepted();
+  test_set_flow_limiter_preserves_the_pid_terms();
+  test_set_flow_limiter_clamps_against_the_factory_bound();
+  test_set_flow_limiter_rejected_when_unchanged();
+  test_set_flow_limiter_keeps_the_cap_when_not_asserted();
+  test_set_flow_limiter_refuses_an_unknown_sub();
+  test_set_flow_limiter_refuses_when_the_read_fails();
   test_clear_vacation_falls_back_to_the_soonest_upcoming();
   test_clear_vacation_none_active();
   test_clear_single_event();

@@ -422,6 +422,31 @@ void ControlService::read_one_limiter_(uint16_t sub, bool is_config,
       /*expect_short_read_refusal=*/true);
 }
 
+void ControlService::read_limiter_configs(std::function<void(bool)> callback) {
+  if (limiters_reading_) {
+    ESP_LOGD(TAG, "Limiter read already in flight");
+    if (callback) callback(false);
+    return;
+  }
+  limiters_reading_ = true;
+  // Same sequential rule and the same reason as read_limiters(): the two config
+  // records share one type code, so a late 86/600 reply would satisfy the 86/601
+  // request and be cached as MinFlow. Stopping at the first failure is what
+  // keeps positional correlation honest.
+  read_one_limiter_(SUB_LIMITER_CONFIG_MAX_FLOW, true, [this, callback](bool ok) {
+    if (!ok) {
+      ESP_LOGD(TAG, "Limiter config read stopped at 86/600");
+      limiters_reading_ = false;
+      if (callback) callback(false);
+      return;
+    }
+    read_one_limiter_(SUB_LIMITER_CONFIG_MIN_FLOW, true, [this, callback](bool ok2) {
+      limiters_reading_ = false;
+      if (callback) callback(ok2);
+    });
+  });
+}
+
 void ControlService::read_limiters(std::function<void(bool)> callback) {
   if (limiters_reading_) {
     ESP_LOGD(TAG, "Limiter read already in flight");
@@ -1302,6 +1327,70 @@ bool ControlService::write_dhw_config(uint8_t on_minutes, uint8_t off_minutes,
       [on_ack](bool success, const uint8_t *data, size_t /*len*/) {
         // "Answered", not "accepted" -- see write_temp_range_config() above for
         // why a refusal must not be reported as silence (issue #208).
+        const bool answered = success or (data != nullptr);
+        if (on_ack) on_ack(answered);
+      },
+      3000, false, true);
+  return true;
+}
+
+bool ControlService::write_limiter_config(uint16_t sub, bool enabled, float limit_m3s,
+                                          std::function<void(bool)> on_ack) {
+  // Which cached record this sub-id refers to. Only the two the pump declares
+  // are writable: a sweep of the whole range found limiter indices 1 and 2 and
+  // nothing else, so there is no third slot to address (issue #274).
+  const LimiterConfig *cached = nullptr;
+  if (sub == SUB_LIMITER_CONFIG_MAX_FLOW) cached = &limiters_.max_flow;
+  if (sub == SUB_LIMITER_CONFIG_MIN_FLOW) cached = &limiters_.min_flow;
+  if (cached == nullptr) {
+    ESP_LOGW(TAG, "Cannot write limiter: Sub %u is not a limiter config record",
+             static_cast<unsigned>(sub));
+    return false;
+  }
+
+  // Read-modify-write, enforced rather than documented. The struct body -- and
+  // the refusal when there is nothing to echo -- comes from
+  // build_limiter_write_body(), which is pure so a host test can reach the
+  // guard directly. Through this path WriteOperationService has already checked
+  // the record decoded, so a guard living only here would be masked by that one
+  // and its mutation would survive (issue #282's shape; CI found it).
+  uint8_t body[LIMITER_CONFIG_BODY_LEN];
+  if (!build_limiter_write_body(*cached, enabled, limit_m3s, body)) {
+    ESP_LOGW(TAG, "Cannot write limiter Sub %u: not read yet (read_limiters first)",
+             static_cast<unsigned>(sub));
+    return false;
+  }
+
+  // Same packet shape as write_dhw_config(), one object across:
+  //   [0A][9B][56][subH subL][03 7F][01][00 00 12][18 bytes of struct]
+  //
+  // Obj-first addressing with a 1-byte object id, type 895 (0x037F) version 1,
+  // 3-byte size = 18. OpSpec 0x9B = SET (top two bits 10) + 27 bytes
+  // (1 obj + 2 sub + 2 type + 1 version + 3 size + 18 data).
+  uint8_t apdu[29];
+  apdu[0] = 0x0A;  // Class 10
+  apdu[1] = 0x9B;  // OpSpec: SET + 27 bytes
+  apdu[2] = 0x56;  // Obj-ID (86, 1 byte in this packet shape)
+  apdu[3] = static_cast<uint8_t>(sub >> 8);
+  apdu[4] = static_cast<uint8_t>(sub & 0xFF);
+  apdu[5] = 0x03;  // Type high (895 = 0x037F)
+  apdu[6] = 0x7F;  // Type low
+  apdu[7] = 0x01;  // Object version
+  apdu[8] = 0x00;  // Size high
+  apdu[9] = 0x00;  // Size mid
+  apdu[10] = 0x12;  // Size low (18 bytes)
+
+  memcpy(&apdu[11], body, LIMITER_CONFIG_BODY_LEN);
+
+  ESP_LOGI(TAG, "Writing limiter Sub %u: %s at %.4f m3/s (%.2f gpm)",
+           static_cast<unsigned>(sub), enabled ? "enabled" : "disabled",
+           limit_m3s, limit_m3s * 15850.323f);
+
+  this->transport_.send_apdu_command(
+      apdu, sizeof(apdu), 0, 0,
+      [on_ack](bool success, const uint8_t *data, size_t /*len*/) {
+        // "Answered", not "accepted" -- a refusal must not be reported as
+        // silence (issue #208), and the readback decides the verdict anyway.
         const bool answered = success or (data != nullptr);
         if (on_ack) on_ack(answered);
       },

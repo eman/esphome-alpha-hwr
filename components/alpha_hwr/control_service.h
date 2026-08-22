@@ -651,6 +651,16 @@ class ControlService {
   /// lands, so "no limiter" is distinguishable from "we have not looked".
   const LimiterState &limiter_state() const { return limiters_; }
 
+  /// Is a limiter read already in flight? (issue #299)
+  ///
+  /// read_limiters() answers `false` immediately when one is, which is
+  /// indistinguishable at the callback from "the pump would not answer" -- and
+  /// the two want opposite responses. The status poll takes the same flag every
+  /// control-poll interval, so a user write landing in that window would settle
+  /// REJECTED for a pump that was working perfectly. Callers that can wait ask
+  /// first and retry.
+  bool limiters_reading() const { return limiters_reading_; }
+
   /// Called whenever any limiter record is stored, rather than when the read
   /// chain finishes.
   ///
@@ -871,6 +881,28 @@ class ControlService {
    */
   void read_setpoint_ranges(std::function<void(bool)> callback);
 
+  /**
+   * The two type 895 CONFIG records only (86/600, 86/601), without the status
+   * chain behind them (issue #299).
+   *
+   * `read_limiters()` reads config and then status as one chain and reports the
+   * MANAGER read's result -- so a pump that answers both config records but not
+   * the optional 86/660 answers `false`, even though that object's own note
+   * says its absence "costs the name of the binding limiter and no more".
+   *
+   * That is harmless for the entities, which want the whole family and can
+   * treat a partial read as unknown. It is not harmless for a WRITE: the write
+   * needs exactly one config record, for its name and PID bytes, and refusing
+   * one because a diagnostic read failed reports a pump problem that is not
+   * there. The confirm has the same shape and would time out having already
+   * read the stored cap correctly.
+   *
+   * Shares `limiters_reading_` with the full read, so the two still cannot
+   * interleave -- the hazard the flag exists for is positional correlation
+   * between same-typed replies, and that is unchanged by reading fewer of them.
+   */
+  void read_limiter_configs(std::function<void(bool)> callback);
+
   /// One type 895 (config) or type 896 (status) read. @p is_config picks which
   /// decoder and which type expectation to use.
   void read_one_limiter_(uint16_t sub, bool is_config,
@@ -898,6 +930,36 @@ class ControlService {
   bool write_dhw_config(uint8_t on_minutes, uint8_t off_minutes,
                         std::function<void(bool)> on_ack,
                         const uint8_t *setpoint_be4 = nullptr);
+
+  /**
+   * Write one flow-limiter configuration record (Object 86, Sub 600 or 601,
+   * type 895 v1). Issue #299.
+   *
+   * **Read-modify-write, and it must be.** Type 895 is one struct --
+   * `[name][enable][limit f32][kp][ti][td]` -- so setting the cap means
+   * rewriting all eighteen bytes. The three PID floats are echoed verbatim from
+   * the cached record; a write that zeroed them would silently re-tune the
+   * pump's limiter control loop, which is a bigger change than the one the
+   * caller asked for and an invisible one. Same reason `write_dhw_config()`
+   * echoes its stored setpoint bytes.
+   *
+   * Returns false without sending when the limiter has not been read, rather
+   * than writing blind over unread state -- the clobber class issue #92 bans.
+   * The caller reads first; `WriteOperationService` does that in its run step.
+   *
+   * The limiter's NAME is echoed too rather than derived from the sub-id. The
+   * sub-id indexes the limiter and the name byte says which one it is, and on
+   * this pump they agree (600 = MaxFlow, 601 = MinFlow) -- but only the pump's
+   * own byte is evidence of that on a unit nobody here has seen.
+   *
+   * @param sub        SUB_LIMITER_CONFIG_MAX_FLOW or ..._MIN_FLOW.
+   * @param enabled    Whether the limiter should be on.
+   * @param limit_m3s  The cap in the pump's native m3/s. Callers holding gpm
+   *                   divide by 15850.323f.
+   * @param on_ack     Called with whether the pump answered.
+   */
+  bool write_limiter_config(uint16_t sub, bool enabled, float limit_m3s,
+                            std::function<void(bool)> on_ack);
 
   /**
    * Read Object 91 Sub 430 (temperature range, AutoAdapt, cycle times) and

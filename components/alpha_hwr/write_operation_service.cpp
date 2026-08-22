@@ -22,6 +22,7 @@ const char *write_command_to_string(WriteCommand cmd) {
     case WriteCommand::SET_SETPOINT:          return "set_setpoint";
     case WriteCommand::SET_TEMPERATURE_RANGE: return "set_temperature_range";
     case WriteCommand::SET_CYCLE_TIMES:       return "set_cycle_times";
+    case WriteCommand::SET_FLOW_LIMITER:      return "set_flow_limiter";
     case WriteCommand::SET_SCHEDULE_ENTRY:    return "set_schedule_entry";
     case WriteCommand::CLEAR_SCHEDULE_ENTRY:  return "clear_schedule_entry";
     case WriteCommand::SET_SCHEDULE_ENABLED:  return "set_schedule_enabled";
@@ -122,6 +123,13 @@ std::vector<std::string> WriteOperationService::resource_keys_(const Operation &
       return {"temp_range"};
     case WriteCommand::SET_CYCLE_TIMES:
       return {"cycle_times"};
+    case WriteCommand::SET_FLOW_LIMITER:
+      // Per-limiter, like the per-mode setpoint key above and for the same
+      // reason: MaxFlow and MinFlow are independent records at independent
+      // sub-ids, so a queued write to one must not supersede a queued write to
+      // the other. A shared "limiter" key would silently drop half of "cap the
+      // maximum and raise the minimum".
+      return {format_detail("limiter:%u", op.limiter_sub)};
     case WriteCommand::SET_SCHEDULE_ENTRY:
     case WriteCommand::CLEAR_SCHEDULE_ENTRY:
       // Per-(layer,day): queuing Monday..Sunday writes doesn't self-cancel.
@@ -223,6 +231,7 @@ void WriteOperationService::start_front_() {
     case WriteCommand::SET_SCHEDULE_ENABLED:  budget = WATCHDOG_SCHED_ENABLED_MS; break;
     case WriteCommand::SET_REMOTE_MODE:       budget = WATCHDOG_REMOTE_MODE_MS; break;
     case WriteCommand::SET_CLOCK:             budget = WATCHDOG_SET_CLOCK_MS; break;
+    case WriteCommand::SET_FLOW_LIMITER:      budget = WATCHDOG_FLOW_LIMITER_MS; break;
     case WriteCommand::SET_SINGLE_EVENT:      budget = WATCHDOG_SINGLE_EVENT_MS; break;
     case WriteCommand::CLEAR_SINGLE_EVENT:
       // A vacation clear walks every slot covering now (issue #290), so it gets
@@ -243,6 +252,7 @@ void WriteOperationService::start_front_() {
     case WriteCommand::SET_SETPOINT:          run_set_setpoint_(seq); break;
     case WriteCommand::SET_TEMPERATURE_RANGE: run_set_temperature_range_(seq); break;
     case WriteCommand::SET_CYCLE_TIMES:       run_set_cycle_times_(seq); break;
+    case WriteCommand::SET_FLOW_LIMITER:      run_set_flow_limiter_(seq); break;
     case WriteCommand::SET_SCHEDULE_ENTRY:
     case WriteCommand::CLEAR_SCHEDULE_ENTRY:  run_schedule_entry_(seq); break;
     case WriteCommand::SET_SCHEDULE_ENABLED:  run_schedule_enabled_(seq); break;
@@ -370,6 +380,19 @@ void WriteOperationService::finish_(uint32_t seq, WriteStatus status, const std:
       result.on_minutes = op.on_minutes > 0 ? op.on_minutes : -1;
       result.off_minutes = op.off_minutes > 0 ? op.off_minutes : -1;
       result.flow = op.flow;  // settled from the confirm readback when it ran
+      break;
+    case WriteCommand::SET_FLOW_LIMITER:
+      result.limiter_sub = static_cast<int16_t>(op.limiter_sub);
+      // The request is always reportable; the SETTLED fields only once a
+      // readback has populated them. Before that they still hold the request,
+      // and emitting them as pump state told an automation a refused cap was
+      // active (review on #301).
+      result.requested_limiter_enabled = op.requested_limiter_enabled;
+      result.requested_limiter_limit_gpm = op.requested_limiter_limit_gpm;
+      if (op.limiter_settled) {
+        result.limiter_enabled = op.limiter_enabled ? 1 : 0;
+        result.limiter_limit_gpm = op.limiter_limit_gpm;
+      }
       break;
     case WriteCommand::SET_SCHEDULE_ENTRY:
     case WriteCommand::CLEAR_SCHEDULE_ENTRY:
@@ -1287,6 +1310,205 @@ void WriteOperationService::confirm_temperature_range_(uint32_t seq) {
 // SET_CYCLE_TIMES
 // ---------------------------------------------------------------------------
 
+// ---------------------------------------------------------------------------
+// SET_FLOW_LIMITER (issue #299)
+//
+// The one write in this layer whose pre-write read is mandatory for a reason
+// other than resolving kept fields: type 895 carries three PID floats beside
+// the cap, and setting the cap means rewriting the whole record. They are
+// echoed verbatim, so the record has to be in hand first.
+// ---------------------------------------------------------------------------
+void WriteOperationService::run_set_flow_limiter_(uint32_t seq) {
+  Operation *op = find_(seq);
+  if (op == nullptr || op->phase == Phase::DONE) return;
+
+  // Only the two the pump declares. A sweep of the whole 600-619 range found
+  // limiter indices 1 and 2 and nothing else (issue #274), so a third sub-id is
+  // a caller mistake rather than an unexplored slot.
+  const bool addressable = op->limiter_sub == services::SUB_LIMITER_CONFIG_MAX_FLOW ||
+                           op->limiter_sub == services::SUB_LIMITER_CONFIG_MIN_FLOW;
+  if (!addressable) {
+    finish_(seq, WriteStatus::INVALID,
+            format_detail("Sub %u is not a flow limiter (600 = MaxFlow, 601 = MinFlow)",
+                          static_cast<unsigned>(op->limiter_sub)));
+    return;
+  }
+
+  // NAN keeps the stored cap and changes only the enable flag, the same
+  // keep-existing shape SET_CYCLE_TIMES uses. A cap that IS asserted is bounded
+  // here only against the absurd; the pump's own factory bounds decide the rest
+  // and the confirm reports a clamp.
+  const bool cap_asserted = !std::isnan(op->limiter_limit_gpm);
+  if (cap_asserted && (op->limiter_limit_gpm <= 0.0f || op->limiter_limit_gpm > 100.0f)) {
+    finish_(seq, WriteStatus::INVALID,
+            "limiter cap must be greater than 0 and at most 100 gpm (NAN = keep)");
+    return;
+  }
+
+  op->phase = Phase::RESOLVING;
+
+  // A limiter read already in flight is NOT a failure, and treating it as one
+  // was this operation's first shape. `read_limiters()` answers false
+  // immediately while its own chain is running, and the status poll takes that
+  // same flag every control-poll interval -- so a user pressing the control in
+  // that window got a REJECTED verdict about a pump that was working. Wait for
+  // it instead; the watchdog bounds how long that can go on.
+  if (control_.limiters_reading()) {
+    schedule_([this, seq]() { run_set_flow_limiter_(seq); }, CONFIG_RETRY_DELAY_MS);
+    return;
+  }
+
+  // The CONFIG records only. read_limiters() reads the status chain behind them
+  // and reports the optional manager read's result, so a pump that answers both
+  // config records but not 86/660 would have its write refused for a
+  // diagnostic's sake. The write needs one config record, for its name and PID
+  // bytes, and nothing else (issue #299).
+  control_.read_limiter_configs([this, seq](bool ok) {
+    Operation *op = find_(seq);
+    if (op == nullptr || op->phase == Phase::DONE) return;
+    if (!ok) {
+      finish_(seq, WriteStatus::REJECTED, "could not read flow limiters; write not attempted");
+      return;
+    }
+
+    const services::LimiterConfig &cached =
+        op->limiter_sub == services::SUB_LIMITER_CONFIG_MAX_FLOW
+            ? control_.limiter_state().max_flow
+            : control_.limiter_state().min_flow;
+    if (!cached.valid) {
+      // The chain reported success but this record did not decode. Refusing is
+      // the only safe answer: without the stored PID bytes a write would put
+      // zeros there and re-tune the pump's limiter loop invisibly.
+      finish_(seq, WriteStatus::REJECTED,
+              "limiter record did not decode; write not attempted");
+      return;
+    }
+
+    op->pre_limiter_enabled = cached.enabled ? 1 : 0;
+    op->pre_limiter_limit_gpm = cached.limit_gpm();
+    if (std::isnan(op->limiter_limit_gpm)) {
+      op->limiter_limit_gpm = op->pre_limiter_limit_gpm;
+    }
+
+    op->phase = Phase::WRITING;
+    const float limit_m3s = op->limiter_limit_gpm / 15850.323f;
+    const bool sent = control_.write_limiter_config(
+        op->limiter_sub, op->limiter_enabled, limit_m3s,
+        [this, seq](bool answered) {
+          Operation *op = find_(seq);
+          if (op == nullptr || op->phase == Phase::DONE) return;
+          // Silence is not a verdict (issue #234): the pump may have stored the
+          // record and lost the acknowledgement. The readback decides; this only
+          // survives into the settle detail so the silence is still reported.
+          op->config_unacked = !answered;
+          op->phase = Phase::CONFIRMING;
+          schedule_([this, seq]() { confirm_set_flow_limiter_(seq); },
+                    CONFIG_CONFIRM_DELAY_MS);
+        });
+    if (!sent) {
+      finish_(seq, WriteStatus::REJECTED, "limiter write could not be built");
+    }
+  });
+}
+
+void WriteOperationService::confirm_set_flow_limiter_(uint32_t seq) {
+  Operation *op = find_(seq);
+  if (op == nullptr || op->phase == Phase::DONE) return;
+
+  // Same reasoning as the run step: a poll holding the flag is a reason to wait,
+  // not a readback failure.
+  if (control_.limiters_reading()) {
+    schedule_([this, seq]() { confirm_set_flow_limiter_(seq); }, CONFIG_RETRY_DELAY_MS);
+    return;
+  }
+
+  control_.read_limiter_configs([this, seq](bool ok) {
+    Operation *op = find_(seq);
+    if (op == nullptr || op->phase == Phase::DONE) return;
+
+    if (!ok) {
+      if (op->attempts < CONFIG_MAX_ATTEMPTS) {
+        op->attempts++;
+        schedule_([this, seq]() { confirm_set_flow_limiter_(seq); }, CONFIG_RETRY_DELAY_MS);
+        return;
+      }
+      finish_(seq, WriteStatus::TIMEOUT, "limiter readback failed");
+      return;
+    }
+
+    const services::LimiterConfig &actual =
+        op->limiter_sub == services::SUB_LIMITER_CONFIG_MAX_FLOW
+            ? control_.limiter_state().max_flow
+            : control_.limiter_state().min_flow;
+    if (!actual.valid) {
+      finish_(seq, WriteStatus::TIMEOUT, "limiter readback did not decode");
+      return;
+    }
+
+    const float settled_gpm = actual.limit_gpm();
+    const bool enable_matches = actual.enabled == op->limiter_enabled;
+    // 0.01 gpm: the caps are entered to two decimals in the app, and the m3/s
+    // round trip is exact on every value seen on two pumps, so anything looser
+    // would hide a real clamp.
+    const bool cap_matches = std::fabs(settled_gpm - op->limiter_limit_gpm) < 0.01f;
+
+    const float requested_gpm = op->limiter_limit_gpm;
+
+    std::string detail;
+    if (op->config_unacked) {
+      detail = "write was not acknowledged; verdict from readback";
+    }
+
+    // Settle the operation's fields to what the pump HOLDS -- but only on a
+    // terminal path, never before a retry.
+    //
+    // The first cut overwrote them here, above the retry branch, and every
+    // mismatch then settled ACCEPTED: the retry compared the requested value
+    // against itself, because the requested value had just been replaced by
+    // what was read back. A clamp and a refusal both became a success. The
+    // requested value has to survive until the comparison is done with it.
+    auto settle_fields = [&]() {
+      op->limiter_enabled = actual.enabled;
+      op->limiter_limit_gpm = settled_gpm;
+      op->limiter_settled = true;
+    };
+
+    if (enable_matches && cap_matches) {
+      settle_fields();
+      finish_(seq, WriteStatus::ACCEPTED, detail);
+      return;
+    }
+    if (op->attempts < CONFIG_MAX_ATTEMPTS) {
+      op->attempts++;
+      schedule_([this, seq]() { confirm_set_flow_limiter_(seq); }, CONFIG_RETRY_DELAY_MS);
+      return;
+    }
+    // Captured BEFORE settling, because the detail below describes the request
+    // and settle_fields() is about to overwrite the field it reads. The first
+    // cut read op->limiter_enabled after settling, so a request to ENABLE a
+    // limiter that stayed off reported "requested disabled ... pump holds
+    // disabled" -- the same read-after-overwrite that made every mismatch
+    // settle ACCEPTED, one field across (review on #301).
+    const bool requested_enabled = op->limiter_enabled;
+    settle_fields();  // the pump's values, not the request
+
+    // REJECTED vs CLAMPED, the same distinction the setpoint write draws: a
+    // pump still holding its old cap refused, one holding a different cap
+    // clamped -- most likely against the factory bounds at 86/620-621
+    // (MaxFlow 0.5-11.0 gpm, MinFlow 1.0-13.0 on the bench unit).
+    const bool unchanged =
+        !std::isnan(op->pre_limiter_limit_gpm) &&
+        std::fabs(settled_gpm - op->pre_limiter_limit_gpm) < 0.01f &&
+        (op->pre_limiter_enabled == -1 ||
+         (op->pre_limiter_enabled == 1) == actual.enabled);
+    if (!detail.empty()) detail += "; ";
+    detail += format_detail("requested %s at %.2f gpm, pump holds %s at %.2f gpm",
+                            requested_enabled ? "enabled" : "disabled", requested_gpm,
+                            actual.enabled ? "enabled" : "disabled", settled_gpm);
+    finish_(seq, unchanged ? WriteStatus::REJECTED : WriteStatus::CLAMPED, detail);
+  });
+}
+
 void WriteOperationService::run_set_cycle_times_(uint32_t seq) {
   Operation *op = find_(seq);
   if (op == nullptr || op->phase == Phase::DONE) return;
@@ -1522,6 +1744,25 @@ void WriteOperationService::submit_set_single_event(uint32_t begin_ts, uint32_t 
   op.slot = static_cast<int16_t>(slot);
   op.enabled = true;
   op.single_event_action = action;
+  op.done = std::move(done);
+  submit_(std::move(op));
+}
+
+void WriteOperationService::submit_set_flow_limiter(uint16_t sub, bool enabled, float limit_gpm,
+                                                    const std::string &op_id,
+                                                    std::function<void(bool)> done,
+                                                    WriteOrigin origin) {
+  Operation op;
+  op.command = WriteCommand::SET_FLOW_LIMITER;
+  op.op_id = op_id;
+  op.origin = origin;
+  op.limiter_sub = sub;
+  op.limiter_enabled = enabled;
+  op.limiter_limit_gpm = limit_gpm;
+  // Pinned at submit and never touched again, so the request survives every
+  // later mutation of the working fields.
+  op.requested_limiter_enabled = enabled ? 1 : 0;
+  op.requested_limiter_limit_gpm = limit_gpm;
   op.done = std::move(done);
   submit_(std::move(op));
 }

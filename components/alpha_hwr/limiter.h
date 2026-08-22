@@ -88,15 +88,29 @@ inline const char *limiter_name_string(LimiterName n) {
 /// `limiter_user_config_obj`, type 895 v1 (86/600, 86/601).
 ///
 /// Payload is 18 bytes: `[limiter_name][enable][limit_value f32][kp][ti][td]`.
-/// The three PID terms are read past but not kept -- the limiter behaves as a
-/// control loop rather than a hard clamp (one sample reached 2.84 gpm against a
-/// 1.6 gpm cap before settling back), which is presumably what they are for,
-/// but nothing here acts on them.
+/// The three PID terms are **kept verbatim and never interpreted** (issue #299):
+/// nothing here acts on them, but a write has to put them back byte for byte,
+/// because setting the cap rewrites the whole record. They are presumably why
+/// the limiter behaves as a control loop rather than a hard clamp -- one sample
+/// reached 2.84 gpm against a 1.6 gpm cap before settling back.
 struct LimiterConfig {
   bool valid{false};
   LimiterName name{LimiterName::NONE};
   bool enabled{false};
   float limit_m3s{0.0f};  ///< The cap, in the pump's native m³/s.
+
+  /// The three PID floats that follow the cap in the record, kept as raw wire
+  /// bytes (issue #299).
+  ///
+  /// Nothing here interprets them, and nothing should: they are kept so a WRITE
+  /// can echo them back verbatim. Type 895 is one struct, so setting the cap
+  /// means rewriting the whole record -- and a write that zeroed these would
+  /// silently re-tune the pump's limiter loop, which is a far worse change than
+  /// the one the caller asked for. `write_dhw_config()` echoes its stored
+  /// setpoint bytes for exactly the same reason.
+  ///
+  /// Only meaningful when `valid`.
+  uint8_t pid_raw[12]{};
 
   /// The same value in gallons per minute, which is the unit it was entered in.
   ///
@@ -136,6 +150,10 @@ struct LimiterStatus {
 
 /// Bytes of payload each record carries, after the 3-byte size header.
 static constexpr size_t LIMITER_CONFIG_BODY_LEN = 18;
+/// Where the three PID floats start in the config record, and how many bytes
+/// they occupy: `[name][enable][limit f32]` is six, leaving twelve (issue #299).
+static constexpr size_t LIMITER_CONFIG_PID_OFFSET = 6;
+static constexpr size_t LIMITER_CONFIG_PID_LEN = 12;
 static constexpr size_t LIMITER_STATUS_BODY_LEN = 6;
 
 /// Sub-ids. Named because "the sub-id indexes the limiter, not the mode" is the
@@ -172,8 +190,56 @@ inline LimiterConfig decode_limiter_config(const uint8_t *body, size_t len) {
   c.name = limiter_name_from_byte(body[0]);
   c.enabled = body[1] != 0;
   c.limit_m3s = protocol::decode_float_be(body, 2);
+  // Bytes 6..17: kp, ti, td. Copied rather than decoded -- a float round trip
+  // is not guaranteed to reproduce the exact bytes, and the point of keeping
+  // them is that a write puts back precisely what the pump had.
+  for (size_t i = 0; i < LIMITER_CONFIG_PID_LEN; i++) {
+    c.pid_raw[i] = body[LIMITER_CONFIG_PID_OFFSET + i];
+  }
   return c;
 }
+
+/**
+ * Build the eighteen-byte type 895 body for a limiter write (issue #299).
+ *
+ * Pure, and separated from the framing for the reason issue #282 established:
+ * the guard below is otherwise reachable only through `ControlService`'s
+ * private write primitive, which `WriteOperationService` calls after its own
+ * validity check -- so the outer check masks this one, its mutation survives,
+ * and the guard is protected rather than proven. CI found exactly that
+ * (341/342, `limiter-write-without-a-read` surviving).
+ *
+ * What it guards is not cosmetic. The record is one struct, so setting the cap
+ * rewrites all eighteen bytes, and bytes 6..17 are the pump's PID terms. With
+ * no cached record there is nothing to echo, and writing zeros there would
+ * re-tune the limiter's control loop invisibly -- a bigger change than the
+ * caller asked for and one nothing would report.
+ *
+ * @param cached     The record as last read. Must be `valid`.
+ * @param enabled    Whether the limiter should constrain the pump.
+ * @param limit_m3s  The cap in the pump's native m3/s.
+ * @param out        Receives LIMITER_CONFIG_BODY_LEN bytes. Untouched on false.
+ * @return false when there is nothing to echo, and nothing may be written.
+ */
+inline bool build_limiter_write_body(const LimiterConfig &cached, bool enabled,
+                                     float limit_m3s, uint8_t *out) {
+  if (out == nullptr)
+    return false;
+  if (!cached.valid)
+    return false;
+
+  // The limiter's NAME is echoed from the pump's own byte rather than derived
+  // from the sub-id. They agree on this pump; only the pump's byte is evidence
+  // of that on a unit nobody here has seen.
+  out[0] = static_cast<uint8_t>(cached.name);
+  out[1] = enabled ? 0x01 : 0x00;
+  protocol::encode_float_be(limit_m3s, &out[2]);
+  for (size_t i = 0; i < LIMITER_CONFIG_PID_LEN; i++) {
+    out[LIMITER_CONFIG_PID_OFFSET + i] = cached.pid_raw[i];
+  }
+  return true;
+}
+
 
 /// Decode a type 896 v1 record. @p body starts after the 3-byte size header.
 inline LimiterStatus decode_limiter_status(const uint8_t *body, size_t len) {

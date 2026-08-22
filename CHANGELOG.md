@@ -4,6 +4,61 @@
 
 ### Added
 
+- **The flow limiter can be set, not just read** (issue #299, `set_flow_limiter`).
+  For three of the pump's five modes the limiter **is** the flow control:
+  constant curve and constant pressure regulate speed and head, so flow drifts
+  with hydraulics and the cap is the only thing bounding it, and per manual
+  §9.3.2 temperature control deliberately runs up its maximum curve *until it
+  reaches the flow limit* — making the limit the operating point rather than a
+  safety net. It was readable and unreachable.
+
+  The vendor's own reasons for capping flow are ordinary owner concerns rather
+  than commissioning-only ones: §10.4 gives system noise, §9.3.2 and §9.3.3 give
+  flow-accelerated corrosion.
+
+  **It is a read-modify-write, and has to be.** Type 895 is one struct —
+  `[name][enable][limit][kp][ti][td]` — so setting the cap rewrites all eighteen
+  bytes, and the three PID floats are echoed verbatim from a mandatory pre-write
+  read. A write that zeroed them would re-tune the pump's limiter control loop
+  invisibly. If the record cannot be read the write is refused rather than sent
+  blind, and the decode now keeps the PID bytes precisely so there is something
+  to echo.
+
+  The cap settles against the pump's factory bounds (86/620–621): outside them
+  it settles `clamped` with the stored value reported, and a pump that keeps its
+  old cap settles `rejected` — the same distinction the setpoint write draws,
+  and two answers a client acts on differently.
+
+  **It does nothing in Cycle Time mode**, per the scope table from #274. The
+  write succeeds, the pump stores it, and the cap is ignored while that mode
+  runs. Documented rather than blocked: the record really is stored.
+
+  **Four entities alongside the service**, raised by @jfriend00 in review: every
+  other numeric value the pump stores as a tunable setting is a `number` entity,
+  and this was the one exception, reachable only through a service call. `Max
+  Flow Limit` / `Min Flow Limit` (`gal/min`, no `device_class`, so Home
+  Assistant does no unit conversion and the entity shows exactly what the
+  service takes) and `Max`/`Min Flow Limit Enabled` switches. The cap and the
+  enable flag are separate controls over one record — the same shape
+  `set_pump_state` and the `Engage Pump` / `Schedule Enabled` pair already
+  use — with each keeping the other's stored value so they cannot fight.
+
+  All four are `optimistic: false` and read through a new component-level
+  `limiter_state()` getter. That getter is what makes it possible: without it
+  the only published limiter state is the text sensor's prose, and a config
+  parsing `1.60` back out of "MaxFlow enabled at 1.60 gpm (not limiting)" is
+  precisely the brittleness this cluster has been about. Verified on the pump:
+  changing the cap through the service moved both the number and the switch.
+
+  On the hazard this was deferred over — that enabling a limiter *silently* caps
+  the pump. That was a property of the old blindness rather than of the write,
+  but only where the read is switched on, and `flow_limiter` / `flow_limited`
+  are optional and off by default. The settle event carries the confirmed record
+  either way, so a write is never fully silent; what is missing without the
+  entities is the ongoing "is it limiting". The component now says so at WARN
+  once per write rather than refusing one because a diagnostic entity is
+  undeclared.
+
 - **The repository is MIT licensed** (`LICENSE`). It had no licence at all,
   which the HACS validator surfaced while working on issue #183 — and it
   mattered well beyond HACS. A public repository with no licence is *all rights

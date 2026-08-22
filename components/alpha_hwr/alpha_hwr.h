@@ -981,6 +981,80 @@ public:
                               const std::string &op_id) {
     write_op_service_.submit_set_cycle_times(on_minutes, off_minutes, flow, op_id);
   }
+  /**
+   * The flow limiters as last read (issue #299).
+   *
+   * Exposed so a YAML control can be `optimistic: false` and track the pump.
+   * Without it the only published limiter state is the text sensor's prose --
+   * "MaxFlow enabled at 1.60 gpm (not limiting)" -- and a config parsing a
+   * number back out of that sentence is exactly the brittleness this cluster
+   * has been about. @jfriend00 raised it reviewing the write.
+   *
+   * Values are only meaningful once `flow_limiter` or `flow_limited` is
+   * declared: the reads are gated on one of them existing, so on a node with
+   * neither this reports an unread record and a control bound to it shows
+   * nothing rather than a wrong number.
+   */
+  const services::LimiterState &limiter_state() const {
+    return control_service_.limiter_state();
+  }
+
+  /**
+   * Entity-driven limiter write (issue #299).
+   *
+   * Separate from the service entry point below for the reason every other
+   * entity write here is: `WriteOrigin::ENTITY`, so the settle event says where
+   * the change came from, and the same `check_ready()` guard the other controls
+   * use rather than letting the operation layer reject it one stage later.
+   *
+   * Refuses when the limiter has not been read. That is not defensiveness: the
+   * caller passes an `enabled` flag it took from the cache, and on a cold cache
+   * that reads false -- so setting only the cap would quietly DISABLE a limiter
+   * that was on. The same class of bug as writing unread PID terms, one field
+   * across.
+   */
+  void set_flow_limiter_from_entity(uint16_t sub, bool enabled, float limit_gpm) {
+    if (!check_ready("set_flow_limiter")) return;
+    const auto &cached = (sub == services::SUB_LIMITER_CONFIG_MAX_FLOW)
+                             ? control_service_.limiter_state().max_flow
+                             : control_service_.limiter_state().min_flow;
+    if (!cached.valid) {
+      ESP_LOGW(TAG,
+               "Not setting limiter Sub %u from an entity: it has not been read, so "
+               "the enable flag would be a guess",
+               static_cast<unsigned>(sub));
+      return;
+    }
+    write_op_service_.submit_set_flow_limiter(sub, enabled, limit_gpm, "", nullptr,
+                                              services::WriteOrigin::ENTITY);
+  }
+
+  void submit_set_flow_limiter(uint16_t sub, bool enabled, float limit_gpm,
+                               const std::string &op_id) {
+    // The write is always available; the ONGOING visibility is not, and that
+    // asymmetry is the hazard the limiter write was deferred over (issue #299).
+    //
+    // The argument for taking the write was that "silently caps the pump" was a
+    // property of the old blindness rather than of the write -- true, but only
+    // where the read is switched on, and `flow_limiter` / `flow_limited` are
+    // optional and off by default. On a node without them nothing polls the
+    // limiter, so a cap applied here would constrain the pump with nothing
+    // reporting it.
+    //
+    // The settle event still carries the confirmed record either way, so this
+    // is never fully silent. What is missing without the entities is the
+    // answer to "is it limiting right now", which is the question that matters
+    // afterwards. Said once per write, at WARN, rather than made a config
+    // error: refusing a write because a diagnostic entity is undeclared would
+    // be a worse trade.
+    if (!limiter_entities_wanted_()) {
+      ESP_LOGW(TAG,
+               "Setting a flow limiter, but no flow_limiter/flow_limited entity is "
+               "declared -- the cap will apply with nothing publishing whether it "
+               "is limiting. Declare one to see it.");
+    }
+    write_op_service_.submit_set_flow_limiter(sub, enabled, limit_gpm, op_id);
+  }
   void submit_set_schedule_entry(uint8_t layer, uint8_t day_index, uint8_t begin_hour,
                                  uint8_t begin_minute, uint8_t end_hour, uint8_t end_minute,
                                  const std::string &op_id) {
