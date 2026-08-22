@@ -1323,10 +1323,14 @@ bool ControlService::write_limiter_config(uint16_t sub, bool enabled, float limi
     return false;
   }
 
-  // Read-modify-write, enforced rather than documented. Without a cached record
-  // there are no PID terms to echo, and writing zeros there would re-tune the
-  // pump's limiter loop behind the caller's back.
-  if (!cached->valid) {
+  // Read-modify-write, enforced rather than documented. The struct body -- and
+  // the refusal when there is nothing to echo -- comes from
+  // build_limiter_write_body(), which is pure so a host test can reach the
+  // guard directly. Through this path WriteOperationService has already checked
+  // the record decoded, so a guard living only here would be masked by that one
+  // and its mutation would survive (issue #282's shape; CI found it).
+  uint8_t body[LIMITER_CONFIG_BODY_LEN];
+  if (!build_limiter_write_body(*cached, enabled, limit_m3s, body)) {
     ESP_LOGW(TAG, "Cannot write limiter Sub %u: not read yet (read_limiters first)",
              static_cast<unsigned>(sub));
     return false;
@@ -1351,14 +1355,7 @@ bool ControlService::write_limiter_config(uint16_t sub, bool enabled, float limi
   apdu[9] = 0x00;  // Size mid
   apdu[10] = 0x12;  // Size low (18 bytes)
 
-  // The struct. Name echoed from the pump's own byte rather than derived from
-  // the sub-id -- see the header note.
-  apdu[11] = static_cast<uint8_t>(cached->name);
-  apdu[12] = enabled ? 0x01 : 0x00;
-  protocol::encode_float_be(limit_m3s, &apdu[13]);
-  // The three PID floats, verbatim. This is the whole reason the read keeps
-  // them (issue #299).
-  memcpy(&apdu[17], cached->pid_raw, LIMITER_CONFIG_PID_LEN);
+  memcpy(&apdu[11], body, LIMITER_CONFIG_BODY_LEN);
 
   ESP_LOGI(TAG, "Writing limiter Sub %u: %s at %.4f m3/s (%.2f gpm)",
            static_cast<unsigned>(sub), enabled ? "enabled" : "disabled",

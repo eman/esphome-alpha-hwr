@@ -23,6 +23,46 @@
 
 # Ensure switch and button components are included
 switch:
+  # ── Flow limiter enables (issue #299) ────────────────────────────────────
+  #
+  # The other half of the Max/Min Flow Limit numbers. Each turns its limiter on
+  # or off while KEEPING the stored cap -- the write's NAN sentinel -- so the
+  # two controls do not fight over one record.
+  #
+  # Reads as off until the limiter has been read, which needs `flow_limiter` or
+  # `flow_limited` declared. `binary_sensor`/`switch` de-duplicate publishes in
+  # ESPHome, so the lambda needs no change gate of its own (issue #127).
+  #
+  # Enabling a limiter really does constrain the pump -- and does nothing at all
+  # in Cycle Time mode, which ignores the cap. See docs/configuration.md.
+  - platform: template
+    name: "Max Flow Limit Enabled"
+    id: max_flow_limit_enabled
+    icon: "mdi:speedometer-slow"
+    entity_category: config
+    optimistic: false
+    lambda: |-
+      const auto &c = id(pump).limiter_state().max_flow;
+      return c.valid ? c.enabled : false;
+    turn_on_action:
+      - lambda: 'id(pump).submit_set_flow_limiter(600, true, NAN, "");'
+    turn_off_action:
+      - lambda: 'id(pump).submit_set_flow_limiter(600, false, NAN, "");'
+
+  - platform: template
+    name: "Min Flow Limit Enabled"
+    id: min_flow_limit_enabled
+    icon: "mdi:speedometer-slow"
+    entity_category: config
+    optimistic: false
+    lambda: |-
+      const auto &c = id(pump).limiter_state().min_flow;
+      return c.valid ? c.enabled : false;
+    turn_on_action:
+      - lambda: 'id(pump).submit_set_flow_limiter(601, true, NAN, "");'
+    turn_off_action:
+      - lambda: 'id(pump).submit_set_flow_limiter(601, false, NAN, "");'
+
   # Engage Pump — mutually exclusive with the schedule, like the Grundfos GO
   # app's start/stop button. It engages the pump's configured mode now
   # (operation_mode AUTO) and NOT gated by an enabled schedule. Whether the
@@ -554,6 +594,72 @@ number:
             }
           });
 
+
+  # ── Flow limiters (issue #299) ───────────────────────────────────────────
+  #
+  # The cap and the enable flag are separate entities over one underlying
+  # record, the same shape the component already uses for `set_pump_state` vs
+  # the `Engage Pump` / `Schedule Enabled` pair. A `number` carries one value
+  # and the write needs both, so the switch keeps the stored cap (the write's
+  # NAN sentinel) and the number keeps the stored enable flag.
+  #
+  # `optimistic: false` and a real lambda, deliberately: the alternative is an
+  # optimistic control that drifts the moment anyone changes the limiter in the
+  # Grundfos GO app, which is the failure this whole cluster has been about.
+  #
+  # These read as unknown until the limiter has been read, which needs
+  # `flow_limiter` or `flow_limited` declared -- `alpha_hwr_pairing.yaml` does.
+  #
+  # gal/min with no device_class on purpose: Home Assistant then does no unit
+  # conversion, so the entity shows exactly the number the service takes and
+  # none of the float noise the m³/h controls carry.
+  #
+  # Bounds are the pump's own factory range for MaxFlow (86/620: 0.5-11.0 gpm).
+  # A value outside them settles `clamped` with the stored value reported
+  # rather than being silently accepted.
+  - platform: template
+    name: "Max Flow Limit"
+    id: max_flow_limit
+    icon: "mdi:speedometer-slow"
+    unit_of_measurement: "gal/min"
+    min_value: 0.5
+    max_value: 11.0
+    step: 0.01
+    mode: box
+    entity_category: config
+    optimistic: false
+    update_interval: 10s
+    lambda: |-
+      const auto &c = id(pump).limiter_state().max_flow;
+      float v = c.valid ? c.limit_gpm() : NAN;  // NAN until read from the pump
+      return esphome::alpha_hwr::publish_number_if_changed(id(max_flow_limit), v);
+    set_action:
+      - lambda: |-
+          // Keep the stored enable flag: this control sets the cap, and the
+          // switch below owns whether the limiter is on.
+          const auto &c = id(pump).limiter_state().max_flow;
+          id(pump).submit_set_flow_limiter(600, c.enabled, x, "");
+
+  - platform: template
+    name: "Min Flow Limit"
+    id: min_flow_limit
+    icon: "mdi:speedometer-slow"
+    unit_of_measurement: "gal/min"
+    min_value: 1.0
+    max_value: 13.0
+    step: 0.01
+    mode: box
+    entity_category: config
+    optimistic: false
+    update_interval: 10s
+    lambda: |-
+      const auto &c = id(pump).limiter_state().min_flow;
+      float v = c.valid ? c.limit_gpm() : NAN;
+      return esphome::alpha_hwr::publish_number_if_changed(id(min_flow_limit), v);
+    set_action:
+      - lambda: |-
+          const auto &c = id(pump).limiter_state().min_flow;
+          id(pump).submit_set_flow_limiter(601, c.enabled, x, "");
 
 
 binary_sensor:

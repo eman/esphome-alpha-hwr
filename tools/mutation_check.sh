@@ -556,7 +556,15 @@ MUTATIONS=(
 "limiter-write-drops-the-pid-terms|components/alpha_hwr/limiter.h|    c.pid_raw[i] = body[LIMITER_CONFIG_PID_OFFSET + i];|    c.pid_raw[i] = 0;"
 # And the guard that makes the read mandatory rather than advisory: without a
 # cached record there are no PID terms to echo at all.
-"limiter-write-without-a-read|components/alpha_hwr/control_service.cpp|  if (!cached->valid) {|  if (false) {"
+#
+# Retargeted onto the PURE builder after this exact entry survived at 341/342.
+# It sat in ControlService's private write primitive, which WriteOperationService
+# only calls after its own validity check -- so the outer check masked it, the
+# suite could not reach it, and the mutation lived. Issue #282's shape, and its
+# remedy: move the decision somewhere a test can call directly. Both guards
+# stay; the operation layer's produces a useful settle status, this one makes
+# the function safe to call at all.
+"limiter-write-without-a-read|components/alpha_hwr/limiter.h|  if (!cached.valid)|  if (false)"
 # The settle must report what the pump HOLDS on a non-accepted verdict, not what
 # was requested -- otherwise a clamp names the value the caller asked for and
 # reads as though the pump complied.

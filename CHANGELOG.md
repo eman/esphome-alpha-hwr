@@ -33,6 +33,23 @@
   write succeeds, the pump stores it, and the cap is ignored while that mode
   runs. Documented rather than blocked: the record really is stored.
 
+  **Four entities alongside the service**, raised by @jfriend00 in review: every
+  other numeric value the pump stores as a tunable setting is a `number` entity,
+  and this was the one exception, reachable only through a service call. `Max
+  Flow Limit` / `Min Flow Limit` (`gal/min`, no `device_class`, so Home
+  Assistant does no unit conversion and the entity shows exactly what the
+  service takes) and `Max`/`Min Flow Limit Enabled` switches. The cap and the
+  enable flag are separate controls over one record — the same shape
+  `set_pump_state` and the `Engage Pump` / `Schedule Enabled` pair already
+  use — with each keeping the other's stored value so they cannot fight.
+
+  All four are `optimistic: false` and read through a new component-level
+  `limiter_state()` getter. That getter is what makes it possible: without it
+  the only published limiter state is the text sensor's prose, and a config
+  parsing `1.60` back out of "MaxFlow enabled at 1.60 gpm (not limiting)" is
+  precisely the brittleness this cluster has been about. Verified on the pump:
+  changing the cap through the service moved both the number and the switch.
+
   On the hazard this was deferred over — that enabling a limiter *silently* caps
   the pump. That was a property of the old blindness rather than of the write,
   but only where the read is switched on, and `flow_limiter` / `flow_limited`

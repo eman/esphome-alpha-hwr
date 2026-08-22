@@ -198,6 +198,48 @@ inline LimiterConfig decode_limiter_config(const uint8_t *body, size_t len) {
   return c;
 }
 
+/**
+ * Build the eighteen-byte type 895 body for a limiter write (issue #299).
+ *
+ * Pure, and separated from the framing for the reason issue #282 established:
+ * the guard below is otherwise reachable only through `ControlService`'s
+ * private write primitive, which `WriteOperationService` calls after its own
+ * validity check -- so the outer check masks this one, its mutation survives,
+ * and the guard is protected rather than proven. CI found exactly that
+ * (341/342, `limiter-write-without-a-read` surviving).
+ *
+ * What it guards is not cosmetic. The record is one struct, so setting the cap
+ * rewrites all eighteen bytes, and bytes 6..17 are the pump's PID terms. With
+ * no cached record there is nothing to echo, and writing zeros there would
+ * re-tune the limiter's control loop invisibly -- a bigger change than the
+ * caller asked for and one nothing would report.
+ *
+ * @param cached     The record as last read. Must be `valid`.
+ * @param enabled    Whether the limiter should constrain the pump.
+ * @param limit_m3s  The cap in the pump's native m3/s.
+ * @param out        Receives LIMITER_CONFIG_BODY_LEN bytes. Untouched on false.
+ * @return false when there is nothing to echo, and nothing may be written.
+ */
+inline bool build_limiter_write_body(const LimiterConfig &cached, bool enabled,
+                                     float limit_m3s, uint8_t *out) {
+  if (out == nullptr)
+    return false;
+  if (!cached.valid)
+    return false;
+
+  // The limiter's NAME is echoed from the pump's own byte rather than derived
+  // from the sub-id. They agree on this pump; only the pump's byte is evidence
+  // of that on a unit nobody here has seen.
+  out[0] = static_cast<uint8_t>(cached.name);
+  out[1] = enabled ? 0x01 : 0x00;
+  protocol::encode_float_be(limit_m3s, &out[2]);
+  for (size_t i = 0; i < LIMITER_CONFIG_PID_LEN; i++) {
+    out[LIMITER_CONFIG_PID_OFFSET + i] = cached.pid_raw[i];
+  }
+  return true;
+}
+
+
 /// Decode a type 896 v1 record. @p body starts after the 3-byte size header.
 inline LimiterStatus decode_limiter_status(const uint8_t *body, size_t len) {
   LimiterStatus s{};

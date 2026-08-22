@@ -981,6 +981,24 @@ public:
                               const std::string &op_id) {
     write_op_service_.submit_set_cycle_times(on_minutes, off_minutes, flow, op_id);
   }
+  /**
+   * The flow limiters as last read (issue #299).
+   *
+   * Exposed so a YAML control can be `optimistic: false` and track the pump.
+   * Without it the only published limiter state is the text sensor's prose --
+   * "MaxFlow enabled at 1.60 gpm (not limiting)" -- and a config parsing a
+   * number back out of that sentence is exactly the brittleness this cluster
+   * has been about. @jfriend00 raised it reviewing the write.
+   *
+   * Values are only meaningful once `flow_limiter` or `flow_limited` is
+   * declared: the reads are gated on one of them existing, so on a node with
+   * neither this reports an unread record and a control bound to it shows
+   * nothing rather than a wrong number.
+   */
+  const services::LimiterState &limiter_state() const {
+    return control_service_.limiter_state();
+  }
+
   void submit_set_flow_limiter(uint16_t sub, bool enabled, float limit_gpm,
                                const std::string &op_id) {
     // The write is always available; the ONGOING visibility is not, and that
