@@ -548,6 +548,59 @@
   "the sequence is long enough that this delay is irrelevant", so shortening the
   sequence would require re-measuring.
 
+- **`ready_recycle` is a bounded count, not off-or-forever** (issue #257). As a
+  boolean it offered two shapes and the useful one was neither. The reporter's
+  case is a bonded, connected link that just does not get all the way through
+  the opening GENI reads: if that is a one-off glitch, one reconnect clears it;
+  if it is not, another fifty will not clear it either — and each one takes
+  another run at the encryption-on-open window that can erase a bond (#14).
+
+  So `0` never recycles (unchanged default), and `N` recycles at most **N
+  consecutive times** and then stops, leaving the fault standing for an
+  automation to notice. The bound is judged against the consecutive counter,
+  which the pump becoming ready resets, so an allowance is per episode rather
+  than per boot: a link that recovers gets its full allowance again next time.
+
+  `ready_recycle: true` still means unbounded, so no existing configuration
+  changes behaviour. Booleans are validated *before* integers and deliberately —
+  `bool` is a subclass of `int` in Python, so an integer-first validator would
+  silently read `true` as the number 1 and quietly turn "recycle forever" into
+  "recycle once".
+
+  Giving up is reported distinctly from never having tried, because "it stopped
+  trying" is exactly the state the reporter wanted to be able to see.
+
+- **`enable_pairing` is now `initiate_pairing`, and the docs say what it cannot
+  do** (issue #245). The old name reads as a property of the link — "this node
+  will not bond" — and that is a guarantee no ESPHome component can make. When
+  the pump initiates, `BLEClientBase::gap_event_handler()` has already consented
+  on our behalf, unconditionally, before this component sees the event. A node
+  with the option off was observed bonding **four times in twenty minutes**,
+  252 ms after logging `Skipping encryption request - pairing disabled`.
+
+  The component already knew this and said so in a code comment. What was
+  missing is that nothing outside that comment did — the option name, the docs
+  table and the base package all implied a guarantee that was never available.
+
+  `initiate_pairing` names what is actually governed: our side of the
+  negotiation. `enable_pairing` is still accepted and means exactly what it
+  always meant; setting both to different values is refused rather than
+  resolved, since there is no reading of that config that is obviously intended.
+
+- **`alpha_hwr_base.yaml` no longer promises telemetry "without BLE
+  pairing/bonding"** (issue #244). It could not deliver either half. It does not
+  deliver *unbonded*, for the reason above. And whether an unbonded link works
+  at all on this pump is still open: the sibling client records a measured
+  ~1.8 s drop of an unbonded connection in seven places, traced to a debugging
+  episode rather than assumed, and on the ESP32 the pump accepts the connection,
+  completes discovery, accepts the CCCD write and hangs up at ~2.02 s — having
+  received **zero** GENI frames across 90 measured cycles.
+
+  The package now says it never *initiates* pairing, states the bonding caveat
+  plainly, and asks anyone running it successfully unpaired to say so on the
+  issue. The repo asserted the old claim in four places and had measured it in
+  none.
+
 - **`clear_vacation` clears every vacation covering now, not just one** (issue
   #290). `submit_set_vacation()` resolves through `find_free_single_event_slot()`,
   which prefers an **empty** slot and does not look for an existing vacation to
