@@ -1,6 +1,4 @@
 {
   "name": "Alpha HWR Schedule Card",
-  "filename": "alpha-hwr-schedule-card.js",
-  "render_readme": true,
-  "homeassistant": "2024.1.0"
+  "filename": "alpha-hwr-schedule-card.js"
 }

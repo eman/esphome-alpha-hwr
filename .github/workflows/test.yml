@@ -433,6 +433,21 @@ jobs:
         with:
           node-version: "20"
 
+      # HACS's own validator, so "does this still install through HACS" is a
+      # checked fact rather than a claim in a PR description (issue #183). It
+      # covers what a hand audit cannot see: hacs.json's schema, the repository
+      # metadata HACS requires, and that the plugin file is where HACS looks for
+      # it -- dist/ first, ahead of release assets and the repo root.
+      #
+      # Runs the default-store ruleset, which is stricter than the custom
+      # repository this issue scoped. That is deliberate: submission to the
+      # default store is the follow-up, and this keeps the repo eligible for it
+      # rather than discovering a gap at submission time.
+      - name: HACS validation
+        uses: hacs/action@main
+        with:
+          category: plugin
+
       - name: Syntax check
         run: node --check dist/alpha-hwr-schedule-card.js
 

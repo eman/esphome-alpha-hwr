@@ -519,6 +519,20 @@
   that can diverge, which is the same shape as the drift this change exists to
   prevent.
 
+  CI now runs **HACS's own validator** (`hacs/action`, category `plugin`), so
+  "does this still install through HACS" is a checked fact rather than a claim.
+  It covers what a hand audit cannot: `hacs.json`'s schema, the repository
+  metadata HACS requires, and that the plugin file is where HACS looks. It runs
+  the stricter default-store ruleset deliberately — default-store submission is
+  the follow-up this issue names, and this keeps the repo eligible rather than
+  finding a gap at submission time.
+
+  `hacs.json` carries only `name` and `filename`. An earlier draft added
+  `render_readme` and a `homeassistant` minimum version; both were dropped as
+  unverified — `render_readme` is absent from the current key list and has open
+  bugs, and a minimum-version floor nobody has tested is a guess that can lock
+  users out.
+
   The card also carried a local `v6` marker unrelated to any release, so nobody
   could tell which firmware a given card matched. It now carries the release
   version, stamped by `tools/bump_version.sh` (which covered the example YAMLs
