@@ -999,6 +999,36 @@ public:
     return control_service_.limiter_state();
   }
 
+  /**
+   * Entity-driven limiter write (issue #299).
+   *
+   * Separate from the service entry point below for the reason every other
+   * entity write here is: `WriteOrigin::ENTITY`, so the settle event says where
+   * the change came from, and the same `check_ready()` guard the other controls
+   * use rather than letting the operation layer reject it one stage later.
+   *
+   * Refuses when the limiter has not been read. That is not defensiveness: the
+   * caller passes an `enabled` flag it took from the cache, and on a cold cache
+   * that reads false -- so setting only the cap would quietly DISABLE a limiter
+   * that was on. The same class of bug as writing unread PID terms, one field
+   * across.
+   */
+  void set_flow_limiter_from_entity(uint16_t sub, bool enabled, float limit_gpm) {
+    if (!check_ready("set_flow_limiter")) return;
+    const auto &cached = (sub == services::SUB_LIMITER_CONFIG_MAX_FLOW)
+                             ? control_service_.limiter_state().max_flow
+                             : control_service_.limiter_state().min_flow;
+    if (!cached.valid) {
+      ESP_LOGW(TAG,
+               "Not setting limiter Sub %u from an entity: it has not been read, so "
+               "the enable flag would be a guess",
+               static_cast<unsigned>(sub));
+      return;
+    }
+    write_op_service_.submit_set_flow_limiter(sub, enabled, limit_gpm, "", nullptr,
+                                              services::WriteOrigin::ENTITY);
+  }
+
   void submit_set_flow_limiter(uint16_t sub, bool enabled, float limit_gpm,
                                const std::string &op_id) {
     // The write is always available; the ONGOING visibility is not, and that

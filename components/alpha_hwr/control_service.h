@@ -651,6 +651,16 @@ class ControlService {
   /// lands, so "no limiter" is distinguishable from "we have not looked".
   const LimiterState &limiter_state() const { return limiters_; }
 
+  /// Is a limiter read already in flight? (issue #299)
+  ///
+  /// read_limiters() answers `false` immediately when one is, which is
+  /// indistinguishable at the callback from "the pump would not answer" -- and
+  /// the two want opposite responses. The status poll takes the same flag every
+  /// control-poll interval, so a user write landing in that window would settle
+  /// REJECTED for a pump that was working perfectly. Callers that can wait ask
+  /// first and retry.
+  bool limiters_reading() const { return limiters_reading_; }
+
   /// Called whenever any limiter record is stored, rather than when the read
   /// chain finishes.
   ///

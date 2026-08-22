@@ -1338,9 +1338,21 @@ void WriteOperationService::run_set_flow_limiter_(uint32_t seq) {
   }
 
   op->phase = Phase::RESOLVING;
+
+  // A limiter read already in flight is NOT a failure, and treating it as one
+  // was this operation's first shape. `read_limiters()` answers false
+  // immediately while its own chain is running, and the status poll takes that
+  // same flag every control-poll interval -- so a user pressing the control in
+  // that window got a REJECTED verdict about a pump that was working. Wait for
+  // it instead; the watchdog bounds how long that can go on.
+  if (control_.limiters_reading()) {
+    schedule_([this, seq]() { run_set_flow_limiter_(seq); }, CONFIG_RETRY_DELAY_MS);
+    return;
+  }
+
   // The whole family, not just the one record: read_limiters() is the only
   // entry point that populates the config cache, and it reads config then
-  // status as one chain. Its own in-flight guard means a poll cannot interleave.
+  // status as one chain.
   control_.read_limiters([this, seq](bool ok) {
     Operation *op = find_(seq);
     if (op == nullptr || op->phase == Phase::DONE) return;
@@ -1392,6 +1404,13 @@ void WriteOperationService::run_set_flow_limiter_(uint32_t seq) {
 void WriteOperationService::confirm_set_flow_limiter_(uint32_t seq) {
   Operation *op = find_(seq);
   if (op == nullptr || op->phase == Phase::DONE) return;
+
+  // Same reasoning as the run step: a poll holding the flag is a reason to wait,
+  // not a readback failure.
+  if (control_.limiters_reading()) {
+    schedule_([this, seq]() { confirm_set_flow_limiter_(seq); }, CONFIG_RETRY_DELAY_MS);
+    return;
+  }
 
   control_.read_limiters([this, seq](bool ok) {
     Operation *op = find_(seq);
