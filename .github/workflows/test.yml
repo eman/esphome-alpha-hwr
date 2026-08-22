@@ -439,35 +439,38 @@ jobs:
       # metadata HACS requires, and that the plugin file is where HACS looks for
       # it -- dist/ first, ahead of release assets and the repo root.
       #
-      # Two checks ignored, one of them only until this lands on main:
+      # One check ignored, and only one:
       #
       #   images   the README has no images. HACS wants a screenshot; the card
       #            has never had one. A DEFAULT-STORE criterion rather than a
       #            custom-repository one, so it does not affect installing
-      #            today -- which is the scope issue #183 shipped.
+      #            today -- which is the scope issue #183 shipped. It is the
+      #            last thing between this repo and default-store eligibility.
       #
-      #   license  REMOVE THIS ONE AFTER #183 MERGES. The validator's first run
-      #            found the repository had no LICENSE at all, which mattered
-      #            well beyond HACS -- a public repo with no licence is "all
-      #            rights reserved", so strictly nobody had permission to use
-      #            what the README invites them to install. MIT was added in the
-      #            same change. It still fails from a PR branch because this
-      #            check reads GitHub's repository-level licence field, which
-      #            GitHub derives from the DEFAULT branch: a LICENSE that exists
-      #            only on a feature branch cannot satisfy it. Adding the file
-      #            and removing the ignore in one PR therefore cannot both pass.
+      # `license` was ignored for exactly as long as it had to be. The
+      # validator's first run found the repository had no LICENSE at all, which
+      # mattered well beyond HACS -- a public repo with no licence is "all
+      # rights reserved", so strictly nobody had permission to use what the
+      # README invites them to install. MIT landed with #183, and the check now
+      # gates.
+      #
+      # Why it could not be un-ignored in that same PR, since the shape recurs:
+      # this check reads GitHub's repository-level licence field, and GitHub
+      # derives that from the DEFAULT branch. A LICENSE on a feature branch
+      # cannot satisfy it, so adding the file and dropping the ignore together
+      # can never both pass.
       #
       # Everything else gates: topics, description, archived, issues,
-      # information, and hacsjson -- that last one is the schema check that
-      # makes this job worth having, since a malformed hacs.json is the failure
-      # a hand audit misses and a user discovers.
+      # information, license, and hacsjson -- that last one is the schema check
+      # that makes this job worth having, since a malformed hacs.json is the
+      # failure a hand audit misses and a user discovers.
       #
       # Drop entries as they are addressed, rather than leaving the list to rot.
       - name: HACS validation
         uses: hacs/action@main
         with:
           category: plugin
-          ignore: images license
+          ignore: images
 
       - name: Syntax check
         run: node --check dist/alpha-hwr-schedule-card.js
