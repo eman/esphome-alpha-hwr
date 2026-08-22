@@ -88,10 +88,11 @@ inline const char *limiter_name_string(LimiterName n) {
 /// `limiter_user_config_obj`, type 895 v1 (86/600, 86/601).
 ///
 /// Payload is 18 bytes: `[limiter_name][enable][limit_value f32][kp][ti][td]`.
-/// The three PID terms are read past but not kept -- the limiter behaves as a
-/// control loop rather than a hard clamp (one sample reached 2.84 gpm against a
-/// 1.6 gpm cap before settling back), which is presumably what they are for,
-/// but nothing here acts on them.
+/// The three PID terms are **kept verbatim and never interpreted** (issue #299):
+/// nothing here acts on them, but a write has to put them back byte for byte,
+/// because setting the cap rewrites the whole record. They are presumably why
+/// the limiter behaves as a control loop rather than a hard clamp -- one sample
+/// reached 2.84 gpm against a 1.6 gpm cap before settling back.
 struct LimiterConfig {
   bool valid{false};
   LimiterName name{LimiterName::NONE};

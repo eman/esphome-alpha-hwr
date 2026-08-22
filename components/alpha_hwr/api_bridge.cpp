@@ -390,8 +390,15 @@ void AlphaHwrApiBridge::fire_write_settled(const WriteResult &result) {
       // `limiter_enabled`, not `enabled`, for the reason the remote-mode case
       // below gives: that key already carries the pump's run state and the
       // schedule flag, and a third meaning would be one too many.
+      // Settled vs requested, kept apart. `limiter_enabled` / `limit_gpm`
+      // describe what the pump HOLDS and are absent until a readback says so,
+      // so a terminal reached before the write -- an unknown sub-id, a refused
+      // pre-read -- reports the request under `requested_*` and claims nothing
+      // about the pump (review on #301).
       put_bool("limiter_enabled", result.limiter_enabled);
       put_float("limit_gpm", result.limiter_limit_gpm, "%.2f");
+      put_bool("requested_limiter_enabled", result.requested_limiter_enabled);
+      put_float("requested_limit_gpm", result.requested_limiter_limit_gpm, "%.2f");
       break;
     case WriteCommand::SET_REMOTE_MODE:
       // `remote_enabled`, not `enabled`: that key already carries two

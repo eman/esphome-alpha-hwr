@@ -184,10 +184,18 @@ struct PumpSim {
   bool limiter_min_enabled{false};
   float limiter_max_gpm{1.5f};
   float limiter_min_gpm{2.5f};
-  /// Factory bounds from 86/620-621 on the bench pump: MaxFlow 0.5-11.0 gpm.
-  /// A write above the top is stored at the top, which is the CLAMPED case.
+  /// Factory bounds from 86/620-621 on the bench pump, PER LIMITER: MaxFlow
+  /// 0.5-11.0 gpm, MinFlow 1.0-13.0. A write outside them is stored at the
+  /// bound, which is the CLAMPED case.
+  ///
+  /// Separate pairs deliberately. One shared pair (MaxFlow's) clamped a MinFlow
+  /// write at 11.0 instead of 13.0, so the harness could not exercise the
+  /// MinFlow path the entities newly expose -- latent, since no test wrote
+  /// MinFlow, and wrong the moment one did.
   float limiter_max_cap_gpm{11.0f};
   float limiter_max_floor_gpm{0.5f};
+  float limiter_min_cap_gpm{13.0f};
+  float limiter_min_floor_gpm{1.0f};
   uint8_t limiter_max_pid[12]{0x11, 0x22, 0x33, 0x44, 0x55, 0x66,
                               0x77, 0x88, 0x99, 0xAA, 0xBB, 0xCC};
   uint8_t limiter_min_pid[12]{0xC0, 0xFF, 0xEE, 0x01, 0x02, 0x03,
@@ -674,11 +682,15 @@ struct Harness {
       if (sim.honor_limiter_writes) {
         const bool on = apdu[12] != 0;
         float gpm = protocol::decode_float_be(apdu + 13) * 15850.323f;
-        // Factory bounds, which is what makes a CLAMPED verdict reachable.
-        if (gpm > sim.limiter_max_cap_gpm) gpm = sim.limiter_max_cap_gpm;
-        if (gpm < sim.limiter_max_floor_gpm) gpm = sim.limiter_max_floor_gpm;
-        if (lsub == 600) { sim.limiter_max_enabled = on; sim.limiter_max_gpm = gpm; }
-        if (lsub == 601) { sim.limiter_min_enabled = on; sim.limiter_min_gpm = gpm; }
+        // Each limiter against ITS OWN factory bounds, which is what makes a
+        // CLAMPED verdict reachable and correct for both.
+        const bool is_max = lsub == 600;
+        const float cap = is_max ? sim.limiter_max_cap_gpm : sim.limiter_min_cap_gpm;
+        const float floor_gpm = is_max ? sim.limiter_max_floor_gpm : sim.limiter_min_floor_gpm;
+        if (gpm > cap) gpm = cap;
+        if (gpm < floor_gpm) gpm = floor_gpm;
+        if (is_max) { sim.limiter_max_enabled = on; sim.limiter_max_gpm = gpm; }
+        else { sim.limiter_min_enabled = on; sim.limiter_min_gpm = gpm; }
       }
       if (sim.ack_limiter_write) inject_short_ack();
     } else if (opspec == 0x03 && apdu_len >= 5 && apdu[2] == 91 && apdu[3] == 0x01 && apdu[4] == 0xAE) {
@@ -4274,6 +4286,15 @@ static void test_set_flow_limiter_rejected_when_unchanged() {
   const WriteResult *r = h.result_for("lim_rej");
   TEST_ASSERT(r && r->status == WriteStatus::REJECTED,
               "#299: a pump still holding its old cap refused, it did not clamp");
+  // The detail must describe the REQUEST on the requested side. It read the
+  // already-settled field before review caught it, so a request to ENABLE a
+  // limiter that stayed off reported "requested disabled ... pump holds
+  // disabled" -- both halves the same, and both wrong about the ask.
+  TEST_ASSERT(r && r->detail.find("requested enabled at 3.00 gpm") != std::string::npos,
+              std::string("#299: the detail names what was asked for (got \"") +
+                  (r ? r->detail : std::string()) + "\")");
+  TEST_ASSERT(r && r->detail.find("pump holds disabled") != std::string::npos,
+              "#299: ...and what the pump actually holds");
 }
 
 // Keep-existing: NAN leaves the cap alone and changes only the enable flag,
@@ -4309,6 +4330,15 @@ static void test_set_flow_limiter_refuses_an_unknown_sub() {
   TEST_ASSERT(r && r->status == WriteStatus::INVALID, "#299: an unknown sub-id is invalid");
   TEST_ASSERT(h.frames_limiter_write == writes_before,
               "#299: ...and nothing reached the wire");
+  // A terminal reached before any readback must claim NOTHING about the pump.
+  // These fields carried the request before review caught it, so a rejected cap
+  // read to an automation as the active one.
+  TEST_ASSERT(r && r->limiter_enabled == -1,
+              "#299: a pre-write terminal reports the enable state as unknown");
+  TEST_ASSERT(r && std::isnan(r->limiter_limit_gpm),
+              "#299: ...and the cap as unknown, not as the request");
+  TEST_ASSERT(r && r->requested_limiter_enabled == 1,
+              "#299: the request is still reported, under requested_*");
 }
 
 // The read is not optional. Without a cached record there are no PID terms to

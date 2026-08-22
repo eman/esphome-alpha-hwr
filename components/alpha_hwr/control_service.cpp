@@ -422,6 +422,31 @@ void ControlService::read_one_limiter_(uint16_t sub, bool is_config,
       /*expect_short_read_refusal=*/true);
 }
 
+void ControlService::read_limiter_configs(std::function<void(bool)> callback) {
+  if (limiters_reading_) {
+    ESP_LOGD(TAG, "Limiter read already in flight");
+    if (callback) callback(false);
+    return;
+  }
+  limiters_reading_ = true;
+  // Same sequential rule and the same reason as read_limiters(): the two config
+  // records share one type code, so a late 86/600 reply would satisfy the 86/601
+  // request and be cached as MinFlow. Stopping at the first failure is what
+  // keeps positional correlation honest.
+  read_one_limiter_(SUB_LIMITER_CONFIG_MAX_FLOW, true, [this, callback](bool ok) {
+    if (!ok) {
+      ESP_LOGD(TAG, "Limiter config read stopped at 86/600");
+      limiters_reading_ = false;
+      if (callback) callback(false);
+      return;
+    }
+    read_one_limiter_(SUB_LIMITER_CONFIG_MIN_FLOW, true, [this, callback](bool ok2) {
+      limiters_reading_ = false;
+      if (callback) callback(ok2);
+    });
+  });
+}
+
 void ControlService::read_limiters(std::function<void(bool)> callback) {
   if (limiters_reading_) {
     ESP_LOGD(TAG, "Limiter read already in flight");

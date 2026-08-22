@@ -881,6 +881,28 @@ class ControlService {
    */
   void read_setpoint_ranges(std::function<void(bool)> callback);
 
+  /**
+   * The two type 895 CONFIG records only (86/600, 86/601), without the status
+   * chain behind them (issue #299).
+   *
+   * `read_limiters()` reads config and then status as one chain and reports the
+   * MANAGER read's result -- so a pump that answers both config records but not
+   * the optional 86/660 answers `false`, even though that object's own note
+   * says its absence "costs the name of the binding limiter and no more".
+   *
+   * That is harmless for the entities, which want the whole family and can
+   * treat a partial read as unknown. It is not harmless for a WRITE: the write
+   * needs exactly one config record, for its name and PID bytes, and refusing
+   * one because a diagnostic read failed reports a pump problem that is not
+   * there. The confirm has the same shape and would time out having already
+   * read the stored cap correctly.
+   *
+   * Shares `limiters_reading_` with the full read, so the two still cannot
+   * interleave -- the hazard the flag exists for is positional correlation
+   * between same-typed replies, and that is unchanged by reading fewer of them.
+   */
+  void read_limiter_configs(std::function<void(bool)> callback);
+
   /// One type 895 (config) or type 896 (status) read. @p is_config picks which
   /// decoder and which type expectation to use.
   void read_one_limiter_(uint16_t sub, bool is_config,

@@ -274,7 +274,7 @@ working); `op_id` is a new optional argument.
 | `clear_single_event` | `slot` | Clear one single-event slot |
 | `refresh_single_events` | *(no data)* | Re-read all single-event slots |
 | `upload_schedule` | v1 payload (below) | **Bulk full-state upload** of the entire 7×5 grid in one call |
-| `set_flow_limiter` | `limiter` (`maxflow`\|`minflow`), `enabled`, `limit_gpm` (0 = keep) | Enable/disable a flow limiter and set its cap. Read-modify-write: the pump's PID terms are preserved. **Does nothing in Cycle Time mode** — see below |
+| `set_flow_limiter` | `limiter` (`maxflow`\|`minflow`), `enabled`, `limit_gpm` (0 = keep) | Enable/disable a flow limiter and set its cap. Read-modify-write: the pump's PID terms are preserved. Settles with `limiter_enabled` / `limit_gpm` (what the pump holds, absent until a readback) and `requested_limiter_enabled` / `requested_limit_gpm`. **Does nothing in Cycle Time mode** — see below |
 | `set_vacation` | `begin_ts,end_ts` (epoch seconds) | A multi-day Stop event overriding the weekly schedule. Settles as `set_single_event` with `event_type: "stop"` — a vacation *is* a single-event slot, not a command of its own |
 | `clear_vacation` | *(no data)* | End the active vacation. Clears **every** enabled Stop event covering now, not just one. Settles as `clear_single_event` |
 

@@ -383,8 +383,16 @@ void WriteOperationService::finish_(uint32_t seq, WriteStatus status, const std:
       break;
     case WriteCommand::SET_FLOW_LIMITER:
       result.limiter_sub = static_cast<int16_t>(op.limiter_sub);
-      result.limiter_enabled = op.limiter_enabled ? 1 : 0;
-      result.limiter_limit_gpm = op.limiter_limit_gpm;
+      // The request is always reportable; the SETTLED fields only once a
+      // readback has populated them. Before that they still hold the request,
+      // and emitting them as pump state told an automation a refused cap was
+      // active (review on #301).
+      result.requested_limiter_enabled = op.requested_limiter_enabled;
+      result.requested_limiter_limit_gpm = op.requested_limiter_limit_gpm;
+      if (op.limiter_settled) {
+        result.limiter_enabled = op.limiter_enabled ? 1 : 0;
+        result.limiter_limit_gpm = op.limiter_limit_gpm;
+      }
       break;
     case WriteCommand::SET_SCHEDULE_ENTRY:
     case WriteCommand::CLEAR_SCHEDULE_ENTRY:
@@ -1350,10 +1358,12 @@ void WriteOperationService::run_set_flow_limiter_(uint32_t seq) {
     return;
   }
 
-  // The whole family, not just the one record: read_limiters() is the only
-  // entry point that populates the config cache, and it reads config then
-  // status as one chain.
-  control_.read_limiters([this, seq](bool ok) {
+  // The CONFIG records only. read_limiters() reads the status chain behind them
+  // and reports the optional manager read's result, so a pump that answers both
+  // config records but not 86/660 would have its write refused for a
+  // diagnostic's sake. The write needs one config record, for its name and PID
+  // bytes, and nothing else (issue #299).
+  control_.read_limiter_configs([this, seq](bool ok) {
     Operation *op = find_(seq);
     if (op == nullptr || op->phase == Phase::DONE) return;
     if (!ok) {
@@ -1412,7 +1422,7 @@ void WriteOperationService::confirm_set_flow_limiter_(uint32_t seq) {
     return;
   }
 
-  control_.read_limiters([this, seq](bool ok) {
+  control_.read_limiter_configs([this, seq](bool ok) {
     Operation *op = find_(seq);
     if (op == nullptr || op->phase == Phase::DONE) return;
 
@@ -1460,6 +1470,7 @@ void WriteOperationService::confirm_set_flow_limiter_(uint32_t seq) {
     auto settle_fields = [&]() {
       op->limiter_enabled = actual.enabled;
       op->limiter_limit_gpm = settled_gpm;
+      op->limiter_settled = true;
     };
 
     if (enable_matches && cap_matches) {
@@ -1472,6 +1483,13 @@ void WriteOperationService::confirm_set_flow_limiter_(uint32_t seq) {
       schedule_([this, seq]() { confirm_set_flow_limiter_(seq); }, CONFIG_RETRY_DELAY_MS);
       return;
     }
+    // Captured BEFORE settling, because the detail below describes the request
+    // and settle_fields() is about to overwrite the field it reads. The first
+    // cut read op->limiter_enabled after settling, so a request to ENABLE a
+    // limiter that stayed off reported "requested disabled ... pump holds
+    // disabled" -- the same read-after-overwrite that made every mismatch
+    // settle ACCEPTED, one field across (review on #301).
+    const bool requested_enabled = op->limiter_enabled;
     settle_fields();  // the pump's values, not the request
 
     // REJECTED vs CLAMPED, the same distinction the setpoint write draws: a
@@ -1485,7 +1503,7 @@ void WriteOperationService::confirm_set_flow_limiter_(uint32_t seq) {
          (op->pre_limiter_enabled == 1) == actual.enabled);
     if (!detail.empty()) detail += "; ";
     detail += format_detail("requested %s at %.2f gpm, pump holds %s at %.2f gpm",
-                            op->limiter_enabled ? "enabled" : "disabled", requested_gpm,
+                            requested_enabled ? "enabled" : "disabled", requested_gpm,
                             actual.enabled ? "enabled" : "disabled", settled_gpm);
     finish_(seq, unchanged ? WriteStatus::REJECTED : WriteStatus::CLAMPED, detail);
   });
@@ -1741,6 +1759,10 @@ void WriteOperationService::submit_set_flow_limiter(uint16_t sub, bool enabled, 
   op.limiter_sub = sub;
   op.limiter_enabled = enabled;
   op.limiter_limit_gpm = limit_gpm;
+  // Pinned at submit and never touched again, so the request survives every
+  // later mutation of the working fields.
+  op.requested_limiter_enabled = enabled ? 1 : 0;
+  op.requested_limiter_limit_gpm = limit_gpm;
   op.done = std::move(done);
   submit_(std::move(op));
 }

@@ -121,8 +121,16 @@ struct WriteResult {
   // authored in -- every limit seen on two pumps converts to an exact gpm
   // figure and to nothing round in m³/h.
   int16_t limiter_sub{-1};
+  // What the pump HOLDS, and only ever that. Left unknown on any terminal
+  // reached before a readback -- an INVALID sub-id or a refused pre-write read
+  // must not report the request as though it were pump state, or an automation
+  // reads a rejected cap as active.
   int8_t limiter_enabled{-1};   // -1 unknown, 0 off, 1 on
   float limiter_limit_gpm{NAN};
+  // What was ASKED for, always populated. Mirrors requested_mode /
+  // requested_value / requested_temp_* above.
+  int8_t requested_limiter_enabled{-1};
+  float requested_limiter_limit_gpm{NAN};
 
   // Schedule commands
   int16_t layer{-1};
@@ -479,6 +487,14 @@ class WriteOperationService {
     float limiter_limit_gpm{NAN};
     int8_t pre_limiter_enabled{-1};
     float pre_limiter_limit_gpm{NAN};
+    // True once a confirm readback has overwritten limiter_enabled /
+    // limiter_limit_gpm with what the pump holds. Until then those fields still
+    // carry the request and must not be reported as settled state.
+    bool limiter_settled{false};
+    // The request, pinned at submit and never mutated, so it survives every
+    // later rewrite of the working fields above.
+    int8_t requested_limiter_enabled{-1};
+    float requested_limiter_limit_gpm{NAN};
     bool clear_by_vacation{false};
     // clear_vacation clears EVERY enabled Stop event covering now, not just the
     // best-ranked one (issue #290). These carry that walk across the
