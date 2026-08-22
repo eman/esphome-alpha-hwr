@@ -275,11 +275,40 @@ working); `op_id` is a new optional argument.
 | `refresh_single_events` | *(no data)* | Re-read all single-event slots |
 | `upload_schedule` | v1 payload (below) | **Bulk full-state upload** of the entire 7×5 grid in one call |
 | `set_vacation` | `begin_ts,end_ts` (epoch seconds) | A multi-day Stop event overriding the weekly schedule. Settles as `set_single_event` with `event_type: "stop"` — a vacation *is* a single-event slot, not a command of its own |
-| `clear_vacation` | *(no data)* | End the active vacation. Settles as `clear_single_event` |
+| `clear_vacation` | *(no data)* | End the active vacation. Clears **every** enabled Stop event covering now, not just one. Settles as `clear_single_event` |
 
 Schedule writes are **verified**: after the write and commit, the component
 reads the schedule back from the pump and compares before reporting. (They
 previously reported success unconditionally.)
+
+#### More than one vacation can be stored
+
+Setting a vacation while one already exists writes a **second** one. That is
+deliberate: the auto-slot resolver prefers an empty slot, the pump has several
+single-event slots, and a user may legitimately have two absences booked.
+Replacing silently would destroy a stored event, which is the class of thing the
+slot-recycling note exists to prevent.
+
+The consequence is that `clear_vacation` must clear *all* of them, and it does —
+every enabled Stop event covering the current time, in slot order, as one
+operation with one terminal event. **While a vacation is live, a booking that has
+not begun yet is left alone**, so ending the current absence does not cancel next
+month's.
+
+When *nothing* covers the current time the resolver falls back to the
+single-vacation ranking, which picks the soonest upcoming booking (and failing
+that, the one that ended most recently). So calling `clear_vacation` with only
+future bookings stored **does** cancel one of them — the nearest. That is
+deliberate and predates this behaviour: it is what makes a booked-but-not-started
+vacation cancellable at all, since there is no other way to name it. If you mean
+a specific slot, use `clear_single_event`.
+
+When it clears more than one, `detail` says so and names the slots. If a clear
+fails part-way — a readback timeout, the watchdog, or a disconnect — the status
+is a failure and `detail` reports how many were cleared and that the rest still
+cover now, because at that point the pump is still holding itself off. The same
+applies if more vacations cover now than one call can clear: that settles
+`rejected`, not `accepted`, since the hold was not lifted.
 
 #### Telling a vacation from a one-time run
 
@@ -417,6 +446,7 @@ Statuses:
   - `set_single_event` / `set_vacation` reused a slot holding an already-ended
     event — it names the slot and the window it replaced
   - `clear_vacation` found no active vacation (`no active vacation`)
+  - `clear_vacation` cleared more than one (`cleared 2 vacations (slots 0, 1)`)
   - `refresh_schedule` reports how many entries it cached (`N entries cached`)
   - `upload_schedule` skipped every layer (`no-op`)
 - **`clamped`** — the pump stored a *different* value (e.g. 1500 RPM clamped

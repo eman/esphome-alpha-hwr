@@ -793,7 +793,17 @@ void ScheduleService::read_single_events_async(
     return;
   }
 
-  uint8_t max_events = get_max_single_events();
+  // get_max_single_events() clamps against the address map (issue #284); this
+  // is the one place that says so out loud, because here the difference is a
+  // fact about the pump rather than a fact about a loop bound.
+  const uint8_t max_events = get_max_single_events();
+  if (get_reported_max_single_events() > max_events) {
+    ESP_LOGW(TAG,
+             "Pump reports %u single-event slots; SubID %u+ is the schedule "
+             "layer space, so reading the first %u",
+             (unsigned) get_reported_max_single_events(),
+             (unsigned) (900 + SINGLE_EVENT_SLOT_LIMIT), (unsigned) max_events);
+  }
   ESP_LOGD(TAG, "Reading up to %d single events from pump...", max_events);
 
   // Read single events sequentially to avoid flooding the transport queue
@@ -976,7 +986,11 @@ void ScheduleService::write_single_event_async(
 }
 
 int ScheduleService::find_free_single_event_slot(uint32_t now_ts) const {
-  uint8_t max_events = overview_cached_ ? overview_structure_[1] : 35;
+  // Through the accessor, not the raw byte. This duplicated the expression and
+  // so missed the address-map clamp -- it would have picked a "free" slot past
+  // 99, which the write bound then rejects as not a single-event slot at all
+  // (issue #284).
+  uint8_t max_events = get_max_single_events();
   // A cold cache means every slot "looks free", so answering 0 here hands the
   // caller a live slot to overwrite -- the clobber class issue #92 exists to
   // prevent. -1 is this function's own "none available" answer; use it, and let
@@ -1131,6 +1145,36 @@ const SingleEvent *ScheduleService::pick_vacation_(uint32_t now_ts,
     return latest_ended;
   }
   return nullptr;
+}
+
+ScheduleService::VacationWhen ScheduleService::find_vacation_slots(
+    uint32_t now_ts, std::vector<uint8_t> *out) const {
+  out->clear();
+  if (!single_events_cached_)
+    return VacationWhen::NONE;
+
+  // Only the COVERS_NOW case can have more than one member, and it is the only
+  // case where clearing one and stopping leaves the pump held off. Everything
+  // else defers to the single-answer ranking so #267's behaviour is untouched.
+  if (now_ts != 0) {
+    for (const auto &ev : cached_single_events_) {
+      const bool is_vacation = ev.enabled && ev.action == 0x01;
+      if (!is_vacation)
+        continue;
+      const bool covers_now =
+          ev.begin_timestamp <= now_ts && now_ts < ev.end_timestamp;
+      if (covers_now)
+        out->push_back(ev.index);
+    }
+    if (!out->empty())
+      return VacationWhen::COVERS_NOW;
+  }
+
+  VacationWhen when = VacationWhen::NONE;
+  const SingleEvent *ev = pick_vacation_(now_ts, &when);
+  if (ev != nullptr)
+    out->push_back(ev->index);
+  return when;
 }
 
 int ScheduleService::find_vacation_slot(uint32_t now_ts) const {

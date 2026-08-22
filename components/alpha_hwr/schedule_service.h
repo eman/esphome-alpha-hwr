@@ -551,6 +551,29 @@ public:
    */
   int find_vacation_slot(uint32_t now_ts) const;
 
+  /**
+   * EVERY enabled Stop event covering `now_ts`, in slot order (issue #290).
+   *
+   * find_vacation_slot() above answers "which vacation does the caller mean",
+   * and its ranking is correct for that. But a ranking orders a set; it does not
+   * bound the set's SIZE. Setting a vacation while one is stored writes a second
+   * one -- `find_free_single_event_slot()` prefers an empty slot and does not
+   * look for an existing vacation to replace -- so `clear_vacation` cleared the
+   * first, settled `accepted`, and left the pump held off under the other. That
+   * is #267's sentence with "finished" replaced by "the other live one".
+   *
+   * When nothing covers now this falls back to find_vacation_slot()'s ranking
+   * and yields at most one slot, so the upcoming / ended / unknown-clock cases
+   * behave exactly as they did. The multiplicity only ever arises among
+   * vacations that are live at the same instant, which is the only case where
+   * clearing one and stopping is observably wrong.
+   *
+   * @param now_ts  Node clock, or 0 when it is not set.
+   * @param out     Filled with the slot indices; cleared first. Never null.
+   * @return Where the vacations sit relative to now, for wording the result.
+   */
+  VacationWhen find_vacation_slots(uint32_t now_ts, std::vector<uint8_t> *out) const;
+
   /** Human-readable vacation range, or "No vacation". @see find_vacation_slot */
   std::string format_vacation_display(uint32_t now_ts) const;
 
@@ -571,7 +594,37 @@ public:
   /**
    * Get max number of single events from ClockProgramOverview.
    */
+  /**
+   * How many single-event slots to walk, clamped against the address map.
+   *
+   * `overview_structure_[1]` is a byte straight off the wire. The write path has
+   * always refused a slot at or past SINGLE_EVENT_SLOT_LIMIT; the read paths
+   * simply walked as far as the pump said (issue #284). SubID is `900 + slot`
+   * and the schedule LAYER records start at 1000, so a pump reporting more than
+   * 100 sends a read chain into layer 0 and reads schedule layers as though they
+   * were single events.
+   *
+   * Clamped here rather than at each call site because there are three of them
+   * -- the read chain, the free-slot search and the write bound -- and two had
+   * already drifted apart. The sibling client had the identical omission,
+   * described the same way: the bound was on the write path and simply never
+   * applied to the read (eman/alpha-hwr#40).
+   *
+   * Silent by design: this is called per free-slot search. The read chain
+   * compares the raw byte against this and warns once, where it is a fact about
+   * the pump rather than a fact about a loop bound.
+   */
   uint8_t get_max_single_events() const {
+    const uint8_t reported = overview_cached_ ? overview_structure_[1] : 35;
+    if (reported > SINGLE_EVENT_SLOT_LIMIT) {
+      return static_cast<uint8_t>(SINGLE_EVENT_SLOT_LIMIT);
+    }
+    return reported;
+  }
+
+  /// The slot count exactly as the pump reported it, before the clamp above.
+  /// Only for saying so in a log; never a loop bound.
+  uint8_t get_reported_max_single_events() const {
     return overview_cached_ ? overview_structure_[1] : 35;
   }
 

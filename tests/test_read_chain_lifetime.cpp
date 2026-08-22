@@ -360,12 +360,12 @@ static std::vector<uint8_t> event_entry_reply(uint32_t stamp) {
   return with_crc(class10_response(0x0000, 0xF402, body));
 }
 
-static std::vector<uint8_t> event_meta_reply(uint16_t available) {
+static std::vector<uint8_t> event_meta_reply(uint16_t available, uint16_t max_entries = 20) {
   return with_crc(class10_response(0x0000, 0xF301,
                                    {0x00, 0x00, 0x00,
                                     0x00, 0x01,                            // cycle
                                     (uint8_t) (available >> 8), (uint8_t) available,
-                                    0x00, 0x14,                            // max entries
+                                    (uint8_t) (max_entries >> 8), (uint8_t) max_entries,
                                     0x00}));
 }
 
@@ -480,6 +480,196 @@ static void test_no_accumulation() {
   TEST_ASSERT(alive == 0, "history: repeated reads accumulate nothing");
 }
 
+// ---------------------------------------------------------------------------
+// Issue #284: the chain is as long as the pump says, and nothing bounded it
+// ---------------------------------------------------------------------------
+//
+// `available_entries` and `max_entries` are both uint16 fields straight off the
+// wire, so `count` could be 65,535 -- roughly 1.9 hours of reads, ~512 KB
+// accumulated in cached_entries_, and a uint16 sub-id that wraps out of the
+// event-log address range entirely from idx 55336.
+static void test_event_log_count_is_clamped() {
+  Rig rig;
+  services::EventLogService svc(rig.transport, rig.session);
+
+  int completions = 0;
+  bool reported_ok = false;
+  svc.read_entries_async(
+      [&](bool ok, const std::vector<services::EventLogEntry> &) {
+        completions++;
+        reported_ok = ok;
+      });
+  step(rig.transport, 2);
+
+  // Baseline BEFORE the metadata reply goes in. Taken after it instead, the
+  // chain has already issued entry read #0 by the time the step returns, and
+  // the count comes out one short -- which is how this test first read 511.
+  const int metadata_commands = rig.commands_sent;
+
+  // A pump claiming far more entries than the object can even address.
+  auto meta = event_meta_reply(60000, 60000);
+  rig.transport.on_notification(meta.data(), meta.size());
+
+  const int after_metadata = metadata_commands;
+
+  // Answer every entry read promptly, so the chain runs at full speed and stops
+  // where the clamp says rather than where a timeout does. Step first, then
+  // answer whatever went out -- the cap on the loop is only a runaway guard, and
+  // it is comfortably above the clamp so a chain that failed to stop would be
+  // measured rather than cut short by the harness.
+  int answered = 0;
+  const int loop_cap = services::EVENT_LOG_MAX_CHAIN_ENTRIES * 4;
+  for (int i = 0; i < loop_cap && completions == 0; i++) {
+    step(rig.transport, 2);
+    if (rig.commands_sent > after_metadata + answered) {
+      auto entry = event_entry_reply(1700000000u + (uint32_t) answered);
+      rig.transport.on_notification(entry.data(), entry.size());
+      answered++;
+    }
+  }
+
+  const int entry_commands = rig.commands_sent - after_metadata;
+  TEST_ASSERT(entry_commands == services::EVENT_LOG_MAX_CHAIN_ENTRIES,
+              std::string("#284: the chain stops at the clamp (") +
+                  std::to_string(entry_commands) + " entry reads, expected " +
+                  std::to_string(services::EVENT_LOG_MAX_CHAIN_ENTRIES) + ")");
+  TEST_ASSERT(completions == 1 && reported_ok,
+              "#284: ...and still reports one successful completion");
+
+  // The clamp must keep every read inside the object's own address range --
+  // sub-ids 10200..11200 per the profile. This is the wrap the uint16 sub-id
+  // allowed: from idx 55336 the reads land on object 88 sub-id 0 onward.
+  TEST_ASSERT(10200 + services::EVENT_LOG_MAX_CHAIN_ENTRIES - 1 <= 11200,
+              "#284: the last sub-id the clamp allows is still an event-log entry");
+}
+
+// A clamp bounds ONE chain. It does nothing about N of them, and the re-arm
+// backoff bumps the read generation without stopping work already queued in the
+// transport -- so a slow chain could have a second copy queued behind it.
+static void test_event_log_will_not_queue_a_second_chain() {
+  Rig rig;
+  services::EventLogService svc(rig.transport, rig.session);
+
+  svc.read_entries_async(
+      [](bool, const std::vector<services::EventLogEntry> &) {});
+  step(rig.transport, 2);
+  auto meta = event_meta_reply(20, 20);
+  rig.transport.on_notification(meta.data(), meta.size());
+  step(rig.transport, 2);
+
+  const int during = rig.commands_sent;
+  TEST_ASSERT(during > 0, "#284: a chain is in flight");
+
+  int second_completions = 0;
+  bool second_ok = true;
+  svc.read_entries_async(
+      [&](bool ok, const std::vector<services::EventLogEntry> &) {
+        second_completions++;
+        second_ok = ok;
+      });
+  step(rig.transport, 2);
+
+  TEST_ASSERT(second_completions == 1 && !second_ok,
+              "#284: a second read while one is in flight is refused, not queued");
+  TEST_ASSERT(rig.commands_sent == during,
+              "#284: ...and it puts no extra commands on the transport queue");
+}
+
+// The flag must be released on EVERY terminal path, the abandoned one included.
+// A flag that leaks means the event log is never read again for the life of the
+// boot, which is a worse failure than the one the flag prevents.
+static void test_event_log_in_flight_flag_survives_an_abandon() {
+  Rig rig;
+  services::EventLogService svc(rig.transport, rig.session);
+
+  svc.read_entries_async(
+      [](bool, const std::vector<services::EventLogEntry> &) {});
+  step(rig.transport, 2);
+  auto meta = event_meta_reply(20, 20);
+  rig.transport.on_notification(meta.data(), meta.size());
+  step(rig.transport, 2);
+
+  // Disconnect mid-chain: reset() fails the queue and the chain unwinds.
+  rig.transport.reset();
+  rig.session.on_disconnected();
+  step(rig.transport, 2);
+
+  // A fresh session, and a read that must be allowed to start.
+  rig.session.on_ready();
+  int completions = 0;
+  svc.read_entries_async(
+      [&](bool, const std::vector<services::EventLogEntry> &) { completions++; });
+  const int before = rig.commands_sent;
+  step(rig.transport, 3);
+
+  TEST_ASSERT(rig.commands_sent > before,
+              "#284: after an abandoned chain a new read is allowed to start");
+  TEST_ASSERT(completions == 0,
+              "#284: ...and it is genuinely in flight, not refused outright");
+}
+
+// The same shape one service across. SubID is 900 + slot and the schedule LAYER
+// records start at 1000, so a pump reporting more than 100 slots sends this
+// chain reading layer records as though they were single events.
+static void test_single_event_read_stops_at_the_slot_limit() {
+  Rig rig;
+  services::ScheduleService svc(rig.transport, rig.session);
+
+  // Warm the overview cache through the real path. poll_state_async() copies
+  // ten bytes from payload+3 into overview_structure_, and byte [1] of that is
+  // the slot count -- so payload[4] here. 200 is past the address map's 100 and
+  // within uint8_t, so it is a value a pump could really send.
+  svc.poll_state_async([](bool) {});
+  step(rig.transport, 2);
+  auto overview = with_crc(class10_response(0x0000, 0xDA01,
+                                            {0x00, 0x00, 0x00,   // sub-header
+                                             0x00, 200,          // [0], [1] = slots
+                                             0x00, 0x00, 0x01,   // [2]..[4]
+                                             0x00, 0x00, 0x00,   // [5]..[7]
+                                             0x00, 0x00}));      // [8], [9]
+  rig.transport.on_notification(overview.data(), overview.size());
+  step(rig.transport, 2);
+  TEST_ASSERT(svc.get_reported_max_single_events() == 200,
+              "#284: the pump's overstated slot count reached the cache");
+  TEST_ASSERT(svc.get_max_single_events() == services::SINGLE_EVENT_SLOT_LIMIT,
+              "#284: ...and the accessor clamps it to the address map");
+
+  // Every slot read is ANSWERED, so the chain runs to its bound rather than
+  // stopping wherever the harness runs out of mock time. Letting them time out
+  // was this test's first shape and it proved nothing: 4000 ticks only got 67
+  // reads in, which is under the limit whether the clamp is there or not.
+  const int before = rig.commands_sent;
+  int completions = 0;
+  svc.read_single_events_async(
+      [&](bool, const std::vector<services::SingleEvent> &) { completions++; });
+
+  // A disabled slot: 3-byte sub-header, then [enable][action][begin x4][end x4].
+  const std::vector<uint8_t> empty_slot{0x00, 0x00, 0x00,
+                                        0x00, 0x02,
+                                        0x00, 0x00, 0x00, 0x00,
+                                        0x00, 0x00, 0x00, 0x00};
+  int answered = 0;
+  const int loop_cap = services::SINGLE_EVENT_SLOT_LIMIT * 4;
+  for (int i = 0; i < loop_cap && completions == 0; i++) {
+    step(rig.transport, 2);
+    if (rig.commands_sent > before + answered) {
+      auto reply = with_crc(class10_response(0x0000, 0xDC01, empty_slot));
+      rig.transport.on_notification(reply.data(), reply.size());
+      answered++;
+    }
+  }
+  const int slot_reads = rig.commands_sent - before;
+
+  TEST_ASSERT(slot_reads == services::SINGLE_EVENT_SLOT_LIMIT,
+              std::string("#284: the single-event read stops at the slot limit (") +
+                  std::to_string(slot_reads) + " reads, limit " +
+                  std::to_string(services::SINGLE_EVENT_SLOT_LIMIT) + ")");
+  TEST_ASSERT(completions == 1, "#284: ...and the chain completed once");
+  // The bound that matters: SubID 1000 is schedule layer 0, not a single event.
+  TEST_ASSERT(900 + services::SINGLE_EVENT_SLOT_LIMIT - 1 <= 999,
+              "#284: the last slot the clamp allows is still a single-event SubID");
+}
+
 int main() {
   std::cout << "==========================================" << std::endl;
   std::cout << "Read Chain Lifetime Tests" << std::endl;
@@ -495,6 +685,10 @@ int main() {
   test_abandoned_history_read_keeps_the_previous_data();
   test_abandoned_event_log_read_reports_failure();
   test_abandoned_event_log_read_keeps_the_previous_data();
+  test_event_log_count_is_clamped();
+  test_event_log_will_not_queue_a_second_chain();
+  test_event_log_in_flight_flag_survives_an_abandon();
+  test_single_event_read_stops_at_the_slot_limit();
   test_event_log_timestamps_are_rendered_verbatim();
 
   std::cout << "\n==========================================" << std::endl;

@@ -7,6 +7,8 @@
  */
 
 #include "device_info_service.h"
+
+#include "class7_string.h"
 #include "transport.h"
 #include "session.h"
 #include "frame_builder.h"
@@ -121,79 +123,46 @@ void DeviceInfoService::read_class7_string_async(uint8_t string_id,
     0,  // expect_type_low_ver (not used for Class 7)
     0,  // expect_type_high (not used for Class 7)
     [string_id, on_complete](bool success, const uint8_t* data, size_t len) {
-      // Response frame (issue #179):
-      //   [STX][LEN][DST][SRC][0x07][Count][...STRING...][CRC_H][CRC_L]
-      //     0    1    2    3     4     5      6 ..            len-2
-      //
-      // The header is six bytes, not seven: byte 5 is a byte count for the
-      // string that follows, not an [Cmd][ID] pair. Every captured frame has
-      // `byte5 == len - 8` and the first character of the string at byte 6 --
-      // e.g. `24 0E F8 E7 07 0A 41 4C 50 48 41 ...` is a 10-byte "ALPHA HWR\0"
-      // in an 18-byte frame. Reading from byte 7 dropped the first character
-      // of all five strings, which is what the two transcribed "Python fix"
-      // string rewrites were papering over.
-      static const size_t HEADER_LEN = 6;
-      static const size_t CRC_LEN = 2;
-      // The shortest frame that can carry a (zero-length) string. Named rather
-      // than inlined because it is load-bearing: string_len below is size_t, so
-      // a shorter frame would wrap it to ~1.8e19 and the copy loop would read
-      // far past the frame. transport.cpp dispatches Class 3/7 on len >= 5, so
-      // 5-, 6- and 7-byte frames do reach this callback.
-      static const size_t MIN_FRAME_LEN = HEADER_LEN + CRC_LEN;
-
-      if (!success || !data || len < MIN_FRAME_LEN) {
+      // The decode itself lives in protocol::decode_class7_string(), pure and
+      // directly testable (issue #282). It used to be inline here, in a lambda
+      // inside a private method, so the only way to reach it was through a
+      // Transport -- which made its memory-safety guard unprovable once #278
+      // gave the transport a length floor of its own: each guard masked the
+      // other's mutation, and CI found the equivalent mutant. The guard has not
+      // moved or weakened; it is just now reachable by a test holding a 7-byte
+      // frame, with no transport in front of it.
+      if (!success) {
         ESP_LOGW(TAG, "No response for String ID %d", string_id);
         on_complete(false, nullptr);
         return;
       }
 
-      if (data[4] != 0x07) {
-        ESP_LOGW(TAG, "Invalid Class 7 response for String ID %d (class=0x%02X)",
-                 string_id, data[4]);
+      const protocol::Class7StringResult decoded = protocol::decode_class7_string(data, len);
+      if (decoded.status != protocol::Class7Status::OK) {
+        ESP_LOGW(TAG, "Bad Class 7 response for String ID %d (%s, len=%zu)", string_id,
+                 protocol::class7_status_name(decoded.status), len);
         on_complete(false, nullptr);
         return;
       }
 
-      size_t string_len = len - HEADER_LEN - CRC_LEN;
-
-      // The count byte is not needed to bound the read -- the frame length
-      // already does that, and trusting a radio-supplied count would be an
-      // overread waiting to happen. It is checked only so that a pump whose
-      // layout differs from the captures says so, instead of silently handing
-      // back a shifted string the way this parser did for its whole life.
-      if (data[5] != string_len) {
+      if (decoded.count_disagrees) {
         ESP_LOGW(TAG, "String ID %d: count byte %u disagrees with the frame's "
                       "%u string bytes; parsing by frame length",
-                 string_id, (unsigned) data[5], (unsigned) string_len);
+                 string_id, (unsigned) decoded.declared_count,
+                 (unsigned) decoded.string_bytes);
       }
-
-      if (string_len == 0) {
+      if (decoded.truncated) {
+        ESP_LOGW(TAG, "String ID %d: %u string bytes truncated to %u",
+                 string_id, (unsigned) decoded.string_bytes,
+                 (unsigned) protocol::CLASS7_MAX_STRING_LEN);
+      }
+      if (decoded.value.empty()) {
         ESP_LOGW(TAG, "Empty string for ID %d", string_id);
-        on_complete(true, "");
-        return;
       }
 
-      const uint8_t* string_data = data + HEADER_LEN;
-
-      // Create null-terminated C string (strip trailing nulls)
-      char string_buffer[128];
-      size_t actual_len = 0;
-      for (size_t i = 0; i < string_len && i < 127; i++) {
-        if (string_data[i] == 0) break;  // Stop at first null
-        string_buffer[actual_len++] = string_data[i];
-      }
-      string_buffer[actual_len] = '\0';
-      
-      // Trim trailing whitespace
-      while (actual_len > 0 && (string_buffer[actual_len-1] == ' ' || 
-                                 string_buffer[actual_len-1] == '\t' ||
-                                 string_buffer[actual_len-1] == '\r' ||
-                                 string_buffer[actual_len-1] == '\n')) {
-        string_buffer[--actual_len] = '\0';
-      }
-      
-      ESP_LOGV(TAG, "String ID %d: '%s' (%d bytes)", string_id, string_buffer, actual_len);
-      on_complete(true, string_buffer);
+      ESP_LOGV(TAG, "String ID %d: '%s' (%u bytes)", string_id, decoded.value.c_str(),
+               (unsigned) decoded.value.size());
+      on_complete(true, decoded.value.c_str());
     },
     3000  // 3 second timeout
   );
