@@ -539,6 +539,9 @@
   early on this pump, and 1200 ms has ≥24× margin. Nothing argues for moving
   toward the app's 2500 ms.
 
+  `SET_CYCLE_TIMES` was measured the same way and gave the same answer, so both
+  callers of the constant are covered rather than one measured and one assumed.
+
   The comment records what the margin actually belongs to: settle is 0.7–0.8 s
   even at a 50 ms delay, because the write sequence is several round trips of
   its own. The measurement cannot separate "the pump applies instantly" from

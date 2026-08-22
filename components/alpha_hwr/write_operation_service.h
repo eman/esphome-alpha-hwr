@@ -599,8 +599,13 @@ class WriteOperationService {
   // irrelevant" -- so if the sequence is ever shortened, the margin does not
   // automatically carry over and this wants re-measuring.
   //
-  // Scope: SET_TEMPERATURE_RANGE only. SET_CYCLE_TIMES shares the constant and
-  // the object and is assumed to behave the same -- assumed, not measured.
+  // Both callers measured, not one: SET_CYCLE_TIMES was run the same way and
+  // gave the same answer -- five writes, five accepted, every readback carrying
+  // the values just written. One of those settled in 5.4 s against 0.8-1.0 s
+  // for the rest, from somewhere inside the write sequence rather than from a
+  // confirm retry (there were none); it still settled accepted with correct
+  // values, and it is noted here because a long settle looks like a
+  // confirm-delay problem to anyone reading settle times and is not one.
   static constexpr uint32_t CONFIG_CONFIRM_DELAY_MS = 1200;
   static constexpr uint32_t CONFIG_RETRY_DELAY_MS = 1500;
   static constexpr uint8_t CONFIG_MAX_ATTEMPTS = 1;
