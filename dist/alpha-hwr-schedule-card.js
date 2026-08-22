@@ -1,5 +1,11 @@
 /**
- * Alpha HWR Schedule Card — v6
+ * Alpha HWR Schedule Card v0.15.0
+ *
+ * The version is the alpha_hwr RELEASE this card was published with, and is
+ * stamped by tools/bump_version.sh. It used to be a card-local "v6" unrelated
+ * to any release tag, which meant a user had no way to tell which firmware
+ * their card matched -- and this card has drifted out of step with the
+ * firmware twice, both times silently (issue #183).
  *
  * Custom Lovelace card for managing the Grundfos ALPHA HWR pump's weekly schedule.
  * Reads the schedule from the per-layer ESPHome read-back sensors and writes
@@ -2172,7 +2178,17 @@ class AlphaHwrScheduleCard extends HTMLElement {
   }
 }
 
+// Stamped by tools/bump_version.sh alongside the header above (issue #183).
+const CARD_VERSION = '0.15.0';
+
 customElements.define('alpha-hwr-schedule-card', AlphaHwrScheduleCard);
+
+// One line in the browser console, which is the only place a user can check
+// what a manually-copied card actually is. HACS shows the installed version
+// itself; a /config/www copy shows nothing.
+console.info(`%c ALPHA-HWR-SCHEDULE-CARD %c ${CARD_VERSION} `,
+             'color: white; background: #03a9f4; font-weight: 700;',
+             'color: #03a9f4; background: white; font-weight: 700;');
 
 window.customCards = window.customCards || [];
 window.customCards.push({

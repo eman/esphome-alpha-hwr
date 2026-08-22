@@ -86,9 +86,29 @@ for file in "${FILES[@]}"; do
     fi
 done
 
+# The Lovelace card, which is not a YAML pin and needs its own two rules.
+#
+# It ships through HACS from dist/ (issue #183), and HACS resolves the version
+# from the release tag -- so the stamp below is not what HACS reads. It is what
+# a user who copied the file into /config/www by hand can check, and what the
+# card prints to the browser console. Before this the header carried a
+# card-local "v6" unrelated to any release, and the card had drifted out of step
+# with the firmware twice without anyone being able to tell.
+CARD="dist/alpha-hwr-schedule-card.js"
+if [ -f "$CARD" ]; then
+    # No em-dash in this anchor, deliberately: perl -pi works on bytes, so a
+    # multi-byte "—" defeats a "." in the pattern and the header silently does
+    # not get stamped while CARD_VERSION below does.
+    perl -pi -e "s|(Alpha HWR Schedule Card )v[0-9]+\\.[0-9]+\\.[0-9]+|\${1}${NEW_VERSION}|" "$CARD"
+    perl -pi -e "s|(CARD_VERSION = ')[0-9]+\\.[0-9]+\\.[0-9]+(')|\${1}${VER_NO_V}\${2}|" "$CARD"
+    echo "  Updated $CARD"
+else
+    echo "  Warning: $CARD not found! Skipping..."
+fi
+
 echo ""
 echo "Step 3: Committing and pushing release changes..."
-git add CHANGELOG.md "${FILES[@]}"
+git add CHANGELOG.md "${FILES[@]}" "$CARD"
 git commit -m "Release ${NEW_VERSION}"
 git push origin main
 

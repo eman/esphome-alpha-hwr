@@ -489,6 +489,42 @@
 
 ### Changed
 
+- **The Lovelace card installs through HACS, and moved to `dist/`** (issue
+  #183). The card is a Home Assistant frontend resource, so ESPHome cannot
+  install it — and the only documented path was copying it into `/config/www`
+  by hand. That meant every installation ran whatever version the user last
+  remembered to copy, and the card has drifted out of step with the firmware
+  **twice, both times silently**: a required service argument it never picked up
+  made every write a no-op, and a display change left the Quick Run list empty
+  in a way indistinguishable from "no events exist".
+
+  Add this repo as a HACS **Dashboard** custom repository and HACS installs the
+  card, registers the dashboard resource itself, pins it to a release tag and
+  raises update notifications. The manual copy stays documented for installs not
+  running HACS.
+
+  **Two corrections to the plan the issue sketched**, both from checking the
+  HACS documentation rather than building on the assumption:
+
+  - HACS resolves a plugin file from **`dist/` first**, then the latest release,
+    then the repo root — not "release assets, then `dist/`, then root". A `dist/`
+    file therefore shadows a release asset entirely, so attaching the card to the
+    release would not have done what was intended.
+  - Version pinning does not need release assets anyway. HACS resolves the
+    version from the release tag and installs the tree at that tag, so a card in
+    `dist/` is pinned for free.
+
+  That settles the issue's open question — move the card or publish a copy — in
+  favour of moving it. A published copy alongside a source of truth is two paths
+  that can diverge, which is the same shape as the drift this change exists to
+  prevent.
+
+  The card also carried a local `v6` marker unrelated to any release, so nobody
+  could tell which firmware a given card matched. It now carries the release
+  version, stamped by `tools/bump_version.sh` (which covered the example YAMLs
+  and packages but not the card), and logs it to the browser console once on
+  load — the only place a hand-copied card can be identified.
+
 - **Where the flow limiter actually binds is documented** (issue #274). An
   enabled limiter is *not* a general explanation for a setpoint that is not
   reached, and treating it as one would be wrong in the more misleading

@@ -434,7 +434,7 @@ jobs:
           node-version: "20"
 
       - name: Syntax check
-        run: node --check homeassistant/www/alpha-hwr-schedule-card.js
+        run: node --check dist/alpha-hwr-schedule-card.js
 
       # Behaviour, not just parseability. Plain node against a stubbed DOM --
       # no npm install, nothing to keep current.
@@ -449,7 +449,7 @@ jobs:
       # guard against it regressing.
       - name: Every esphome service call must carry an op_id
         run: |
-          if grep -n "callService('esphome'" homeassistant/www/alpha-hwr-schedule-card.js \
+          if grep -n "callService('esphome'" dist/alpha-hwr-schedule-card.js \
              | grep -v "op_id"; then
             echo "::error::esphome service call without op_id (see the lines above)"
             exit 1
