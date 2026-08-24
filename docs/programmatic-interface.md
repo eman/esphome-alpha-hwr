@@ -66,6 +66,44 @@ writing that state does not yet know. Before this the terminal event did not
 exist: a toggle emitted only the sub-writes it happened to issue, and a toggle
 the pump already matched emitted nothing at all.
 
+### Which entity settles as which `command`
+
+For a service the answer is implicit — the command *is* the service you called.
+For an entity there is no such correspondence, so here it is. These are the
+write entities in the shipped packages; anything not listed is read-only and
+never settles.
+
+| Entity | Settles as |
+| --- | --- |
+| **Engage Pump**, **Schedule Enabled** (switches) | `set_pump_state` (plus the flag writes underneath — see above) |
+| **Pump Control Mode** (select) | `set_mode` |
+| **Constant Pressure / Constant Speed / Constant Flow / Proportional Pressure Setpoint** (numbers) | `set_setpoint` |
+| **Temperature Range Min**, **Temperature Range Max** (numbers) | `set_temperature_range` |
+| **Temperature AutoAdapt** (switch) | `set_temperature_range` |
+| **Cycle Time ON**, **Cycle Time OFF**, **Cycle Flow** (numbers) | `set_cycle_times` |
+| **Max/Min Flow Limit** (numbers), **Max/Min Flow Limit Enabled** (switches) | `set_flow_limiter` |
+| **Remote Mode** (switch) | `set_remote_mode` |
+| **Save Schedule Entry** (button) | `set_schedule_entry` |
+| **Clear Schedule Entry** (button) | `clear_schedule_entry` |
+| **Clear Single Event**, **Clear Vacation** (buttons) | `clear_single_event` — a vacation is a Stop single event, not a command of its own |
+
+Three things the table cannot show:
+
+- **A setpoint number settles as `set_setpoint`, never `set_mode`**, even though
+  the write also switches the pump into that mode — that pairing is what the
+  pump fuses into one write, and `set_mode` is the separate operation that
+  changes mode *without* touching a setpoint.
+- **Four setpoint entities share one command.** Read `requested_mode` on the
+  event to tell which control moved; it is populated even on a refusal that
+  never reached the pump, precisely so this stays answerable.
+- **One entity write is one event.** Temperature Range Min and Max are separate
+  writes of the whole record, so moving both is two `set_temperature_range`
+  events — and if they overlap, the second supersedes the first, which settles
+  the earlier one `superseded`. The same is true of the two cycle-time numbers.
+
+`pump_start()` / `pump_stop()` settle as `set_pump_enabled`, but no shipped
+package exposes them as entities; they are reachable only from a custom lambda.
+
 ## Requirements
 
 The services and event need two flags on the `api:` component (all shipped

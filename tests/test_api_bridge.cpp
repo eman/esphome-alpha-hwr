@@ -854,6 +854,12 @@ static void test_a_switch_toggled_before_the_pump_is_ready_still_settles() {
 // packages/alpha_hwr_controls.yaml calls, on an unconnected component -- which
 // is precisely the state a user's node is in for the first seconds after boot,
 // and after every reconnect.
+//
+// This table is also the executable copy of the entity-to-command mapping in
+// docs/programmatic-interface.md ("Which entity settles as which command"). A
+// client is told to match on `command`, so that mapping is public API: if you
+// change which command an entity settles as, both this table and that one have
+// to move together, and this one is the half that fails loudly.
 static void test_every_entity_write_settles_when_the_pump_is_not_ready() {
   std::cout << "\n=== every entity write settles rather than returning in silence ==="
             << std::endl;
