@@ -31,6 +31,7 @@
 #include "fixture_crc.h"
 #include "esphome/components/text_sensor/text_sensor.h"
 #include "esphome/core/application.h"
+#include "esphome/components/api/custom_api_device.h"
 
 uint32_t mock_millis = 0;
 
@@ -217,6 +218,27 @@ struct Rig {
   /// Pump Ready waits on unpopulated.
   bool answer_overview{true};
 
+  /// What run state and schedule flag the simulated pump reports.
+  ///
+  /// The defaults are the bytes this fixture has always sent, kept exactly so
+  /// that no test written before these knobs existed changes behaviour: STOP
+  /// with the weekly schedule enabled. Note what that pair IS -- a dead
+  /// schedule (issue #124), the one state the component repairs by itself. Any
+  /// test that reaches ready and then runs update() is watching a repair
+  /// attempt go by, which is fine for the link assertions this file is mostly
+  /// made of and NOT fine for anything counting write events (issue #302). Ask
+  /// for a healthy pump when the writes are the subject.
+  uint8_t operation_mode{
+      static_cast<uint8_t>(esphome::alpha_hwr::services::OperationMode::STOP)};
+  bool schedule_enabled{true};
+
+  /// AUTO + schedule off: "Engaged", and the pump is not stalled, so the
+  /// dead-schedule repair stays out of the way.
+  void pump_reports_engaged() {
+    operation_mode = static_cast<uint8_t>(esphome::alpha_hwr::services::OperationMode::AUTO);
+    schedule_enabled = false;
+  }
+
   /// Answer the pump-clock read (Obj 94 Sub 101). Off by default because the
   /// drift leg's behaviour when the read goes UNANSWERED is itself pinned below
   /// (issue #259), and because every test written before this fixture existed
@@ -382,9 +404,12 @@ void Rig::answer_outstanding_writes() {
         }
       } else if (obj == 0x56) {
         // Operation status (Obj 86) -- the frame captured on hardware, and what
-        // populates the control-mode cache.
+        // populates the control-mode cache. Byte 14 is the payload's
+        // operation_mode (payload is [00 00 07][source][operation_mode][control
+        // _mode][setpoint]), and it is the one byte the run state is read from:
+        // pump_enabled = operation_mode != STOP.
         notify(with_crc({0x24, 0x12, 0xF8, 0xE7, 0x0A, 0x0E, 0x00, 0x01, 0x2F, 0x01,
-                         0x00, 0x00, 0x07, 0x00, 0x01, 0x02, 0x44, 0xCE, 0x40, 0x00,
+                         0x00, 0x00, 0x07, 0x00, operation_mode, 0x02, 0x44, 0xCE, 0x40, 0x00,
                          0x00, 0x00}));
       } else if (obj == 91 && sub == 430) {
         // Temperature-range config. Answered with OpSpec 0x15, which is the
@@ -419,7 +444,10 @@ void Rig::answer_outstanding_writes() {
         // waits on. Built with the same envelope as the write-operation
         // suite's fixture rather than hand-rolled: my first attempt was a byte
         // short, which fails the payload_len >= 13 guard silently.
-        const uint8_t overview[10] = {0x8C, 5, 0x05, 0x05, 0x01,
+        // Byte 4 is the enable flag the schedule cache reads (payload[7], three
+        // header bytes in).
+        const uint8_t overview[10] = {0x8C, 5, 0x05, 0x05,
+                                      static_cast<uint8_t>(schedule_enabled ? 0x01 : 0x00),
                                       0x01, 0x00, 0x00, 0x00, 0x00};
         notify(data_object_frame(0xDA, 0x01, overview, sizeof(overview)));
       }
@@ -1383,6 +1411,135 @@ void test_the_fault_is_visible_across_the_reconnect_it_describes() {
               "that set it");
 }
 
+
+// ---------------------------------------------------------------------------
+// The two coupled switches settle like the service (issue #302)
+// ---------------------------------------------------------------------------
+//
+// This is the only rig that can ask the question. The entity path needs a pump
+// whose caches are populated -- otherwise every toggle stops at the readiness
+// check, which test_api_bridge.cpp covers -- and that means a connection that
+// has actually reached ready with a simulated pump answering its reads.
+//
+// What used to happen here: `apply_pump_schedule_target_()` submitted the flag
+// writes that differed and said nothing else, so the events a toggle produced
+// depended on the state the pump was already in (one, two, or -- when the pump
+// already matched -- none at all). A client had to know the pump's state to
+// know which event to wait for, which is the thing it was writing to establish.
+
+/// Every settle event fired so far, in order, as (command, origin, status).
+struct SettleLog {
+  struct Row {
+    std::string command, origin, status, detail, op_id;
+  };
+  static std::vector<Row> rows() {
+    std::vector<Row> out;
+    for (const auto &e : esphome::api::mock_fired_events()) {
+      if (e.name != std::string("esphome.alpha_hwr_write_settled")) continue;
+      auto get = [&](const char *k) {
+        auto it = e.data.find(k);
+        return it == e.data.end() ? std::string() : it->second;
+      };
+      out.push_back({get("command"), get("origin"), get("status"), get("detail"), get("op_id")});
+    }
+    return out;
+  }
+};
+
+/// A rig connected, ready, and with both caches populated -- the state a user's
+/// node is in whenever they can see the switches at all.
+static void ready_rig_with_events_cleared(Rig &r) {
+  // Engaged, not the fixture's default STOP-under-an-enabled-schedule: that
+  // pair is a dead schedule, and the component repairs it on its own from
+  // update(). A repair is a write of exactly the kind these tests count, so
+  // leaving it armed would put the component's own events in the middle of the
+  // user's.
+  r.pump_reports_engaged();
+  r.setup();
+  r.connect_and_subscribe();
+  r.run_until_ready();
+  esphome::api::mock_fired_events().clear();
+}
+
+void test_a_no_op_toggle_still_settles() {
+  std::cout << "\n=== A toggle the pump already matches still settles ===" << std::endl;
+
+  Rig r;
+  ready_rig_with_events_cleared(r);
+
+  bool engage = false, scheduled = false;
+  TEST_ASSERT(r.component.get_engage_pump_state(&engage) &&
+                  r.component.get_schedule_state(&scheduled),
+              "Both switches read a state once the pump is ready");
+  TEST_ASSERT(engage && !scheduled, "...and the pump reads Engaged, as the rig was told to");
+
+  // Turn Engage Pump ON while the pump is already engaged. Both fields of the
+  // target already match, so there is nothing to write -- the corner the issue
+  // was filed for.
+  r.component.set_engage_pump(true);
+
+  const auto rows = SettleLog::rows();
+  TEST_ASSERT(rows.size() == 1,
+              "A no-op toggle fires exactly one event, not none (it used to fire none)");
+  if (rows.size() != 1) return;
+  TEST_ASSERT(rows[0].command == "set_pump_state",
+              "...named set_pump_state, so it is distinguishable from the flag writes");
+  TEST_ASSERT(rows[0].origin == "entity", "...reported as an entity write");
+  TEST_ASSERT(rows[0].status == "accepted",
+              "...settling accepted: the pump is in the requested state");
+  TEST_ASSERT(rows[0].detail == "no change",
+              "...with the same 'no change' detail the service reports");
+
+  // And it is still a no-op. A sub-write would have been queued here and
+  // settled during this run, so the event log growing at all would mean the
+  // terminal event had been bought by writing to a pump that needed nothing.
+  r.advance(120000, 240);
+  const auto after = SettleLog::rows();
+  TEST_ASSERT(after.size() == 1,
+              "...and nothing is written to reach a state the pump already holds");
+}
+
+void test_a_toggle_that_writes_settles_once_after_its_sub_writes() {
+  std::cout << "\n=== A toggle that writes settles once, last ===" << std::endl;
+
+  Rig r;
+  ready_rig_with_events_cleared(r);
+
+  // Off, from Engaged: the run-state flag differs, so a sub-write is issued and
+  // the aggregation is genuinely exercised.
+  r.component.set_engage_pump(false);
+
+  // The rig's pump answers reads and ignores writes, so each sub-write reaches
+  // its own terminal the slow way. That is the point: the aggregate must wait
+  // for the last leg rather than reporting early.
+  const auto before = SettleLog::rows();
+  TEST_ASSERT(before.empty(),
+              "Nothing settles at submission time -- the writes are still in flight");
+
+  r.advance(120000, 240);
+
+  const auto rows = SettleLog::rows();
+  int aggregates = 0, sub_writes = 0;
+  for (const auto &row : rows) {
+    if (row.command == "set_pump_state") aggregates++;
+    else sub_writes++;
+  }
+  TEST_ASSERT(sub_writes >= 1,
+              "The raw flag writes still surface as their own events");
+  TEST_ASSERT(aggregates == 1, "...and exactly one terminal set_pump_state joins them");
+  if (rows.empty()) return;
+  TEST_ASSERT(rows.back().command == "set_pump_state",
+              "...arriving last, after every leg it aggregates");
+  TEST_ASSERT(rows.back().origin == "entity", "...as an entity write");
+  TEST_ASSERT(rows.back().op_id.empty(),
+              "...under the empty op_id, which is what entity writes carry");
+  bool all_empty_op_ids = true;
+  for (const auto &row : rows) {
+    if (!row.op_id.empty()) all_empty_op_ids = false;
+  }
+  TEST_ASSERT(all_empty_op_ids,
+              "...and so do the legs: a switch has no op_id to hand any of them");
+}
 
 void test_the_default_names_the_fault_without_touching_the_link() {
   std::cout << "\n=== The default names it and does not recycle ===" << std::endl;
@@ -2641,6 +2798,9 @@ int main() {
   test_readiness_recycles_reach_the_counter_an_automation_watches();
   test_the_fault_is_visible_across_the_reconnect_it_describes();
   test_the_default_names_the_fault_without_touching_the_link();
+
+  test_a_no_op_toggle_still_settles();
+  test_a_toggle_that_writes_settles_once_after_its_sub_writes();
 
   test_the_drift_leg_publishes_the_drift_it_measured();
   test_the_drift_leg_leaves_a_good_reading_alone();

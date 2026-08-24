@@ -1136,9 +1136,13 @@ void AlphaHwrComponent::reconcile_run_state_() {
   ESP_LOGW(TAG,
            "Schedule is enabled but the pump is STOP - no window can run it. "
            "Engaging AUTO to repair (issue #124).");
+  // Settles as one terminal `set_pump_state` under the same op_id the
+  // sub-writes carry (issue #302), so a client filtering on the op_id sees the
+  // repair's verdict rather than having to infer it from the legs.
   this->apply_pump_schedule_target_(ux::dead_schedule_repair_target(),
                                     services::WriteOrigin::INTERNAL,
-                                    "auto:dead-schedule-repair");
+                                    "auto:dead-schedule-repair",
+                                    "dead_schedule_repair");
 }
 
 bool AlphaHwrComponent::is_state_synchronized() const {

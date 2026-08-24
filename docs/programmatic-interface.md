@@ -21,6 +21,44 @@ adjusting a value on a dashboard. Entity writes go through the same internal
 write path (serialized and verified identically; their events carry
 `op_id: ""`), but programmatic writes should use the services below.
 
+### Watching an entity write settle
+
+An entity write that reaches the operation layer settles like a service call,
+so `switch.turn_on` and friends can be waited on. Two limits are worth knowing
+before you build on that.
+
+**There is no `op_id`.** Entity events carry `op_id: ""`, so match on `command`
+(and `origin: "entity"`) instead, and expect no way to tell two simultaneous
+writes apart. That is the reason to prefer the services for anything
+programmatic.
+
+**One case still settles nothing.** A *single-value* entity write — the setpoint
+numbers, the mode select, the Remote Mode switch — made while the pump is not
+yet synchronized is refused before the operation layer sees it, and that
+refusal is logged rather than settled: no event arrives. The same write through
+a service settles `rejected`. The two coupled switches below no longer behave
+that way, but the rest of the entity surface still does, so a client that must
+not hang should either call the services or arm a timeout.
+
+The two coupled switches — **Engage Pump** and **Schedule Enabled** — write the
+same three-state machine `set_pump_state` does, so they settle the same way:
+each toggle produces **exactly one** terminal `set_pump_state` event, with the
+raw flag writes it issued surfacing underneath it as their own events, in the
+same shape a `set_pump_state` service call produces (issue #302).
+
+| Toggle | Events, in order |
+| --- | --- |
+| Engage Pump on, from Off | `set_pump_enabled`, then `set_pump_state` |
+| Engage Pump on, from Scheduled | `set_schedule_enabled`, then `set_pump_state` |
+| Engage Pump on, from Engaged | `set_pump_state` alone — `accepted`, `detail: "no change"` |
+| Engage Pump on, pump not synchronized | `set_pump_state` alone — `rejected` |
+
+Wait for `command: set_pump_state`; the number of flag writes underneath it
+depends on the state the pump was already in, which is exactly what a client
+writing that state does not yet know. Before this the terminal event did not
+exist: a toggle emitted only the sub-writes it happened to issue, and a toggle
+the pump already matched emitted nothing at all.
+
 ## Requirements
 
 The services and event need two flags on the `api:` component (all shipped
@@ -169,9 +207,10 @@ Consequences for automations calling these raw services:
   component detects `STOP` + schedule-on with its periodic state poll and
   converges it to `AUTO` + schedule-on (attempts spaced at least five minutes
   apart; suppressed while a vacation covers the current time). That repair
-  fires its own `write_settled` event with `origin: "internal"` and
-  `op_id: "auto:dead-schedule-repair"` — filter it out if your automation
-  reacts to pump-enable writes. Watch for it on
+  fires its own `write_settled` events with `origin: "internal"` and
+  `op_id: "auto:dead-schedule-repair"` — the flag writes it makes, and one
+  terminal `set_pump_state` carrying the repair's verdict — filter them out if
+  your automation reacts to pump-enable writes. Watch for it on
   `sensor.<node_name>_pump_run_state` = `stalled` — see
   [schedule-management.md](schedule-management.md#the-stalled-schedule-and-how-it-repairs-itself).
   To hold the pump off from an automation, clear the schedule flag too
@@ -547,10 +586,17 @@ submission order from logs.
 Two kinds of event never reach the operation queue and so carry `seq: "0"`:
 a request the API bridge rejects as `invalid` before submitting it (an
 unparsable `data` string, an unknown mode or state name), and the aggregate
-`set_pump_state` event, which is composed at the bridge from the two flag
-writes underneath it. Real sequence numbers start at 1, so `"0"` identifies
-them. Correlate these by `op_id`; `node` + `seq` identifies an event uniquely
-only among the ones the queue numbered.
+`set_pump_state` event, which is composed from the two flag writes underneath
+it rather than queued as an operation of its own — whether it came from the
+service, from one of the two coupled switches, or from the dead-schedule
+repair. Real sequence numbers start at 1, so `"0"` identifies them.
+
+Correlate a service one by `op_id`. An entity aggregate has no `op_id` to
+correlate by (`""`, like every entity write): match it on `command` plus
+`origin: "entity"`, and note that this leaves two switch toggles issued at the
+same moment indistinguishable — one more reason for a program to call the
+service. `node` + `seq` identifies an event uniquely only among the ones the
+queue numbered.
 
 ## Writing a client
 

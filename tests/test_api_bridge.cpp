@@ -786,6 +786,62 @@ static void test_a_rejected_pump_state_does_not_assert_a_state() {
   TEST_ASSERT(!BridgeHarness::has(*ev, "schedule_enabled"), "nor a schedule flag");
 }
 
+// ---------------------------------------------------------------------------
+// The entity path settles too (issue #302)
+// ---------------------------------------------------------------------------
+//
+// The two coupled switches used to bare-`return` on the readiness check, where
+// the same write submitted through `set_pump_state` settled REJECTED. Nothing
+// was written and nothing was said, so a client watching write_settled -- which
+// the docs invite, since entity writes are described as going through the same
+// verified path -- waited for an event that was never coming.
+//
+// Asserted through the ENTITY entry points rather than the service, because
+// that is the path that was silent; the service arm above already covers the
+// same refusal under an op_id.
+static void test_a_switch_toggled_before_the_pump_is_ready_still_settles() {
+  std::cout << "\n=== an entity toggle on an unsynchronized pump settles rejected ==="
+            << std::endl;
+
+  struct Case {
+    const char *label;
+    bool schedule_switch;  // false = Engage Pump, true = Schedule Enabled
+    bool on;
+  };
+  const std::vector<Case> cases = {
+      {"Engage Pump on", false, true},
+      {"Engage Pump off", false, false},
+      {"Schedule Enabled on", true, true},
+      {"Schedule Enabled off", true, false},
+  };
+
+  for (const auto &c : cases) {
+    BridgeHarness h;
+    if (c.schedule_switch) {
+      h.component.set_schedule(c.on);
+    } else {
+      h.component.set_engage_pump(c.on);
+    }
+
+    const auto *ev = h.only_event();
+    TEST_ASSERT(ev != nullptr,
+                std::string(c.label) + ": fires exactly one settle event");
+    if (ev == nullptr) continue;
+    TEST_ASSERT(BridgeHarness::field(*ev, "command") == "set_pump_state",
+                std::string(c.label) + ": ...named set_pump_state, not one of the flag writes");
+    TEST_ASSERT(BridgeHarness::field(*ev, "origin") == "entity",
+                std::string(c.label) + ": ...reported as an entity write");
+    TEST_ASSERT(BridgeHarness::field(*ev, "op_id").empty(),
+                std::string(c.label) + ": ...with the empty op_id entity writes carry");
+    TEST_ASSERT(BridgeHarness::field(*ev, "status") == "rejected",
+                std::string(c.label) + ": ...settling rejected");
+    // Same rule the service path is held to: nothing was written and the
+    // caches are invalid, so the event must not name a state.
+    TEST_ASSERT(!BridgeHarness::has(*ev, "state"),
+                std::string(c.label) + ": ...and asserts no pump state");
+  }
+}
+
 int main() {
   std::cout << "===========================================================" << std::endl;
   std::cout << "  API Bridge Test Suite (issue #92 public surface)" << std::endl;
@@ -807,6 +863,7 @@ int main() {
   test_paired_echo_keys_are_guarded_independently();
   test_upload_keys_are_omitted_when_nothing_ran();
   test_a_rejected_pump_state_does_not_assert_a_state();
+  test_a_switch_toggled_before_the_pump_is_ready_still_settles();
 
   std::cout << "\n===========================================================" << std::endl;
   std::cout << "  Test Results" << std::endl;

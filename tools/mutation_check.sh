@@ -1616,6 +1616,23 @@ MUTATIONS=(
 # A write that never reached the pump must not report a concrete pump state.
 # Both caches can be invalid, and -1 is what the event encoding already had.
 "bridge-pump-state-invents-a-known-state|components/alpha_hwr/alpha_hwr.h|    auto tri = [](bool known, bool value) -> int8_t { return known ? (value ? 1 : 0) : -1; };|    auto tri = [](bool known, bool value) -> int8_t { (void) known; return value ? 1 : 0; };"
+# Issue #302: the entity path's terminal event. Toggling a coupled switch has
+# to end in exactly one set_pump_state result, or a client waiting on the
+# dashboard write waits forever -- which is what it did before, in the corner
+# where the pump already matched the target and nothing was submitted at all.
+"entity-toggle-never-settles|components/alpha_hwr/alpha_hwr.h|          write_op_service_.emit_result(result);|          (void) result;"
+# The same event reported as a service call. `origin` is the only thing telling
+# an automation that a person moved a switch rather than its own script writing.
+"entity-toggle-reports-itself-as-a-service|components/alpha_hwr/alpha_hwr.h|          result.origin = origin;|          result.origin = services::WriteOrigin::SERVICE;"
+# The no-op arm. Without it a toggle the pump already matches submits nothing
+# and aggregates nothing, so the fan-in never fires and the terminal event is
+# never built -- issue #302 exactly as filed.
+"pump-state-no-op-settles-nothing|components/alpha_hwr/alpha_hwr.h|    if (!need_engaged && !need_scheduled) {|    if (false) {"
+# The sub-writes take the caller's sub_op_id, which is empty for a switch and
+# the repair's tag for the repair -- never the terminal event's op_id. A leak
+# here would put three events under a service caller's op_id where the contract
+# promises one.
+"pump-state-sub-writes-leak-an-op-id|components/alpha_hwr/alpha_hwr.h|      write_op_service_.submit_set_enabled(target.pump_enabled, sub_op_id, nullptr, origin, step);|      write_op_service_.submit_set_enabled(target.pump_enabled, \"leaked\", nullptr, origin, step);"
 # state_name(pump_auto, schedule_on) is asymmetric, so its arguments can be
 # swapped without a compiler complaint: a running unscheduled pump would then
 # report "off". The test fixtures were symmetric (both flags 1) and could not

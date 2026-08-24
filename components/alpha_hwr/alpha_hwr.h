@@ -392,34 +392,56 @@ public:
 
 private:
   // Converge the pump to a Run/Schedule target, writing only the fields that
-  // differ from the current cached state (both writes if a field is unknown).
-  // Ordering avoids a transient dead/gated state: disable the schedule before
-  // touching run state when turning it off; set AUTO before enabling the
-  // schedule when turning it on (so there is never a STOP+schedule moment).
+  // differ from the current cached state (both writes if a field is unknown),
+  // and report ONE terminal `set_pump_state` result for the whole toggle.
+  //
+  // The composition, the ordering and the aggregate verdict all live in
+  // submit_set_pump_state(); this is the same operation the `set_pump_state`
+  // service performs, reached from a switch instead of from an API call, so it
+  // runs the same code and differs only in what it is labelled with -- the
+  // `origin` reported, and the op_id, which a switch does not have to give
+  // (issue #302). It used to be
+  // a separate copy of the diff-and-order logic that submitted the sub-writes
+  // and said nothing further, which left the entity path with no terminal event
+  // at all -- and with a number of events that depended on the pump's current
+  // state rather than on what the user had asked for:
+  //
+  //   Engage Pump ON from Off       -> set_pump_enabled
+  //   Engage Pump ON from Scheduled -> set_schedule_enabled
+  //   Engage Pump ON from Engaged   -> nothing whatsoever
+  //
+  // so a client could not know which event to wait for without already knowing
+  // the state it was writing to establish, and in the third case waited for an
+  // event that never came. The raw sub-writes still surface as their own
+  // events, exactly as they do under the service; the terminal one is added on
+  // top of them and arrives last.
+  //
   // origin/op_id let the autonomous dead-schedule repair (issue #124) report
   // itself as INTERNAL with a stable op_id, so a client watching write_settled
   // can tell a self-repair from a switch toggle. The switches keep the
-  // defaults.
+  // defaults. `action_name` only names the control in the not-ready log line.
   void apply_pump_schedule_target_(const ux::PumpScheduleTarget &target,
                                    services::WriteOrigin origin = services::WriteOrigin::ENTITY,
-                                   const std::string &op_id = "") {
-    bool cur_schedule = false;
-    bool schedule_known = schedule_service_.get_state(&cur_schedule);
-    bool pump_known = control_service_.is_pump_enabled_valid();
-    bool cur_pump = control_service_.is_pump_enabled();
-
-    bool write_schedule = !schedule_known || cur_schedule != target.schedule_enabled;
-    bool write_pump = !pump_known || cur_pump != target.pump_enabled;
-
-    if (write_schedule && !target.schedule_enabled) {
-      write_op_service_.submit_set_schedule_enabled(false, op_id, nullptr, origin);
-    }
-    if (write_pump) {
-      write_op_service_.submit_set_enabled(target.pump_enabled, op_id, nullptr, origin);
-    }
-    if (write_schedule && target.schedule_enabled) {
-      write_op_service_.submit_set_schedule_enabled(true, op_id, nullptr, origin);
-    }
+                                   const std::string &op_id = "",
+                                   const char *action_name = "set_pump_state") {
+    this->submit_set_pump_state(
+        target,
+        [this, origin, op_id](services::WriteStatus status, int8_t engaged, int8_t scheduled,
+                              const std::string &detail) {
+          services::WriteResult result;
+          result.op_id = op_id;
+          result.command = services::WriteCommand::SET_PUMP_STATE;
+          result.origin = origin;
+          result.status = status;
+          result.detail = detail;
+          // Tri-state straight through, like the service path: -1 means the
+          // cache could not tell us, and fire_write_settled() then omits the
+          // key rather than reporting a state nothing read back.
+          result.enabled = engaged;
+          result.sched_enabled = scheduled;
+          write_op_service_.emit_result(result);
+        },
+        origin, op_id, action_name);
   }
 
   // Publishes the run-state diagnostics and repairs a dead schedule (issue
@@ -1091,12 +1113,24 @@ public:
   // reading `state` concluded the pump was off. The bridge already had the
   // right encoding for unknown and a guard to use it; nothing could ever
   // produce it, so the guard was dead.
+  //
+  // `origin` and `sub_op_id` exist for the two callers that are not the
+  // service (issue #302): the two coupled switches, which report ENTITY, and
+  // the dead-schedule repair, which reports INTERNAL and tags its sub-writes
+  // with a stable op_id. `sub_op_id` labels the SUB-WRITES only; the terminal
+  // result is the caller's to build in on_complete, under whatever op_id it
+  // answers to. Keeping the two apart is what lets a service call keep the
+  // documented shape -- sub-writes at `op_id: ""`, exactly one event under the
+  // caller's op_id -- while the repair keeps tagging both.
   void submit_set_pump_state(
       ux::PumpScheduleTarget target,
-      std::function<void(services::WriteStatus, int8_t, int8_t, const std::string &)> on_complete) {
+      std::function<void(services::WriteStatus, int8_t, int8_t, const std::string &)> on_complete,
+      services::WriteOrigin origin = services::WriteOrigin::SERVICE,
+      const std::string &sub_op_id = "",
+      const char *action_name = "set_pump_state") {
     using services::WriteStatus;
     auto tri = [](bool known, bool value) -> int8_t { return known ? (value ? 1 : 0) : -1; };
-    if (!check_ready("set_pump_state")) {
+    if (!check_ready(action_name)) {
       bool cs = false;
       const bool cs_known = schedule_service_.get_state(&cs);
       if (on_complete) {
@@ -1159,13 +1193,13 @@ public:
     // touching run state; enable it only after AUTO is set. The status callback
     // is the 5th arg (bool `done` stays null — we only need the full status).
     if (need_scheduled && !target.schedule_enabled) {
-      write_op_service_.submit_set_schedule_enabled(false, "", nullptr, services::WriteOrigin::SERVICE, step);
+      write_op_service_.submit_set_schedule_enabled(false, sub_op_id, nullptr, origin, step);
     }
     if (need_engaged) {
-      write_op_service_.submit_set_enabled(target.pump_enabled, "", nullptr, services::WriteOrigin::SERVICE, step);
+      write_op_service_.submit_set_enabled(target.pump_enabled, sub_op_id, nullptr, origin, step);
     }
     if (need_scheduled && target.schedule_enabled) {
-      write_op_service_.submit_set_schedule_enabled(true, "", nullptr, services::WriteOrigin::SERVICE, step);
+      write_op_service_.submit_set_schedule_enabled(true, sub_op_id, nullptr, origin, step);
     }
   }
   void submit_set_single_event(uint32_t begin_ts, uint32_t end_ts, const std::string &op_id) {
@@ -1402,18 +1436,27 @@ public:
 
   // Toggle "Engage Pump": ON = engage continuously (AUTO + schedule off),
   // OFF = Off (STOP).
+  //
+  // The readiness check is NOT made here any more (issue #302). It used to be,
+  // and a not-ready toggle then returned in silence -- where the same write
+  // submitted through the service settled REJECTED. Both now reject through
+  // one path, so a dashboard toggle against an unsynchronized pump is a
+  // terminal event like every other refusal instead of nothing at all. The
+  // action name is passed through only so the log line still names the control.
   void set_engage_pump(bool on) {
-    if (!check_ready(on ? "engage_pump_on" : "engage_pump_off")) return;
     apply_pump_schedule_target_(on ? ux::engage_pump_on_target()
-                                   : ux::engage_pump_off_target());
+                                   : ux::engage_pump_off_target(),
+                                services::WriteOrigin::ENTITY, "",
+                                on ? "engage_pump_on" : "engage_pump_off");
   }
 
   // Toggle "Schedule Enabled": ON = Scheduled (AUTO so it can actually run +
   // schedule on), OFF = Off (stop the pump + schedule off).
   void set_schedule(bool on) {
-    if (!check_ready(on ? "schedule_on" : "schedule_off")) return;
     apply_pump_schedule_target_(on ? ux::schedule_on_target()
-                                   : ux::schedule_off_target());
+                                   : ux::schedule_off_target(),
+                                services::WriteOrigin::ENTITY, "",
+                                on ? "schedule_on" : "schedule_off");
   }
 
   bool read_schedule_entries_async(
