@@ -2,6 +2,28 @@
 
 ## [Unreleased]
 
+### Changed
+
+- **Two outbound APDU hex dumps moved to `ESP_LOGV`** (issue #307).
+  `write_temp_range APDU:` was logged at **INFO, unconditionally**, so it fired
+  on every temperature-range write on a default build — the packages ship
+  `logger: level: INFO` — costing an API frame per connected subscriber plus the
+  `std::string` the formatting allocates. That is exactly the per-subscriber
+  cost `docs/configuration.md` warns about under *Log level and API
+  subscribers*, and the load that has exhausted this node's heap in ESPHome's
+  outgoing buffer (issue #127).
+
+  `Clock SET APDU:` was at DEBUG. Cheaper — a clock write happens twice a day,
+  not per user action — but there was no reason for two identical lines to sit
+  at two different levels, and AGENTS.md §3 assigns packet dumps to `ESP_LOGV`
+  either way (`ESP_LOGD` is for single packet *summaries*).
+
+  Neither line is deleted, but neither is the way to see these writes any more:
+  `frame_logging: true` dumps the whole telegram each APDU is carried in, in
+  both directions, without turning the rest of the component up to VERBOSE.
+
+  A default build emits two fewer log lines than before; nothing else changes.
+
 ### Added
 
 - **`frame_logging`**, a component option that logs every GENI frame, sent and
