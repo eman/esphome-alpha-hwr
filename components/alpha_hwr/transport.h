@@ -257,6 +257,18 @@ class Transport {
 
   void set_write_callback(WriteCallback callback) { write_callback_ = callback; }
 
+  /// Diagnostic frame logging. When on, every GENI frame sent and received is
+  /// logged whole at INFO, so a protocol capture can be taken from a stock
+  /// build without raising the whole component to VERBOSE (which emits far
+  /// more lines, and the per-line cost distorts the timing a capture is
+  /// usually taken to measure). Sent frames are not logged at any level
+  /// otherwise, and the VERBOSE receive line shows only the first 12 bytes.
+  ///
+  /// Off by default: the lines are not free while it is on, so a capture
+  /// perturbs the timing it records. Intended to be turned on to collect a
+  /// trace and turned off again.
+  void set_frame_logging(bool enabled) { frame_logging_ = enabled; }
+
   /// Frames dropped for a bad CRC since boot (issue #260). See crc_drops_.
   uint32_t crc_drops() const { return crc_drops_; }
 
@@ -467,6 +479,9 @@ class Transport {
    * @return true if this is a frame start byte
    */
   static bool is_frame_start(uint8_t byte);
+
+  /// True while diagnostic frame logging is on. See set_frame_logging().
+  bool frame_logging_{false};
 
 
   /// How many replies the pump still owes us for commands that gave up.

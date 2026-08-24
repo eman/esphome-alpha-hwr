@@ -4,6 +4,16 @@
 
 ### Added
 
+- **`frame_logging`**, a component option that logs every GENI frame, sent and
+  received, whole, at INFO. Previously the receive path logged only the first 12
+  bytes and only at VERBOSE, and the send path logged nothing.
+
+  Off by default. With it off the existing VERBOSE receive line is unchanged and
+  nothing additional is allocated. Frames are logged at INFO rather than the
+  `ESP_LOGV` that AGENTS.md §3 assigns to packet dumps, so a capture reaches every
+  API subscriber; `docs/configuration.md` carries the subscriber and
+  `tx_buffer_size` cautions.
+
 - **The flow limiter can be set, not just read** (issue #299, `set_flow_limiter`).
   For three of the pump's five modes the limiter **is** the flow control:
   constant curve and constant pressure regulate speed and head, so flow drifts
