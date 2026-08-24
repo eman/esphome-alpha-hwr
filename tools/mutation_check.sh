@@ -1616,6 +1616,11 @@ MUTATIONS=(
 # A write that never reached the pump must not report a concrete pump state.
 # Both caches can be invalid, and -1 is what the event encoding already had.
 "bridge-pump-state-invents-a-known-state|components/alpha_hwr/alpha_hwr.h|    auto tri = [](bool known, bool value) -> int8_t { return known ? (value ? 1 : 0) : -1; };|    auto tri = [](bool known, bool value) -> int8_t { (void) known; return value ? 1 : 0; };"
+# Review on #304: the guard ORDER in clear_schedule_entry. An unknown day name
+# is validated before the readiness check, because REJECTED means "retry once
+# the link is up" and INVALID means "never". Readiness first made a misspelled
+# day retryable on a disconnected pump -- an obedient client loops forever.
+"bad-day-name-loses-to-the-readiness-check|components/alpha_hwr/alpha_hwr.h|      r.status = services::WriteStatus::INVALID;\n      r.detail = \"unknown day name\";|      r.status = services::WriteStatus::REJECTED;\n      r.detail = \"unknown day name\";"
 # Issue #302 follow-up: the rest of the entity surface. Every entity setter
 # guards on check_ready() and used to return in silence, so a dashboard write
 # during the first seconds after boot produced a log line and no event. The

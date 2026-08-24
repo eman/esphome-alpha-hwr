@@ -1579,25 +1579,31 @@ public:
   }
   void clear_schedule_entry(const std::string &day, uint8_t layer = 0,
                             std::function<void(bool)> on_complete = nullptr) {
-    if (!check_ready("clear_schedule_entry")) {
-      services::WriteResult r = not_ready_refusal_(services::WriteCommand::CLEAR_SCHEDULE_ENTRY);
-      r.layer = layer;
-      refuse_entity_write_(r);
-      if (on_complete) on_complete(false);
-      return;
-    }
+    // The day name is validated BEFORE the readiness check, and the order is
+    // the whole point (review on #304). An unrecognised day is deterministic:
+    // no reconnect can make it valid. Checking readiness first meant that on a
+    // disconnected pump -- which is every node for the first seconds after boot
+    // -- a misspelled day settled REJECTED, the status whose entire meaning is
+    // "retry once the link is up". A client obeying that retries forever
+    // against a request that can never succeed. Readiness is the retryable
+    // condition, so it goes second.
     ScheduleEntry probe;
     probe.set_day(day.c_str());
     int day_index = probe.get_day_index();
     if (day_index < 0) {
-      // INVALID, not REJECTED: an unrecognised day name is deterministic and
-      // never worth a retry, which is exactly the rule the api bridge applies
-      // to a malformed argument.
       services::WriteResult r;
       r.command = services::WriteCommand::CLEAR_SCHEDULE_ENTRY;
       r.status = services::WriteStatus::INVALID;
       r.detail = "unknown day name";
       r.layer = layer;
+      refuse_entity_write_(r);
+      if (on_complete) on_complete(false);
+      return;
+    }
+    if (!check_ready("clear_schedule_entry")) {
+      services::WriteResult r = not_ready_refusal_(services::WriteCommand::CLEAR_SCHEDULE_ENTRY);
+      r.layer = layer;
+      r.day = day_index;  // known by now, so the refusal can name the day
       refuse_entity_write_(r);
       if (on_complete) on_complete(false);
       return;

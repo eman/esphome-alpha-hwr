@@ -942,6 +942,49 @@ static void test_a_refused_entity_write_names_no_pump_state() {
               "...and the value the user asked for");
 }
 
+// A deterministic refusal outranks the readiness check (review on #304).
+//
+// The two statuses mean different things to a client: `rejected` says "retry
+// once the link is up", `invalid` says "this request can never succeed". So the
+// order of the guards decides which one an unknown day name gets, and getting
+// it wrong is not cosmetic -- on a disconnected pump, which is every node for
+// the first seconds after boot, a misspelled day used to settle `rejected` and
+// send an obedient client round a retry loop with no exit.
+//
+// This is the case the ready-pump test in test_component_wiring.cpp cannot
+// reach: with the pump ready there is no readiness failure for the day check to
+// lose to, so the ordering is only observable from here.
+static void test_a_bad_day_name_outranks_the_readiness_check() {
+  std::cout << "\n=== an unknown day name settles invalid even when the pump is also unready ==="
+            << std::endl;
+
+  BridgeHarness h;
+  h.component.clear_schedule_entry("Blursday", 0, nullptr);
+
+  const auto *ev = h.only_event();
+  TEST_ASSERT(ev != nullptr, "it settles exactly once");
+  if (ev == nullptr) return;
+  TEST_ASSERT(BridgeHarness::field(*ev, "command") == "clear_schedule_entry",
+              "...as clear_schedule_entry");
+  TEST_ASSERT(BridgeHarness::field(*ev, "status") == "invalid",
+              "...invalid, NOT rejected: no reconnect can make 'Blursday' a day");
+  TEST_ASSERT(BridgeHarness::field(*ev, "detail") == "unknown day name",
+              "...saying which half of the request was wrong");
+  TEST_ASSERT(BridgeHarness::field(*ev, "origin") == "entity", "...and as an entity write");
+
+  // The valid-day arm still reports the retryable condition, so the reorder
+  // did not simply swap which case is wrong.
+  BridgeHarness h2;
+  h2.component.clear_schedule_entry("Monday", 0, nullptr);
+  const auto *ev2 = h2.only_event();
+  TEST_ASSERT(ev2 != nullptr, "a well-formed clear against an unready pump also settles");
+  if (ev2 == nullptr) return;
+  TEST_ASSERT(BridgeHarness::field(*ev2, "status") == "rejected",
+              "...as rejected, which IS worth retrying once the link is up");
+  TEST_ASSERT(BridgeHarness::field(*ev2, "day") == "0",
+              "...and names the day, now that it is parsed before the refusal is built");
+}
+
 int main() {
   std::cout << "===========================================================" << std::endl;
   std::cout << "  API Bridge Test Suite (issue #92 public surface)" << std::endl;
@@ -966,6 +1009,7 @@ int main() {
   test_a_switch_toggled_before_the_pump_is_ready_still_settles();
   test_every_entity_write_settles_when_the_pump_is_not_ready();
   test_a_refused_entity_write_names_no_pump_state();
+  test_a_bad_day_name_outranks_the_readiness_check();
 
   std::cout << "\n===========================================================" << std::endl;
   std::cout << "  Test Results" << std::endl;

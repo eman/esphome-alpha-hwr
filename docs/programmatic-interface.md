@@ -23,10 +23,14 @@ write path (serialized and verified identically; their events carry
 
 ### Watching an entity write settle
 
-An entity write settles like a service call — exactly one terminal event,
-whatever happens, including a refusal that never reaches the pump — so
-`switch.turn_on`, `number.set_value` and `select.select_option` can all be
-waited on.
+Every entity write gives you a terminal event to wait on — including a refusal
+that never reaches the pump — so `switch.turn_on`, `number.set_value` and
+`select.select_option` can all be waited on rather than timed out.
+
+"One event to wait for" is not the same as "one event in total": the two
+coupled switches below emit the raw flag writes they issue as their own settle
+events, and then the aggregate you are waiting for. Match on `command`, not on
+count.
 
 **The one thing they cannot give you is an `op_id`.** Entity events carry
 `op_id: ""`, so match on `command` (and `origin: "entity"`) instead, and expect
@@ -586,13 +590,18 @@ submission time, so they can arrive **before** the terminal events of
 operations submitted earlier. Use the `seq` field when reconstructing
 submission order from logs.
 
-Two kinds of event never reach the operation queue and so carry `seq: "0"`:
-a request the API bridge rejects as `invalid` before submitting it (an
-unparsable `data` string, an unknown mode or state name), and the aggregate
-`set_pump_state` event, which is composed from the two flag writes underneath
-it rather than queued as an operation of its own — whether it came from the
-service, from one of the two coupled switches, or from the dead-schedule
-repair. Real sequence numbers start at 1, so `"0"` identifies them.
+Three kinds of event never reach the operation queue and so carry `seq: "0"`:
+
+- a request the API bridge rejects as `invalid` before submitting it (an
+  unparsable `data` string, an unknown mode or state name);
+- the aggregate `set_pump_state` event, composed from the two flag writes
+  underneath it rather than queued as an operation of its own — whether it came
+  from the service, from one of the two coupled switches, or from the
+  dead-schedule repair;
+- an entity write refused before submission — the pump not yet synchronized, an
+  unknown day name, an unread limiter record.
+
+Real sequence numbers start at 1, so `"0"` identifies them.
 
 Correlate a service one by `op_id`. An entity aggregate has no `op_id` to
 correlate by (`""`, like every entity write): match it on `command` plus
