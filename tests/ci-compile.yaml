@@ -50,6 +50,10 @@ alpha_hwr:
   # tests. This file already deviates from production for the same kind of
   # reason (data_timeout above, and the whole gap histogram below).
   ready_recycle: true
+  # Nothing else in CI sets frame_logging at all, so a rename or a broken
+  # validator would go unnoticed. Turning it on here is a schema check; the
+  # codegen call is unconditional, so no extra code is compiled either way.
+  frame_logging: true
   link_gaps_over_15s:
     name: "Pump Link Gaps Over 15s"
   link_gaps_over_20s:

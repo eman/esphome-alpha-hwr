@@ -350,6 +350,9 @@ public:
   // reason about, and lets an automation see a fault that has stopped moving
   // rather than a link that flaps forever.
   void set_ready_recycle_limit(uint32_t limit) { link_ready_recycle_limit_ = limit; }
+  // Diagnostic frame logging: log every GENI frame sent and received, whole, at
+  // INFO. Off by default. See core::Transport::set_frame_logging().
+  void set_frame_logging(bool enabled) { transport_.set_frame_logging(enabled); }
   void set_ready_timeout(uint32_t ms) {
     this->link_ready_timeout_ms_ = ms;
     this->link_ready_timeout_current_ms_ = ms;

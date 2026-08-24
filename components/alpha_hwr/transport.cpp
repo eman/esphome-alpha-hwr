@@ -7,6 +7,10 @@
 #include "transport.h"
 #include "esphome/core/log.h"
 #include "esphome/core/hal.h"
+// format_hex_pretty is declared in esphome/core/alloc_helpers.h as of ESPHome
+// 2026.5.0; helpers.h still forwards to it. Left as-is here so this file does
+// not migrate ahead of time_service.cpp and control_service.cpp.
+#include "esphome/core/helpers.h"
 #include "frame_builder.h"
 #include "frame_parser.h"
 #include "response_match.h"
@@ -87,6 +91,28 @@ void Transport::loop() {
 
         if (cmd.bytes_sent >= cmd.packet.size()) {
           // Finished sending all chunks
+
+          // Diagnostic frame logging, off unless frame_logging is set. Hoisted
+          // above the arms below so one line covers every outbound frame
+          // whatever reply it expects. Nothing logs the frame as it goes on the
+          // wire otherwise -- an APDU dumped by a builder is not the telegram --
+          // and a reply naming an item ID can only be read against the request
+          // that drew it.
+          //
+          // AGENTS.md section 3 assigns packet dumps to ESP_LOGV. These are at
+          // INFO on purpose: at VERBOSE a capture costs every other verbose line
+          // too, and the per-line cost distorts the timing a capture is usually
+          // taken to measure. The trade is that INFO is the level the packages
+          // ship, so a capture reaches every API subscriber -- see the
+          // frame_logging section in docs/configuration.md.
+          //
+          // Empty packets are skipped: send_command() is public and takes an
+          // arbitrary vector, so size() - 1 would underflow to 4294967295.
+          if (this->frame_logging_ && !cmd.packet.empty()) {
+            ESP_LOGI(TAG, "Frame sent [0-%u]: %s", (unsigned) (cmd.packet.size() - 1),
+                     format_hex_pretty(cmd.packet.data(), cmd.packet.size(), ' ', false).c_str());
+          }
+
           // If a callback is registered, we expect a response (including wildcard matches where obj_id=0)
           if (cmd.callback) {
             this->state_ = State::AWAITING_RESPONSE;
@@ -467,8 +493,16 @@ void Transport::on_notification(const uint8_t* data, size_t len) {
        reassembly_buffer_.size() >= expected_packet_length_) {
      ESP_LOGV(TAG, "Packet complete: %d bytes", reassembly_buffer_.size());
 
-     // Log first 12 bytes for debugging packet structure
-     if (reassembly_buffer_.size() >= 12) {
+     // Diagnostic frame logging, off unless frame_logging is set: the whole
+     // frame rather than the first 12 bytes the VERBOSE line below shows, so
+     // the tail of a longer reply is visible. Dumped BEFORE the trim, so
+     // trailing bytes outside the declared frame length stay visible too. The
+     // enclosing condition guarantees a non-empty buffer, so size() - 1 is safe.
+     if (this->frame_logging_) {
+       ESP_LOGI(TAG, "Frame received [0-%u]: %s", (unsigned) (reassembly_buffer_.size() - 1),
+                format_hex_pretty(reassembly_buffer_.data(), reassembly_buffer_.size(), ' ', false).c_str());
+     } else if (reassembly_buffer_.size() >= 12) {
+       // Log first 12 bytes for debugging packet structure
        ESP_LOGV(TAG, "Packet bytes [0-11]: %02X %02X %02X %02X %02X %02X %02X %02X %02X %02X %02X %02X",
                 reassembly_buffer_[0], reassembly_buffer_[1], reassembly_buffer_[2], reassembly_buffer_[3],
                 reassembly_buffer_[4], reassembly_buffer_[5], reassembly_buffer_[6], reassembly_buffer_[7],

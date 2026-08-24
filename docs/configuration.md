@@ -32,6 +32,7 @@ events fire.
 | `data_timeout` | time | `60s` | Tear the BLE link down after this long with no data from the pump, so the normal reconnect runs. Set to `0s` to disable. |
 | `ready_timeout` | time | `300s` | Report a fault if the pump has not become usable this long after connecting. Naming only; see `ready_recycle`. `0s` disables. |
 | `ready_recycle` | boolean | `false` | Also tear the link down when `ready_timeout` expires, so the normal reconnect runs. **Opt-in** — see below. |
+| `frame_logging` | boolean | `false` | Log every GENI frame sent and received, whole, at INFO. Diagnostic capture only, and it reaches every API subscriber — see below before turning it on. |
 
 ### `time_id`
 
@@ -900,6 +901,41 @@ logger:
 
 and prefer keeping at most one extra subscriber attached beyond Home Assistant
 while you do. Watch `Free Heap` / `Min Free Heap` during long debug sessions.
+
+### `frame_logging`
+
+`frame_logging: true` logs every GENI frame, sent and received, whole, at INFO:
+
+```yaml
+alpha_hwr:
+  frame_logging: true
+```
+
+Each line carries the byte range and the frame:
+
+```
+[I][alpha_hwr.transport:098]: Frame sent [0-8]: 27 05 E7 F8 07 01 01 52 38
+[I][alpha_hwr.transport:488]: Frame received [0-17]: 24 0E F8 E7 07 0A 41 4C 50 48 41 20 48 57 52 00 83 8D
+```
+
+With the option off, the receive path logs the first 12 bytes at VERBOSE as
+before, and the send path logs nothing.
+
+**These are INFO lines, so a capture reaches every API subscriber**, with the
+heap cost described directly above. Keep at most one extra subscriber attached
+beyond Home Assistant while capturing, watch `Free Heap` / `Min Free Heap`, and
+turn the option off afterwards.
+
+**Frames longer than roughly 150 bytes are cut off.** The logger formats each
+line into `tx_buffer_size`, 512 bytes by default, and a frame renders as three
+characters per byte; this component reassembles up to 259. The `[0-N]` range
+shows when a line was cut, because the declared range stops matching what
+printed. Raise the buffer if you expect long frames:
+
+```yaml
+logger:
+  tx_buffer_size: 1024
+```
 
 ## Flow limiters
 

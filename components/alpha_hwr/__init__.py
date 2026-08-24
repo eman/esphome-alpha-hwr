@@ -101,6 +101,7 @@ CONF_CONTROL_STATE_POLL_INTERVAL = "control_state_poll_interval"
 CONF_DATA_TIMEOUT = "data_timeout"
 CONF_READY_TIMEOUT = "ready_timeout"
 CONF_READY_RECYCLE = "ready_recycle"
+CONF_FRAME_LOGGING = "frame_logging"
 
 # `ready_recycle: true` -- recycle without a bound. Mirrors
 # AlphaHwrComponent::READY_RECYCLE_FOREVER; the user never types this number.
@@ -263,6 +264,15 @@ CONFIG_SCHEMA = (
             # (issue #245). So the diagnosis ships on and the remedy waits for
             # someone who wants it and can see their node reaches ready today.
             cv.Optional(CONF_READY_RECYCLE, default=False): validate_ready_recycle,
+            # Diagnostic protocol capture. Logs every GENI frame sent and
+            # received, whole, at INFO -- the only way to see what the component
+            # SENDS, which nothing logs at any level, and the only way to see a
+            # received frame past its first 12 bytes. Turning the component up
+            # to VERBOSE is not a substitute: it emits far more lines, and the
+            # per-line cost distorts the timing a capture is usually taken to
+            # measure. Off by default, and meant to be turned on to collect a
+            # trace and off again -- the lines are not free while it is on.
+            cv.Optional(CONF_FRAME_LOGGING, default=False): cv.boolean,
             cv.Optional(CONF_FLOW): sensor.sensor_schema(
                 unit_of_measurement="m³/h",
                 accuracy_decimals=3,
@@ -627,6 +637,7 @@ async def to_code(config):
     cg.add(var.set_data_timeout(config[CONF_DATA_TIMEOUT]))
     cg.add(var.set_ready_timeout(config[CONF_READY_TIMEOUT]))
     cg.add(var.set_ready_recycle_limit(config[CONF_READY_RECYCLE]))
+    cg.add(var.set_frame_logging(config[CONF_FRAME_LOGGING]))
     if config[CONF_RECONNECT_SETTLE_TIME].total_milliseconds > 0:
         # Register as an esp32_ble_tracker listener (at codegen, so the count
         # macro that enables the listener path is defined) — this is what makes
