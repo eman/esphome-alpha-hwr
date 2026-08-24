@@ -842,6 +842,106 @@ static void test_a_switch_toggled_before_the_pump_is_ready_still_settles() {
   }
 }
 
+// Every OTHER entity write settles too (issue #302 follow-up)
+//
+// The coupled switches were the half issue #302 named. The rest of the entity
+// surface had the same hole: each setter guards on check_ready() and used to
+// return in silence, so a setpoint moved on a dashboard while the pump was
+// still synchronizing produced a log line and no event, where the identical
+// write through a service settles `rejected`.
+//
+// Every entry below is driven through the C++ entry point the YAML lambda in
+// packages/alpha_hwr_controls.yaml calls, on an unconnected component -- which
+// is precisely the state a user's node is in for the first seconds after boot,
+// and after every reconnect.
+static void test_every_entity_write_settles_when_the_pump_is_not_ready() {
+  std::cout << "\n=== every entity write settles rather than returning in silence ==="
+            << std::endl;
+
+  struct Case {
+    const char *label;
+    const char *command;   // the `command` its settle event must report
+    void (*run)(AlphaHwrComponent &);
+  };
+  static const std::vector<Case> cases = {
+      {"Start", "set_pump_enabled", [](AlphaHwrComponent &c) { c.pump_start(); }},
+      {"Stop", "set_pump_enabled", [](AlphaHwrComponent &c) { c.pump_stop(); }},
+      {"Mode select", "set_mode",
+       [](AlphaHwrComponent &c) { c.set_control_mode(ControlMode::CONSTANT_SPEED); }},
+      {"Remote Mode on", "set_remote_mode", [](AlphaHwrComponent &c) { c.enable_remote(); }},
+      {"Remote Mode off", "set_remote_mode", [](AlphaHwrComponent &c) { c.disable_remote(); }},
+      {"Constant pressure setpoint", "set_setpoint",
+       [](AlphaHwrComponent &c) { c.set_constant_pressure(3.0f, nullptr); }},
+      {"Constant speed setpoint", "set_setpoint",
+       [](AlphaHwrComponent &c) { c.set_constant_speed(2500.0f, nullptr); }},
+      {"Constant flow setpoint", "set_setpoint",
+       [](AlphaHwrComponent &c) { c.set_constant_flow(1.2f, nullptr); }},
+      {"Proportional pressure setpoint", "set_setpoint",
+       [](AlphaHwrComponent &c) { c.set_proportional_pressure(2.5f, nullptr); }},
+      {"Temperature range", "set_temperature_range",
+       [](AlphaHwrComponent &c) { c.set_temperature_range(35.0f, 38.9f, true, nullptr); }},
+      {"Cycle times", "set_cycle_times",
+       [](AlphaHwrComponent &c) { c.set_cycle_time_control(5, 10, nullptr); }},
+      {"Cycle flow", "set_cycle_times",
+       [](AlphaHwrComponent &c) { c.set_cycle_flow(1.4f, nullptr); }},
+      {"Flow limiter", "set_flow_limiter",
+       [](AlphaHwrComponent &c) {
+         c.set_flow_limiter_from_entity(esphome::alpha_hwr::services::SUB_LIMITER_CONFIG_MAX_FLOW,
+                                        true, 1.6f);
+       }},
+      {"Schedule entry save", "set_schedule_entry",
+       [](AlphaHwrComponent &c) {
+         esphome::alpha_hwr::ScheduleEntry e;
+         c.set_schedule_entry(0, 2, e, nullptr);
+       }},
+      {"Schedule entry clear", "clear_schedule_entry",
+       [](AlphaHwrComponent &c) { c.clear_schedule_entry_async(0, 2, nullptr); }},
+      {"Schedule entry clear by name", "clear_schedule_entry",
+       [](AlphaHwrComponent &c) { c.clear_schedule_entry("Monday", 0, nullptr); }},
+  };
+
+  for (const auto &c : cases) {
+    BridgeHarness h;
+    c.run(h.component);
+
+    const auto *ev = h.only_event();
+    TEST_ASSERT(ev != nullptr, std::string(c.label) + ": fires exactly one settle event");
+    if (ev == nullptr) continue;
+    TEST_ASSERT(BridgeHarness::field(*ev, "command") == c.command,
+                std::string(c.label) + ": ...reporting command " + c.command);
+    TEST_ASSERT(BridgeHarness::field(*ev, "origin") == "entity",
+                std::string(c.label) + ": ...as an entity write");
+    TEST_ASSERT(BridgeHarness::field(*ev, "status") == "rejected",
+                std::string(c.label) + ": ...settling rejected, as the service does");
+    TEST_ASSERT(BridgeHarness::field(*ev, "detail") == "pump not connected/synchronized",
+                std::string(c.label) + ": ...with the detail the service path uses");
+    TEST_ASSERT(BridgeHarness::field(*ev, "op_id").empty(),
+                std::string(c.label) + ": ...and the empty op_id entity writes carry");
+  }
+}
+
+// The settled value fields stay unknown on all of them. This is the rule the
+// tri-state encoding exists for: nothing was written and nothing was read back,
+// so an automation must not be able to read a pump state out of a refusal.
+static void test_a_refused_entity_write_names_no_pump_state() {
+  std::cout << "\n=== a refused entity write claims nothing about the pump ===" << std::endl;
+
+  BridgeHarness h;
+  h.component.set_constant_speed(2500.0f, nullptr);
+  const auto *ev = h.only_event();
+  TEST_ASSERT(ev != nullptr, "the setpoint write settles");
+  if (ev == nullptr) return;
+  TEST_ASSERT(!BridgeHarness::has(*ev, "value"), "no settled value");
+  TEST_ASSERT(!BridgeHarness::has(*ev, "enabled"), "no settled enable flag");
+  TEST_ASSERT(!BridgeHarness::has(*ev, "mode"), "no settled mode");
+  // ...but the request IS echoed, because `set_setpoint` alone would not say
+  // which of the five setpoint entities the user had just moved.
+  TEST_ASSERT(BridgeHarness::field(*ev, "requested_mode") == "constant_speed",
+              "the requested mode is echoed, naming the control");
+  TEST_ASSERT(BridgeHarness::field(*ev, "requested_value") == "2500",
+              "...and the value the user asked for");
+}
+
 int main() {
   std::cout << "===========================================================" << std::endl;
   std::cout << "  API Bridge Test Suite (issue #92 public surface)" << std::endl;
@@ -864,6 +964,8 @@ int main() {
   test_upload_keys_are_omitted_when_nothing_ran();
   test_a_rejected_pump_state_does_not_assert_a_state();
   test_a_switch_toggled_before_the_pump_is_ready_still_settles();
+  test_every_entity_write_settles_when_the_pump_is_not_ready();
+  test_a_refused_entity_write_names_no_pump_state();
 
   std::cout << "\n===========================================================" << std::endl;
   std::cout << "  Test Results" << std::endl;

@@ -3515,6 +3515,37 @@
   client to have waited on an entity write and noticed nothing arrived.
 
 
+- **Every other entity write settles too** (issue #305, split out of #302).
+  The two coupled switches were the half issue #302 named; every remaining
+  entity setter had the same hole. Each guards on `check_ready()` and returned
+  in silence, so a setpoint moved on a dashboard, a mode selected, Remote Mode
+  toggled, or a schedule entry saved while the pump was still synchronizing
+  produced a log line and no `write_settled` event — where the identical write
+  submitted through a service settles `rejected`. That window is every node for
+  the first seconds after boot, and again after each reconnect.
+
+  Fourteen call sites now say it: start/stop, the mode select, both remote
+  toggles, all five setpoint numbers, the temperature range, both cycle-time
+  controls, the flow limiter, and the three schedule-entry writes. The refusal
+  carries the command it was refused under, `origin: "entity"`, and the
+  `requested_*` echo where one exists — the five setpoint entities share the
+  `set_setpoint` command, so without the echoed mode a client could not tell
+  which control had been refused. No settled value field is populated: nothing
+  was written and nothing was read back, so the event names no pump state.
+
+  **Two statuses, kept apart.** Not-ready settles `rejected` and is worth
+  retrying once the link is up. A refusal no reconnect could fix settles
+  `invalid` — an unrecognised day name on a schedule clear, and a limiter write
+  made before the limiter record has ever been read, where the enable flag
+  would be a guess (issue #299). That is the distinction a client retries on,
+  and the same rule the api bridge already applies to a malformed argument.
+
+  `sync_pump_clock()` is deliberately unchanged: it returns false without
+  calling `done`, its callers use the return value, and conflating "we did not
+  try" with "we tried and the pump did not confirm" is a 10-second retry versus
+  a 15-minute one. Nothing outside waits on it.
+
+
 ## [0.15.0] - 2026-07-30
 
 ### Added

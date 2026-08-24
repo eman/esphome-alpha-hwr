@@ -444,6 +444,44 @@ private:
         origin, op_id, action_name);
   }
 
+  // ---- Terminal results for an entity write refused before the operation
+  // layer ever saw it (issue #302 follow-up).
+  //
+  // Every entity setter below guards on check_ready(), and each one used to
+  // return in silence. The identical write submitted through a service settles
+  // REJECTED with this exact detail string -- start_front_() produces it from
+  // the SAME predicate, since write_op_service_'s ready check IS
+  // is_state_synchronized() -- so the refusal was never in doubt, only unsaid.
+  // A client watching write_settled had nothing to wait for and no way to tell
+  // "refused" from "still working".
+  //
+  // These say it once, in the shape the api bridge's own reject_() uses:
+  // command, status, detail, and the requested_* echo where there is one. The
+  // SETTLED value fields stay unknown, deliberately -- nothing was written and
+  // nothing was read back, so the event must not name a pump state (the rule
+  // issue #92's tri-state encoding exists for).
+  static services::WriteResult not_ready_refusal_(services::WriteCommand command) {
+    services::WriteResult result;
+    result.command = command;
+    result.status = services::WriteStatus::REJECTED;
+    result.detail = "pump not connected/synchronized";
+    return result;
+  }
+  void refuse_entity_write_(services::WriteResult result) {
+    result.origin = services::WriteOrigin::ENTITY;
+    result.op_id = "";  // entity writes have none, by construction
+    write_op_service_.emit_result(result);
+  }
+  /// The five setpoint entities share one command, so the mode and the value
+  /// are echoed: `set_setpoint rejected` alone would not say which control the
+  /// user had just moved.
+  void refuse_entity_setpoint_(services::ControlMode mode, float value) {
+    services::WriteResult result = not_ready_refusal_(services::WriteCommand::SET_SETPOINT);
+    result.requested_mode = mode;
+    result.requested_value = value;
+    this->refuse_entity_write_(result);
+  }
+
   // Publishes the run-state diagnostics and repairs a dead schedule (issue
   // #124). Called from update() once the caches are synchronized. Defined in
   // alpha_hwr.cpp.
@@ -1036,7 +1074,21 @@ public:
    * across.
    */
   void set_flow_limiter_from_entity(uint16_t sub, bool enabled, float limit_gpm) {
-    if (!check_ready("set_flow_limiter")) return;
+    // Both refusals are terminal events (issue #302 follow-up), and they are
+    // deliberately not the same status. Not-ready is REJECTED and worth
+    // retrying once the link is up; an unread limiter record is INVALID -- the
+    // request cannot be honoured as asked whatever the link does, because the
+    // enable flag the caller passed came from a cache that has never been
+    // filled. That is the same distinction the api bridge draws for a
+    // malformed argument.
+    if (!check_ready("set_flow_limiter")) {
+      services::WriteResult r = not_ready_refusal_(services::WriteCommand::SET_FLOW_LIMITER);
+      r.limiter_sub = static_cast<int16_t>(sub);
+      r.requested_limiter_enabled = enabled ? 1 : 0;
+      r.requested_limiter_limit_gpm = limit_gpm;
+      refuse_entity_write_(r);
+      return;
+    }
     const auto &cached = (sub == services::SUB_LIMITER_CONFIG_MAX_FLOW)
                              ? control_service_.limiter_state().max_flow
                              : control_service_.limiter_state().min_flow;
@@ -1045,6 +1097,14 @@ public:
                "Not setting limiter Sub %u from an entity: it has not been read, so "
                "the enable flag would be a guess",
                static_cast<unsigned>(sub));
+      services::WriteResult r;
+      r.command = services::WriteCommand::SET_FLOW_LIMITER;
+      r.status = services::WriteStatus::INVALID;
+      r.detail = "limiter record not read; the enable flag would be a guess";
+      r.limiter_sub = static_cast<int16_t>(sub);
+      r.requested_limiter_enabled = enabled ? 1 : 0;
+      r.requested_limiter_limit_gpm = limit_gpm;
+      refuse_entity_write_(r);
       return;
     }
     write_op_service_.submit_set_flow_limiter(sub, enabled, limit_gpm, "", nullptr,
@@ -1229,27 +1289,44 @@ public:
   // empty op_id: they get the same serialization, confirm readbacks, and
   // terminal settle events as the programmatic services — one write path.
   bool pump_start() {
-    if (!check_ready("start")) return false;
+    if (!check_ready("start")) {
+      refuse_entity_write_(not_ready_refusal_(services::WriteCommand::SET_PUMP_ENABLED));
+      return false;
+    }
     write_op_service_.submit_set_enabled(true, "", nullptr, services::WriteOrigin::ENTITY);
     return true;
   }
   bool pump_stop() {
-    if (!check_ready("stop")) return false;
+    if (!check_ready("stop")) {
+      refuse_entity_write_(not_ready_refusal_(services::WriteCommand::SET_PUMP_ENABLED));
+      return false;
+    }
     write_op_service_.submit_set_enabled(false, "", nullptr, services::WriteOrigin::ENTITY);
     return true;
   }
   bool set_control_mode(services::ControlMode mode) {
-    if (!check_ready("set_control_mode")) return false;
+    if (!check_ready("set_control_mode")) {
+      services::WriteResult r = not_ready_refusal_(services::WriteCommand::SET_MODE);
+      r.requested_mode = mode;
+      refuse_entity_write_(r);
+      return false;
+    }
     write_op_service_.submit_set_mode(mode, "", nullptr, services::WriteOrigin::ENTITY);
     return true;
   }
   bool enable_remote() {
-    if (!check_ready("enable_remote")) return false;
+    if (!check_ready("enable_remote")) {
+      refuse_entity_write_(not_ready_refusal_(services::WriteCommand::SET_REMOTE_MODE));
+      return false;
+    }
     write_op_service_.submit_set_remote_mode(true, "", nullptr, services::WriteOrigin::ENTITY);
     return true;
   }
   bool disable_remote() {
-    if (!check_ready("disable_remote")) return false;
+    if (!check_ready("disable_remote")) {
+      refuse_entity_write_(not_ready_refusal_(services::WriteCommand::SET_REMOTE_MODE));
+      return false;
+    }
     write_op_service_.submit_set_remote_mode(false, "", nullptr, services::WriteOrigin::ENTITY);
     return true;
   }
@@ -1259,35 +1336,65 @@ public:
   // accepted/clamped), no longer with the send/ACK of the first wire step.
   void set_constant_pressure(float value_m,
                              std::function<void(bool)> callback) {
-    if (!check_ready("set_constant_pressure")) { if (callback) callback(false); return; }
+    if (!check_ready("set_constant_pressure")) {
+      refuse_entity_setpoint_(services::ControlMode::CONSTANT_PRESSURE, value_m);
+      if (callback) callback(false);
+      return;
+    }
     write_op_service_.submit_set_setpoint(services::ControlMode::CONSTANT_PRESSURE, value_m, "",
                                           callback, services::WriteOrigin::ENTITY);
   }
   void set_constant_speed(float value_rpm, std::function<void(bool)> callback) {
-    if (!check_ready("set_constant_speed")) { if (callback) callback(false); return; }
+    if (!check_ready("set_constant_speed")) {
+      refuse_entity_setpoint_(services::ControlMode::CONSTANT_SPEED, value_rpm);
+      if (callback) callback(false);
+      return;
+    }
     write_op_service_.submit_set_setpoint(services::ControlMode::CONSTANT_SPEED, value_rpm, "",
                                           callback, services::WriteOrigin::ENTITY);
   }
   void set_constant_flow(float value_m3h, std::function<void(bool)> callback) {
-    if (!check_ready("set_constant_flow")) { if (callback) callback(false); return; }
+    if (!check_ready("set_constant_flow")) {
+      refuse_entity_setpoint_(services::ControlMode::CONSTANT_FLOW, value_m3h);
+      if (callback) callback(false);
+      return;
+    }
     write_op_service_.submit_set_setpoint(services::ControlMode::CONSTANT_FLOW, value_m3h, "",
                                           callback, services::WriteOrigin::ENTITY);
   }
   void set_temperature_range(float min_temp, float max_temp, bool autoadapt,
                              std::function<void(bool)> callback) {
-    if (!check_ready("set_temperature_range")) { if (callback) callback(false); return; }
+    if (!check_ready("set_temperature_range")) {
+      services::WriteResult r = not_ready_refusal_(services::WriteCommand::SET_TEMPERATURE_RANGE);
+      r.requested_temp_min = min_temp;
+      r.requested_temp_max = max_temp;
+      refuse_entity_write_(r);
+      if (callback) callback(false);
+      return;
+    }
     write_op_service_.submit_set_temperature_range(min_temp, max_temp, autoadapt, "", callback,
                                                    services::WriteOrigin::ENTITY);
   }
   void set_proportional_pressure(float value_m,
                                  std::function<void(bool)> callback) {
-    if (!check_ready("set_proportional_pressure")) { if (callback) callback(false); return; }
+    if (!check_ready("set_proportional_pressure")) {
+      refuse_entity_setpoint_(services::ControlMode::PROPORTIONAL_PRESSURE, value_m);
+      if (callback) callback(false);
+      return;
+    }
     write_op_service_.submit_set_setpoint(services::ControlMode::PROPORTIONAL_PRESSURE, value_m,
                                           "", callback, services::WriteOrigin::ENTITY);
   }
   void set_cycle_time_control(uint8_t on_minutes, uint8_t off_minutes,
                               std::function<void(bool)> callback) {
-    if (!check_ready("set_cycle_time_control")) { if (callback) callback(false); return; }
+    if (!check_ready("set_cycle_time_control")) {
+      services::WriteResult r = not_ready_refusal_(services::WriteCommand::SET_CYCLE_TIMES);
+      r.requested_on_minutes = on_minutes;
+      r.requested_off_minutes = off_minutes;
+      refuse_entity_write_(r);
+      if (callback) callback(false);
+      return;
+    }
     write_op_service_.submit_set_cycle_times(on_minutes, off_minutes, NAN, "", callback,
                                              services::WriteOrigin::ENTITY);
   }
@@ -1312,7 +1419,13 @@ public:
   // works. Recorded here so the next person to notice the discrepancy finds the
   // answer rather than repeating the investigation.
   void set_cycle_flow(float value_m3h, std::function<void(bool)> callback) {
-    if (!check_ready("set_cycle_flow")) { if (callback) callback(false); return; }
+    if (!check_ready("set_cycle_flow")) {
+      services::WriteResult r = not_ready_refusal_(services::WriteCommand::SET_CYCLE_TIMES);
+      r.requested_flow = value_m3h;
+      refuse_entity_write_(r);
+      if (callback) callback(false);
+      return;
+    }
     write_op_service_.submit_set_cycle_times(0, 0, value_m3h, "", callback,
                                              services::WriteOrigin::ENTITY);
   }
@@ -1466,11 +1579,26 @@ public:
   }
   void clear_schedule_entry(const std::string &day, uint8_t layer = 0,
                             std::function<void(bool)> on_complete = nullptr) {
-    if (!check_ready("clear_schedule_entry")) { if (on_complete) on_complete(false); return; }
+    if (!check_ready("clear_schedule_entry")) {
+      services::WriteResult r = not_ready_refusal_(services::WriteCommand::CLEAR_SCHEDULE_ENTRY);
+      r.layer = layer;
+      refuse_entity_write_(r);
+      if (on_complete) on_complete(false);
+      return;
+    }
     ScheduleEntry probe;
     probe.set_day(day.c_str());
     int day_index = probe.get_day_index();
     if (day_index < 0) {
+      // INVALID, not REJECTED: an unrecognised day name is deterministic and
+      // never worth a retry, which is exactly the rule the api bridge applies
+      // to a malformed argument.
+      services::WriteResult r;
+      r.command = services::WriteCommand::CLEAR_SCHEDULE_ENTRY;
+      r.status = services::WriteStatus::INVALID;
+      r.detail = "unknown day name";
+      r.layer = layer;
+      refuse_entity_write_(r);
       if (on_complete) on_complete(false);
       return;
     }
@@ -1490,7 +1618,14 @@ public:
   void set_schedule_entry(uint8_t layer, uint8_t day_index,
                           const ScheduleEntry &entry,
                           std::function<void(bool)> on_complete) {
-    if (!check_ready("set_schedule_entry")) { if (on_complete) on_complete(false); return; }
+    if (!check_ready("set_schedule_entry")) {
+      services::WriteResult r = not_ready_refusal_(services::WriteCommand::SET_SCHEDULE_ENTRY);
+      r.layer = layer;
+      r.day = day_index;
+      refuse_entity_write_(r);
+      if (on_complete) on_complete(false);
+      return;
+    }
     write_op_service_.submit_set_schedule_entry(
         layer, day_index, entry.get_begin_hour(), entry.get_begin_minute(),
         entry.get_end_hour(), entry.get_end_minute(), "", on_complete,
@@ -1498,7 +1633,14 @@ public:
   }
   void clear_schedule_entry_async(uint8_t layer, uint8_t day_index,
                                   std::function<void(bool)> on_complete) {
-    if (!check_ready("clear_schedule_entry_async")) { if (on_complete) on_complete(false); return; }
+    if (!check_ready("clear_schedule_entry_async")) {
+      services::WriteResult r = not_ready_refusal_(services::WriteCommand::CLEAR_SCHEDULE_ENTRY);
+      r.layer = layer;
+      r.day = day_index;
+      refuse_entity_write_(r);
+      if (on_complete) on_complete(false);
+      return;
+    }
     write_op_service_.submit_clear_schedule_entry(layer, day_index, "", on_complete,
                                                   services::WriteOrigin::ENTITY);
   }

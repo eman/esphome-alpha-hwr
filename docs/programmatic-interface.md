@@ -23,22 +23,25 @@ write path (serialized and verified identically; their events carry
 
 ### Watching an entity write settle
 
-An entity write that reaches the operation layer settles like a service call,
-so `switch.turn_on` and friends can be waited on. Two limits are worth knowing
-before you build on that.
+An entity write settles like a service call — exactly one terminal event,
+whatever happens, including a refusal that never reaches the pump — so
+`switch.turn_on`, `number.set_value` and `select.select_option` can all be
+waited on.
 
-**There is no `op_id`.** Entity events carry `op_id: ""`, so match on `command`
-(and `origin: "entity"`) instead, and expect no way to tell two simultaneous
-writes apart. That is the reason to prefer the services for anything
-programmatic.
+**The one thing they cannot give you is an `op_id`.** Entity events carry
+`op_id: ""`, so match on `command` (and `origin: "entity"`) instead, and expect
+no way to tell two simultaneous writes apart. That is the reason to prefer the
+services for anything programmatic.
 
-**One case still settles nothing.** A *single-value* entity write — the setpoint
-numbers, the mode select, the Remote Mode switch — made while the pump is not
-yet synchronized is refused before the operation layer sees it, and that
-refusal is logged rather than settled: no event arrives. The same write through
-a service settles `rejected`. The two coupled switches below no longer behave
-that way, but the rest of the entity surface still does, so a client that must
-not hang should either call the services or arm a timeout.
+A write refused before the operation layer sees it — the pump is still
+synchronizing, which is the state of every node for the first seconds after
+boot and after each reconnect — settles `rejected` with
+`detail: "pump not connected/synchronized"`, the same terminal a service call
+gets. A refusal that no reconnect could fix settles `invalid` instead: an
+unrecognised day name on a schedule clear, or a limiter write made before the
+limiter record has ever been read (where the enable flag would be a guess).
+Neither names a pump state — nothing was written and nothing was read back — so
+the settled value fields are absent and only the `requested_*` echo is present.
 
 The two coupled switches — **Engage Pump** and **Schedule Enabled** — write the
 same three-state machine `set_pump_state` does, so they settle the same way:

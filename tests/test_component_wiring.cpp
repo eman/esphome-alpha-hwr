@@ -1541,6 +1541,53 @@ void test_a_toggle_that_writes_settles_once_after_its_sub_writes() {
               "...and so do the legs: a switch has no op_id to hand any of them");
 }
 
+// ── A deterministic entity refusal settles INVALID, not REJECTED ────────────
+//
+// The distinction a client retries on, and it needs a READY pump to observe:
+// on an unconnected node the readiness check fires first and everything is
+// rejected, so test_api_bridge.cpp cannot reach these two arms at all. Neither
+// of them becomes possible by waiting for the link.
+void test_a_deterministic_entity_refusal_settles_invalid() {
+  std::cout << "\n=== A deterministic entity refusal settles invalid ===" << std::endl;
+
+  {
+    Rig r;
+    ready_rig_with_events_cleared(r);
+    // An unknown day name is not a link problem.
+    r.component.clear_schedule_entry("Blursday", 0, nullptr);
+
+    const auto rows = SettleLog::rows();
+    TEST_ASSERT(rows.size() == 1, "An unknown day name settles, rather than returning in silence");
+    if (rows.size() == 1) {
+      TEST_ASSERT(rows[0].command == "clear_schedule_entry", "...as clear_schedule_entry");
+      TEST_ASSERT(rows[0].status == "invalid",
+                  "...invalid, not rejected: reconnecting will not make the day exist");
+      TEST_ASSERT(rows[0].origin == "entity", "...and as an entity write");
+    }
+  }
+
+  {
+    Rig r;
+    // No limiter entities are attached, so the component never reads the
+    // limiter family and the record stays unread -- the state the enable flag
+    // would be a guess in (issue #299).
+    ready_rig_with_events_cleared(r);
+    r.component.set_flow_limiter_from_entity(
+        esphome::alpha_hwr::services::SUB_LIMITER_CONFIG_MAX_FLOW, true, 1.6f);
+
+    const auto rows = SettleLog::rows();
+    TEST_ASSERT(rows.size() == 1,
+                "A limiter write against an unread record settles, rather than only logging");
+    if (rows.size() == 1) {
+      TEST_ASSERT(rows[0].command == "set_flow_limiter", "...as set_flow_limiter");
+      TEST_ASSERT(rows[0].status == "invalid",
+                  "...invalid: the enable flag cannot be honoured as asked, link or no link");
+      TEST_ASSERT(rows[0].detail.find("not read") != std::string::npos,
+                  "...saying why, so the log line is not the only place it exists");
+    }
+  }
+}
+
 void test_the_default_names_the_fault_without_touching_the_link() {
   std::cout << "\n=== The default names it and does not recycle ===" << std::endl;
 
@@ -2801,6 +2848,7 @@ int main() {
 
   test_a_no_op_toggle_still_settles();
   test_a_toggle_that_writes_settles_once_after_its_sub_writes();
+  test_a_deterministic_entity_refusal_settles_invalid();
 
   test_the_drift_leg_publishes_the_drift_it_measured();
   test_the_drift_leg_leaves_a_good_reading_alone();
