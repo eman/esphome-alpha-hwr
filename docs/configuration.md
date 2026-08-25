@@ -33,6 +33,7 @@ events fire.
 | `ready_timeout` | time | `300s` | Report a fault if the pump has not become usable this long after connecting. Naming only; see `ready_recycle`. `0s` disables. |
 | `ready_recycle` | boolean | `false` | Also tear the link down when `ready_timeout` expires, so the normal reconnect runs. **Opt-in** — see below. |
 | `frame_logging` | boolean | `false` | Log every GENI frame sent and received, whole, at INFO. Diagnostic capture only, and it reaches every API subscriber — see below before turning it on. |
+| `connect_after_boot_delay` | time | `0s` | Hold the **first** BLE connection this long after boot, so a log client is attached before the link opens. Troubleshooting only — see below. |
 
 ### `time_id`
 
@@ -936,6 +937,64 @@ printed. Raise the buffer if you expect long frames:
 logger:
   tx_buffer_size: 1024
 ```
+
+### `connect_after_boot_delay`
+
+On a normal boot the entire BLE phase — connect, bond, encryption request,
+service discovery, notification enable — is over before an `esphome logs`
+stream carries its first line. `setup()` runs at `setup_priority::DATA`, well
+before the API server is up, so even `esphome run`, which attaches the moment
+the upload finishes, arrives too late: a capture from a stock node can open on
+the banner and find the session already `STABILIZING -> READY` half a second
+later, with none of the sequence in it.
+
+That is the phase where connection problems live, so it is the one worth
+capturing.
+
+```yaml
+alpha_hwr:
+  connect_after_boot_delay: 10s
+```
+
+The node holds its first connection for that long, which is enough for a log
+client to attach and see the whole thing:
+
+```
+16:12:12.330  Boot connect delay elapsed; allowing connection
+16:12:12.369  [0C:4B:EE:11:B6:C9] 0x00 Connecting
+16:12:12.566  Connection open
+16:12:12.575  Session: IDLE -> SERVICE_DISCOVERY
+16:12:12.583  Device is bonded - requesting encryption to resume secure session
+16:12:12.767  auth complete addr: 0C:4B:EE:11:B6:C9
+16:12:13.087  Starting service discovery...
+16:12:14.215  Service discovery complete
+16:12:14.227  Service found, enabling notifications...
+16:12:16.247  Session: STABILIZING -> READY
+```
+
+Pair it with `frame_logging: true` and one capture covers the BLE phase and
+every GENI frame after it.
+
+**`0s` by default, and that is what a deployed node should keep.** This delays
+the pump becoming controllable by exactly the interval you set, on every boot,
+to buy a window nobody is watching unless they are troubleshooting.
+
+**Pump Link Status reads `Boot delay` while the hold is in force**, rather than
+`Initializing` — the option is used precisely when somebody is watching that
+sensor, and `Initializing` is indistinguishable from a pump that cannot
+connect. The value appears only when the option is set.
+
+The hold is not `reconnect_settle_time` in another hat. That one is entered
+from the disconnect handler, timed from when the pump reappears, and exists to
+keep an encryption request out of a window that can erase the pump's bond; it
+protects the pump and is on by default. This one is entered at boot, protects
+the observer, and is off. They can never be live at once — no disconnect can
+occur while there has never been a connection.
+
+A suspend that arrives inside the hold survives it, and releasing that suspend
+inside the hold does not connect early — the window is preserved either way,
+since the person who released it is the one waiting to watch the connection
+happen.
 
 ## Flow limiters
 

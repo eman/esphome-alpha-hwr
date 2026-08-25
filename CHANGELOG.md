@@ -38,6 +38,36 @@
 
 ### Added
 
+- **`connect_after_boot_delay`**, which holds the first BLE connection so a log
+  client can attach before the link opens (issue #310, reported by
+  @jfriend00). On a stock node the whole BLE phase — connect, bond, encryption
+  request, service discovery, notification enable — is over before an
+  `esphome logs` stream carries a line: `setup()` runs at
+  `setup_priority::DATA`, long before the API server is up. The reporter's
+  capture opens on the banner and finds the session `STABILIZING -> READY`
+  0.59 s later, with none of the sequence in it. That phase is where connection
+  problems live, so it is the one worth capturing; pair it with
+  `frame_logging: true` and one capture covers the BLE phase and every GENI
+  frame after it.
+
+  `0s` by default, and that is what a deployed node should keep — it delays the
+  pump becoming controllable by exactly the interval set, on every boot.
+
+  **Pump Link Status gains `Boot delay`** for the duration, rather than showing
+  `Initializing`. The option is used precisely when somebody is watching that
+  sensor, and `Initializing` is indistinguishable from a pump that cannot
+  connect — the confusion the status ladder exists to remove. The value is
+  unreachable unless the option is set.
+
+  Three places treat a deliberately absent link as a broken one, and all three
+  are handled: the boot grace now covers the hold (without it a hold near 15 s
+  publishes `Unreachable` for a link held down on purpose); a suspend arriving
+  inside the hold is not undone when it elapses; and releasing that suspend
+  inside the hold does not connect early. The other three mechanisms that watch
+  the link — the inbound-data watchdog, the readiness watchdog and the gap
+  histogram — are all armed from the first connection *open*, so a hold that
+  ends before any open cannot reach them.
+
 - **`frame_logging`**, a component option that logs every GENI frame, sent and
   received, whole, at INFO. Previously the receive path logged only the first 12
   bytes and only at VERBOSE, and the send path logged nothing.

@@ -353,6 +353,11 @@ public:
   // Diagnostic frame logging: log every GENI frame sent and received, whole, at
   // INFO. Off by default. See core::Transport::set_frame_logging().
   void set_frame_logging(bool enabled) { transport_.set_frame_logging(enabled); }
+  // Hold the first BLE connection this long after boot (issue #310), so a log
+  // client is attached before the link opens. 0 disables, which is the default
+  // and the only value a deployed node should use -- the hold is for capturing
+  // a connect sequence, not for running one.
+  void set_connect_after_boot_delay(uint32_t ms) { this->connect_after_boot_ms_ = ms; }
   void set_ready_timeout(uint32_t ms) {
     this->link_ready_timeout_ms_ = ms;
     this->link_ready_timeout_current_ms_ = ms;
@@ -980,6 +985,13 @@ private:
   LinkGapSampler link_gap_;
 
   uint32_t link_boot_ms_{0};
+  // Boot connect hold (issue #310). The budget, and whether the hold is in
+  // force right now. `connect_after_boot_holding_` is what separates a link
+  // that is down because we are holding it from one that is down because it
+  // cannot connect -- the status ladder, the boot grace and the suspend release
+  // all have to tell those apart.
+  uint32_t connect_after_boot_ms_{0};
+  bool connect_after_boot_holding_{false};
   uint32_t link_last_open_ms_{0};
   uint32_t link_last_eval_ms_{0};
   uint16_t link_consecutive_failures_{0};

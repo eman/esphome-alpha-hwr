@@ -23,6 +23,45 @@ void AlphaHwrComponent::setup() {
 
   this->link_boot_ms_ = millis();  // Pump Link Status: mark the startup window
 
+  // Hold the first BLE connection so a log client can attach before the link
+  // opens (issue #310). Without it the whole BLE phase -- connect, bond,
+  // encryption request, service discovery, notification enable -- is over
+  // before an `esphome logs` stream carries its first line, and that phase is
+  // where connection problems live. Reported with a capture showing
+  // `STABILIZING -> READY` 0.59 s after the log opened, with none of the
+  // sequence in it.
+  //
+  // Note what this cannot do: announce itself usefully. setup() runs at
+  // setup_priority::DATA, which is the very fact that makes the option
+  // necessary, so this line reaches the serial console and nothing else. The
+  // line worth watching for is the one the timer logs when the hold ELAPSES,
+  // by which point a client is attached -- which is the whole point.
+  if (this->connect_after_boot_ms_ > 0 && this->parent_ != nullptr) {
+    this->connect_after_boot_holding_ = true;
+    this->parent_->set_auto_connect(false);
+    ESP_LOGI(TAG, "Holding the first connection for %" PRIu32 " ms so a log client can attach",
+             this->connect_after_boot_ms_);
+    this->set_timeout(this->connect_after_boot_ms_, [this]() {
+      this->connect_after_boot_holding_ = false;
+      // A suspend arriving inside the hold must survive it. Without this the
+      // timer hands auto-connect back and the link reconnects behind the
+      // switch -- the same class of bug as the settle timer undoing a suspend,
+      // and the reason set_suspended()'s release path checks for this hold in
+      // turn. Leaving auto-connect off is correct here: release is what turns
+      // it back on.
+      if (this->suspended_) {
+        ESP_LOGI(TAG, "Boot connect delay elapsed, but the link is suspended; leaving it down");
+        this->evaluate_link_status();
+        return;
+      }
+      ESP_LOGI(TAG, "Boot connect delay elapsed; allowing connection");
+      if (this->parent_ != nullptr) {
+        this->parent_->set_auto_connect(true);
+      }
+      this->evaluate_link_status();
+    });
+  }
+
   // `time_id` is optional in the schema and load-bearing in practice, and its
   // absence used to be reported only at DEBUG -- invisible at the INFO level
   // this component ships. What the user sees instead is a pump whose schedule
@@ -907,6 +946,11 @@ void AlphaHwrComponent::publish_link_diagnostics_(uint32_t now_ms) {
 //                 from the last open / last Connected; or never opened since boot
 //                 and past the 15s grace. Covers both an absent pump and a present
 //                 pump we cannot connect to (the two are not distinguished).
+//   Boot delay    the first connection is being held on purpose
+//                 (connect_after_boot_delay, issue #310) so a log client can
+//                 attach before the link opens. A deliberate absence, like
+//                 Suspended -- never a fault, and never reached unless the
+//                 option is set.
 //   Reconnecting  not ready, opened within 20s, but >= 3 consecutive failed
 //                 attempts (LINK_FAIL_K): links keep opening yet the session keeps
 //                 failing before READY.
@@ -973,6 +1017,13 @@ void AlphaHwrComponent::set_suspended(bool suspended) {
       // advertisement plus the settle window.
       ESP_LOGI(TAG, "...but a reconnect-settle hold is in force; waiting for it "
                     "rather than reconnecting now");
+    } else if (this->connect_after_boot_holding_) {
+      // The boot hold outlives a suspend/release cycle inside it (issue #310).
+      // Releasing here would connect immediately and spend exactly the window
+      // the option exists to preserve -- and the operator who released is the
+      // one waiting to watch that connection happen.
+      ESP_LOGI(TAG, "...but the boot connect delay is still in force; waiting for it "
+                    "rather than connecting now");
     } else if (this->parent_ != nullptr) {
       ESP_LOGI(TAG, "...reconnecting to the pump");
       this->parent_->set_auto_connect(true);
@@ -1036,12 +1087,26 @@ void AlphaHwrComponent::evaluate_link_status() {
     // on purpose is not Unreachable, not Reconnecting, and not a fault. The
     // operator glancing at Home Assistant should see the state they asked for.
     state = "Suspended";
+  } else if (this->connect_after_boot_holding_) {
+    // Directly under Suspended, and for the same reason: a link that is down
+    // because we are holding it down is not a link that is failing. Given its
+    // own value rather than folded into "Initializing" (issue #310) because
+    // "Initializing" is indistinguishable from a pump that cannot connect --
+    // which is the confusion this ladder exists to remove, and this option is
+    // used precisely when somebody is watching the status.
+    state = "Boot delay";
   } else if (this->session_.is_ready()) {
     state = "Connected";
     this->link_last_open_ms_ = now;  // measure "unreachable" from the drop, not the first open
   } else if (!this->link_ever_opened_) {
-    state = (now - this->link_boot_ms_ < LINK_INIT_GRACE_MS) ? "Initializing"
-                                                             : "Unreachable";
+    // The grace has to cover the hold as well as the connect. Both stamps start
+    // in setup() within a few instructions of each other, so adding them is the
+    // whole correction -- without it a hold approaching LINK_INIT_GRACE_MS
+    // publishes "Unreachable" for a link we are deliberately holding down, and
+    // a hold past it does so every time.
+    const uint32_t init_grace_ms = LINK_INIT_GRACE_MS + this->connect_after_boot_ms_;
+    state = (now - this->link_boot_ms_ < init_grace_ms) ? "Initializing"
+                                                        : "Unreachable";
   } else if (this->pairing_enabled_ && !this->ble_manager_.was_bonded_at_open()) {
     state = "Unpaired";
   } else if (now - this->link_last_open_ms_ > LINK_UNREACHABLE_MS) {

@@ -100,6 +100,7 @@ CONF_RECONNECT_SETTLE_TIME = "reconnect_settle_time"
 CONF_CONTROL_STATE_POLL_INTERVAL = "control_state_poll_interval"
 CONF_DATA_TIMEOUT = "data_timeout"
 CONF_READY_TIMEOUT = "ready_timeout"
+CONF_CONNECT_AFTER_BOOT_DELAY = "connect_after_boot_delay"
 CONF_READY_RECYCLE = "ready_recycle"
 CONF_FRAME_LOGGING = "frame_logging"
 
@@ -246,6 +247,20 @@ CONFIG_SCHEMA = (
             # not). A first pairing is still untimed, so err high rather than
             # low. 0 disables it.
             cv.Optional(CONF_READY_TIMEOUT, default="300s"): cv.positive_time_period_milliseconds,
+            # Hold the FIRST BLE connection this long after boot, so a log client
+            # can attach before the link opens (issue #310). setup() runs at
+            # setup_priority::DATA, well before the API server is up, so on a
+            # normal boot the whole connect/bond/discovery/subscribe sequence is
+            # over before an `esphome logs` stream carries a line -- the phase
+            # where connection problems actually live is the one a capture never
+            # contains.
+            #
+            # Zero by default: this is a troubleshooting and development option,
+            # not something a deployed node wants. It is NOT reconnect_settle_time
+            # in another hat -- that one is entered from the disconnect handler,
+            # protects the pump's bond, and is on by default; this one is entered
+            # at boot, protects the observer, and is off.
+            cv.Optional(CONF_CONNECT_AFTER_BOOT_DELAY, default="0s"): cv.positive_time_period_milliseconds,
             # ...and whether reaching that bound also tears the link down so the
             # normal reconnect runs. Defaults OFF, and the asymmetry between
             # these two options is the point.
@@ -636,6 +651,7 @@ async def to_code(config):
     cg.add(var.set_reconnect_settle_time(config[CONF_RECONNECT_SETTLE_TIME]))
     cg.add(var.set_data_timeout(config[CONF_DATA_TIMEOUT]))
     cg.add(var.set_ready_timeout(config[CONF_READY_TIMEOUT]))
+    cg.add(var.set_connect_after_boot_delay(config[CONF_CONNECT_AFTER_BOOT_DELAY]))
     cg.add(var.set_ready_recycle_limit(config[CONF_READY_RECYCLE]))
     cg.add(var.set_frame_logging(config[CONF_FRAME_LOGGING]))
     if config[CONF_RECONNECT_SETTLE_TIME].total_milliseconds > 0:
