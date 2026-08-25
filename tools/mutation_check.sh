@@ -1633,6 +1633,20 @@ MUTATIONS=(
 # The five setpoint entities share one command, so without the echo a client
 # cannot tell which control was refused.
 "entity-setpoint-refusal-drops-the-mode|components/alpha_hwr/alpha_hwr.h|    result.requested_mode = mode;|    result.requested_mode = services::ControlMode::NONE;"
+# Issue #310: the boot connect hold. Three separate ways a deliberately absent
+# link gets mistaken for a broken one, each with its own entry, because they
+# fail in different places and a client reads them differently.
+#
+# The boot grace has to cover the hold, or a hold near LINK_INIT_GRACE_MS
+# publishes "Unreachable" -- the status that means the pump cannot be reached --
+# for a link the component is holding down on purpose.
+"boot-hold-not-added-to-the-grace|components/alpha_hwr/alpha_hwr.cpp|    const uint32_t init_grace_ms = LINK_INIT_GRACE_MS + this->connect_after_boot_ms_;|    const uint32_t init_grace_ms = LINK_INIT_GRACE_MS;"
+# A suspend inside the hold must survive it. Without the check the timer hands
+# auto-connect back and the link reconnects behind the operator's switch.
+"boot-hold-timer-overrides-a-suspend|components/alpha_hwr/alpha_hwr.cpp|      if (this->suspended_) {\n        ESP_LOGI(TAG, \"Boot connect delay elapsed, but the link is suspended; leaving it down\");|      if (false) {\n        ESP_LOGI(TAG, \"Boot connect delay elapsed, but the link is suspended; leaving it down\");"
+# Releasing a suspend inside the hold must not spend the window the option
+# exists to preserve.
+"boot-hold-release-connects-early|components/alpha_hwr/alpha_hwr.cpp|    } else if (this->connect_after_boot_holding_) {|    } else if (false) {"
 # Issue #302: the entity path's terminal event. Toggling a coupled switch has
 # to end in exactly one set_pump_state result, or a client waiting on the
 # dashboard write waits forever -- which is what it did before, in the corner

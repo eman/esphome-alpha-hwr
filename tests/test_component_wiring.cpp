@@ -1588,6 +1588,135 @@ void test_a_deterministic_entity_refusal_settles_invalid() {
   }
 }
 
+// ---------------------------------------------------------------------------
+// The boot connect hold (issue #310)
+// ---------------------------------------------------------------------------
+//
+// Holds the FIRST connection so a log client is attached before the link opens.
+// Without it the whole BLE phase is over before an `esphome logs` stream carries
+// a line, and that phase is where connection problems live.
+//
+// The interesting cases are not "does it wait" -- they are the three places a
+// deliberately absent link is mistaken for a broken one: the status ladder, the
+// boot grace underneath it, and a suspend arriving inside the hold.
+
+void test_the_boot_hold_keeps_the_link_down_until_it_elapses() {
+  std::cout << "\n=== The boot connect delay holds the first connection ===" << std::endl;
+
+  Rig r;
+  r.component.set_connect_after_boot_delay(10000);
+  // Deliberately ON before setup(). The mock defaults auto_connect to false, so
+  // asserting "it is off" against that default proves nothing -- it would pass
+  // against a component that does not implement the hold at all. Starting from
+  // true makes the assertion say what it means: the component turned it off.
+  r.client.set_auto_connect(true);
+  r.setup();
+
+  TEST_ASSERT(!r.client.mock_auto_connect(),
+              "Auto-connect is turned off by setup(), before anything can connect");
+  r.advance(9000, 90);
+  TEST_ASSERT(!r.client.mock_auto_connect(), "...still off nine seconds in");
+  TEST_ASSERT(r.link_status.state == "Boot delay",
+              "...and the status says so, rather than 'Initializing'");
+
+  r.advance(2000, 20);
+  TEST_ASSERT(r.client.mock_auto_connect(),
+              "Auto-connect is handed back once the hold elapses");
+  TEST_ASSERT(r.link_status.state != "Boot delay",
+              "...and the status leaves the hold rung");
+}
+
+void test_a_zero_delay_changes_nothing() {
+  std::cout << "\n=== Zero, the default, holds nothing ===" << std::endl;
+
+  Rig r;  // connect_after_boot_delay defaults to 0
+  r.setup();
+  TEST_ASSERT(r.link_status.state != "Boot delay",
+              "The hold rung is unreachable without the option");
+  r.connect_and_subscribe();
+  TEST_ASSERT(r.run_until_ready(), "...and the link comes up exactly as before");
+}
+
+// Edge 1 from the issue. The grace is measured from boot, so a hold eats into
+// it: without adding the hold to the grace, a link held down on purpose reports
+// Unreachable -- the status that means the pump cannot be reached.
+void test_a_long_hold_is_not_reported_as_unreachable() {
+  std::cout << "\n=== A hold longer than the boot grace is not 'Unreachable' ===" << std::endl;
+
+  Rig r;
+  r.component.set_connect_after_boot_delay(30000);  // twice LINK_INIT_GRACE_MS
+  r.client.set_auto_connect(true);                  // see the note above
+  r.setup();
+  TEST_ASSERT(!r.client.mock_auto_connect(), "The hold is in force");
+
+  bool ever_unreachable = false;
+  for (int i = 0; i < 30; i++) {
+    r.advance(1000, 10);
+    if (r.link_status.state == "Unreachable") ever_unreachable = true;
+  }
+  TEST_ASSERT(!ever_unreachable,
+              "Thirty seconds of deliberate hold never reports Unreachable");
+
+  // ...and the grace still covers the connect that follows the hold, rather
+  // than having been spent by it.
+  r.advance(1000, 10);
+  r.connect_and_subscribe();
+  TEST_ASSERT(r.run_until_ready(), "The link comes up after the hold");
+}
+
+// Edge 2, first half. The timer must not hand auto-connect back to a link
+// somebody suspended while it was held -- the same shape as the settle timer
+// undoing a suspend.
+void test_a_suspend_inside_the_hold_survives_it() {
+  std::cout << "\n=== A suspend inside the hold is not undone when it elapses ===" << std::endl;
+
+  Rig r;
+  r.component.set_connect_after_boot_delay(10000);
+  r.client.set_auto_connect(true);  // see the note above
+  r.setup();
+  r.advance(2000, 20);
+  TEST_ASSERT(!r.client.mock_auto_connect(), "Held, before the suspend");
+
+  r.component.set_suspended(true);
+  TEST_ASSERT(!r.client.mock_auto_connect(), "Suspended during the hold");
+
+  r.advance(12000, 120);  // let the hold elapse underneath the suspension
+  TEST_ASSERT(!r.client.mock_auto_connect(),
+              "The hold elapsing does NOT reconnect behind the switch");
+  TEST_ASSERT(r.link_status.state == "Suspended",
+              "...and the status still reads Suspended, which outranks the hold");
+
+  r.component.set_suspended(false);
+  TEST_ASSERT(r.client.mock_auto_connect(),
+              "Releasing after the hold has elapsed reconnects normally");
+}
+
+// Edge 2, second half. Releasing INSIDE the hold must not spend the window the
+// option exists to preserve -- the operator who released is the one waiting to
+// watch that connection happen.
+void test_releasing_inside_the_hold_does_not_connect_early() {
+  std::cout << "\n=== Releasing a suspend inside the hold waits for the hold ===" << std::endl;
+
+  Rig r;
+  r.component.set_connect_after_boot_delay(10000);
+  r.client.set_auto_connect(true);  // see the note above
+  r.setup();
+  r.advance(1000, 10);
+
+  r.component.set_suspended(true);
+  r.advance(1000, 10);
+  r.component.set_suspended(false);
+
+  TEST_ASSERT(!r.client.mock_auto_connect(),
+              "Release inside the hold does not hand auto-connect back early");
+  TEST_ASSERT(r.link_status.state == "Boot delay",
+              "...and the status returns to the hold, not to Initializing");
+
+  r.advance(10000, 100);
+  TEST_ASSERT(r.client.mock_auto_connect(),
+              "...the hold still ends on its own schedule");
+}
+
 void test_the_default_names_the_fault_without_touching_the_link() {
   std::cout << "\n=== The default names it and does not recycle ===" << std::endl;
 
@@ -2845,6 +2974,12 @@ int main() {
   test_readiness_recycles_reach_the_counter_an_automation_watches();
   test_the_fault_is_visible_across_the_reconnect_it_describes();
   test_the_default_names_the_fault_without_touching_the_link();
+
+  test_the_boot_hold_keeps_the_link_down_until_it_elapses();
+  test_a_zero_delay_changes_nothing();
+  test_a_long_hold_is_not_reported_as_unreachable();
+  test_a_suspend_inside_the_hold_survives_it();
+  test_releasing_inside_the_hold_does_not_connect_early();
 
   test_a_no_op_toggle_still_settles();
   test_a_toggle_that_writes_settles_once_after_its_sub_writes();
