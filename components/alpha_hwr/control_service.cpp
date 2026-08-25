@@ -1256,8 +1256,20 @@ void ControlService::write_temp_range_config(float min_temp, float max_temp, boo
   // #106); before the first read this falls back to the historical constants.
   memcpy(&apdu[20], cached_temp_limits_tail_, 5);
 
-  // Log the full APDU for debugging
-  ESP_LOGI(TAG, "write_temp_range APDU: %s", format_hex_pretty(apdu, 25).c_str());
+  // VERBOSE, which is where AGENTS.md §3 puts a packet dump, and where this
+  // should always have been (issue #307). At INFO it fired on every
+  // temperature-range write on a default build -- the packages ship
+  // `logger: level: INFO` -- so it cost an API frame per subscriber, plus the
+  // std::string the formatting allocates, for a line nobody had asked for. That
+  // is precisely the per-subscriber cost docs/configuration.md warns about
+  // under "Log level and API subscribers", and the load that has exhausted this
+  // node's heap in ESPHome's outgoing buffer (issue #127).
+  //
+  // Kept rather than deleted, but it is no longer the way to see this write:
+  // `frame_logging: true` (issue #303) dumps the whole telegram this APDU is
+  // carried in, in both directions, without turning the rest of the component
+  // up to VERBOSE.
+  ESP_LOGV(TAG, "write_temp_range APDU: %s", format_hex_pretty(apdu, 25).c_str());
 
   // Pass expect_type_low_ver=0, expect_type_high=0 for response matching because
   // the pump responds with a short ACK (OpSpec 0x01) without Obj/Sub fields

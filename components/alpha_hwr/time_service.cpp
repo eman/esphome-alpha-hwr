@@ -212,7 +212,12 @@ void TimeService::send_set_clock_command(const ESPTime &local_now) {
   apdu[20] = 0x00;
   apdu[21] = 0x00;
 
-  ESP_LOGD(TAG, "Clock SET APDU: %s", format_hex_pretty(apdu, sizeof(apdu)).c_str());
+  // VERBOSE for the same reason as write_temp_range's APDU dump (issue #307):
+  // a packet dump is what AGENTS.md §3 assigns to ESP_LOGV, and DEBUG is for
+  // single packet *summaries*. Cheaper than the control_service case -- a clock
+  // write happens twice a day, not per user action -- but there is no reason
+  // for the two identical lines to sit at two different levels.
+  ESP_LOGV(TAG, "Clock SET APDU: %s", format_hex_pretty(apdu, sizeof(apdu)).c_str());
 
   // Awaited, not fired and forgotten (issue #253).
   //
