@@ -22,7 +22,19 @@
   `frame_logging: true` dumps the whole telegram each APDU is carried in, in
   both directions, without turning the rest of the component up to VERBOSE.
 
-  A default build emits two fewer log lines than before; nothing else changes.
+  **What actually changes, per level**, since the two lines started at different
+  ones. The shipped packages set `logger: level: INFO`; ESPHome's own default,
+  which a config not using the packages gets, is `DEBUG`.
+
+  | Your `logger` level | Before | After |
+  | --- | --- | --- |
+  | `INFO` (the packages' setting) | temperature-range dump only | neither |
+  | `DEBUG` (ESPHome's default) | both | neither |
+  | `VERBOSE` | both | both |
+
+  So on a packaged node one line disappears, not two — the clock dump was
+  already below the shipped level and was never in that output. The clock change
+  bites at `DEBUG`, where the line was visible and now needs `VERBOSE`.
 
 ### Added
 
