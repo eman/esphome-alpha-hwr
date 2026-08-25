@@ -1616,6 +1616,40 @@ MUTATIONS=(
 # A write that never reached the pump must not report a concrete pump state.
 # Both caches can be invalid, and -1 is what the event encoding already had.
 "bridge-pump-state-invents-a-known-state|components/alpha_hwr/alpha_hwr.h|    auto tri = [](bool known, bool value) -> int8_t { return known ? (value ? 1 : 0) : -1; };|    auto tri = [](bool known, bool value) -> int8_t { (void) known; return value ? 1 : 0; };"
+# Review on #304: the guard ORDER in clear_schedule_entry. An unknown day name
+# is validated before the readiness check, because REJECTED means "retry once
+# the link is up" and INVALID means "never". Readiness first made a misspelled
+# day retryable on a disconnected pump -- an obedient client loops forever.
+"bad-day-name-loses-to-the-readiness-check|components/alpha_hwr/alpha_hwr.h|      r.status = services::WriteStatus::INVALID;\n      r.detail = \"unknown day name\";|      r.status = services::WriteStatus::REJECTED;\n      r.detail = \"unknown day name\";"
+# Issue #302 follow-up: the rest of the entity surface. Every entity setter
+# guards on check_ready() and used to return in silence, so a dashboard write
+# during the first seconds after boot produced a log line and no event. The
+# refusal has to be SAID, and said as the entity write it was.
+"entity-refusal-never-settles|components/alpha_hwr/alpha_hwr.h|    result.op_id = \"\";  // entity writes have none, by construction\n    write_op_service_.emit_result(result);|    result.op_id = \"\";\n    (void) result;"
+"entity-refusal-reported-as-a-service|components/alpha_hwr/alpha_hwr.h|    result.origin = services::WriteOrigin::ENTITY;\n    result.op_id = \"\";  // entity writes have none, by construction|    result.op_id = \"\";  // entity writes have none, by construction"
+# REJECTED is retryable once the link is up; INVALID never becomes possible.
+# Flattening the two takes away the only thing a client decides on.
+"entity-refusal-status-flattened|components/alpha_hwr/alpha_hwr.h|    result.status = services::WriteStatus::REJECTED;|    result.status = services::WriteStatus::INVALID;"
+# The five setpoint entities share one command, so without the echo a client
+# cannot tell which control was refused.
+"entity-setpoint-refusal-drops-the-mode|components/alpha_hwr/alpha_hwr.h|    result.requested_mode = mode;|    result.requested_mode = services::ControlMode::NONE;"
+# Issue #302: the entity path's terminal event. Toggling a coupled switch has
+# to end in exactly one set_pump_state result, or a client waiting on the
+# dashboard write waits forever -- which is what it did before, in the corner
+# where the pump already matched the target and nothing was submitted at all.
+"entity-toggle-never-settles|components/alpha_hwr/alpha_hwr.h|          write_op_service_.emit_result(result);|          (void) result;"
+# The same event reported as a service call. `origin` is the only thing telling
+# an automation that a person moved a switch rather than its own script writing.
+"entity-toggle-reports-itself-as-a-service|components/alpha_hwr/alpha_hwr.h|          result.origin = origin;|          result.origin = services::WriteOrigin::SERVICE;"
+# The no-op arm. Without it a toggle the pump already matches submits nothing
+# and aggregates nothing, so the fan-in never fires and the terminal event is
+# never built -- issue #302 exactly as filed.
+"pump-state-no-op-settles-nothing|components/alpha_hwr/alpha_hwr.h|    if (!need_engaged && !need_scheduled) {|    if (false) {"
+# The sub-writes take the caller's sub_op_id, which is empty for a switch and
+# the repair's tag for the repair -- never the terminal event's op_id. A leak
+# here would put three events under a service caller's op_id where the contract
+# promises one.
+"pump-state-sub-writes-leak-an-op-id|components/alpha_hwr/alpha_hwr.h|      write_op_service_.submit_set_enabled(target.pump_enabled, sub_op_id, nullptr, origin, step);|      write_op_service_.submit_set_enabled(target.pump_enabled, \"leaked\", nullptr, origin, step);"
 # state_name(pump_auto, schedule_on) is asymmetric, so its arguments can be
 # swapped without a compiler complaint: a running unscheduled pump would then
 # report "off". The test fixtures were symmetric (both flags 1) and could not

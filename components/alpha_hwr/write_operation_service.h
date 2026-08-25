@@ -256,6 +256,35 @@ class WriteOperationService {
     result_callback_ = std::move(callback);
   }
 
+  /**
+   * Deliver a terminal result for an operation this queue never held.
+   *
+   * There are exactly two such cases, and both are terminal results the queue
+   * cannot produce because the queue never held the operation:
+   *
+   *   1. The aggregate SET_PUMP_STATE verdict, composed a layer up out of the
+   *      two raw flag writes (see the `case SET_PUMP_STATE: break;` in
+   *      finish_(), and AlphaHwrComponent::submit_set_pump_state).
+   *   2. An entity write refused before submission -- the readiness check, an
+   *      unknown day name, a limiter record that has never been read (issue
+   *      #302 and its follow-up #305). These settle REJECTED or INVALID
+   *      without ever being enqueued.
+   *
+   * Both are still terminal results, and every terminal result has to reach the
+   * same sink, or the settle event it produces would skip the component's
+   * central write-result hook and arrive with different treatment from every
+   * other event. Keep this list current: it is the only thing describing what
+   * may legitimately bypass the queue.
+   *
+   * Deliberately narrow: this does NOT enqueue, retry, confirm or serialize
+   * anything. The caller has already decided the outcome. Nothing else should
+   * use it -- an operation that touches the wire belongs in the queue, where it
+   * gets the readback confirmation that makes a settle event worth trusting.
+   */
+  void emit_result(const WriteResult &result) {
+    if (result_callback_) result_callback_(result);
+  }
+
   // ---- Submission API. `done` is the legacy bool callback used by the
   // entity path; it fires with the terminal result (true for
   // accepted/clamped). Programmatic callers identify their result by op_id

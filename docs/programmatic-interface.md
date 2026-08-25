@@ -21,6 +21,89 @@ adjusting a value on a dashboard. Entity writes go through the same internal
 write path (serialized and verified identically; their events carry
 `op_id: ""`), but programmatic writes should use the services below.
 
+### Watching an entity write settle
+
+Every entity write gives you a terminal event to wait on — including a refusal
+that never reaches the pump — so `switch.turn_on`, `number.set_value` and
+`select.select_option` can all be waited on rather than timed out.
+
+"One event to wait for" is not the same as "one event in total": the two
+coupled switches below emit the raw flag writes they issue as their own settle
+events, and then the aggregate you are waiting for. Match on `command`, not on
+count.
+
+**The one thing they cannot give you is an `op_id`.** Entity events carry
+`op_id: ""`, so match on `command` (and `origin: "entity"`) instead, and expect
+no way to tell two simultaneous writes apart. That is the reason to prefer the
+services for anything programmatic.
+
+A write refused before the operation layer sees it — the pump is still
+synchronizing, which is the state of every node for the first seconds after
+boot and after each reconnect — settles `rejected` with
+`detail: "pump not connected/synchronized"`, the same terminal a service call
+gets. A refusal that no reconnect could fix settles `invalid` instead: an
+unrecognised day name on a schedule clear, or a limiter write made before the
+limiter record has ever been read (where the enable flag would be a guess).
+Neither names a pump state — nothing was written and nothing was read back — so
+the settled value fields are absent and only the `requested_*` echo is present.
+
+The two coupled switches — **Engage Pump** and **Schedule Enabled** — write the
+same three-state machine `set_pump_state` does, so they settle the same way:
+each toggle produces **exactly one** terminal `set_pump_state` event, with the
+raw flag writes it issued surfacing underneath it as their own events, in the
+same shape a `set_pump_state` service call produces (issue #302).
+
+| Toggle | Events, in order |
+| --- | --- |
+| Engage Pump on, from Off | `set_pump_enabled`, then `set_pump_state` |
+| Engage Pump on, from Scheduled | `set_schedule_enabled`, then `set_pump_state` |
+| Engage Pump on, from Engaged | `set_pump_state` alone — `accepted`, `detail: "no change"` |
+| Engage Pump on, pump not synchronized | `set_pump_state` alone — `rejected` |
+
+Wait for `command: set_pump_state`; the number of flag writes underneath it
+depends on the state the pump was already in, which is exactly what a client
+writing that state does not yet know. Before this the terminal event did not
+exist: a toggle emitted only the sub-writes it happened to issue, and a toggle
+the pump already matched emitted nothing at all.
+
+### Which entity settles as which `command`
+
+For a service the answer is implicit — the command *is* the service you called.
+For an entity there is no such correspondence, so here it is. These are the
+write entities in the shipped packages; anything not listed is read-only and
+never settles.
+
+| Entity | Settles as |
+| --- | --- |
+| **Engage Pump**, **Schedule Enabled** (switches) | `set_pump_state` (plus the flag writes underneath — see above) |
+| **Pump Control Mode** (select) | `set_mode` |
+| **Constant Pressure / Constant Speed / Constant Flow / Proportional Pressure Setpoint** (numbers) | `set_setpoint` |
+| **Temperature Range Min**, **Temperature Range Max** (numbers) | `set_temperature_range` |
+| **Temperature AutoAdapt** (switch) | `set_temperature_range` |
+| **Cycle Time ON**, **Cycle Time OFF**, **Cycle Flow** (numbers) | `set_cycle_times` |
+| **Max/Min Flow Limit** (numbers), **Max/Min Flow Limit Enabled** (switches) | `set_flow_limiter` |
+| **Remote Mode** (switch) | `set_remote_mode` |
+| **Save Schedule Entry** (button) | `set_schedule_entry` |
+| **Clear Schedule Entry** (button) | `clear_schedule_entry` |
+| **Clear Single Event**, **Clear Vacation** (buttons) | `clear_single_event` — a vacation is a Stop single event, not a command of its own |
+
+Three things the table cannot show:
+
+- **A setpoint number settles as `set_setpoint`, never `set_mode`**, even though
+  the write also switches the pump into that mode — that pairing is what the
+  pump fuses into one write, and `set_mode` is the separate operation that
+  changes mode *without* touching a setpoint.
+- **Four setpoint entities share one command.** Read `requested_mode` on the
+  event to tell which control moved; it is populated even on a refusal that
+  never reached the pump, precisely so this stays answerable.
+- **One entity write is one event.** Temperature Range Min and Max are separate
+  writes of the whole record, so moving both is two `set_temperature_range`
+  events — and if they overlap, the second supersedes the first, which settles
+  the earlier one `superseded`. The same is true of the two cycle-time numbers.
+
+`pump_start()` / `pump_stop()` settle as `set_pump_enabled`, but no shipped
+package exposes them as entities; they are reachable only from a custom lambda.
+
 ## Requirements
 
 The services and event need two flags on the `api:` component (all shipped
@@ -169,9 +252,10 @@ Consequences for automations calling these raw services:
   component detects `STOP` + schedule-on with its periodic state poll and
   converges it to `AUTO` + schedule-on (attempts spaced at least five minutes
   apart; suppressed while a vacation covers the current time). That repair
-  fires its own `write_settled` event with `origin: "internal"` and
-  `op_id: "auto:dead-schedule-repair"` — filter it out if your automation
-  reacts to pump-enable writes. Watch for it on
+  fires its own `write_settled` events with `origin: "internal"` and
+  `op_id: "auto:dead-schedule-repair"` — the flag writes it makes, and one
+  terminal `set_pump_state` carrying the repair's verdict — filter them out if
+  your automation reacts to pump-enable writes. Watch for it on
   `sensor.<node_name>_pump_run_state` = `stalled` — see
   [schedule-management.md](schedule-management.md#the-stalled-schedule-and-how-it-repairs-itself).
   To hold the pump off from an automation, clear the schedule flag too
@@ -544,13 +628,25 @@ submission time, so they can arrive **before** the terminal events of
 operations submitted earlier. Use the `seq` field when reconstructing
 submission order from logs.
 
-Two kinds of event never reach the operation queue and so carry `seq: "0"`:
-a request the API bridge rejects as `invalid` before submitting it (an
-unparsable `data` string, an unknown mode or state name), and the aggregate
-`set_pump_state` event, which is composed at the bridge from the two flag
-writes underneath it. Real sequence numbers start at 1, so `"0"` identifies
-them. Correlate these by `op_id`; `node` + `seq` identifies an event uniquely
-only among the ones the queue numbered.
+Three kinds of event never reach the operation queue and so carry `seq: "0"`:
+
+- a request the API bridge rejects as `invalid` before submitting it (an
+  unparsable `data` string, an unknown mode or state name);
+- the aggregate `set_pump_state` event, composed from the two flag writes
+  underneath it rather than queued as an operation of its own — whether it came
+  from the service, from one of the two coupled switches, or from the
+  dead-schedule repair;
+- an entity write refused before submission — the pump not yet synchronized, an
+  unknown day name, an unread limiter record.
+
+Real sequence numbers start at 1, so `"0"` identifies them.
+
+Correlate a service one by `op_id`. An entity aggregate has no `op_id` to
+correlate by (`""`, like every entity write): match it on `command` plus
+`origin: "entity"`, and note that this leaves two switch toggles issued at the
+same moment indistinguishable — one more reason for a program to call the
+service. `node` + `seq` identifies an event uniquely only among the ones the
+queue numbered.
 
 ## Writing a client
 

@@ -3489,6 +3489,73 @@
   / `clear_vacation` services, and `set_pump_state`. All were already
   implemented and covered in `docs/`; only the README summary lagged.
 
+### Fixed
+
+- **The two coupled switches settle like the service they mirror** (issue #302).
+  Toggling **Engage Pump** or **Schedule Enabled** now fires exactly one
+  terminal `set_pump_state` `write_settled` event, with `origin: "entity"` and
+  the empty `op_id` entity writes carry — including when there is nothing to
+  write, and including when the pump is not synchronized and the toggle is
+  refused.
+
+  What a toggle emitted before depended on the state the pump was already in,
+  which is what the client was writing to establish. Engage Pump ON showed all
+  three outcomes on its own: one `set_pump_enabled` from Off, one
+  `set_schedule_enabled` from Scheduled, and **nothing whatsoever** when the
+  pump already matched. A client waiting for a result therefore had to know the
+  answer in advance, and in the third case waited until it timed out. Two
+  writes could also appear where one normally does, since an invalid cache
+  forces both flags to be written.
+
+  The refusal path was silent for the same reason: `set_engage_pump()` and
+  `set_schedule()` returned without a word when the pump was not yet
+  synchronized, where the identical write submitted through `set_pump_state`
+  settles `rejected`.
+
+  The fix is a deletion as much as an addition. `apply_pump_schedule_target_()`
+  held its own copy of the diff-and-order logic; it now delegates to
+  `submit_set_pump_state()` — the same composition, ordering and worst-leg
+  aggregation the service has used since issue #92 — and reports the aggregate
+  under `origin: "entity"`. The raw flag writes still surface as their own
+  events underneath, exactly as they do under the service, and the terminal one
+  arrives last. The autonomous dead-schedule repair (issue #124) settles the
+  same way, under its existing `op_id: "auto:dead-schedule-repair"`.
+
+  Reported from the end-to-end harness work in issue #63, which is the first
+  client to have waited on an entity write and noticed nothing arrived.
+
+
+- **Every other entity write settles too** (issue #305, split out of #302).
+  The two coupled switches were the half issue #302 named; every remaining
+  entity setter had the same hole. Each guards on `check_ready()` and returned
+  in silence, so a setpoint moved on a dashboard, a mode selected, Remote Mode
+  toggled, or a schedule entry saved while the pump was still synchronizing
+  produced a log line and no `write_settled` event — where the identical write
+  submitted through a service settles `rejected`. That window is every node for
+  the first seconds after boot, and again after each reconnect.
+
+  Fourteen call sites now say it: start/stop, the mode select, both remote
+  toggles, all five setpoint numbers, the temperature range, both cycle-time
+  controls, the flow limiter, and the three schedule-entry writes. The refusal
+  carries the command it was refused under, `origin: "entity"`, and the
+  `requested_*` echo where one exists — the five setpoint entities share the
+  `set_setpoint` command, so without the echoed mode a client could not tell
+  which control had been refused. No settled value field is populated: nothing
+  was written and nothing was read back, so the event names no pump state.
+
+  **Two statuses, kept apart.** Not-ready settles `rejected` and is worth
+  retrying once the link is up. A refusal no reconnect could fix settles
+  `invalid` — an unrecognised day name on a schedule clear, and a limiter write
+  made before the limiter record has ever been read, where the enable flag
+  would be a guess (issue #299). That is the distinction a client retries on,
+  and the same rule the api bridge already applies to a malformed argument.
+
+  `sync_pump_clock()` is deliberately unchanged: it returns false without
+  calling `done`, its callers use the return value, and conflating "we did not
+  try" with "we tried and the pump did not confirm" is a 10-second retry versus
+  a 15-minute one. Nothing outside waits on it.
+
+
 ## [0.15.0] - 2026-07-30
 
 ### Added

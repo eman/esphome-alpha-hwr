@@ -395,34 +395,94 @@ public:
 
 private:
   // Converge the pump to a Run/Schedule target, writing only the fields that
-  // differ from the current cached state (both writes if a field is unknown).
-  // Ordering avoids a transient dead/gated state: disable the schedule before
-  // touching run state when turning it off; set AUTO before enabling the
-  // schedule when turning it on (so there is never a STOP+schedule moment).
+  // differ from the current cached state (both writes if a field is unknown),
+  // and report ONE terminal `set_pump_state` result for the whole toggle.
+  //
+  // The composition, the ordering and the aggregate verdict all live in
+  // submit_set_pump_state(); this is the same operation the `set_pump_state`
+  // service performs, reached from a switch instead of from an API call, so it
+  // runs the same code and differs only in what it is labelled with -- the
+  // `origin` reported, and the op_id, which a switch does not have to give
+  // (issue #302). It used to be
+  // a separate copy of the diff-and-order logic that submitted the sub-writes
+  // and said nothing further, which left the entity path with no terminal event
+  // at all -- and with a number of events that depended on the pump's current
+  // state rather than on what the user had asked for:
+  //
+  //   Engage Pump ON from Off       -> set_pump_enabled
+  //   Engage Pump ON from Scheduled -> set_schedule_enabled
+  //   Engage Pump ON from Engaged   -> nothing whatsoever
+  //
+  // so a client could not know which event to wait for without already knowing
+  // the state it was writing to establish, and in the third case waited for an
+  // event that never came. The raw sub-writes still surface as their own
+  // events, exactly as they do under the service; the terminal one is added on
+  // top of them and arrives last.
+  //
   // origin/op_id let the autonomous dead-schedule repair (issue #124) report
   // itself as INTERNAL with a stable op_id, so a client watching write_settled
   // can tell a self-repair from a switch toggle. The switches keep the
-  // defaults.
+  // defaults. `action_name` only names the control in the not-ready log line.
   void apply_pump_schedule_target_(const ux::PumpScheduleTarget &target,
                                    services::WriteOrigin origin = services::WriteOrigin::ENTITY,
-                                   const std::string &op_id = "") {
-    bool cur_schedule = false;
-    bool schedule_known = schedule_service_.get_state(&cur_schedule);
-    bool pump_known = control_service_.is_pump_enabled_valid();
-    bool cur_pump = control_service_.is_pump_enabled();
+                                   const std::string &op_id = "",
+                                   const char *action_name = "set_pump_state") {
+    this->submit_set_pump_state(
+        target,
+        [this, origin, op_id](services::WriteStatus status, int8_t engaged, int8_t scheduled,
+                              const std::string &detail) {
+          services::WriteResult result;
+          result.op_id = op_id;
+          result.command = services::WriteCommand::SET_PUMP_STATE;
+          result.origin = origin;
+          result.status = status;
+          result.detail = detail;
+          // Tri-state straight through, like the service path: -1 means the
+          // cache could not tell us, and fire_write_settled() then omits the
+          // key rather than reporting a state nothing read back.
+          result.enabled = engaged;
+          result.sched_enabled = scheduled;
+          write_op_service_.emit_result(result);
+        },
+        origin, op_id, action_name);
+  }
 
-    bool write_schedule = !schedule_known || cur_schedule != target.schedule_enabled;
-    bool write_pump = !pump_known || cur_pump != target.pump_enabled;
-
-    if (write_schedule && !target.schedule_enabled) {
-      write_op_service_.submit_set_schedule_enabled(false, op_id, nullptr, origin);
-    }
-    if (write_pump) {
-      write_op_service_.submit_set_enabled(target.pump_enabled, op_id, nullptr, origin);
-    }
-    if (write_schedule && target.schedule_enabled) {
-      write_op_service_.submit_set_schedule_enabled(true, op_id, nullptr, origin);
-    }
+  // ---- Terminal results for an entity write refused before the operation
+  // layer ever saw it (issue #302 follow-up).
+  //
+  // Every entity setter below guards on check_ready(), and each one used to
+  // return in silence. The identical write submitted through a service settles
+  // REJECTED with this exact detail string -- start_front_() produces it from
+  // the SAME predicate, since write_op_service_'s ready check IS
+  // is_state_synchronized() -- so the refusal was never in doubt, only unsaid.
+  // A client watching write_settled had nothing to wait for and no way to tell
+  // "refused" from "still working".
+  //
+  // These say it once, in the shape the api bridge's own reject_() uses:
+  // command, status, detail, and the requested_* echo where there is one. The
+  // SETTLED value fields stay unknown, deliberately -- nothing was written and
+  // nothing was read back, so the event must not name a pump state (the rule
+  // issue #92's tri-state encoding exists for).
+  static services::WriteResult not_ready_refusal_(services::WriteCommand command) {
+    services::WriteResult result;
+    result.command = command;
+    result.status = services::WriteStatus::REJECTED;
+    result.detail = "pump not connected/synchronized";
+    return result;
+  }
+  void refuse_entity_write_(services::WriteResult result) {
+    result.origin = services::WriteOrigin::ENTITY;
+    result.op_id = "";  // entity writes have none, by construction
+    write_op_service_.emit_result(result);
+  }
+  /// The five setpoint entities share one command, so the mode and the value
+  /// are echoed: `set_setpoint rejected` alone would not say which control the
+  /// user had just moved.
+  void refuse_entity_setpoint_(services::ControlMode mode, float value) {
+    services::WriteResult result = not_ready_refusal_(services::WriteCommand::SET_SETPOINT);
+    result.requested_mode = mode;
+    result.requested_value = value;
+    this->refuse_entity_write_(result);
   }
 
   // Publishes the run-state diagnostics and repairs a dead schedule (issue
@@ -1017,7 +1077,21 @@ public:
    * across.
    */
   void set_flow_limiter_from_entity(uint16_t sub, bool enabled, float limit_gpm) {
-    if (!check_ready("set_flow_limiter")) return;
+    // Both refusals are terminal events (issue #302 follow-up), and they are
+    // deliberately not the same status. Not-ready is REJECTED and worth
+    // retrying once the link is up; an unread limiter record is INVALID -- the
+    // request cannot be honoured as asked whatever the link does, because the
+    // enable flag the caller passed came from a cache that has never been
+    // filled. That is the same distinction the api bridge draws for a
+    // malformed argument.
+    if (!check_ready("set_flow_limiter")) {
+      services::WriteResult r = not_ready_refusal_(services::WriteCommand::SET_FLOW_LIMITER);
+      r.limiter_sub = static_cast<int16_t>(sub);
+      r.requested_limiter_enabled = enabled ? 1 : 0;
+      r.requested_limiter_limit_gpm = limit_gpm;
+      refuse_entity_write_(r);
+      return;
+    }
     const auto &cached = (sub == services::SUB_LIMITER_CONFIG_MAX_FLOW)
                              ? control_service_.limiter_state().max_flow
                              : control_service_.limiter_state().min_flow;
@@ -1026,6 +1100,14 @@ public:
                "Not setting limiter Sub %u from an entity: it has not been read, so "
                "the enable flag would be a guess",
                static_cast<unsigned>(sub));
+      services::WriteResult r;
+      r.command = services::WriteCommand::SET_FLOW_LIMITER;
+      r.status = services::WriteStatus::INVALID;
+      r.detail = "limiter record not read; the enable flag would be a guess";
+      r.limiter_sub = static_cast<int16_t>(sub);
+      r.requested_limiter_enabled = enabled ? 1 : 0;
+      r.requested_limiter_limit_gpm = limit_gpm;
+      refuse_entity_write_(r);
       return;
     }
     write_op_service_.submit_set_flow_limiter(sub, enabled, limit_gpm, "", nullptr,
@@ -1094,12 +1176,24 @@ public:
   // reading `state` concluded the pump was off. The bridge already had the
   // right encoding for unknown and a guard to use it; nothing could ever
   // produce it, so the guard was dead.
+  //
+  // `origin` and `sub_op_id` exist for the two callers that are not the
+  // service (issue #302): the two coupled switches, which report ENTITY, and
+  // the dead-schedule repair, which reports INTERNAL and tags its sub-writes
+  // with a stable op_id. `sub_op_id` labels the SUB-WRITES only; the terminal
+  // result is the caller's to build in on_complete, under whatever op_id it
+  // answers to. Keeping the two apart is what lets a service call keep the
+  // documented shape -- sub-writes at `op_id: ""`, exactly one event under the
+  // caller's op_id -- while the repair keeps tagging both.
   void submit_set_pump_state(
       ux::PumpScheduleTarget target,
-      std::function<void(services::WriteStatus, int8_t, int8_t, const std::string &)> on_complete) {
+      std::function<void(services::WriteStatus, int8_t, int8_t, const std::string &)> on_complete,
+      services::WriteOrigin origin = services::WriteOrigin::SERVICE,
+      const std::string &sub_op_id = "",
+      const char *action_name = "set_pump_state") {
     using services::WriteStatus;
     auto tri = [](bool known, bool value) -> int8_t { return known ? (value ? 1 : 0) : -1; };
-    if (!check_ready("set_pump_state")) {
+    if (!check_ready(action_name)) {
       bool cs = false;
       const bool cs_known = schedule_service_.get_state(&cs);
       if (on_complete) {
@@ -1162,13 +1256,13 @@ public:
     // touching run state; enable it only after AUTO is set. The status callback
     // is the 5th arg (bool `done` stays null — we only need the full status).
     if (need_scheduled && !target.schedule_enabled) {
-      write_op_service_.submit_set_schedule_enabled(false, "", nullptr, services::WriteOrigin::SERVICE, step);
+      write_op_service_.submit_set_schedule_enabled(false, sub_op_id, nullptr, origin, step);
     }
     if (need_engaged) {
-      write_op_service_.submit_set_enabled(target.pump_enabled, "", nullptr, services::WriteOrigin::SERVICE, step);
+      write_op_service_.submit_set_enabled(target.pump_enabled, sub_op_id, nullptr, origin, step);
     }
     if (need_scheduled && target.schedule_enabled) {
-      write_op_service_.submit_set_schedule_enabled(true, "", nullptr, services::WriteOrigin::SERVICE, step);
+      write_op_service_.submit_set_schedule_enabled(true, sub_op_id, nullptr, origin, step);
     }
   }
   void submit_set_single_event(uint32_t begin_ts, uint32_t end_ts, const std::string &op_id) {
@@ -1198,27 +1292,44 @@ public:
   // empty op_id: they get the same serialization, confirm readbacks, and
   // terminal settle events as the programmatic services — one write path.
   bool pump_start() {
-    if (!check_ready("start")) return false;
+    if (!check_ready("start")) {
+      refuse_entity_write_(not_ready_refusal_(services::WriteCommand::SET_PUMP_ENABLED));
+      return false;
+    }
     write_op_service_.submit_set_enabled(true, "", nullptr, services::WriteOrigin::ENTITY);
     return true;
   }
   bool pump_stop() {
-    if (!check_ready("stop")) return false;
+    if (!check_ready("stop")) {
+      refuse_entity_write_(not_ready_refusal_(services::WriteCommand::SET_PUMP_ENABLED));
+      return false;
+    }
     write_op_service_.submit_set_enabled(false, "", nullptr, services::WriteOrigin::ENTITY);
     return true;
   }
   bool set_control_mode(services::ControlMode mode) {
-    if (!check_ready("set_control_mode")) return false;
+    if (!check_ready("set_control_mode")) {
+      services::WriteResult r = not_ready_refusal_(services::WriteCommand::SET_MODE);
+      r.requested_mode = mode;
+      refuse_entity_write_(r);
+      return false;
+    }
     write_op_service_.submit_set_mode(mode, "", nullptr, services::WriteOrigin::ENTITY);
     return true;
   }
   bool enable_remote() {
-    if (!check_ready("enable_remote")) return false;
+    if (!check_ready("enable_remote")) {
+      refuse_entity_write_(not_ready_refusal_(services::WriteCommand::SET_REMOTE_MODE));
+      return false;
+    }
     write_op_service_.submit_set_remote_mode(true, "", nullptr, services::WriteOrigin::ENTITY);
     return true;
   }
   bool disable_remote() {
-    if (!check_ready("disable_remote")) return false;
+    if (!check_ready("disable_remote")) {
+      refuse_entity_write_(not_ready_refusal_(services::WriteCommand::SET_REMOTE_MODE));
+      return false;
+    }
     write_op_service_.submit_set_remote_mode(false, "", nullptr, services::WriteOrigin::ENTITY);
     return true;
   }
@@ -1228,35 +1339,65 @@ public:
   // accepted/clamped), no longer with the send/ACK of the first wire step.
   void set_constant_pressure(float value_m,
                              std::function<void(bool)> callback) {
-    if (!check_ready("set_constant_pressure")) { if (callback) callback(false); return; }
+    if (!check_ready("set_constant_pressure")) {
+      refuse_entity_setpoint_(services::ControlMode::CONSTANT_PRESSURE, value_m);
+      if (callback) callback(false);
+      return;
+    }
     write_op_service_.submit_set_setpoint(services::ControlMode::CONSTANT_PRESSURE, value_m, "",
                                           callback, services::WriteOrigin::ENTITY);
   }
   void set_constant_speed(float value_rpm, std::function<void(bool)> callback) {
-    if (!check_ready("set_constant_speed")) { if (callback) callback(false); return; }
+    if (!check_ready("set_constant_speed")) {
+      refuse_entity_setpoint_(services::ControlMode::CONSTANT_SPEED, value_rpm);
+      if (callback) callback(false);
+      return;
+    }
     write_op_service_.submit_set_setpoint(services::ControlMode::CONSTANT_SPEED, value_rpm, "",
                                           callback, services::WriteOrigin::ENTITY);
   }
   void set_constant_flow(float value_m3h, std::function<void(bool)> callback) {
-    if (!check_ready("set_constant_flow")) { if (callback) callback(false); return; }
+    if (!check_ready("set_constant_flow")) {
+      refuse_entity_setpoint_(services::ControlMode::CONSTANT_FLOW, value_m3h);
+      if (callback) callback(false);
+      return;
+    }
     write_op_service_.submit_set_setpoint(services::ControlMode::CONSTANT_FLOW, value_m3h, "",
                                           callback, services::WriteOrigin::ENTITY);
   }
   void set_temperature_range(float min_temp, float max_temp, bool autoadapt,
                              std::function<void(bool)> callback) {
-    if (!check_ready("set_temperature_range")) { if (callback) callback(false); return; }
+    if (!check_ready("set_temperature_range")) {
+      services::WriteResult r = not_ready_refusal_(services::WriteCommand::SET_TEMPERATURE_RANGE);
+      r.requested_temp_min = min_temp;
+      r.requested_temp_max = max_temp;
+      refuse_entity_write_(r);
+      if (callback) callback(false);
+      return;
+    }
     write_op_service_.submit_set_temperature_range(min_temp, max_temp, autoadapt, "", callback,
                                                    services::WriteOrigin::ENTITY);
   }
   void set_proportional_pressure(float value_m,
                                  std::function<void(bool)> callback) {
-    if (!check_ready("set_proportional_pressure")) { if (callback) callback(false); return; }
+    if (!check_ready("set_proportional_pressure")) {
+      refuse_entity_setpoint_(services::ControlMode::PROPORTIONAL_PRESSURE, value_m);
+      if (callback) callback(false);
+      return;
+    }
     write_op_service_.submit_set_setpoint(services::ControlMode::PROPORTIONAL_PRESSURE, value_m,
                                           "", callback, services::WriteOrigin::ENTITY);
   }
   void set_cycle_time_control(uint8_t on_minutes, uint8_t off_minutes,
                               std::function<void(bool)> callback) {
-    if (!check_ready("set_cycle_time_control")) { if (callback) callback(false); return; }
+    if (!check_ready("set_cycle_time_control")) {
+      services::WriteResult r = not_ready_refusal_(services::WriteCommand::SET_CYCLE_TIMES);
+      r.requested_on_minutes = on_minutes;
+      r.requested_off_minutes = off_minutes;
+      refuse_entity_write_(r);
+      if (callback) callback(false);
+      return;
+    }
     write_op_service_.submit_set_cycle_times(on_minutes, off_minutes, NAN, "", callback,
                                              services::WriteOrigin::ENTITY);
   }
@@ -1281,7 +1422,13 @@ public:
   // works. Recorded here so the next person to notice the discrepancy finds the
   // answer rather than repeating the investigation.
   void set_cycle_flow(float value_m3h, std::function<void(bool)> callback) {
-    if (!check_ready("set_cycle_flow")) { if (callback) callback(false); return; }
+    if (!check_ready("set_cycle_flow")) {
+      services::WriteResult r = not_ready_refusal_(services::WriteCommand::SET_CYCLE_TIMES);
+      r.requested_flow = value_m3h;
+      refuse_entity_write_(r);
+      if (callback) callback(false);
+      return;
+    }
     write_op_service_.submit_set_cycle_times(0, 0, value_m3h, "", callback,
                                              services::WriteOrigin::ENTITY);
   }
@@ -1405,18 +1552,27 @@ public:
 
   // Toggle "Engage Pump": ON = engage continuously (AUTO + schedule off),
   // OFF = Off (STOP).
+  //
+  // The readiness check is NOT made here any more (issue #302). It used to be,
+  // and a not-ready toggle then returned in silence -- where the same write
+  // submitted through the service settled REJECTED. Both now reject through
+  // one path, so a dashboard toggle against an unsynchronized pump is a
+  // terminal event like every other refusal instead of nothing at all. The
+  // action name is passed through only so the log line still names the control.
   void set_engage_pump(bool on) {
-    if (!check_ready(on ? "engage_pump_on" : "engage_pump_off")) return;
     apply_pump_schedule_target_(on ? ux::engage_pump_on_target()
-                                   : ux::engage_pump_off_target());
+                                   : ux::engage_pump_off_target(),
+                                services::WriteOrigin::ENTITY, "",
+                                on ? "engage_pump_on" : "engage_pump_off");
   }
 
   // Toggle "Schedule Enabled": ON = Scheduled (AUTO so it can actually run +
   // schedule on), OFF = Off (stop the pump + schedule off).
   void set_schedule(bool on) {
-    if (!check_ready(on ? "schedule_on" : "schedule_off")) return;
     apply_pump_schedule_target_(on ? ux::schedule_on_target()
-                                   : ux::schedule_off_target());
+                                   : ux::schedule_off_target(),
+                                services::WriteOrigin::ENTITY, "",
+                                on ? "schedule_on" : "schedule_off");
   }
 
   bool read_schedule_entries_async(
@@ -1426,11 +1582,32 @@ public:
   }
   void clear_schedule_entry(const std::string &day, uint8_t layer = 0,
                             std::function<void(bool)> on_complete = nullptr) {
-    if (!check_ready("clear_schedule_entry")) { if (on_complete) on_complete(false); return; }
+    // The day name is validated BEFORE the readiness check, and the order is
+    // the whole point (review on #304). An unrecognised day is deterministic:
+    // no reconnect can make it valid. Checking readiness first meant that on a
+    // disconnected pump -- which is every node for the first seconds after boot
+    // -- a misspelled day settled REJECTED, the status whose entire meaning is
+    // "retry once the link is up". A client obeying that retries forever
+    // against a request that can never succeed. Readiness is the retryable
+    // condition, so it goes second.
     ScheduleEntry probe;
     probe.set_day(day.c_str());
     int day_index = probe.get_day_index();
     if (day_index < 0) {
+      services::WriteResult r;
+      r.command = services::WriteCommand::CLEAR_SCHEDULE_ENTRY;
+      r.status = services::WriteStatus::INVALID;
+      r.detail = "unknown day name";
+      r.layer = layer;
+      refuse_entity_write_(r);
+      if (on_complete) on_complete(false);
+      return;
+    }
+    if (!check_ready("clear_schedule_entry")) {
+      services::WriteResult r = not_ready_refusal_(services::WriteCommand::CLEAR_SCHEDULE_ENTRY);
+      r.layer = layer;
+      r.day = day_index;  // known by now, so the refusal can name the day
+      refuse_entity_write_(r);
       if (on_complete) on_complete(false);
       return;
     }
@@ -1450,7 +1627,14 @@ public:
   void set_schedule_entry(uint8_t layer, uint8_t day_index,
                           const ScheduleEntry &entry,
                           std::function<void(bool)> on_complete) {
-    if (!check_ready("set_schedule_entry")) { if (on_complete) on_complete(false); return; }
+    if (!check_ready("set_schedule_entry")) {
+      services::WriteResult r = not_ready_refusal_(services::WriteCommand::SET_SCHEDULE_ENTRY);
+      r.layer = layer;
+      r.day = day_index;
+      refuse_entity_write_(r);
+      if (on_complete) on_complete(false);
+      return;
+    }
     write_op_service_.submit_set_schedule_entry(
         layer, day_index, entry.get_begin_hour(), entry.get_begin_minute(),
         entry.get_end_hour(), entry.get_end_minute(), "", on_complete,
@@ -1458,7 +1642,14 @@ public:
   }
   void clear_schedule_entry_async(uint8_t layer, uint8_t day_index,
                                   std::function<void(bool)> on_complete) {
-    if (!check_ready("clear_schedule_entry_async")) { if (on_complete) on_complete(false); return; }
+    if (!check_ready("clear_schedule_entry_async")) {
+      services::WriteResult r = not_ready_refusal_(services::WriteCommand::CLEAR_SCHEDULE_ENTRY);
+      r.layer = layer;
+      r.day = day_index;
+      refuse_entity_write_(r);
+      if (on_complete) on_complete(false);
+      return;
+    }
     write_op_service_.submit_clear_schedule_entry(layer, day_index, "", on_complete,
                                                   services::WriteOrigin::ENTITY);
   }

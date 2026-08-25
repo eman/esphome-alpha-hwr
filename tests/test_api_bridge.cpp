@@ -786,6 +786,211 @@ static void test_a_rejected_pump_state_does_not_assert_a_state() {
   TEST_ASSERT(!BridgeHarness::has(*ev, "schedule_enabled"), "nor a schedule flag");
 }
 
+// ---------------------------------------------------------------------------
+// The entity path settles too (issue #302)
+// ---------------------------------------------------------------------------
+//
+// The two coupled switches used to bare-`return` on the readiness check, where
+// the same write submitted through `set_pump_state` settled REJECTED. Nothing
+// was written and nothing was said, so a client watching write_settled -- which
+// the docs invite, since entity writes are described as going through the same
+// verified path -- waited for an event that was never coming.
+//
+// Asserted through the ENTITY entry points rather than the service, because
+// that is the path that was silent; the service arm above already covers the
+// same refusal under an op_id.
+static void test_a_switch_toggled_before_the_pump_is_ready_still_settles() {
+  std::cout << "\n=== an entity toggle on an unsynchronized pump settles rejected ==="
+            << std::endl;
+
+  struct Case {
+    const char *label;
+    bool schedule_switch;  // false = Engage Pump, true = Schedule Enabled
+    bool on;
+  };
+  const std::vector<Case> cases = {
+      {"Engage Pump on", false, true},
+      {"Engage Pump off", false, false},
+      {"Schedule Enabled on", true, true},
+      {"Schedule Enabled off", true, false},
+  };
+
+  for (const auto &c : cases) {
+    BridgeHarness h;
+    if (c.schedule_switch) {
+      h.component.set_schedule(c.on);
+    } else {
+      h.component.set_engage_pump(c.on);
+    }
+
+    const auto *ev = h.only_event();
+    TEST_ASSERT(ev != nullptr,
+                std::string(c.label) + ": fires exactly one settle event");
+    if (ev == nullptr) continue;
+    TEST_ASSERT(BridgeHarness::field(*ev, "command") == "set_pump_state",
+                std::string(c.label) + ": ...named set_pump_state, not one of the flag writes");
+    TEST_ASSERT(BridgeHarness::field(*ev, "origin") == "entity",
+                std::string(c.label) + ": ...reported as an entity write");
+    TEST_ASSERT(BridgeHarness::field(*ev, "op_id").empty(),
+                std::string(c.label) + ": ...with the empty op_id entity writes carry");
+    TEST_ASSERT(BridgeHarness::field(*ev, "status") == "rejected",
+                std::string(c.label) + ": ...settling rejected");
+    // Same rule the service path is held to: nothing was written and the
+    // caches are invalid, so the event must not name a state.
+    TEST_ASSERT(!BridgeHarness::has(*ev, "state"),
+                std::string(c.label) + ": ...and asserts no pump state");
+  }
+}
+
+// Every OTHER entity write settles too (issue #302 follow-up)
+//
+// The coupled switches were the half issue #302 named. The rest of the entity
+// surface had the same hole: each setter guards on check_ready() and used to
+// return in silence, so a setpoint moved on a dashboard while the pump was
+// still synchronizing produced a log line and no event, where the identical
+// write through a service settles `rejected`.
+//
+// Every entry below is driven through the C++ entry point the YAML lambda in
+// packages/alpha_hwr_controls.yaml calls, on an unconnected component -- which
+// is precisely the state a user's node is in for the first seconds after boot,
+// and after every reconnect.
+//
+// This table is also the executable copy of the entity-to-command mapping in
+// docs/programmatic-interface.md ("Which entity settles as which command"). A
+// client is told to match on `command`, so that mapping is public API: if you
+// change which command an entity settles as, both this table and that one have
+// to move together, and this one is the half that fails loudly.
+static void test_every_entity_write_settles_when_the_pump_is_not_ready() {
+  std::cout << "\n=== every entity write settles rather than returning in silence ==="
+            << std::endl;
+
+  struct Case {
+    const char *label;
+    const char *command;   // the `command` its settle event must report
+    void (*run)(AlphaHwrComponent &);
+  };
+  static const std::vector<Case> cases = {
+      {"Start", "set_pump_enabled", [](AlphaHwrComponent &c) { c.pump_start(); }},
+      {"Stop", "set_pump_enabled", [](AlphaHwrComponent &c) { c.pump_stop(); }},
+      {"Mode select", "set_mode",
+       [](AlphaHwrComponent &c) { c.set_control_mode(ControlMode::CONSTANT_SPEED); }},
+      {"Remote Mode on", "set_remote_mode", [](AlphaHwrComponent &c) { c.enable_remote(); }},
+      {"Remote Mode off", "set_remote_mode", [](AlphaHwrComponent &c) { c.disable_remote(); }},
+      {"Constant pressure setpoint", "set_setpoint",
+       [](AlphaHwrComponent &c) { c.set_constant_pressure(3.0f, nullptr); }},
+      {"Constant speed setpoint", "set_setpoint",
+       [](AlphaHwrComponent &c) { c.set_constant_speed(2500.0f, nullptr); }},
+      {"Constant flow setpoint", "set_setpoint",
+       [](AlphaHwrComponent &c) { c.set_constant_flow(1.2f, nullptr); }},
+      {"Proportional pressure setpoint", "set_setpoint",
+       [](AlphaHwrComponent &c) { c.set_proportional_pressure(2.5f, nullptr); }},
+      {"Temperature range", "set_temperature_range",
+       [](AlphaHwrComponent &c) { c.set_temperature_range(35.0f, 38.9f, true, nullptr); }},
+      {"Cycle times", "set_cycle_times",
+       [](AlphaHwrComponent &c) { c.set_cycle_time_control(5, 10, nullptr); }},
+      {"Cycle flow", "set_cycle_times",
+       [](AlphaHwrComponent &c) { c.set_cycle_flow(1.4f, nullptr); }},
+      {"Flow limiter", "set_flow_limiter",
+       [](AlphaHwrComponent &c) {
+         c.set_flow_limiter_from_entity(esphome::alpha_hwr::services::SUB_LIMITER_CONFIG_MAX_FLOW,
+                                        true, 1.6f);
+       }},
+      {"Schedule entry save", "set_schedule_entry",
+       [](AlphaHwrComponent &c) {
+         esphome::alpha_hwr::ScheduleEntry e;
+         c.set_schedule_entry(0, 2, e, nullptr);
+       }},
+      {"Schedule entry clear", "clear_schedule_entry",
+       [](AlphaHwrComponent &c) { c.clear_schedule_entry_async(0, 2, nullptr); }},
+      {"Schedule entry clear by name", "clear_schedule_entry",
+       [](AlphaHwrComponent &c) { c.clear_schedule_entry("Monday", 0, nullptr); }},
+  };
+
+  for (const auto &c : cases) {
+    BridgeHarness h;
+    c.run(h.component);
+
+    const auto *ev = h.only_event();
+    TEST_ASSERT(ev != nullptr, std::string(c.label) + ": fires exactly one settle event");
+    if (ev == nullptr) continue;
+    TEST_ASSERT(BridgeHarness::field(*ev, "command") == c.command,
+                std::string(c.label) + ": ...reporting command " + c.command);
+    TEST_ASSERT(BridgeHarness::field(*ev, "origin") == "entity",
+                std::string(c.label) + ": ...as an entity write");
+    TEST_ASSERT(BridgeHarness::field(*ev, "status") == "rejected",
+                std::string(c.label) + ": ...settling rejected, as the service does");
+    TEST_ASSERT(BridgeHarness::field(*ev, "detail") == "pump not connected/synchronized",
+                std::string(c.label) + ": ...with the detail the service path uses");
+    TEST_ASSERT(BridgeHarness::field(*ev, "op_id").empty(),
+                std::string(c.label) + ": ...and the empty op_id entity writes carry");
+  }
+}
+
+// The settled value fields stay unknown on all of them. This is the rule the
+// tri-state encoding exists for: nothing was written and nothing was read back,
+// so an automation must not be able to read a pump state out of a refusal.
+static void test_a_refused_entity_write_names_no_pump_state() {
+  std::cout << "\n=== a refused entity write claims nothing about the pump ===" << std::endl;
+
+  BridgeHarness h;
+  h.component.set_constant_speed(2500.0f, nullptr);
+  const auto *ev = h.only_event();
+  TEST_ASSERT(ev != nullptr, "the setpoint write settles");
+  if (ev == nullptr) return;
+  TEST_ASSERT(!BridgeHarness::has(*ev, "value"), "no settled value");
+  TEST_ASSERT(!BridgeHarness::has(*ev, "enabled"), "no settled enable flag");
+  TEST_ASSERT(!BridgeHarness::has(*ev, "mode"), "no settled mode");
+  // ...but the request IS echoed, because `set_setpoint` alone would not say
+  // which of the five setpoint entities the user had just moved.
+  TEST_ASSERT(BridgeHarness::field(*ev, "requested_mode") == "constant_speed",
+              "the requested mode is echoed, naming the control");
+  TEST_ASSERT(BridgeHarness::field(*ev, "requested_value") == "2500",
+              "...and the value the user asked for");
+}
+
+// A deterministic refusal outranks the readiness check (review on #304).
+//
+// The two statuses mean different things to a client: `rejected` says "retry
+// once the link is up", `invalid` says "this request can never succeed". So the
+// order of the guards decides which one an unknown day name gets, and getting
+// it wrong is not cosmetic -- on a disconnected pump, which is every node for
+// the first seconds after boot, a misspelled day used to settle `rejected` and
+// send an obedient client round a retry loop with no exit.
+//
+// This is the case the ready-pump test in test_component_wiring.cpp cannot
+// reach: with the pump ready there is no readiness failure for the day check to
+// lose to, so the ordering is only observable from here.
+static void test_a_bad_day_name_outranks_the_readiness_check() {
+  std::cout << "\n=== an unknown day name settles invalid even when the pump is also unready ==="
+            << std::endl;
+
+  BridgeHarness h;
+  h.component.clear_schedule_entry("Blursday", 0, nullptr);
+
+  const auto *ev = h.only_event();
+  TEST_ASSERT(ev != nullptr, "it settles exactly once");
+  if (ev == nullptr) return;
+  TEST_ASSERT(BridgeHarness::field(*ev, "command") == "clear_schedule_entry",
+              "...as clear_schedule_entry");
+  TEST_ASSERT(BridgeHarness::field(*ev, "status") == "invalid",
+              "...invalid, NOT rejected: no reconnect can make 'Blursday' a day");
+  TEST_ASSERT(BridgeHarness::field(*ev, "detail") == "unknown day name",
+              "...saying which half of the request was wrong");
+  TEST_ASSERT(BridgeHarness::field(*ev, "origin") == "entity", "...and as an entity write");
+
+  // The valid-day arm still reports the retryable condition, so the reorder
+  // did not simply swap which case is wrong.
+  BridgeHarness h2;
+  h2.component.clear_schedule_entry("Monday", 0, nullptr);
+  const auto *ev2 = h2.only_event();
+  TEST_ASSERT(ev2 != nullptr, "a well-formed clear against an unready pump also settles");
+  if (ev2 == nullptr) return;
+  TEST_ASSERT(BridgeHarness::field(*ev2, "status") == "rejected",
+              "...as rejected, which IS worth retrying once the link is up");
+  TEST_ASSERT(BridgeHarness::field(*ev2, "day") == "0",
+              "...and names the day, now that it is parsed before the refusal is built");
+}
+
 int main() {
   std::cout << "===========================================================" << std::endl;
   std::cout << "  API Bridge Test Suite (issue #92 public surface)" << std::endl;
@@ -807,6 +1012,10 @@ int main() {
   test_paired_echo_keys_are_guarded_independently();
   test_upload_keys_are_omitted_when_nothing_ran();
   test_a_rejected_pump_state_does_not_assert_a_state();
+  test_a_switch_toggled_before_the_pump_is_ready_still_settles();
+  test_every_entity_write_settles_when_the_pump_is_not_ready();
+  test_a_refused_entity_write_names_no_pump_state();
+  test_a_bad_day_name_outranks_the_readiness_check();
 
   std::cout << "\n===========================================================" << std::endl;
   std::cout << "  Test Results" << std::endl;

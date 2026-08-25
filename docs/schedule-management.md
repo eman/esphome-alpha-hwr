@@ -152,9 +152,11 @@ minutes apart (measured across stall episodes and reconnects alike, so neither a
 relapse nor a flapping BLE link can multiply them). The first attempt after boot
 is immediate.
 
-The repair announces itself: its `write_settled` event carries
+The repair announces itself: its `write_settled` events carry
 `origin: "internal"` and `op_id: "auto:dead-schedule-repair"`, so an automation
-can tell the node fixing itself from a user toggling a switch.
+can tell the node fixing itself from a user toggling a switch. It settles like
+a switch toggle otherwise — the flag writes it makes, then one terminal
+`set_pump_state` carrying the verdict.
 
 One exception: while a **vacation** (a `Stop` single event) covers the current
 time, a stopped pump is the commanded state, so it is neither reported as
