@@ -2,6 +2,10 @@
 #include "transport.h"
 #include "frame_builder.h"
 #include "esphome/core/log.h"
+// format_hex_pretty reached this file only through log.h pulling in the string
+// helpers. That is not a contract log.h makes, and it is one header reshuffle
+// away from being false; named explicitly now (issue #306).
+#include "alloc_compat.h"
 #include <cstring>
 #include <cmath>
 

@@ -7,10 +7,7 @@
 #include "transport.h"
 #include "esphome/core/log.h"
 #include "esphome/core/hal.h"
-// format_hex_pretty is declared in esphome/core/alloc_helpers.h as of ESPHome
-// 2026.5.0; helpers.h still forwards to it. Left as-is here so this file does
-// not migrate ahead of time_service.cpp and control_service.cpp.
-#include "esphome/core/helpers.h"
+#include "alloc_compat.h"  // format_hex_pretty; see the header for the version guard
 #include "frame_builder.h"
 #include "frame_parser.h"
 #include "response_match.h"

@@ -3555,6 +3555,27 @@
   try" with "we tried and the pump did not confirm" is a 10-second retry versus
   a 15-minute one. Nothing outside waits on it.
 
+- **The `format_hex_pretty` include now spans the supported core range**
+  (issue #306). Its `std::string` overloads moved from `esphome/core/helpers.h`
+  to `esphome/core/alloc_helpers.h` in ESPHome 2026.5.0, and the forwarding
+  shim left behind in `helpers.h` documents its own removal *before 2026.11.0*.
+  CI installs the latest core on every run, so the old includes would have
+  stopped compiling on whatever unrelated PR happened to be open that week.
+
+  Switching to the new header outright would have broken the other end:
+  `alloc_helpers.h` does not exist before 2026.5.0, and `packages/README.md`
+  declares a floor of ESPHome 2024.6.0. So this is a version guard, in the same
+  idiom `alpha_hwr.cpp` already uses for the `get_build_time_string()` split at
+  2026.1.0, kept in one header (`components/alpha_hwr/alloc_compat.h`) rather
+  than repeated at each call site.
+
+  Three call sites, one of which was never an include: `control_service.cpp`
+  reached `format_hex_pretty` only through `log.h` pulling in the string
+  helpers, which `log.h` does not promise and is one reshuffle away from
+  ceasing to do.
+
+  No behaviour change on any core version — this is which header declares a
+  function the component already called.
 
 ## [0.15.0] - 2026-07-30
 

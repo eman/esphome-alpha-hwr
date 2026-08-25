@@ -13,7 +13,7 @@
 #include "frame_builder.h"
 #include "codec.h"
 #include "esphome/core/log.h"
-#include "esphome/core/helpers.h"
+#include "alloc_compat.h"  // format_hex_pretty; see the header for the version guard
 #include "esphome/core/time.h"
 #include <cstring>
 
