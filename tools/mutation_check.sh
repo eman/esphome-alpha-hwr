@@ -1633,6 +1633,11 @@ MUTATIONS=(
 # The five setpoint entities share one command, so without the echo a client
 # cannot tell which control was refused.
 "entity-setpoint-refusal-drops-the-mode|components/alpha_hwr/alpha_hwr.h|    result.requested_mode = mode;|    result.requested_mode = services::ControlMode::NONE;"
+# Issue #310 follow-up, raised reviewing the merged change: the boot hold clears
+# auto_connect in setup(), which is only safe while this component sets up
+# BEFORE esp32_ble_tracker and esp32_ble_client (both AFTER_BLUETOOTH, 300).
+# Nothing declared that until the override existed; lowering it is a silent race.
+"setup-priority-drops-below-the-ble-stack|components/alpha_hwr/alpha_hwr.h|  float get_setup_priority() const override { return setup_priority::DATA; }|  float get_setup_priority() const override { return setup_priority::AFTER_BLUETOOTH; }"
 # Issue #310: the boot connect hold. Three separate ways a deliberately absent
 # link gets mistaken for a broken one, each with its own entry, because they
 # fail in different places and a client reads them differently.

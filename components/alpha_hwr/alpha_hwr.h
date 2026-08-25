@@ -369,6 +369,27 @@ public:
     control_state_poll_interval_ms_ = ms; 
   }
 
+  // Stated explicitly, though it is also the inherited default, because the
+  // boot connect hold depends on it and nothing else says so (issue #310,
+  // raised by @jfriend00 reviewing the merged change).
+  //
+  // The hold works by clearing `auto_connect` in setup() before anything can
+  // act on it. That is only safe while this component sets up BEFORE the BLE
+  // stack: esp32_ble_tracker and esp32_ble_client both return
+  // setup_priority::AFTER_BLUETOOTH (300), Application::setup() sorts
+  // descending, and DATA (600) therefore runs first. The flag is a plain
+  // assignment read only on the advertisement path, which cannot run until
+  // ble_client is looping.
+  //
+  // The window that looks dangerous and is not: Application::setup() does call
+  // loop() on components while a later one blocks on can_proceed(), but that
+  // pass iterates `j <= i`, so it can never reach a component that has not been
+  // set up yet.
+  //
+  // Lower this below AFTER_BLUETOOTH and the hold becomes a real race with
+  // nothing to announce it -- which is why the relationship is asserted in
+  // tests/test_component_wiring.cpp rather than only described here.
+  float get_setup_priority() const override { return setup_priority::DATA; }
   void setup() override;
   void loop() override;
   void update() override; // Called every 10 seconds (PollingComponent interval)

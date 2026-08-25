@@ -17,6 +17,11 @@ inline constexpr float BUS = 1000.0f;
 inline constexpr float HARDWARE = 800.0f;
 inline constexpr float DATA = 600.0f;
 inline constexpr float PROCESSOR = 400.0f;
+// 300.0f in the real core, where esp32_ble_tracker and esp32_ble_client both
+// return it. Named here because the boot connect hold depends on this component
+// setting up BEFORE those two, and tests/test_component_wiring.cpp pins that
+// relationship rather than leaving it to be rediscovered (issue #310).
+inline constexpr float AFTER_BLUETOOTH = 300.0f;
 inline constexpr float AFTER_CONNECTION = 100.0f;
 inline constexpr float LATE = -100.0f;
 }  // namespace setup_priority

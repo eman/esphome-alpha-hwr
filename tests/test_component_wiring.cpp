@@ -1600,6 +1600,31 @@ void test_a_deterministic_entity_refusal_settles_invalid() {
 // deliberately absent link is mistaken for a broken one: the status ladder, the
 // boot grace underneath it, and a suspend arriving inside the hold.
 
+// ── The boot hold's unstated dependency, stated ─────────────────────────────
+//
+// The hold clears `auto_connect` in setup(), which only works because this
+// component sets up BEFORE the BLE stack. esp32_ble_tracker and
+// esp32_ble_client both return setup_priority::AFTER_BLUETOOTH (300);
+// Application::setup() sorts descending, so DATA (600) runs first and the flag
+// is in place before anything reads it.
+//
+// Raised by @jfriend00 on #311: nothing declared that, so lowering this
+// component's priority below AFTER_BLUETOOTH would turn the hold into a real
+// race with no test to catch it. This is that test. It is not a tautology
+// against the default -- the component now states its priority explicitly, and
+// this asserts the relationship that makes the hold sound rather than the
+// literal value.
+void test_the_component_sets_up_before_the_ble_stack() {
+  std::cout << "\n=== The component sets up before the BLE stack ===" << std::endl;
+
+  Rig r;
+  TEST_ASSERT(r.component.get_setup_priority() > esphome::setup_priority::AFTER_BLUETOOTH,
+              "alpha_hwr's setup priority outranks AFTER_BLUETOOTH, which is what lets "
+              "the boot hold clear auto_connect before ble_client can act on it");
+  TEST_ASSERT(r.component.get_setup_priority() == esphome::setup_priority::DATA,
+              "...and it is DATA, the value the comment on get_setup_priority() explains");
+}
+
 void test_the_boot_hold_keeps_the_link_down_until_it_elapses() {
   std::cout << "\n=== The boot connect delay holds the first connection ===" << std::endl;
 
@@ -2975,6 +3000,7 @@ int main() {
   test_the_fault_is_visible_across_the_reconnect_it_describes();
   test_the_default_names_the_fault_without_touching_the_link();
 
+  test_the_component_sets_up_before_the_ble_stack();
   test_the_boot_hold_keeps_the_link_down_until_it_elapses();
   test_a_zero_delay_changes_nothing();
   test_a_long_hold_is_not_reported_as_unreachable();
