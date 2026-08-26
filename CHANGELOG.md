@@ -2,39 +2,42 @@
 
 ## [Unreleased]
 
-### Changed
+### Migration
 
-- **Two outbound APDU hex dumps moved to `ESP_LOGV`** (issue #307).
-  `write_temp_range APDU:` was logged at **INFO, unconditionally**, so it fired
-  on every temperature-range write on a default build — the packages ship
-  `logger: level: INFO` — costing an API frame per connected subscriber plus the
-  `std::string` the formatting allocates. That is exactly the per-subscriber
-  cost `docs/configuration.md` warns about under *Log level and API
-  subscribers*, and the load that has exhausted this node's heap in ESPHome's
-  outgoing buffer (issue #127).
+Three breaking changes land in this release. Two of them fail loudly; the third
+does not, and is the one to read.
 
-  `Clock SET APDU:` was at DEBUG. Cheaper — a clock write happens twice a day,
-  not per user action — but there was no reason for two identical lines to sit
-  at two different levels, and AGENTS.md §3 assigns packet dumps to `ESP_LOGV`
-  either way (`ESP_LOGD` is for single packet *summaries*).
+| Change | What breaks | What to do |
+| --- | --- | --- |
+| The six pump services are renamed | The automation fails with `Action ... not found` — **the next time it fires**, not when it is reloaded, so a rarely triggered one goes on looking healthy | Rename per the table below |
+| `droplet_max_stale_seconds` → `flow_max_stale_seconds` | `esphome config` fails and names the replacement | Rename the key. Default (60 s), behavior and semantics are unchanged |
+| The Head sensor is named "Head", not "Head Pressure" | **Nothing fails.** The renamed sensor arrives as a *new* entity and `sensor.<device>_head_pressure` is orphaned with its history and long-term statistics | To keep the history, declare `name: "Head Pressure"` under `head:` in your own `alpha_hwr:` block. Otherwise delete the orphan and clear its statistics under **Developer tools → Statistics** |
 
-  Neither line is deleted, but neither is the way to see these writes any more:
-  `frame_logging: true` dumps the whole telegram each APDU is carried in, in
-  both directions, without turning the rest of the component up to VERBOSE.
+**The service renames, in full:**
 
-  **What actually changes, per level**, since the two lines started at different
-  ones. The shipped packages set `logger: level: INFO`; ESPHome's own default,
-  which a config not using the packages gets, is `DEBUG`.
+| Old service | New service |
+| --- | --- |
+| `pump_set_enabled` | `set_pump_enabled` |
+| `pump_set_mode` | `set_mode` |
+| `pump_set_setpoint` | `set_setpoint` |
+| `pump_set_temperature_range` | `set_temperature_range` |
+| `pump_set_cycle_times` | `set_cycle_times` |
+| `pump_set_state` | `set_pump_state` |
 
-  | Your `logger` level | Before | After |
-  | --- | --- | --- |
-  | `INFO` (the packages' setting) | temperature-range dump only | neither |
-  | `DEBUG` (ESPHome's default) | both | neither |
-  | `VERBOSE` | both | both |
+Read the table rather than transposing by hand: `pump` is *dropped* where the
+verb alone is unambiguous (`pump_set_mode` → `set_mode`) and *kept* only where
+it says which thing is being set (`pump_set_state` → `set_pump_state`, since the
+schedule has a state too). Arguments, semantics and every field of
+`esphome.alpha_hwr_write_settled` are untouched — the services move onto the
+names their settle events were already reporting. The schedule services
+(`set_schedule_entry`, `upload_schedule`, `clear_single_event` and the rest)
+were already correct and do not move.
 
-  So on a packaged node one line disappears, not two — the clock dump was
-  already below the shipped level and was never in that output. The clock change
-  bites at `DEBUG`, where the line was visible and now needs `VERBOSE`.
+Finally, update the version pin in your own configuration alongside the examples,
+which now resolve to `@v0.16.0`.
+
+Each of these is written up in full below, with the reasoning and the failure
+modes: the service renames and the two key/entity renames under **Changed**.
 
 ### Added
 
@@ -623,7 +626,51 @@
   `alpha_hwr_controls.yaml` reads `id(motor_speed)` directly, so this is the
   only configuration where renaming the rpm sensor fails.
 
+
+- **Host tests for the session FSM** — `tests/test_session.cpp`, 36 assertions.
+  The state machine had been documented in prose and in a diagram and checked by
+  nothing, which is how a state with no way into it survived. Every transition
+  that exists is now pinned, from every state, along with two behaviours a
+  reader would not guess: `on_authenticating()` is reachable from READY for
+  re-authentication and is idempotent, and the out-of-order guards **warn and
+  then transition anyway** rather than refusing — so anything able to call
+  `on_authenticated()` after a disconnect would drive the session to READY. That
+  safety lives in the callers, not in the FSM, and the test now says so.
+
 ### Changed
+
+- **Two outbound APDU hex dumps moved to `ESP_LOGV`** (issue #307).
+  `write_temp_range APDU:` was logged at **INFO, unconditionally**, so it fired
+  on every temperature-range write on a default build — the packages ship
+  `logger: level: INFO` — costing an API frame per connected subscriber plus the
+  `std::string` the formatting allocates. That is exactly the per-subscriber
+  cost `docs/configuration.md` warns about under *Log level and API
+  subscribers*, and the load that has exhausted this node's heap in ESPHome's
+  outgoing buffer (issue #127).
+
+  `Clock SET APDU:` was at DEBUG. Cheaper — a clock write happens twice a day,
+  not per user action — but there was no reason for two identical lines to sit
+  at two different levels, and AGENTS.md §3 assigns packet dumps to `ESP_LOGV`
+  either way (`ESP_LOGD` is for single packet *summaries*).
+
+  Neither line is deleted, but neither is the way to see these writes any more:
+  `frame_logging: true` dumps the whole telegram each APDU is carried in, in
+  both directions, without turning the rest of the component up to VERBOSE.
+
+  **What actually changes, per level**, since the two lines started at different
+  ones. The shipped packages set `logger: level: INFO`; ESPHome's own default,
+  which a config not using the packages gets, is `DEBUG`.
+
+  | Your `logger` level | Before | After |
+  | --- | --- | --- |
+  | `INFO` (the packages' setting) | temperature-range dump only | neither |
+  | `DEBUG` (ESPHome's default) | both | neither |
+  | `VERBOSE` | both | both |
+
+  So on a packaged node one line disappears, not two — the clock dump was
+  already below the shipped level and was never in that output. The clock change
+  bites at `DEBUG`, where the line was visible and now needs `VERBOSE`.
+
 
 - **The Lovelace card installs through HACS, and moved to `dist/`** (issue
   #183). The card is a Home Assistant frontend resource, so ESPHome cannot
@@ -1881,6 +1928,16 @@
   `sensor.water_heater_*`) — these are illustrative substitution values, so
   they change nothing at build time.
 
+
+- `tools/mutation_check.sh` checks every entry's search string before it builds
+  anything, and grew a `--verify` flag that does only that. An entry pointing at
+  code that has moved is scored `(not applied)` and turns the sweep red — which
+  is correct, but only after the better part of an hour, and only for the
+  entries a filter happened to select. The static check answers the same
+  question for all of them in about seven seconds. Retargeting the three entries issue
+  #259 invalidated is what prompted it: one was noticed while writing the
+  change, two were found by the sweep.
+
 ### Removed
 
 - **Seven dead schedule methods, and the doc recipe that pointed at the worst of
@@ -1917,7 +1974,6 @@
   `clear_entry()` was already removed; the `clear_entry_async()` deleted here is
   a different method that was also never called.
 
-### Removed
 
 - **The session's ERROR state, which nothing could enter** (issue #174 audit).
   `session.h` documented six states and a `* -> ERROR : Any operation fails
@@ -1933,29 +1989,6 @@
   carries more than a state could. The clearest evidence it was never a distinct
   state is that `is_connected()`, the only predicate that ever inspected it,
   treated ERROR exactly as IDLE.
-
-### Added
-
-- **Host tests for the session FSM** — `tests/test_session.cpp`, 36 assertions.
-  The state machine had been documented in prose and in a diagram and checked by
-  nothing, which is how a state with no way into it survived. Every transition
-  that exists is now pinned, from every state, along with two behaviours a
-  reader would not guess: `on_authenticating()` is reachable from READY for
-  re-authentication and is idempotent, and the out-of-order guards **warn and
-  then transition anyway** rather than refusing — so anything able to call
-  `on_authenticated()` after a disconnect would drive the session to READY. That
-  safety lives in the callers, not in the FSM, and the test now says so.
-
-### Changed
-
-- `tools/mutation_check.sh` checks every entry's search string before it builds
-  anything, and grew a `--verify` flag that does only that. An entry pointing at
-  code that has moved is scored `(not applied)` and turns the sweep red — which
-  is correct, but only after the better part of an hour, and only for the
-  entries a filter happened to select. The static check answers the same
-  question for all of them in about seven seconds. Retargeting the three entries issue
-  #259 invalidated is what prompted it: one was noticed while writing the
-  change, two were found by the sweep.
 
 ### Fixed
 
@@ -3553,7 +3586,6 @@
   / `clear_vacation` services, and `set_pump_state`. All were already
   implemented and covered in `docs/`; only the README summary lagged.
 
-### Fixed
 
 - **The two coupled switches settle like the service they mirror** (issue #302).
   Toggling **Engage Pump** or **Schedule Enabled** now fires exactly one
