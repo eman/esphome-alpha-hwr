@@ -106,9 +106,25 @@ else
     echo "  Warning: $CARD not found! Skipping..."
 fi
 
+# The repo-root manifest, which is the odd one out: nothing consumes it. HACS
+# validates this repository as a plugin and reads hacs.json; ESPHome's
+# external_components loader reads components/ directly and knows manifest.json
+# only as its own bundle format, which needs manifest_version and
+# config_filename and is a different file entirely. So this stamp is for a
+# human reading the repo, not for a tool -- which is exactly why nobody noticed
+# it sitting at 0.1.0 from the initial commit through fifteen releases. Kept
+# and stamped rather than deleted, so the version it declares is true.
+MANIFEST="manifest.json"
+if [ -f "$MANIFEST" ]; then
+    perl -pi -e "s|(\"version\": \")[0-9]+\.[0-9]+\.[0-9]+(\")|\${1}${VER_NO_V}\${2}|" "$MANIFEST"
+    echo "  Updated $MANIFEST"
+else
+    echo "  Warning: $MANIFEST not found! Skipping..."
+fi
+
 echo ""
 echo "Step 3: Committing and pushing release changes..."
-git add CHANGELOG.md "${FILES[@]}" "$CARD"
+git add CHANGELOG.md "${FILES[@]}" "$CARD" "$MANIFEST"
 git commit -m "Release ${NEW_VERSION}"
 git push origin main
 

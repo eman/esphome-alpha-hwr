@@ -1,6 +1,6 @@
 {
   "name": "alpha-hwr",
-  "version": "0.1.0",
+  "version": "0.15.0",
   "description": "Grundfos ALPHA HWR and DHW demand components for ESPHome",
   "components": ["alpha_hwr", "dhw_demand"]
 }
