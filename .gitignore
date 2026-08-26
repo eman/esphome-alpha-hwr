@@ -17,7 +17,13 @@ __pycache__/
 .Python
 build/
 develop-eggs/
-dist/
+# Python packaging would ignore dist/ wholesale, but dist/ is also where the
+# Lovelace card ships from -- HACS looks there first (issue #183). Ignore the
+# directory's *contents* rather than the directory, so the card can be
+# re-included below: git does not descend into an excluded directory, so a
+# negation cannot rescue a file whose parent directory is itself excluded.
+dist/*
+!dist/alpha-hwr-schedule-card.js
 downloads/
 eggs/
 .eggs/
