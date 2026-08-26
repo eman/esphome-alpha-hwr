@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+## [0.16.0] - 2026-08-25
+
 ### Migration
 
 Three breaking changes land in this release. Two of them fail loudly; the third

@@ -42,9 +42,9 @@ substitutions:
 # whenever a config key changes between releases, and the config stops
 # validating.
 packages:
-  alpha_hwr: github://eman/esphome-alpha-hwr/packages/alpha_hwr_pairing.yaml@v0.15.0
-  alpha_hwr_controls: github://eman/esphome-alpha-hwr/packages/alpha_hwr_controls.yaml@v0.15.0
-  dhw_demand: github://eman/esphome-alpha-hwr/packages/dhw_demand_detector.yaml@v0.15.0
+  alpha_hwr: github://eman/esphome-alpha-hwr/packages/alpha_hwr_pairing.yaml@v0.16.0
+  alpha_hwr_controls: github://eman/esphome-alpha-hwr/packages/alpha_hwr_controls.yaml@v0.16.0
+  dhw_demand: github://eman/esphome-alpha-hwr/packages/dhw_demand_detector.yaml@v0.16.0
 
 esp32:
   board: esp32-c3-devkitm-1

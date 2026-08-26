@@ -51,7 +51,7 @@ substitutions:
   # This component's release version, surfaced as the "Component Version"
   # diagnostic entity below (issue #95). Kept in sync automatically by
   # tools/bump_version.sh, which rewrites it alongside the @vX.Y.Z package pin.
-  component_version: "0.15.0"
+  component_version: "0.16.0"
 
   # Where the component's C++ and codegen are loaded from. Overridable so a
   # config can point it at a working tree without also having to declare a
@@ -64,7 +64,7 @@ substitutions:
   # directory before the github:// pattern, so one substitution covers both.
   #
   # Rewritten by tools/bump_version.sh, which matches the @vX.Y.Z.
-  component_source: github://eman/esphome-alpha-hwr@v0.15.0
+  component_source: github://eman/esphome-alpha-hwr@v0.16.0
 
 esphome:
   # Publish the (constant) component version once at boot (issue #95).

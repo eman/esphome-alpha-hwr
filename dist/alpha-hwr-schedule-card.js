@@ -1,5 +1,5 @@
 /**
- * Alpha HWR Schedule Card v0.15.0
+ * Alpha HWR Schedule Card v0.16.0
  *
  * The version is the alpha_hwr RELEASE this card was published with, and is
  * stamped by tools/bump_version.sh. It used to be a card-local "v6" unrelated
@@ -2179,7 +2179,7 @@ class AlphaHwrScheduleCard extends HTMLElement {
 }
 
 // Stamped by tools/bump_version.sh alongside the header above (issue #183).
-const CARD_VERSION = '0.15.0';
+const CARD_VERSION = '0.16.0';
 
 customElements.define('alpha-hwr-schedule-card', AlphaHwrScheduleCard);
 
