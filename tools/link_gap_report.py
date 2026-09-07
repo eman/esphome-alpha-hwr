@@ -102,6 +102,27 @@ MIN_DAYS = 14.0
 # publish an interval count, so this uses a denominator that is exactly known.
 MAX_TRUNCATED_PER_DAY = 2.0
 
+# Rule of three: with no events observed in N units of exposure, the 95% upper
+# bound on the rate is ~3/N. The CRC section below has always said this about
+# its own zero; the budget verdict did not, and recommended lowering the default
+# off runs far too short to support it (issue #313).
+#
+# MIN_DAYS gates whether a report is printed at all. It is NOT sufficient for
+# the tolerance rule: at 14 node-days a clean run bounds the rate at 0.214/day,
+# six times TOLERANCE_PER_DAY. Establishing the tolerance takes 3/TOLERANCE_PER_DAY.
+ZERO_EVENT_BOUND_K = 3.0
+
+
+def zero_event_bound(days: float) -> float:
+    """95% upper bound on a per-day rate after `days` of exposure with no events."""
+    return ZERO_EVENT_BOUND_K / days if days > 0 else float("inf")
+
+
+def tolerance_days_needed() -> float:
+    """Node-days of zero events required before TOLERANCE_PER_DAY is established."""
+    return ZERO_EVENT_BOUND_K / TOLERANCE_PER_DAY
+
+
 GAP_RE = re.compile(r"gaps?\s+over\s+(\d+)\s*s", re.IGNORECASE)
 TRUNCATED_RE = re.compile(r"gaps?\s+truncated", re.IGNORECASE)
 WATCH_RE = re.compile(r"watched\s+time", re.IGNORECASE)
@@ -423,15 +444,31 @@ def print_budgets(nodes: dict[str, NodeTotals], reported: list[int]) -> list[int
         per_node = [rate_per_day(n.over.get(threshold, 0.0), n.days) for n in nodes.values() if n.days > 0]
         worst = max(per_node, default=rate)
         between = 1.0 / rate if rate > 0 else float("inf")
-        ok = threshold >= FLOOR_S and worst < TOLERANCE_PER_DAY
+        # A zero count is not a rate of zero. Compare the upper bound the run
+        # actually supports, or a clean-but-short run "passes" every rung it is
+        # long enough to print (issue #313).
+        bound = zero_event_bound(total_days) if pooled == 0 else worst
+        ok = threshold >= FLOOR_S and bound < TOLERANCE_PER_DAY
         if ok:
             passing.append(threshold)
         why = "PASS"
         if threshold < FLOOR_S:
             why = f"FAIL below the {FLOOR_S}s floor"
+        elif pooled == 0 and bound >= TOLERANCE_PER_DAY:
+            why = f"UNPROVEN zero events, rate only bounded < {bound:.4f}/day"
         elif worst >= TOLERANCE_PER_DAY:
             why = "FAIL over the recycle tolerance"
-        between_text = "never" if math.isinf(between) else f"{between:>12.1f}"
+        # "never" asserts what a zero count cannot support. With no events the
+        # honest figure is the floor the bound implies, not infinity (#313).
+        if math.isinf(between):
+            if pooled == 0 and math.isfinite(bound) and bound > 0:
+                between_text = f">={1.0 / bound:.1f}"
+            elif pooled == 0:
+                between_text = "unproven"
+            else:
+                between_text = "never"
+        else:
+            between_text = f"{between:>12.1f}"
         print(f"  {threshold:>4}s {rate:>13.4f} {between_text:>13} {worst:>13.4f}  {why}")
     return passing
 
@@ -450,6 +487,21 @@ def refusals(nodes: dict[str, NodeTotals], reported: list[int], budget_s: float 
             f"{truncated:.0f} intervals were cut short rather than ending on their own "
             f"({truncated_rate:.2f} per watched day) -- the tail was clipped, not observed"
         )
+
+    # Zero events is the expected shape of a healthy run, so this refusal has to
+    # name what is missing -- exposure -- rather than reading as a fault (#313).
+    eligible = [t for t in reported if t >= FLOOR_S]
+    if eligible and total_days > 0:
+        unobserved = all(sum(n.over.get(t, 0.0) for n in nodes.values()) == 0 for t in eligible)
+        bound = zero_event_bound(total_days)
+        if unobserved and bound >= TOLERANCE_PER_DAY:
+            needed = tolerance_days_needed()
+            problems.append(
+                f"no rung above the floor recorded an event, so the rate is bounded only "
+                f"at {bound:.4f}/day (95%, rule of three) against a tolerance of "
+                f"{TOLERANCE_PER_DAY:.4f}/day -- clean, but {needed:.0f} node-days of zero "
+                f"events are needed to establish it, and this run has {total_days:.1f}"
+            )
 
     if budget_s is None:
         problems.append("no --budget given, so it cannot be checked that the rungs could fill")
@@ -491,6 +543,9 @@ def print_recommendation(passing: list[int], reported: list[int], problems: list
     print(f"    Tolerance  Under {TOLERANCE_PER_DAY:.4f} spurious recycles per node-day (one per")
     print("               30 days). Each recycle takes another run at the")
     print("               encryption-on-open window that can erase the bond (#14).")
+    print("               Tested as an UPPER BOUND: a rung with no events is held")
+    print(f"               to 3/N (95%), so establishing it takes {tolerance_days_needed():.0f}")
+    print("               node-days of zero events, not merely MIN_DAYS.")
     print("    Choose     The smallest rung meeting both. Detection latency is the")
     print("               cost on the other side and these counters cannot measure")
     print("               it -- that half is judgement, said here so it is not")
