@@ -2,6 +2,29 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- **`tools/link_gap_report.py` no longer recommends lowering `data_timeout` off a
+  run too short to support it** (issue #313). The budget verdict compared a zero
+  event count against the tolerance as though it were a rate of zero, so any
+  clean run long enough to print — `MIN_DAYS`, 14 — marked every rung above the
+  floor `PASS` and named the smallest as the new default.
+
+  The report already applied the rule of three to its CRC counter, with a comment
+  recording that an earlier zero on this issue had to be withdrawn for claiming
+  more than it showed. The verdict this tool exists to produce did not. It now
+  does: a rung with no events is held to the 95% upper bound (`3/N`), which takes
+  **90 node-days** of zero events to clear the `1-per-30-days` tolerance, not 14.
+
+  A clean-but-short run now reads `UNPROVEN zero events, rate only bounded <
+  0.1943/day` and refuses with the exposure still needed, rather than falling
+  through to the "no candidate clears both" message — which invites reading a
+  perfectly clean link as a fault. Runs that observed events are unchanged: the
+  point estimate still governs.
+
+  `MIN_DAYS` is untouched. It gates whether a report prints at all, which is a
+  separate question from what the evidence supports.
+
 ## [0.16.0] - 2026-08-25
 
 ### Migration
