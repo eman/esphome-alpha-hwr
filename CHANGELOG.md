@@ -22,6 +22,10 @@
   perfectly clean link as a fault. Runs that observed events are unchanged: the
   point estimate still governs.
 
+  The `days between` column no longer prints `never` for a zero-event rung, which
+  asserted exactly what the verdict beside it says is unproven. It now shows the
+  floor the bound implies (`>=5.1`), or `unproven` where there is no exposure.
+
   `MIN_DAYS` is untouched. It gates whether a report prints at all, which is a
   separate question from what the evidence supports.
 

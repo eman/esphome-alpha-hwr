@@ -458,7 +458,17 @@ def print_budgets(nodes: dict[str, NodeTotals], reported: list[int]) -> list[int
             why = f"UNPROVEN zero events, rate only bounded < {bound:.4f}/day"
         elif worst >= TOLERANCE_PER_DAY:
             why = "FAIL over the recycle tolerance"
-        between_text = "never" if math.isinf(between) else f"{between:>12.1f}"
+        # "never" asserts what a zero count cannot support. With no events the
+        # honest figure is the floor the bound implies, not infinity (#313).
+        if math.isinf(between):
+            if pooled == 0 and math.isfinite(bound) and bound > 0:
+                between_text = f">={1.0 / bound:.1f}"
+            elif pooled == 0:
+                between_text = "unproven"
+            else:
+                between_text = "never"
+        else:
+            between_text = f"{between:>12.1f}"
         print(f"  {threshold:>4}s {rate:>13.4f} {between_text:>13} {worst:>13.4f}  {why}")
     return passing
 
