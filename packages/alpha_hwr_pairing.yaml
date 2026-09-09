@@ -110,6 +110,12 @@ sensor:
       name: "Min Free Heap"
     fragmentation:
       name: "Heap Fragmentation"
+    # What a task watchdog reset actually fires on. The four counters above
+    # answer "did an allocation fail"; none of them answer "did something stop
+    # yielding", which is the other way these nodes reboot (issue #314) and the
+    # one the reset reason alone cannot narrow down.
+    loop_time:
+      name: "Loop Time"
 
 # Ensure text_sensor component is included in build
 text_sensor:
