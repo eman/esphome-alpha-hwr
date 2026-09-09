@@ -2,6 +2,26 @@
 
 ## [Unreleased]
 
+### Added
+
+- **`Loop Time` is now one of the shipped debug sensors** (issue #314). The
+  packages already declare `Free Heap`, `Largest Free Block`, `Min Free Heap`,
+  `Heap Fragmentation` and `Reset Reason` — four ways to see an allocation
+  failure, and one that names why the node last rebooted.
+
+  None of them answer the question a `task watchdog` reset actually raises: what
+  stopped yielding. A node that resets this way reports the reason and nothing
+  else, which is where #314 has been stuck through two occurrences. `loop_time`
+  is what the watchdog fires on, so it gives the next occurrence something to
+  point at, and a known-good baseline to read it against — on the node carrying
+  the #223 run that baseline is a median of 21 ms over 2,131 samples, p95 25 ms,
+  max 91 ms, against a watchdog that trips in seconds.
+
+  Costs one extra sensor per node on the existing 60 s `debug:` interval. No
+  firmware or behaviour change. It is speculative instrumentation: it pays off
+  only if a stall recurs, and only if the stall is in the main loop rather than
+  another task.
+
 ### Fixed
 
 - **`tools/link_gap_report.py` no longer recommends lowering `data_timeout` off a
