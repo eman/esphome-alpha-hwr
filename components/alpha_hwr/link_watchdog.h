@@ -69,29 +69,70 @@
 //
 // The worst case is a connect, not steady state, because the window is timed
 // from connection-open and update() is a free-running poller that the connect
-// path does not synchronise with. The fixed part is 500 ms post-connect +
-// 3 x 1000 ms discovery retries + 2000 ms stabilize = 5.5 s, then up to 10 s to
-// the next poll and 500 ms to its schedule read = 10.5 s after READY.
+// path does not synchronise with.
 //
-// Nothing sits between those two terms any more. The opening sequence used to,
-// and it is gone (issue #174): no reads to be answered slowly, no
-// REPLY_TIMEOUT_MS to multiply by four when they were not answered at all, and
-// no whole-sequence backstop ceiling.
+// Measured on 2026-09-07 (issue #316), from an `esphome logs` capture held open
+// by connect_after_boot_delay, and corroborated independently by the recorder
+// history of Pump Link Longest Gap -- which IS this quantity on a fresh boot,
+// since alpha_hwr.cpp:184 anchors link_last_inbound_ms_ to link_last_open_ms_:
 //
-//   5.5 + 0 + 10.5 = 16.0 s worst case to first inbound data, against the 60 s
-//   default -- leaving 44 s of slack.
+//   connection OPEN        +0.000 s
+//   auth complete          +0.435 s
+//   discovery start        +0.519 s
+//   discovery done         +2.662 s   (one attempt, 2.143 s)
+//   CCCD written           +2.687 s
+//   READY                  +4.692 s   (2.005 s stabilize)
+//   first inbound data     +5.792 s
+//
+// Two boots gave open-to-first-inbound of 5.79 s and 6.48 s. The figures this
+// note used to carry -- 5.90/6.17/5.94 s open-to-READY -- described code removed
+// by issue #174; 4.692 s is the re-measured equivalent, 1.21 s faster, which is
+// the shift that removal was predicted to produce.
+//
+// The worst case is NOT those numbers, and the arithmetic this note carried for
+// it was wrong in a way that mattered. It costed service discovery at
+// "3 x 1000 ms discovery retries" -- only the DISCOVERY_RETRY_DELAY_MS waits.
+// A discovery attempt is not free: one takes 2.143 s measured, and
+// ble_connection_manager.cpp retries while `discovery_retry_count_ <
+// MAX_DISCOVERY_RETRIES`, which fires at 0, 1 and 2 -- so up to FOUR attempts
+// separated by three 1 s delays, not three delays alone:
+//
+//   4 x 2.143 + 3 x 1.000 = 11.57 s, against 3.0 s modelled.
+//
+// So the worst case to first inbound data, on a link that still ends up
+// working, is:
+//
+//   0.519 pre-discovery + 11.572 discovery + 0.025 CCCD + 2.000 stabilize
+//     + 10.000 wait for the next poll + 0.500 schedule read = 24.62 s
+//
+// against the 60 s default, leaving 35 s of slack rather than the 44 s this note
+// used to claim. The typical case remains ~5.8-6.5 s: discovery succeeded on the
+// first attempt on all three boots observed, and the retry path has never been
+// seen. It is included because a budget below it would recycle EVERY connect
+// that needs a retry -- systematically, not occasionally -- and each recycle
+// takes another run at the encryption-on-open window that can erase the bond
+// (issue #14).
+//
+// Weakest input in that chain: 2.143 s is a single sample, used four times over.
+// It is the term worth re-measuring first if this figure ever has to bear more
+// weight than it does here.
 //
 // There is no second, larger case. The branch that used to reach 31.5 s was the
-// sequence backstop firing, and the sequence is gone. Every figure this note
-// carried for the sequence itself -- 0.98 s calculated for an answered
-// handshake, 4.45 s unanswered, 15.45 s with the backstop, and the 1.33 s
-// measured on the bench specimen on 2026-08-17 -- described code that no longer
-// runs and has been removed rather than left to mislead.
+// opening sequence's backstop firing, and the sequence is gone (issue #174):
+// no reads to be answered slowly, no REPLY_TIMEOUT_MS to multiply by four, and
+// no whole-sequence backstop ceiling. Every figure this note carried for the
+// sequence itself -- 0.98 s calculated for an answered handshake, 4.45 s
+// unanswered, 15.45 s with the backstop, and 1.33 s measured on the bench
+// specimen on 2026-08-17 -- described code that no longer runs and has been
+// removed rather than left to mislead.
 //
-// The open-to-READY figures previously recorded here -- 5.90/6.17/5.94 s across
-// three reconnects -- predate the removal and are NOT re-measured. The expected
-// shift is the whole of the old sequence, roughly 1.0-1.3 s faster on a
-// responsive pump. Re-measure before relying on them.
+// What the steady-state side measured, over 16+ days and three boots (#223):
+// the largest gap ever recorded is 9.991 s, which is the ordinary quiet stretch
+// BETWEEN poll cycles rather than a missed one -- the six replies of a cycle
+// arrive together, then the link is idle until the next. A missed cycle would
+// read ~20 s and would have tripped the 15 s rung, which counts zero. So the
+// link has never missed a single poll cycle, and the 60 s default's "tolerates
+// five missed poll cycles" has never been called on to tolerate one.
 //
 // That margin cannot be eroded by configuration: the interval is fixed at
 // PollingComponent(10000) in the constructor, and `update_interval` is not in
