@@ -2,6 +2,39 @@
 
 ## [Unreleased]
 
+### Changed
+
+- **The `data_timeout` sizing note and the report's recommendation floor are now
+  derived from measurement rather than constants** (issues #315, #316, #223).
+
+  `components/alpha_hwr/link_watchdog.h` carried a request to re-measure
+  open-to-READY, because the figures it quoted — 5.90/6.17/5.94 s — described the
+  opening sequence removed by #174. Measured 2026-09-07: **4.692 s** to READY,
+  **5.792 s** to first inbound data, corroborated independently by recorder
+  history of `Pump Link Longest Gap`. The 1.21 s shift is what removing the
+  sequence was predicted to produce.
+
+  Re-deriving the worst case found an error that mattered. The note costed
+  service discovery as `3 x 1000 ms discovery retries` — only the retry *delays*.
+  A discovery attempt takes 2.143 s measured, and up to **four** run
+  (`discovery_retry_count_ < MAX_DISCOVERY_RETRIES` fires at 0, 1, 2), so the
+  term is `4 x 2.143 + 3 x 1.0 = 11.57 s`, not 3.0 s. Worst case to first inbound
+  data is **24.62 s, not 16.0 s** — the calculation was optimistic in the one
+  term never observed failing.
+
+  `FLOOR_S` accordingly moves 41 → **32** (24.62 + 30% margin), replacing a
+  number its own comment admitted was an unexplained constant awaiting exactly
+  this measurement. It changes no recommendation: 15/20/30 fail on either floor
+  and 45 is the smallest survivor either way. The point was to stop the floor
+  being unexplained, not to unlock a shorter default.
+
+  The note also now records what the steady-state side measured over 16+ days
+  and three boots: the largest gap ever seen is 9.991 s, which is the ordinary
+  quiet stretch *between* poll cycles, not a missed one. A missed cycle would
+  read ~20 s and would have tripped the 15 s rung, which counts zero — so the
+  link has never missed a poll cycle, and the default's tolerance for five has
+  never been called on.
+
 ### Fixed
 
 - **`tools/link_gap_report.py` no longer recommends lowering `data_timeout` off a
