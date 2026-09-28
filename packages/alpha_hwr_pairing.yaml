@@ -7,11 +7,9 @@
 # alpha_hwr_controls.yaml (or alpha_hwr_schedule.yaml) on top for the control
 # UI, and alpha_hwr_schedule_editor.yaml for the schedule services.
 #
-# The pump has to be paired to this node. There is no unpaired mode: a peer the
-# pump has never bonded to gets no connection at all (issue #244, measured),
-# so the node pairs on first connection and keeps the bond in NVS. Put the pump
-# into Bluetooth pairing mode for that first connection -- it takes more than a
-# button press; see docs/configuration.md, "Pairing".
+# The node pairs with the pump on first connection and keeps the bond in NVS.
+# Put the pump into Bluetooth pairing mode for that first connection -- it
+# takes more than a button press; see docs/configuration.md, "Pairing".
 #
 # Telemetry: flow, head, head rate, water / PCB / control-box temperature,
 # motor speed, power, AC and DC voltage, motor current, inlet pressure, active

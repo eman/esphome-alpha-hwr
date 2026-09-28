@@ -13,7 +13,7 @@ in the component stack directly from GitHub.
 
 | Package | Purpose | Notes |
 | --- | --- | --- |
-| `packages/alpha_hwr_pairing.yaml` | The pump package: BLE link, full telemetry, diagnostics and schedule read-back | The pump has to be paired to the node; there is no unpaired mode (#244). See [Pairing](#pairing) |
+| `packages/alpha_hwr_pairing.yaml` | The pump package: BLE link, full telemetry, diagnostics and schedule read-back | Pair the pump with the node on first use; see [Pairing](#pairing) |
 | `packages/alpha_hwr_controls.yaml` | Recommended control UI | Adds pump enable, remote mode, schedule toggle, mode select, and setpoint controls |
 | `packages/alpha_hwr_schedule.yaml` | Lighter schedule/remote/mode UI | Simpler alternative to `alpha_hwr_controls.yaml`. **Pick one — including both fails validation**, see below |
 | `packages/alpha_hwr_schedule_editor.yaml` | ESPHome services and helper entities for weekly/single-event editing | Pair with `alpha_hwr_pairing.yaml` |
@@ -60,9 +60,9 @@ delivered to every connected subscriber, so DEBUG is opt-in — put your own
 - **dhw_demand standalone**: any ESPHome-capable board if you only use Home
   Assistant-fed sensors
 - `substitutions.mac_address` for the pump packages
-- The pump paired to the node. There is no unpaired mode: a peer the pump has
-  never bonded to gets no connection at all (#244). The node pairs on first
-  connection; see [Pairing](#pairing) for putting the pump in pairing mode
+- The pump paired with the node, as with any Bluetooth device. The node pairs
+  on first connection; see [Pairing](#pairing) for putting the pump in pairing
+  mode
 - `api:` enabled if you want Home Assistant services/entities
 - `framework.type: esp-idf` is strongly recommended for BLE-based ALPHA HWR
   nodes
@@ -359,12 +359,10 @@ More detail and automation examples are in
 
 ## Pairing
 
-The pump has to be paired to the node. There is no unpaired mode: a peer the
-pump has never bonded to gets no connection at all, measured three for three
-from a never-paired host ([#244](https://github.com/eman/esphome-alpha-hwr/issues/244)),
-and a peer whose bond the pump holds but the node has lost is dropped about 2 s
-after connecting. The component's `initiate_pairing` option therefore defaults
-to `true`, and the package sets it explicitly. First-time flow:
+The pump pairs with the node the way any Bluetooth device does: once, on the
+first connection, and the bond is reused after that. The component's
+`initiate_pairing` option defaults to `true`, and the package sets it
+explicitly. First-time flow:
 
 1. Put the pump into Bluetooth pairing mode — more involved than one button
    press; see

@@ -10,10 +10,9 @@ esphome:
 # For controls and schedules see hwr-pump-schedule-example.yaml and
 # hwr-pump-dhw-example.yaml.
 #
-# The pump has to be paired to the node -- there is no unpaired mode (issue
-# #244). The node pairs on its first connection and keeps the bond in NVS, but
-# the pump only offers to pair while it is in Bluetooth pairing mode, which
-# takes more than a button press: see docs/configuration.md, "Pairing".
+# The node pairs with the pump on its first connection and keeps the bond in
+# NVS. The pump only offers to pair while it is in Bluetooth pairing mode,
+# which takes more than a button press: see docs/configuration.md, "Pairing".
 #
 # Setup Instructions:
 # 1. Replace the MAC address below with your pump's BLE MAC address
