@@ -26,7 +26,7 @@ events fire.
 | --- | --- | --- | --- |
 | `ble_client_id` | string | **required** | BLE client ID for pump connection |
 | `time_id` | ID | none | A `time:` component to sync the pump's clock from. Optional in the schema, but see below — without it the pump's clock is never set. |
-| `initiate_pairing` | boolean | `true` | Whether **this node** initiates BLE pairing and configures security parameters. The pump has to be paired, so leave it on; `false` does *not* prevent bonding — see below. (Formerly `enable_pairing`, still accepted.) |
+| `initiate_pairing` | boolean | `true` | Whether **this node** initiates BLE pairing and configures security parameters. Leave it on; `false` does *not* prevent bonding — see below. (Formerly `enable_pairing`, still accepted.) |
 | `reconnect_settle_time` | time | `2s` | Delay after disconnect before reconnecting |
 | `control_state_poll_interval` | time | `30s` | Interval for periodic control state polling. Set to `0s` to disable. |
 | `data_timeout` | time | `60s` | Tear the BLE link down after this long with no data from the pump, so the normal reconnect runs. Set to `0s` to disable. |
@@ -210,9 +210,9 @@ pump's rule through the GO app, or the node's zone in your `time:` block.
 > `enable_pairing` is still accepted and means exactly what it always did.
 > Setting both names to different values is refused rather than resolved.
 
-**It defaults to `true`.** It defaulted to `false` while this repo believed the
-pump offered an unpaired telemetry mode; #244 measured that it does not (see
-below), so a node with it off is a node that bonds by accident with no security
+**It defaults to `true`.** It defaulted to `false` while this repo shipped a
+package that claimed to work without pairing; that package is gone (#244), and
+a node with the option off bonds anyway when the pump asks, with no security
 parameters configured. A hand-written `alpha_hwr:` block that never set the
 option now initiates pairing; set `initiate_pairing: false` to keep the old
 behaviour on purpose.
@@ -222,8 +222,7 @@ the node stays silent and waits for the pump's security request, because a
 pairing request sent from this side to an unbonded pump comes back "Pairing Not
 Supported" and loses the pump's own request in the process.
 
-Bonding is not optional. A peer the pump has never bonded to does not get a
-connection at all: measured from a never-paired Linux host on 2026-09-27, three
+A peer the pump has never bonded to does not get a connection at all: measured from a never-paired Linux host on 2026-09-27, three
 direct connection requests in a row drew no link-layer reply from the pump, and
 the controller gave each one up within 150-300 ms with `Connection Failed to be
 Established (0x3e)` ([#244](https://github.com/eman/esphome-alpha-hwr/issues/244)).

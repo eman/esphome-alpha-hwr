@@ -4,8 +4,8 @@
 
 ### Migration
 
-Two related changes in this release follow from the finding on #244 that the
-pump has no unpaired mode.
+Two related changes in this release follow from #244, which settled that the
+pump pairs like any other Bluetooth device.
 
 | Change | What breaks | What to do |
 | --- | --- | --- |
@@ -19,9 +19,8 @@ pump package and is the example it used to be.
 
 - **`packages/alpha_hwr_base.yaml`, `hwr-pairing-example.yaml` and the CI
   config that validated the base package** (issue #244). The base package
-  existed to offer telemetry without pairing, and the pump does not offer that:
-  a peer it has never bonded to gets no connection at all. What the package
-  actually delivered was a node with `initiate_pairing` off, which bonds by
+  existed to offer telemetry without pairing, which the pump does not support.
+  What the package actually delivered was a node with `initiate_pairing` off, which bonds by
   accident when the pump asks and configures no security parameters while doing
   it. One pump package remains, `alpha_hwr_pairing.yaml`, which keeps its
   historical name because configs reference it by URL.
@@ -32,8 +31,8 @@ pump package and is the example it used to be.
 
 - **The README, the packages README, `docs/configuration.md`, the package header
   and the example no longer describe pairing as optional.** The README's
-  "basic vs paired" comparison is gone, its Pairing section now says the pump
-  has to be paired and points at the Suspend Pump Link switch it previously
+  "basic vs paired" comparison is gone, its Pairing section now treats pairing
+  as the ordinary first step and points at the Suspend Pump Link switch it previously
   claimed did not exist, and the `enable_pairing` spelling it still used is
   replaced by `initiate_pairing`. Four code comments that reasoned from
   "pairing disabled (the default)" or "passive telemetry needs no bond" are
@@ -94,15 +93,14 @@ pump package and is the example it used to be.
   never missed a poll cycle, and the default's tolerance for five has never
   been called on.
 
-- **The base package no longer offers an unpaired mode, because the pump does
-  not have one** (issue #244). Measured 2026-09-27 from a Linux host the pump had
+- **The base package no longer claims to work without pairing** (issue #244). Measured 2026-09-27 from a Linux host the pump had
   never bonded to: three direct connection requests in a row drew no link-layer
   reply, each given up by the controller within 150-300 ms as `Connection Failed
   to be Established (0x3e)`. Combined with the 90 ESP32 cycles already on record
   where a peer with a *stale* bond connects and is dropped ~2 s later, there is
   no unbonded state in which a GENI frame has ever been exchanged. The package
   header, both READMEs and the pairing section of `docs/configuration.md` now say
-  the pump has to be paired to the node; three code comments that reasoned from
+  to pair the pump with the node; three code comments that reasoned from
   "unbonded operation is a supported mode" are corrected. No behaviour changes.
 
 ### Fixed

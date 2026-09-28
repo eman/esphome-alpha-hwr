@@ -6,11 +6,9 @@ This directory contains reusable YAML packages for the Grundfos ALPHA HWR pump c
 
 ### `alpha_hwr_pairing.yaml` - The pump package
 The BLE link plus every telemetry and diagnostic entity the component exposes.
-The pump has to be paired to the node: there is no unpaired mode, a peer the
-pump has never bonded to gets no connection at all (issue #244). The node pairs
-on first connection, while the pump is in Bluetooth pairing mode, and keeps the
-bond in NVS. (The file keeps its historical name from when the repo shipped a
-second, "unpaired" package; configs reference it by URL.)
+The node pairs with the pump on first connection, while the pump is in
+Bluetooth pairing mode, and keeps the bond in NVS. (The file keeps its
+historical name; configs reference it by URL.)
 
 **Sensors included:**
 - Flow Rate (m³/h), Head (m), Head Rate, Motor Speed (RPM), Power (W)
