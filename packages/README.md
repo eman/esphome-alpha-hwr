@@ -5,7 +5,9 @@ This directory contains reusable YAML packages for the Grundfos ALPHA HWR pump c
 ## Available Packages
 
 ### `alpha_hwr_base.yaml` - Basic Telemetry
-Provides essential pump monitoring without BLE pairing.
+Provides essential pump monitoring. The node never initiates pairing, but the
+pump has to be paired to it all the same: a peer the pump has never bonded to
+cannot hold a connection (issue #244).
 
 **Sensors Included:**
 - Flow Rate (m³/h)
@@ -195,7 +197,9 @@ See the root directory for complete example configurations:
 - Check logs for pairing error messages
 
 ### Sensors Show "Unknown"
-- Basic sensors (flow, temp, RPM) work without pairing
+- No sensor updates until the pump is paired to the node. A never-paired peer
+  is refused at the link layer, and a peer with a stale bond is dropped about
+  2 s after connecting (issues #244, #230)
 - Voltage/current sensors **require** pairing to be enabled
 - Wait 10-30 seconds after connection for first telemetry update
 

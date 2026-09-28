@@ -13,7 +13,7 @@ in the component stack directly from GitHub.
 
 | Package | Purpose | Notes |
 | --- | --- | --- |
-| `packages/alpha_hwr_base.yaml` | Basic ALPHA HWR telemetry without BLE pairing | Good starting point for read-only monitoring |
+| `packages/alpha_hwr_base.yaml` | Basic ALPHA HWR telemetry; the node never initiates pairing | Read-only monitoring. The pump still has to be paired to the node -- an unpaired peer gets no connection (#244) -- see `docs/configuration.md` |
 | `packages/alpha_hwr_pairing.yaml` | Full telemetry, diagnostics, schedules, and paired BLE access | Required for controls and schedule editing |
 | `packages/alpha_hwr_controls.yaml` | Recommended control UI | Adds pump enable, remote mode, schedule toggle, mode select, and setpoint controls |
 | `packages/alpha_hwr_schedule.yaml` | Lighter schedule/remote/mode UI | Simpler alternative to `alpha_hwr_controls.yaml`. **Pick one — including both fails validation**, see below |

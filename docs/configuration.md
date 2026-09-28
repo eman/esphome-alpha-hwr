@@ -217,6 +217,18 @@ the node stays silent and waits for the pump's security request, because a
 pairing request sent from this side to an unbonded pump comes back "Pairing Not
 Supported" and loses the pump's own request in the process.
 
+Bonding is not optional. A peer the pump has never bonded to does not get a
+connection at all: measured from a never-paired Linux host on 2026-09-27, three
+direct connection requests in a row drew no link-layer reply from the pump, and
+the controller gave each one up within 150-300 ms with `Connection Failed to be
+Established (0x3e)` ([#244](https://github.com/eman/esphome-alpha-hwr/issues/244)).
+That is the same shape as the dozen refused connects reported there from a
+never-bonded node against a pump not in pairing mode. A peer whose address the
+pump *does* hold a bond for gets one stage further: the link opens, and the pump
+drops it about 2 s later for failing to encrypt (the case below). Neither state
+ever carries a GENI frame. The one configuration not yet observed is a
+factory-fresh pump that has never bonded to anything.
+
 That works whenever the pump is willing to pair. It has one failure mode, and it
 is not recoverable over the air:
 
@@ -282,8 +294,7 @@ which points at radio trouble — and the radio is fine; the connections succeed
 
 Three cycles rather than one, so an ordinary dropped link is not reported as a
 pairing problem — and three specific cycles. A connection that carried data is
-not counted, so an unbonded node running read-only telemetry (the default, since
-`initiate_pairing` is `false`) does not accumulate them on its ordinary
+not counted, so a working node does not accumulate them on its ordinary
 reconnects. Neither is a link the node dropped itself: a `data_timeout` recycle
 looks identical in every other respect, and blaming pairing for a pump that is
 simply not answering would replace a true diagnosis with a false one. Neither,

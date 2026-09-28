@@ -36,6 +36,17 @@
   never missed a poll cycle, and the default's tolerance for five has never
   been called on.
 
+- **The base package no longer offers an unpaired mode, because the pump does
+  not have one** (issue #244). Measured 2026-09-27 from a Linux host the pump had
+  never bonded to: three direct connection requests in a row drew no link-layer
+  reply, each given up by the controller within 150-300 ms as `Connection Failed
+  to be Established (0x3e)`. Combined with the 90 ESP32 cycles already on record
+  where a peer with a *stale* bond connects and is dropped ~2 s later, there is
+  no unbonded state in which a GENI frame has ever been exchanged. The package
+  header, both READMEs and the pairing section of `docs/configuration.md` now say
+  the pump has to be paired to the node; three code comments that reasoned from
+  "unbonded operation is a supported mode" are corrected. No behaviour changes.
+
 ### Fixed
 
 - **`tools/link_gap_report.py` no longer recommends lowering `data_timeout` off a

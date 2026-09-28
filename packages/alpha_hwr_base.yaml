@@ -5,25 +5,29 @@
 # This package provides basic telemetry from the Grundfos ALPHA HWR pump, with
 # this node never INITIATING BLE pairing. Use it for simple monitoring.
 #
-# It used to say "without BLE pairing/bonding", and that claim could not be
-# supported (issues #244 and #245). Two separate problems with it:
+# The pump still has to be paired to this node. The package used to say it
+# worked "without BLE pairing/bonding", and that is wrong in two separate ways
+# (issues #244 and #245):
 #
 #   1. Not initiating is not the same as not bonding. The pump can initiate, and
 #      ESPHome consents on our behalf before this component sees the event -- a
 #      node on this package was observed bonding four times in twenty minutes
 #      (#245). So this package does not deliver an unbonded node, and never did.
 #
-#   2. Whether an unbonded link WORKS on this pump is still open (#244). The
-#      sibling client's docs record a measured ~1.8 s drop of an unbonded
-#      connection, in seven places, traced to a debugging episode rather than
-#      assumed; on the ESP32 the pump accepts the connection, completes
-#      discovery, accepts the CCCD write and then hangs up at ~2.02 s, having
-#      sent zero GENI frames across 90 measured cycles. Nobody has yet reported
-#      a node on this package reaching Pump Ready without a bond.
+#   2. A peer the pump has never bonded to cannot hold a connection at all
+#      (#244, measured 2026-09-27). From a never-paired Linux host, three
+#      direct connection requests in a row drew no link-layer reply: the
+#      controller gave each one up within 150-300 ms with "Connection Failed to
+#      be Established (0x3e)". A peer whose address the pump DOES hold a bond
+#      for gets one stage further -- the link opens, and the pump drops it about
+#      2 s later for failing to encrypt (#230; 90 cycles measured on ESP32s,
+#      zero GENI frames). The sibling client's docs record the same ~1.8 s drop,
+#      and the GO app's own code will not discover services on an unbonded link.
 #
-# So: use this package for monitoring, and expect to pair the pump. If you are
-# running it unpaired and it works, please say so on #244 -- one "yes" settles
-# a question the repo has asserted in four places and measured in none.
+# So: use this package for monitoring, and pair the pump to the node first
+# (docs/configuration.md, "Pairing"). The one configuration still unobserved is
+# a factory-fresh pump that has never bonded to anything; if yours reaches Pump
+# Ready with no pairing step, please report it on #244.
 #
 # Telemetry Included:
 # - Flow Rate (m³/h)

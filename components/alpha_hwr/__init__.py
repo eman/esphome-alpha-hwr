@@ -272,12 +272,12 @@ CONFIG_SCHEMA = (
             # that never becomes ready it would do that on an escalating
             # schedule indefinitely.
             #
-            # Whether such a node exists in a supported configuration is issue
-            # #244 -- an attempt to measure it was confounded three ways at once
-            # (a pre-release build, pairing enabled rather than defaulted, and a
-            # signal at the noise floor) and it bonded within 252 ms regardless
-            # (issue #245). So the diagnosis ships on and the remedy waits for
-            # someone who wants it and can see their node reaches ready today.
+            # Such a node exists: a pump holding a bond for a peer that lost
+            # its own (issue #230) connects and never becomes ready. Issue #244
+            # measured the other unbonded state too -- a never-bonded peer gets
+            # no connection at all -- so there is no unbonded configuration in
+            # which a link works. The diagnosis ships on and the remedy waits
+            # for someone who wants it and can see their node reaches ready.
             cv.Optional(CONF_READY_RECYCLE, default=False): validate_ready_recycle,
             # Diagnostic protocol capture. Logs every GENI frame sent and
             # received, whole, at INFO -- the only way to see what the component

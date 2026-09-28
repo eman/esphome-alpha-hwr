@@ -335,8 +335,9 @@ public:
   // so. Defaults to false, and the asymmetry is the whole reason the two are
   // separate options: naming the fault costs nothing, while recycling takes
   // another run at the encryption-on-open window that can erase a bond
-  // (issue #14) -- and on a configuration nobody has yet observed (issue #244)
-  // it may do that forever. So the diagnosis ships on and the remedy is opt-in.
+  // (issue #14) -- and on a node the pump holds a stale bond for (issue #230),
+  // which connects and never becomes ready, it would do that forever. So the
+  // diagnosis ships on and the remedy is opt-in.
   // A COUNT, not a flag (issue #257). 0 never recycles; N recycles at most N
   // consecutive times and then stops, leaving the fault standing;
   // READY_RECYCLE_FOREVER is the unbounded behaviour a `true` in YAML still
