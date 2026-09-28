@@ -100,9 +100,11 @@ enum class GapSecurityAction : uint8_t {
 /// its behalf would be the same overreach as replying "yes", just in the other
 /// direction. Silence leaves the decision where it belongs.
 ///
-/// DECLINE is what `enable_pairing: false` means -- it defaults to false and
-/// documents itself as passive telemetry only. init_security() already honours
-/// it by never configuring the security parameters; the reply paths did not.
+/// DECLINE is what `initiate_pairing: false` means: this node does not ask and
+/// sets no security parameters. init_security() already honours it by never
+/// configuring the security parameters; the reply paths did not. (The option
+/// defaulted to false until issue #244 measured that the pump has to be paired;
+/// it now defaults to true, and false is an explicit choice.)
 inline GapSecurityAction gap_security_action(bool addr_is_ours, bool pairing_enabled) {
   if (!addr_is_ours) {
     return GapSecurityAction::IGNORE;

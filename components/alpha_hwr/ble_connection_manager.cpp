@@ -131,7 +131,8 @@ bool BLEConnectionManager::is_alpha_hwr_device(const esp32_ble_tracker::ESPBTDev
 
 void BLEConnectionManager::init_security() {
   if (!pairing_enabled_) {
-    ESP_LOGI(TAG, "BLE pairing disabled - using passive telemetry only");
+    ESP_LOGI(TAG, "initiate_pairing is off: this node will not ask to pair and sets no "
+                  "security parameters (the pump may still initiate)");
     return;
   }
   
@@ -563,8 +564,8 @@ void BLEConnectionManager::handle_notification(const esp_ble_gattc_cb_param_t *p
     ESP_LOGV(TAG, "Received notification, %d bytes", notify_evt->value_len);
     // Inbound data refutes a held "no data from pump" reason by construction,
     // so release that hold here rather than waiting for the AUTH_CMPL clear
-    // below — with pairing disabled (the default) AUTH_CMPL never fires at all,
-    // so a watchdog hold would otherwise never be released. Scoped to the
+    // below — with initiate_pairing off AUTH_CMPL never fires at all, so a
+    // watchdog hold would otherwise never be released. Scoped to the
     // watchdog's own hold: see failure_hold.h for why an auth-failure hold must
     // survive notifications.
     if (failure_hold_released_by_data(failure_hold_)) {

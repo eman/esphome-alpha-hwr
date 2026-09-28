@@ -1,23 +1,30 @@
 # ==============================================================================
-# ALPHA HWR Enhanced Package (with BLE Pairing)
+# ALPHA HWR Package
 # ==============================================================================
-# 
-# This package provides FULL telemetry from the Grundfos ALPHA HWR pump
-# with BLE pairing/bonding enabled for authenticated access.
 #
-# Enhanced Telemetry Included:
-# - All sensors from alpha_hwr_base.yaml PLUS:
-# - AC Voltage (V) - Requires pairing
-# - DC Voltage (V) - Requires pairing
-# - Motor Current (A) - Requires pairing
-# - Inlet Pressure (bar) - Requires pairing
-# - PCB Temperature (°C)
-# - Control Box Temperature (°C)
-# - Active Alarms (text sensor) - Requires pairing
-# - Active Warnings (text sensor) - Requires pairing
-# - Pairing Status (binary sensor)
-# - Pump Link Status (text sensor)
-# - Pump Link Fault (text sensor)
+# The pump package: the BLE link, every telemetry and diagnostic entity the
+# component exposes, and the schedule read-back sensors. Add
+# alpha_hwr_controls.yaml (or alpha_hwr_schedule.yaml) on top for the control
+# UI, and alpha_hwr_schedule_editor.yaml for the schedule services.
+#
+# The pump has to be paired to this node. There is no unpaired mode: a peer the
+# pump has never bonded to gets no connection at all (issue #244, measured),
+# so the node pairs on first connection and keeps the bond in NVS. Put the pump
+# into Bluetooth pairing mode for that first connection -- it takes more than a
+# button press; see docs/configuration.md, "Pairing".
+#
+# Telemetry: flow, head, head rate, water / PCB / control-box temperature,
+# motor speed, power, AC and DC voltage, motor current, inlet pressure, active
+# alarms and warnings, run state, control mode, flow limiter.
+# Diagnostics: pump ready, pairing status, link status / fault / recycles /
+# longest gap, pump clock DST check, heap, reset reason, component version and
+# build, serial and firmware versions.
+# Schedules: the five layers, single events, vacation, schedule hash and stall.
+# History: event log, trends, cycle timestamps, start count, operating hours,
+# clock drift and last clock sync.
+#
+# The file keeps its historical name; it was one of two packages when the repo
+# believed pairing was optional, and configs reference it by URL.
 #
 # Requirements:
 # - ESP32 with BLE support
@@ -26,12 +33,9 @@
 # Usage:
 #   substitutions:
 #     mac_address: "AA:BB:CC:DD:EE:FF"
-#   
+#
 #   packages:
 #     alpha_hwr: !include packages/alpha_hwr_pairing.yaml
-#
-# Note: On first connection, the pump will pair/bond with the ESP32.
-# Bonding keys are stored in NVS flash for automatic reconnection.
 # ==============================================================================
 
 substitutions:
@@ -142,9 +146,9 @@ text_sensor:
 # Here rather than in alpha_hwr_controls.yaml, and the reason is which
 # configurations ship with it. The switch below is for handing the pump to
 # something else, which only matters for a node that is BONDED AND CONNECTED --
-# and that is this package. Both shipped bonded examples
-# (hwr-pairing-example.yaml and hwr-pump-schedule-example.yaml) load this and not
-# controls, so putting it there left them without the switch that
+# and that is this package. The shipped examples (hwr-pump-example.yaml and
+# hwr-pump-schedule-example.yaml) load this and not necessarily controls, so
+# putting it there would have left them without the switch that
 # docs/configuration.md tells them to turn on. Raised in review on #285.
 switch:
   # Diagnostic suspend (issue #243). The pump accepts one BLE connection at a
@@ -190,9 +194,10 @@ alpha_hwr:
    id: pump
    ble_client_id: hwr_pump_client
    time_id: hwr_time
-   # This node initiates pairing. It does NOT control whether a bond forms --
-   # the pump can initiate and ESPHome consents before this component sees the
-   # event, so a node with this false can still bond (issue #245). Renamed from
+   # The component's default since the pump was measured to require a bond
+   # (issue #244); stated here so the package does not depend on it. It does
+   # NOT control whether a bond forms -- the pump can initiate and ESPHome
+   # consents before this component sees the event (issue #245). Renamed from
    # `enable_pairing`, which is still accepted.
    initiate_pairing: true
     

@@ -242,17 +242,12 @@ jobs:
       - name: Validate CI config (working tree)
         run: esphome config tests/ci-compile.yaml
 
-      # Two packages cannot share the config above and so had no working-tree
-      # check at all -- the only examples that load them pin a release tag, so CI
-      # was validating the last release of each rather than the branch.
-      # alpha_hwr_schedule.yaml collides with alpha_hwr_controls.yaml on two
-      # entity names and one id; alpha_hwr_base.yaml is a parallel copy of
-      # alpha_hwr_pairing.yaml rather than an include.
+      # alpha_hwr_schedule.yaml cannot share the config above -- it collides
+      # with alpha_hwr_controls.yaml on two entity names and one id -- and the
+      # only example that loads it pins a release tag, so without this CI was
+      # validating the last release of it rather than the branch.
       - name: Validate CI config, schedule UI (working tree)
         run: esphome config tests/ci-compile-schedule.yaml
-
-      - name: Validate CI config, base package (working tree)
-        run: esphome config tests/ci-compile-base.yaml
 
       # Some examples reference !secret. secrets.yaml is gitignored, so seed a
       # throwaway one here. ESPHome resolves !secret relative to the config
@@ -281,7 +276,7 @@ jobs:
       - name: Validate example configs
         run: |
           status=0
-          for f in hwr-pump-example.yaml hwr-pairing-example.yaml \
+          for f in hwr-pump-example.yaml \
                    hwr-pump-schedule-example.yaml dhw-demand-example.yaml \
                    hwr-pump-dhw-example.yaml \
                    components/alpha_hwr/discovery_example.yaml; do

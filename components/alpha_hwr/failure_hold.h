@@ -26,17 +26,19 @@
 //
 //   - DATA and SUBSCRIBE are released by any inbound notification, which
 //     refutes them by construction. They must NOT be released by a successful
-//     AUTH_CMPL: with pairing disabled (the default) AUTH_CMPL never fires at
-//     all, and reaching one proves nothing about whether the pump is answering
+//     AUTH_CMPL: with initiate_pairing off AUTH_CMPL never fires at all, and
+//     reaching one proves nothing about whether the pump is answering
 //     -- which is the very defect the watchdog exists for.
 //   - AUTH is released by a successful AUTH_CMPL, because the failure it
 //     records erases the bond and recovery must pass back through one -- and,
 //     failing that, by the GENI session reaching READY. It must NOT be
 //     released by inbound data: an SMP failure on an UNBONDED pump latches its
-//     reason WITHOUT tearing the link down, and that link then subscribes and
-//     delivers notifications normally (passive telemetry needs no bond).
-//     Releasing AUTH on data would wipe the pairing diagnostic while it is
-//     still the operative fault.
+//     reason WITHOUT tearing the link down, and nothing stops that link from
+//     subscribing and carrying data afterwards. (This was written when passive
+//     telemetry was assumed to need no bond; issue #244 has since measured that
+//     no unbonded link ever carries data on this pump. The rule stands on its
+//     own: inbound data says nothing about the bond.) Releasing AUTH on data
+//     would wipe the pairing diagnostic while it is still the operative fault.
 //
 // The READY release is what bounds an AUTH hold, and it exists because the
 // rank made the hold otherwise unbreakable for the rest of the boot: nothing

@@ -26,7 +26,7 @@ events fire.
 | --- | --- | --- | --- |
 | `ble_client_id` | string | **required** | BLE client ID for pump connection |
 | `time_id` | ID | none | A `time:` component to sync the pump's clock from. Optional in the schema, but see below — without it the pump's clock is never set. |
-| `initiate_pairing` | boolean | `false` | Whether **this node** initiates BLE pairing and configures security parameters. It does *not* prevent bonding — see below. (Formerly `enable_pairing`, still accepted.) |
+| `initiate_pairing` | boolean | `true` | Whether **this node** initiates BLE pairing and configures security parameters. The pump has to be paired, so leave it on; `false` does *not* prevent bonding — see below. (Formerly `enable_pairing`, still accepted.) |
 | `reconnect_settle_time` | time | `2s` | Delay after disconnect before reconnecting |
 | `control_state_poll_interval` | time | `30s` | Interval for periodic control state polling. Set to `0s` to disable. |
 | `data_timeout` | time | `60s` | Tear the BLE link down after this long with no data from the pump, so the normal reconnect runs. Set to `0s` to disable. |
@@ -67,9 +67,8 @@ pump link is up:
 [W][alpha_hwr]:   Schedule windows run on the pump's own RTC, which drifts
 ```
 
-Both entry packages — `alpha_hwr_base.yaml` and `alpha_hwr_pairing.yaml` —
-already wire this up, so this applies to configs that declare `alpha_hwr:` by
-hand:
+`alpha_hwr_pairing.yaml` already wires this up, so this applies to configs that
+declare `alpha_hwr:` by hand:
 
 ```yaml
 time:
@@ -112,8 +111,8 @@ that stopped being kept.
 If you use `alpha_hwr_pairing.yaml`, the **Last Clock Sync** text sensor reports
 when a write was last confirmed by the pump and **Clock Drift** reports how far
 off the pump was when it was found; the two together are the way to check this
-is working. `alpha_hwr_base.yaml` declares neither, so on that package and on
-hand-written blocks the log is the only signal.
+is working. On hand-written blocks that declare neither, the log is the only
+signal.
 
 ### Timezones, and what the pump stores
 
@@ -180,8 +179,8 @@ text_sensor:
 It reads `OK (Mar Sun#2 02:00 - Nov Sun#1 02:00, +60 min)` when the two agree,
 and names both rules when they do not.
 
-`alpha_hwr_pairing.yaml` declares it. **On `alpha_hwr_base.yaml` and on
-hand-written blocks you have to add it**, and adding it is the only way to get
+`alpha_hwr_pairing.yaml` declares it. **On hand-written blocks you have to add
+it**, and adding it is the only way to get
 the check at all: the 94/102 read is skipped entirely when the entity is absent,
 so there is no log warning to fall back on either. That is the same
 "don't pay for what you didn't ask for" rule the other optional reads follow —
@@ -208,9 +207,15 @@ pump's rule through the GO app, or the node's zone in your `time:` block.
 > and what security parameters it sets. It has never meant "do not bond"; it
 > means "do not ask, but say yes if asked".
 >
-> `enable_pairing` is still accepted and means exactly what it always did, so no
-> existing configuration changes behaviour. Setting both names to different
-> values is refused rather than resolved.
+> `enable_pairing` is still accepted and means exactly what it always did.
+> Setting both names to different values is refused rather than resolved.
+
+**It defaults to `true`.** It defaulted to `false` while this repo believed the
+pump offered an unpaired telemetry mode; #244 measured that it does not (see
+below), so a node with it off is a node that bonds by accident with no security
+parameters configured. A hand-written `alpha_hwr:` block that never set the
+option now initiates pairing; set `initiate_pairing: false` to keep the old
+behaviour on purpose.
 
 Pairing is initiated by the pump, not by this node. On an unbonded connection
 the node stays silent and waits for the pump's security request, because a
@@ -256,10 +261,10 @@ own pump (see [#229](https://github.com/eman/esphome-alpha-hwr/pull/229)):
    whether a link is established.
 6. If nothing happens, press it again. It commonly takes several attempts.
 
-Then let the node reconnect. **Set `initiate_pairing: true` before any of this**,
-or the pump's offer goes nowhere: with it false this component configures no IO
-capability, no bonding requirement and no key distribution, so nothing is set up
-to complete a bond. (ESPHome's own BLE client answers the pump's request
+Then let the node reconnect. **Leave `initiate_pairing` at its default of
+`true`**, or the pump's offer goes nowhere: with it false this component
+configures no IO capability, no bonding requirement and no key distribution, so
+nothing is set up to complete a bond. (ESPHome's own BLE client answers the pump's request
 regardless — this node cannot decline it — but answering is not bonding.)
 
 > **When the node does have to give up the link.** A node that is *bonded and
@@ -360,12 +365,8 @@ genuine failure of the reconnect itself publishes normally rather than being
 suppressed.
 
 **Which package provides it.** The switch ships in `alpha_hwr_pairing.yaml`,
-alongside the link diagnostics it acts on.
-
-If you build from `alpha_hwr_base.yaml` instead you do not get it — and you
-still hold the pump, because it is the *connection* that holds it, not the bond.
-A base-only node connects, reaches `Pump Ready`, and denies the pump to
-everything else exactly as a bonded one does. Load the pairing package, or add
+alongside the link diagnostics it acts on. A hand-written `alpha_hwr:` block
+holds the pump just the same — it is the *connection* that holds it — so add
 the switch yourself:
 
 ```yaml
@@ -831,7 +832,11 @@ real hardware looked like".
 
 ## Examples
 
-### Basic read-only monitoring
+### Minimal hand-written block
+
+`initiate_pairing` defaults to `true`, so this pairs on first connection like
+the package does.
+
 ```yaml
 alpha_hwr:
   ble_client_id: hwr_pump_client
