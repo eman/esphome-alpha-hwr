@@ -28,12 +28,13 @@
   and 45 is the smallest survivor either way. The point was to stop the floor
   being unexplained, not to unlock a shorter default.
 
-  The note also now records what the steady-state side measured over 16+ days
-  and three boots: the largest gap ever seen is 9.991 s, which is the ordinary
-  quiet stretch *between* poll cycles, not a missed one. A missed cycle would
-  read ~20 s and would have tripped the 15 s rung, which counts zero — so the
-  link has never missed a poll cycle, and the default's tolerance for five has
-  never been called on.
+  The note also now records what the steady-state side measured: over 35.7
+  node-days across four reboots the 15 s rung counted zero, and the largest gap
+  the recorder held over the run's first ten days is 9.991 s, which is the
+  ordinary quiet stretch *between* poll cycles, not a missed one. A missed
+  cycle would read ~20 s and would have tripped the 15 s rung — so the link has
+  never missed a poll cycle, and the default's tolerance for five has never
+  been called on.
 
 ### Fixed
 

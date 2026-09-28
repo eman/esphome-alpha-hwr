@@ -126,13 +126,15 @@
 // specimen on 2026-08-17 -- described code that no longer runs and has been
 // removed rather than left to mislead.
 //
-// What the steady-state side measured, over 16+ days and three boots (#223):
-// the largest gap ever recorded is 9.991 s, which is the ordinary quiet stretch
-// BETWEEN poll cycles rather than a missed one -- the six replies of a cycle
-// arrive together, then the link is idle until the next. A missed cycle would
-// read ~20 s and would have tripped the 15 s rung, which counts zero. So the
-// link has never missed a single poll cycle, and the 60 s default's "tolerates
-// five missed poll cycles" has never been called on to tolerate one.
+// What the steady-state side measured (#223): over 35.7 node-days of watched
+// link across four reboots, the 15 s rung counted zero -- not one quiet
+// interval longer than 15 s, ever. Over the first ten days of that run the
+// recorder's history of Pump Link Longest Gap peaked at 9.991 s, which is the
+// ordinary quiet stretch BETWEEN poll cycles rather than a missed one -- the
+// six replies of a cycle arrive together, then the link is idle until the
+// next. A missed cycle would read ~20 s and would have tripped the 15 s rung.
+// So the link has never missed a single poll cycle, and the 60 s default's
+// "tolerates five missed poll cycles" has never been called on to tolerate one.
 //
 // That margin cannot be eroded by configuration: the interval is fixed at
 // PollingComponent(10000) in the constructor, and `update_interval` is not in
