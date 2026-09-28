@@ -38,6 +38,18 @@
 
 ### Fixed
 
+- **The BLE scanner no longer starves WiFi** (PR_PLACEHOLDER). The packages and
+  `components/alpha_hwr/discovery_example.yaml` scanned with
+  `interval: 1.1s` / `window: 1.1s` — a 100% duty cycle on a radio the ESP32
+  shares between WiFi and BLE, which ESPHome itself warns about at config time.
+  On a deployed node it showed as 100–275 ms LAN ping latency, eleven brief
+  Home Assistant disconnects in a week, and one outage in which HA completed the
+  encrypted handshake but timed out waiting for `DeviceInfoResponse` /
+  `ListEntities` 33 times. The scan now uses `interval: 320ms` /
+  `window: 300ms`, ESPHome's recommendation, leaving WiFi a slot every interval.
+  The 1.1 s values dated from the initial commit with no recorded rationale.
+  Nodes that override `scan_parameters` themselves are unaffected.
+
 - **`tools/link_gap_report.py` no longer recommends lowering `data_timeout` off a
   run too short to support it** (issue #313). The budget verdict compared a zero
   event count against the tolerance as though it were a rate of zero, so any
