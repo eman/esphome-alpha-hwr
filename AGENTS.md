@@ -19,7 +19,7 @@ Our mission is to provide a robust, reliable, and feature-rich ESPHome component
   * *Phase 2:* Bonded Telemetry (BLE pairing + READ).
   * *Phase 3:* Basic Control (WRITE commands).
   * *Phase 4:* Complex Management (Schedules, Time Sync).
-* **Simple Configuration**: The `hwr-pump-example.yaml` configuration should demonstrate best practices and be the reference for users. We prioritize good architecture over backward compatibility since this is a new library.
+* **Simple Configuration**: The `examples/hwr-pump-example.yaml` configuration should demonstrate best practices and be the reference for users. We prioritize good architecture over backward compatibility since this is a new library.
 * **No Regressions**: New features (e.g., adding schedule writing) must not break existing features (e.g., live flow rate reporting).
 
 ## 2. References
@@ -119,7 +119,7 @@ Before marking a task as complete, verify on actual hardware using your private,
 3. **Connection**: Does it connect *and stay connected*?
 4. **Telemetry**: Do values update? (Wave hand over pump or start water flow to verify changes).
 
-Note: `hwr-pump-example.yaml` is for documentation and compilation testing only (contains placeholder values). Use the private, gitignored config with real device values for actual hardware testing. Never name that file in repo-facing prose — changelog, docs, issues, or PRs.
+Note: `examples/hwr-pump-example.yaml` is for documentation and compilation testing only (contains placeholder values). Use the private, gitignored config with real device values for actual hardware testing. Never name that file in repo-facing prose — changelog, docs, issues, or PRs.
 
 #### Bench session hygiene (issue #127)
 
@@ -154,7 +154,7 @@ Note: `hwr-pump-example.yaml` is for documentation and compilation testing only 
   * *Bad*: `// Send 0x02`
   * *Good*: `// Send 0x02 (Class 10 Start Byte) - See Protocol Doc Sec 3.1`
 * **PR/Commit Messages**: Clearly state what changed and what was tested.
-* **README updates**: If a new feature is added (e.g., a "Boost Mode" switch), update the `README.md` and `hwr-pump-example.yaml` Config section immediately.
+* **README updates**: If a new feature is added (e.g., a "Boost Mode" switch), update the `README.md` and `examples/hwr-pump-example.yaml` Config section immediately.
 
 ## 6. Architecture: Layered Service-Based Design
 
@@ -221,7 +221,7 @@ components/alpha_hwr/
 
 1. **Maintain Layering**: New features should be added to the appropriate layer/namespace.
 2. **Document Protocol References**: Every packet builder/parser must cite the protocol doc section.
-3. **Test After Changes**: Verify `hwr-pump-example.yaml` compiles and the private hardware config works on hardware.
+3. **Test After Changes**: Verify `examples/hwr-pump-example.yaml` compiles and the private hardware config works on hardware.
 4. **Keep Services Focused**: Each service should own a single domain (telemetry, control, schedules, etc.).
 5. **No New Standalone Write Paths**: Anything that writes to the pump must be a `WriteCommand` in the operation layer (see §9), so it inherits serialization, confirm readbacks, and the one-terminal-event contract.
 
@@ -330,7 +330,7 @@ The layered architecture is now in place. When adding new features:
 5. **Unit Test**: Verify the packet builder produces the correct hex against captured byte sequences.
 6. **Implement Service**: Add business logic to the appropriate service in the `services` namespace or create a new service.
 7. **Integration**: Hook the service into the main `AlphaHwrComponent` class (add accessors as needed).
-8. **Verify**: Compile `hwr-pump-example.yaml`, flash the private hardware config, and test on hardware.
+8. **Verify**: Compile `examples/hwr-pump-example.yaml`, flash the private hardware config, and test on hardware.
 
 ### Adding a New Write Operation (issue #92 contract)
 
@@ -368,8 +368,8 @@ Releases follow **semantic versioning** (`vMAJOR.MINOR.PATCH`). Because this lib
    # Bulk-replace the previous tag across all example YAMLs and packages
    old=vOLD; new=vX.Y.Z
    sed -i '' "s|@${old}|@${new}|g" \
-     hwr-pump-example.yaml hwr-pump-controls-example.yaml \
-     hwr-pump-dhw-example.yaml \
+     examples/hwr-pump-example.yaml examples/hwr-pump-controls-example.yaml \
+     examples/hwr-pump-dhw-example.yaml \
      packages/alpha_hwr.yaml packages/dhw_demand_detector.yaml
    git add -u && git commit -m "Pin examples and packages to ${new}"
    git push
@@ -381,9 +381,9 @@ Releases follow **semantic versioning** (`vMAJOR.MINOR.PATCH`). Because this lib
 
 | File | Role |
 |---|---|
-| `hwr-pump-example.yaml` | Pump package example |
-| `hwr-pump-controls-example.yaml` | Pump + controls example |
-| `hwr-pump-dhw-example.yaml` | Pump + controls + DHW demand example |
+| `examples/hwr-pump-example.yaml` | Pump package example |
+| `examples/hwr-pump-controls-example.yaml` | Pump + controls example |
+| `examples/hwr-pump-dhw-example.yaml` | Pump + controls + DHW demand example |
 | `packages/alpha_hwr.yaml` | `external_components` source for the pump package |
 | `packages/dhw_demand_detector.yaml` | `external_components` source for DHW demand package (including commented examples) |
 
@@ -564,5 +564,5 @@ All thresholds are exposed as YAML config keys with defaults matching the Python
 4. **Derivatives use actual elapsed time** — always divide by the real `dt_s` from `millis()` delta, not an assumed 10-second interval.
 5. **Consult reference docs before changing thresholds** — `esp32-detector.md` explains the physical rationale for every default. Changes should be grounded in observed hardware behaviour, and the grounding recorded next to the constant. A threshold whose provenance is not written down cannot be defended when it later disagrees with production; that is how the stale `3.0f` head-rate value survived the units audit (#120).
 8. **The pump-on tier ordering lives in `dhw_demand_logic.h`, not `update()`** — `decide_pump_on()` is a pure function so the host test asserts tier priority directly (#144). Adding, removing or reordering a tier means changing that function and its ordering tests, never adding a branch in the `.cpp`.
-6. **Test compilation** — `dhw_demand` has no BLE dependency; verify it compiles by including it in `hwr-pump-example.yaml` or a minimal test YAML.
+6. **Test compilation** — `dhw_demand` has no BLE dependency; verify it compiles by including it in `examples/hwr-pump-example.yaml` or a minimal test YAML.
 7. **Logging discipline** — follow the same `ESP_LOGx` conventions as `alpha_hwr`: `LOGV` for per-tick data, `LOGD` for state transitions, `LOGI` for session start/end. One documented exception: the two continuation retirements log at `LOGI`. They are once-per-continuation by construction, and the default level is `INFO` — which is precisely the configuration in which a field report of "demand stayed on" would otherwise be undiagnosable, since they are the only record of *why* the tier stopped.

@@ -43,6 +43,21 @@ release tag carries the new one; the release script moves them.
 
 ### Changed
 
+- **The examples live in `examples/`, and each fact about the packages has one
+  home.** `hwr-pump-example.yaml`, `hwr-pump-controls-example.yaml` and
+  `hwr-pump-dhw-example.yaml` moved from the repository root, and the discovery
+  example moved out of `components/alpha_hwr/` to join them. ESPHome resolves
+  `!secret` beside the config it loads, so `examples/secrets.yaml` is a
+  committed symlink to the root `secrets.yaml`; the nested copy the discovery
+  example used to need, and the CI step that seeded it, are gone.
+
+  The same claims used to be repeated across the package headers, both READMEs
+  and the docs, which is how a wrong one survived in five places. Now the
+  README carries the quick start, the recipes and the pairing walkthrough;
+  `packages/README.md` is the only place that lists what each package
+  declares; `docs/configuration.md` is the option reference; and the package
+  and example headers say what the file is for and point at those.
+
 - **Two layers for the pump: `packages/alpha_hwr.yaml` and
   `packages/alpha_hwr_controls.yaml`.** The pump package is the file formerly
   named `alpha_hwr_pairing.yaml`, which still loads it for one release. The

@@ -242,9 +242,9 @@ jobs:
       - name: Validate CI config (working tree)
         run: esphome config tests/ci-compile.yaml
 
-      # Some examples reference !secret. secrets.yaml is gitignored, so seed a
-      # throwaway one here. ESPHome resolves !secret relative to the config
-      # file, hence the second copy beside the nested example.
+      # The examples reference !secret. secrets.yaml is gitignored, so seed a
+      # throwaway one here. ESPHome resolves !secret beside the config file;
+      # examples/secrets.yaml is a committed symlink to this one.
       #
       # Deliberately NOT `cp secrets-example.yaml secrets.yaml`. That template
       # ships an invalid api_key and a commented-out ota_password so that a user
@@ -262,17 +262,16 @@ jobs:
           api_key: "$KEY"
           ota_password: "ci-ota-password"
           EOF
-          cp secrets.yaml components/alpha_hwr/secrets.yaml
 
       # The published examples pin a release tag, so this catches drift between
       # the documented recipes and the packages they load.
       - name: Validate example configs
         run: |
           status=0
-          for f in hwr-pump-example.yaml \
-                   hwr-pump-controls-example.yaml \
-                   hwr-pump-dhw-example.yaml \
-                   components/alpha_hwr/discovery_example.yaml; do
+          for f in examples/hwr-pump-example.yaml \
+                   examples/hwr-pump-controls-example.yaml \
+                   examples/hwr-pump-dhw-example.yaml \
+                   examples/discovery-example.yaml; do
             echo "::group::$f"
             if ! esphome config "$f"; then
               echo "::error file=$f::esphome config failed"

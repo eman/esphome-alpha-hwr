@@ -12,17 +12,13 @@
 # - Flow limiter switches and numbers
 # - Schedule editor helpers (per day/layer entries, single events, vacation)
 #
-# Setup Instructions:
-# 1. Replace the MAC address below with your pump's BLE MAC address
-# 2. Create your secrets file and fill in your own values:
-#      cp secrets-example.yaml secrets.yaml
-#    This config reads WiFi, the API encryption key and the OTA password from
-#    it, so there is nothing to edit here and no working credential is carried
-#    in this file. ESPHome refuses to build until each secret is defined —
-#    which is the point: a config that ships a key anyone can read is not
-#    encrypted, and a published OTA password lets anything on your LAN flash
-#    this node.
-# 3. Flash to your ESP32
+# Setup:
+# 1. Replace the MAC address below with your pump's BLE MAC address.
+# 2. Create secrets.yaml at the repository root (see README, "Examples in this
+#    repo"); examples/secrets.yaml is a symlink to it. The template's key and
+#    OTA password are deliberately unusable, so the build fails until you set
+#    your own.
+# 3. Put the pump into Bluetooth pairing mode and flash. See README, "Pairing".
 #
 # ==============================================================================
 

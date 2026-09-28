@@ -1,6 +1,9 @@
 # ESPHome ALPHA HWR Packages
 
-This directory contains reusable YAML packages for the Grundfos ALPHA HWR pump component.
+The reusable YAML packages for the `alpha_hwr` and `dhw_demand` components,
+and the one place that lists what each package declares. The README has the
+quick start and the recipes; `docs/configuration.md` has the options behind
+each entity; `examples/` has complete, CI-validated configs.
 
 ## Available Packages
 
@@ -72,39 +75,8 @@ to enable pump-on detection. See `docs/configuration.md` for the full key list.
 
 ## Quick Start
 
-1. **Find your pump's MAC address:**
-   - Use ESPHome's Bluetooth scan feature
-   - Or use a BLE scanner app (e.g., nRF Connect)
-
-2. **Start from the pump package**, `alpha_hwr.yaml`, and add
-   `alpha_hwr_controls.yaml` if you want the control UI.
-
-3. **Create your device config:**
-   ```yaml
-   substitutions:
-     mac_address: "AA:BB:CC:DD:EE:FF"  # Your pump's MAC
-   
-   packages:
-     alpha_hwr: github://eman/esphome-alpha-hwr/packages/alpha_hwr.yaml@main
-   
-   esphome:
-     name: hwr-pump-basement
-   
-   esp32:
-     board: esp32-c3-devkitm-1
-   
-   wifi:
-     ssid: !secret wifi_ssid
-     password: !secret wifi_password
-   
-   api:
-   ota:
-   ```
-
-4. **Flash and enjoy!**
-   ```bash
-   esphome run my-device.yaml
-   ```
+In the README: [Quick start](../README.md#quick-start). Complete configs are in
+[`examples/`](../examples/).
 
 ---
 
@@ -159,10 +131,9 @@ sensor:
 
 ## Examples
 
-See the root directory for complete example configurations:
-- `hwr-pump-example.yaml` - The pump package on its own
-- `hwr-pump-controls-example.yaml` - Pump plus the control UI
-- `hwr-pump-dhw-example.yaml` - Pump, control UI and `dhw_demand`
+[`examples/`](../examples/), each release-pinned and validated by CI. The README's
+[Examples in this repo](../README.md#examples-in-this-repo) says what each one is
+for and how secrets work.
 
 ---
 
@@ -191,22 +162,3 @@ See the root directory for complete example configurations:
 - Voltage/current sensors **require** pairing to be enabled
 - Wait 10-30 seconds after connection for first telemetry update
 
----
-
-## Requirements
-
-- **ESP32** with BLE support (ESP32, ESP32-C3, ESP32-S3)
-- **ESPHome 2024.6.0 or newer**
-- **ESP-IDF framework** (recommended for BLE stability)
-
----
-
-## Package Philosophy
-
-These packages follow the **principle of least surprise**:
-
-- `alpha_hwr.yaml` - Pairs on first connection and keeps the bond; the one
-  thing it needs from you is the pump in pairing mode that first time
-- `alpha_hwr_controls.yaml` layers on top without touching the link
-
-The packages are designed to be **drop-in replacements** for manually configuring the component, reducing boilerplate and ensuring consistency across deployments.

@@ -3,17 +3,10 @@
 # ==============================================================================
 #
 # Everything you drive from Home Assistant, layered on the pump package:
-# - Engage Pump, Remote Mode, Schedule Enabled, Temperature AutoAdapt and the
-#   two flow-limit switches
-# - Control mode selector for the exposed operating modes
-# - Setpoint, temperature-range, cycle-time and flow-limit numbers
-# - Restart and Read Pump Clock buttons, Pump Motor Active indicator
-# - The schedule editor helpers used by the Lovelace schedule card: day/layer
-#   selects, time and date numbers, save/clear/vacation buttons. They are
-#   `internal: true`, so they add nothing to the Home Assistant entity list
-#   unless a dashboard references them. The schedule services themselves are
-#   registered by the component (components/alpha_hwr/api_bridge.cpp) and
-#   exist whether or not this package is loaded.
+# switches, the mode select, setpoint and limiter numbers, buttons, and the
+# hidden helper entities the Lovelace schedule card uses.
+#
+# What it declares, entity by entity: packages/README.md.
 #
 # Usage:
 #   packages:

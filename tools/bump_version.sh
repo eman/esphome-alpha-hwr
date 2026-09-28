@@ -63,9 +63,9 @@ fi
 echo ""
 echo "Step 2: Updating version pins in example YAMLs and packages..."
 FILES=(
-    "hwr-pump-example.yaml"
-    "hwr-pump-controls-example.yaml"
-    "hwr-pump-dhw-example.yaml"
+    "examples/hwr-pump-example.yaml"
+    "examples/hwr-pump-controls-example.yaml"
+    "examples/hwr-pump-dhw-example.yaml"
     "packages/alpha_hwr.yaml"
     "packages/dhw_demand_detector.yaml"
 )
