@@ -38,7 +38,7 @@
 
 ### Fixed
 
-- **The BLE scanner no longer starves WiFi** (PR_PLACEHOLDER). The packages and
+- **The BLE scanner no longer starves WiFi** ([#320](https://github.com/eman/esphome-alpha-hwr/pull/320)). The packages and
   `components/alpha_hwr/discovery_example.yaml` scanned with
   `interval: 1.1s` / `window: 1.1s` — a 100% duty cycle on a radio the ESP32
   shares between WiFi and BLE, which ESPHome itself warns about at config time.
