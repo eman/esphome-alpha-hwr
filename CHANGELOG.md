@@ -2,7 +2,42 @@
 
 ## [Unreleased]
 
+### Migration
+
+Two related changes in this release follow from the finding on #244 that the
+pump has no unpaired mode.
+
+| Change | What breaks | What to do |
+| --- | --- | --- |
+| `packages/alpha_hwr_base.yaml` is removed | A config loading it `@main` fails at the package fetch. Configs pinned to a release tag (`@v0.16.0` or earlier) keep working | Load `packages/alpha_hwr_pairing.yaml` instead. Every entity the base package declared is in it under the same name, plus the rest |
+| `initiate_pairing` defaults to `true` | **Nothing fails.** A hand-written `alpha_hwr:` block that never set the option now initiates pairing and configures security parameters, which is what the pump requires; before, such a node bonded anyway when the pump asked, with none configured (#245) | Nothing, unless you want the old behaviour: then set `initiate_pairing: false` explicitly |
+
+`hwr-pairing-example.yaml` is also gone; `hwr-pump-example.yaml` now loads the
+pump package and is the example it used to be.
+
+### Removed
+
+- **`packages/alpha_hwr_base.yaml`, `hwr-pairing-example.yaml` and the CI
+  config that validated the base package** (issue #244). The base package
+  existed to offer telemetry without pairing, and the pump does not offer that:
+  a peer it has never bonded to gets no connection at all. What the package
+  actually delivered was a node with `initiate_pairing` off, which bonds by
+  accident when the pump asks and configures no security parameters while doing
+  it. One pump package remains, `alpha_hwr_pairing.yaml`, which keeps its
+  historical name because configs reference it by URL.
+
 ### Changed
+
+- **`initiate_pairing` defaults to `true`** (issue #244). See Migration.
+
+- **The README, the packages README, `docs/configuration.md`, the package header
+  and the example no longer describe pairing as optional.** The README's
+  "basic vs paired" comparison is gone, its Pairing section now says the pump
+  has to be paired and points at the Suspend Pump Link switch it previously
+  claimed did not exist, and the `enable_pairing` spelling it still used is
+  replaced by `initiate_pairing`. Four code comments that reasoned from
+  "pairing disabled (the default)" or "passive telemetry needs no bond" are
+  corrected.
 
 - **The BLE scan duty cycle drops from 100% to ~9%** ([#320](https://github.com/eman/esphome-alpha-hwr/pull/320)).
   The packages and `components/alpha_hwr/discovery_example.yaml` scanned with

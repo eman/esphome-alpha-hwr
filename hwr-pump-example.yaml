@@ -3,10 +3,17 @@ esphome:
   friendly_name: HWR Pump (Example)
 
 # ==============================================================================
-# Basic ALPHA HWR Example Configuration
+# ALPHA HWR Example Configuration
 # ==============================================================================
-# 
-# This example demonstrates basic telemetry monitoring without BLE pairing.
+#
+# The pump package on its own: full telemetry and diagnostics, no control UI.
+# For controls and schedules see hwr-pump-schedule-example.yaml and
+# hwr-pump-dhw-example.yaml.
+#
+# The pump has to be paired to the node -- there is no unpaired mode (issue
+# #244). The node pairs on its first connection and keeps the bond in NVS, but
+# the pump only offers to pair while it is in Bluetooth pairing mode, which
+# takes more than a button press: see docs/configuration.md, "Pairing".
 #
 # Setup Instructions:
 # 1. Replace the MAC address below with your pump's BLE MAC address
@@ -18,14 +25,15 @@ esphome:
 #    which is the point: a config that ships a key anyone can read is not
 #    encrypted, and a published OTA password lets anything on your LAN flash
 #    this node.
-# 3. Flash to your ESP32
+# 3. Put the pump into Bluetooth pairing mode and flash the ESP32; watch the
+#    logs for "BLE authentication complete". Reconnects reuse the stored bond.
 # ==============================================================================
 
 substitutions:
   mac_address: "00:00:00:00:00:00"  # ← CHANGE THIS to your pump's MAC
 
 packages:
-  alpha_hwr: github://eman/esphome-alpha-hwr/packages/alpha_hwr_base.yaml@v0.16.0
+  alpha_hwr: github://eman/esphome-alpha-hwr/packages/alpha_hwr_pairing.yaml@v0.16.0
 
 esp32:
   board: esp32-c3-devkitm-1

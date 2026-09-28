@@ -94,6 +94,12 @@ CONF_READY_STATUS = "ready_status"
 # component initiates pairing and configures security parameters. `initiate_`
 # carries that distinction in the name, which is where the wrong expectation was
 # being formed.
+#
+# Defaults to true. It defaulted to false while the repo believed the pump
+# offered an unbonded telemetry mode; issue #244 measured that it does not (a
+# never-bonded peer gets no connection at all), so a node with this off is a
+# node that bonds by accident with no security parameters configured. False is
+# still accepted for anyone who wants that on purpose.
 CONF_INITIATE_PAIRING = "initiate_pairing"
 CONF_ENABLE_PAIRING = "enable_pairing"
 CONF_RECONNECT_SETTLE_TIME = "reconnect_settle_time"
@@ -203,7 +209,7 @@ def resolve_pairing_alias(config):
             f"the same option; set only {CONF_INITIATE_PAIRING}."
         )
     if current is None:
-        config[CONF_INITIATE_PAIRING] = legacy if legacy is not None else False
+        config[CONF_INITIATE_PAIRING] = legacy if legacy is not None else True
     return config
 
 

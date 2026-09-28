@@ -4,43 +4,25 @@ This directory contains reusable YAML packages for the Grundfos ALPHA HWR pump c
 
 ## Available Packages
 
-### `alpha_hwr_base.yaml` - Basic Telemetry
-Provides essential pump monitoring. The node never initiates pairing, but the
-pump has to be paired to it all the same: a peer the pump has never bonded to
-cannot hold a connection (issue #244).
+### `alpha_hwr_pairing.yaml` - The pump package
+The BLE link plus every telemetry and diagnostic entity the component exposes.
+The pump has to be paired to the node: there is no unpaired mode, a peer the
+pump has never bonded to gets no connection at all (issue #244). The node pairs
+on first connection, while the pump is in Bluetooth pairing mode, and keeps the
+bond in NVS. (The file keeps its historical name from when the repo shipped a
+second, "unpaired" package; configs reference it by URL.)
 
-**Sensors Included:**
-- Flow Rate (m³/h)
-- Head (m)
-- Water Temperature (°C)
-- Motor Speed (RPM)
-- Power Consumption (W)
-
-**Usage:**
-```yaml
-substitutions:
-  mac_address: "AA:BB:CC:DD:EE:FF"
-
-packages:
-  alpha_hwr: github://eman/esphome-alpha-hwr/packages/alpha_hwr_base.yaml@main
-```
-
----
-
-### `alpha_hwr_pairing.yaml` - Enhanced Telemetry with Pairing
-Provides complete pump diagnostics with BLE pairing/bonding enabled.
-
-**Additional Sensors (vs. base):**
-- AC Voltage (V) - Requires pairing
-- DC Voltage (V) - Requires pairing
-- Motor Current (A) - Requires pairing
+**Sensors included:**
+- Flow Rate (m³/h), Head (m), Head Rate, Motor Speed (RPM), Power (W)
+- AC Voltage (V), DC Voltage (V), Motor Current (A)
 - Inlet Pressure (bar)
-- PCB Temperature (°C)
-- Control Box Temperature (°C)
-- Pairing Status (binary sensor)
-
-Also adds device info, history, event log and statistics sensors, the control
-mode text sensor, and the schedule/single-event/vacation read-back sensors.
+- Water, PCB and Control Box Temperature (°C)
+- Active Alarms and Warnings, Run State, Control Mode, Flow Limiter
+- Pump Ready, Pairing Status, Pump Link Status / Fault / Recycles / Longest Gap
+- Schedule layers, single events, vacation, schedule hash and stall
+- Event log, history trends, cycle timestamps, start count, operating hours,
+  clock drift and last clock sync
+- Device info, heap, reset reason, component version and build
 
 **Usage:**
 ```yaml
@@ -55,7 +37,9 @@ esphome:
 # ... rest of your config
 ```
 
-**Note:** On first connection, the pump will automatically pair/bond with your ESP32. Bonding keys are stored in NVS flash for automatic reconnection on subsequent boots.
+**Note:** put the pump into Bluetooth pairing mode for the first connection; it
+takes more than a button press (see `docs/configuration.md`, "Pairing"). The
+bond is stored in NVS and reconnects reuse it.
 
 ---
 
@@ -92,9 +76,8 @@ to enable pump-on detection. See `docs/configuration.md` for the full key list.
    - Use ESPHome's Bluetooth scan feature
    - Or use a BLE scanner app (e.g., nRF Connect)
 
-2. **Choose a package:**
-   - Use `alpha_hwr_base.yaml` for basic monitoring
-   - Use `alpha_hwr_pairing.yaml` for full diagnostics
+2. **Start from the pump package**, `alpha_hwr_pairing.yaml`, and add
+   `alpha_hwr_controls.yaml` if you want the control UI.
 
 3. **Create your device config:**
    ```yaml
@@ -147,7 +130,7 @@ Or add additional sensors to the same device:
 
 ```yaml
 packages:
-  alpha_hwr: github://eman/esphome-alpha-hwr/packages/alpha_hwr_base.yaml@main
+  alpha_hwr: github://eman/esphome-alpha-hwr/packages/alpha_hwr_pairing.yaml@main
 
 sensor:
   - platform: wifi_signal
@@ -177,9 +160,8 @@ sensor:
 ## Examples
 
 See the root directory for complete example configurations:
-- `hwr-pump-example.yaml` - Uses `alpha_hwr_base.yaml`
-- `hwr-pairing-example.yaml` - Uses `alpha_hwr_pairing.yaml`
-- `hwr-pump-schedule-example.yaml` - Paired pump with schedule UI and services
+- `hwr-pump-example.yaml` - The pump package on its own
+- `hwr-pump-schedule-example.yaml` - Pump with schedule UI and services
 - `dhw-demand-example.yaml` - Combined `alpha_hwr` + `dhw_demand`
 
 ---
@@ -192,8 +174,14 @@ See the root directory for complete example configurations:
 - Use `esphome logs` to see BLE scan results
 
 ### Pairing Fails
-- Ensure `initiate_pairing: true` is set (formerly `enable_pairing`, still accepted)
-- Try erasing NVS flash: `esphome run --erase-nvs`
+- The pump only offers to pair while it is in Bluetooth pairing mode, and
+  getting it there takes more than a button press: see `docs/configuration.md`,
+  "Pairing"
+- Leave `initiate_pairing` at its default of `true` (formerly `enable_pairing`,
+  still accepted)
+- **Do not** clear the node's bond to retry. A pump that holds a bond for a node
+  that lost its own drops every connection and never offers to pair again;
+  recovery needs physical access to the pump
 - Check logs for pairing error messages
 
 ### Sensors Show "Unknown"
@@ -217,7 +205,8 @@ See the root directory for complete example configurations:
 
 These packages follow the **principle of least surprise**:
 
-- `alpha_hwr_base.yaml` - Works out of the box, no BLE pairing required
-- `alpha_hwr_pairing.yaml` - Automatic pairing, no user intervention needed
+- `alpha_hwr_pairing.yaml` - Pairs on first connection and keeps the bond;
+  the one thing it needs from you is the pump in pairing mode that first time
+- The UI and service packages layer on top without touching the link
 
-Both packages are designed to be **drop-in replacements** for manually configuring the component, reducing boilerplate and ensuring consistency across deployments.
+The packages are designed to be **drop-in replacements** for manually configuring the component, reducing boilerplate and ensuring consistency across deployments.

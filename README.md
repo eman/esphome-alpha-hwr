@@ -13,8 +13,7 @@ in the component stack directly from GitHub.
 
 | Package | Purpose | Notes |
 | --- | --- | --- |
-| `packages/alpha_hwr_base.yaml` | Basic ALPHA HWR telemetry; the node never initiates pairing | Read-only monitoring. The pump still has to be paired to the node -- an unpaired peer gets no connection (#244) -- see `docs/configuration.md` |
-| `packages/alpha_hwr_pairing.yaml` | Full telemetry, diagnostics, schedules, and paired BLE access | Required for controls and schedule editing |
+| `packages/alpha_hwr_pairing.yaml` | The pump package: BLE link, full telemetry, diagnostics and schedule read-back | The pump has to be paired to the node; there is no unpaired mode (#244). See [Pairing](#pairing) |
 | `packages/alpha_hwr_controls.yaml` | Recommended control UI | Adds pump enable, remote mode, schedule toggle, mode select, and setpoint controls |
 | `packages/alpha_hwr_schedule.yaml` | Lighter schedule/remote/mode UI | Simpler alternative to `alpha_hwr_controls.yaml`. **Pick one — including both fails validation**, see below |
 | `packages/alpha_hwr_schedule_editor.yaml` | ESPHome services and helper entities for weekly/single-event editing | Pair with `alpha_hwr_pairing.yaml` |
@@ -61,30 +60,19 @@ delivered to every connected subscriber, so DEBUG is opt-in — put your own
 - **dhw_demand standalone**: any ESPHome-capable board if you only use Home
   Assistant-fed sensors
 - `substitutions.mac_address` for the pump packages
+- The pump paired to the node. There is no unpaired mode: a peer the pump has
+  never bonded to gets no connection at all (#244). The node pairs on first
+  connection; see [Pairing](#pairing) for putting the pump in pairing mode
 - `api:` enabled if you want Home Assistant services/entities
 - `framework.type: esp-idf` is strongly recommended for BLE-based ALPHA HWR
   nodes
-
-## Basic vs paired `alpha_hwr`
-
-| Feature | `alpha_hwr_base.yaml` | `alpha_hwr_pairing.yaml` |
-| --- | --- | --- |
-| Flow, head, water temperature, RPM, power | Yes | Yes |
-| AC/DC voltage, motor current | No | Yes |
-| Inlet pressure | No | Yes |
-| PCB and control-box temperatures | No | Yes |
-| Pairing status | No | Yes |
-| Control mode text sensor | No | Yes |
-| Schedule and single-event text sensors | No | Yes |
-| Start/stop, remote control, schedule toggle, mode/setpoint UI | No | Add `alpha_hwr_controls.yaml` **or** `alpha_hwr_schedule.yaml` — not both |
-| Device info, history, event log, statistics | No | Yes |
 
 ## Using these packages from an external ESPHome config
 
 The package URLs below are meant to be used from another ESPHome project. The
 package files already pull the required external components for `alpha_hwr`.
 
-### 1. Basic read-only pump telemetry
+### 1. Pump telemetry and diagnostics
 
 ```yaml
 esphome:
@@ -105,7 +93,7 @@ external_components:
     components: [alpha_hwr]
 
 packages:
-  alpha_hwr: github://eman/esphome-alpha-hwr/packages/alpha_hwr_base.yaml@main
+  alpha_hwr: github://eman/esphome-alpha-hwr/packages/alpha_hwr_pairing.yaml@main
 
 esp32:
   board: esp32-c3-devkitm-1
@@ -126,7 +114,7 @@ ota:
     password: !secret ota_password
 ```
 
-### 2. Full telemetry plus control UI
+### 2. Add the control UI
 
 ```yaml
 esphome:
@@ -371,32 +359,32 @@ More detail and automation examples are in
 
 ## Pairing
 
-`alpha_hwr_pairing.yaml` enables BLE pairing and stores the bond in NVS. Typical
-first-time flow:
+The pump has to be paired to the node. There is no unpaired mode: a peer the
+pump has never bonded to gets no connection at all, measured three for three
+from a never-paired host ([#244](https://github.com/eman/esphome-alpha-hwr/issues/244)),
+and a peer whose bond the pump holds but the node has lost is dropped about 2 s
+after connecting. The component's `initiate_pairing` option therefore defaults
+to `true`, and the package sets it explicitly. First-time flow:
 
 1. Put the pump into Bluetooth pairing mode — more involved than one button
    press; see
-   [the procedure](docs/configuration.md#enable_pairing).
-2. Flash the ESPHome node with the paired package.
-3. Watch logs for the BLE pairing to complete.
+   [the procedure](docs/configuration.md#initiate_pairing).
+2. Flash the ESPHome node.
+3. Watch the logs for `BLE authentication complete`. The bond is stored in NVS
+   and reconnects reuse it.
 
-After that, reconnects reuse the stored bond.
-
-The pump is understood to accept **one BLE connection at a time**, which is
-worth knowing before you start: while this node is bonded and connected, the
-Grundfos GO app cannot have the pump. Powering the node down is the way to hand
-it over — there is no suspend switch that drops the link and stops reconnecting.
-(A node that is *unbonded and failing to connect* is a different case, and has
-been observed not to get in the app's way.)
+The pump accepts **one BLE connection at a time**: while this node is connected,
+the Grundfos GO app cannot have the pump. Turn on the **Suspend Pump Link**
+switch to hand it over, and off again after; see
+[Suspending the BLE link](docs/configuration.md#suspending-the-ble-link).
 
 > **Clearing the node's bond needs physical access to the pump to undo.**
 > `ble_client.remove_bond`, an NVS erase, or a re-flash that loses NVS leaves
-> the pump bonded to a node that is no longer bonded to it. The pump then
-> refuses the link on every attempt and never offers to pair again. Recovering
-> means standing at the pump and running the
-> [re-pairing procedure](docs/configuration.md#enable_pairing), which needs the
-> Grundfos GO app. Set `enable_pairing: true` before you start, or the pump's
-> offer goes nowhere. The node reports this on **Pump Link Fault** as
+> the pump bonded to a node that is no longer bonded to it. The pump then drops
+> the link on every attempt and never offers to pair again. Recovering means
+> standing at the pump and running the
+> [re-pairing procedure](docs/configuration.md#initiate_pairing), which needs the
+> Grundfos GO app. The node reports this on **Pump Link Fault** as
 > `Pump not accepting pairing` once it has happened three connections running.
 
 ## Examples in this repo
@@ -433,12 +421,12 @@ them.
 cp secrets.yaml components/alpha_hwr/secrets.yaml
 ```
 
-- `hwr-pump-example.yaml` — basic read-only `alpha_hwr`
-- `hwr-pairing-example.yaml` — paired `alpha_hwr`
-- `hwr-pump-schedule-example.yaml` — paired pump with schedule UI/services
-- `dhw-demand-example.yaml` — paired `alpha_hwr` + `dhw_demand`
-- `hwr-pump-dhw-example.yaml` — the §5 combination: paired `alpha_hwr` +
-  control UI + `dhw_demand`
+- `hwr-pump-example.yaml` — the pump package on its own: telemetry and
+  diagnostics, no control UI
+- `hwr-pump-schedule-example.yaml` — pump with schedule UI/services
+- `dhw-demand-example.yaml` — `alpha_hwr` + `dhw_demand`
+- `hwr-pump-dhw-example.yaml` — the §5 combination: `alpha_hwr` + control UI +
+  `dhw_demand`
 
 ## Optional Lovelace schedule card
 
