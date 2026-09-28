@@ -283,9 +283,11 @@ not a reset of the pump's own bond table: clearing a bond *at the pump* is a
 different operation that nobody here has needed, and as far as is known it takes
 a full pump reset.
 
-The node cannot tell that state apart from a pump that has simply never been put
-into pairing mode — in both cases the evidence is an absence, no security request
-— and it does not try to, because the remedy is the same. After three
+A pump that has simply never been put into pairing mode looks different at the
+link layer: a never-bonded address gets no connection at all (`0x3e` within
+300 ms, see above), where a stale bond gets a connection that is dropped about
+2 s later. The node does not try to tell them apart, because the remedy is the
+same. After three
 consecutive connections that open with no bond, exchange no security and carry
 no data, it says so: a `WARN` naming both possibilities and the remedy, repeated
 about once a minute, and **Pump Link Fault** reading `Pump not accepting
