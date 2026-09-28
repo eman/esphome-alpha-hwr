@@ -48,9 +48,9 @@ release tag carries the new one; the release script moves them.
   `hwr-pump-dhw-example.yaml` moved from the repository root, and the discovery
   example moved out of `components/alpha_hwr/` to join them. ESPHome resolves
   `!secret` beside the config it loads, so the examples read
-  `examples/secrets.yaml`, created from the root `secrets-example.yaml`
-  template; the separate nested copy the discovery example used to need is
-  gone.
+  `examples/secrets.yaml`, created from the `examples/secrets-example.yaml`
+  template beside them (moved there from the root); the separate nested copy
+  the discovery example used to need is gone.
 
   The same claims used to be repeated across the package headers, both READMEs
   and the docs, which is how a wrong one survived in five places. Now the

@@ -13,9 +13,10 @@ esphome:
 # Setup:
 # 1. Replace the MAC address below with your ALPHA HWR pump's BLE MAC address.
 # 2. Set the three HA entity substitutions to match your installation.
-# 3. Copy secrets-example.yaml to examples/secrets.yaml and fill it in (see
-#    README, "Examples in this repo"). The template's key and OTA password are
-#    deliberately unusable, so the build fails until you set your own.
+# 3. Copy secrets-example.yaml (beside this file) to secrets.yaml and fill it
+#    in; see README, "Examples in this repo". The template's key and OTA
+#    password are deliberately unusable, so the build fails until you set
+#    your own.
 # 4. Put the pump into Bluetooth pairing mode and flash. See README, "Pairing".
 #
 # Why this file exists rather than only the README: the three packages here
