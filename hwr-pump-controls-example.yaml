@@ -1,16 +1,16 @@
 # ==============================================================================
-# ALPHA HWR Schedule Management Example
+# ALPHA HWR Controls Example
 # ==============================================================================
 #
-# This example demonstrates full pump monitoring plus schedule management
-# and control mode selection in Home Assistant.
+# The pump package plus the control UI: everything you drive from Home
+# Assistant, and the hidden helper entities the Lovelace schedule card uses.
 #
 # Features Included (via packages):
-# - Full telemetry with BLE pairing (flow, pressure, temp, voltage, current)
-# - Schedule Enable/Disable switch
-# - Control Mode selector (Constant Speed, Temperature Range, etc.)
-# - Remote Mode buttons (enable/disable remote control)
-# - Schedule editor (read/write individual schedule entries per day/layer)
+# - Full telemetry and diagnostics
+# - Engage Pump, Remote Mode, Schedule Enabled and Temperature AutoAdapt switches
+# - Control mode selector and the setpoint, temperature-range and cycle-time numbers
+# - Flow limiter switches and numbers
+# - Schedule editor helpers (per day/layer entries, single events, vacation)
 #
 # Setup Instructions:
 # 1. Replace the MAC address below with your pump's BLE MAC address
@@ -27,16 +27,18 @@
 # ==============================================================================
 
 esphome:
-  name: hwr-pump-schedule-example
-  friendly_name: "HWR Pump (Schedule)"
+  name: hwr-pump-controls-example
+  friendly_name: "HWR Pump (Controls)"
 
 substitutions:
   mac_address: "00:00:00:00:00:00"  # ← CHANGE THIS to your pump's MAC
 
 packages:
+  # Pinned to the last release, where the pump package still carried its old
+  # name. On main it is packages/alpha_hwr.yaml; the release script moves this
+  # line at the next release.
   alpha_hwr: github://eman/esphome-alpha-hwr/packages/alpha_hwr_pairing.yaml@v0.16.0
-  alpha_hwr_schedule: github://eman/esphome-alpha-hwr/packages/alpha_hwr_schedule.yaml@v0.16.0
-  alpha_hwr_schedule_editor: github://eman/esphome-alpha-hwr/packages/alpha_hwr_schedule_editor.yaml@v0.16.0
+  alpha_hwr_controls: github://eman/esphome-alpha-hwr/packages/alpha_hwr_controls.yaml@v0.16.0
 
 esp32:
   board: esp32-c3-devkitm-1
@@ -71,6 +73,4 @@ ota:
   - platform: esphome
     password: !secret ota_password  # guards OTA firmware upload
 
-button:
-  - platform: restart
-    name: "Restart Device"
+# alpha_hwr_controls.yaml already declares a restart button ("Restart HWR Pump").

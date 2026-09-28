@@ -2,17 +2,22 @@
 # ALPHA HWR Control Package
 # ==============================================================================
 #
-# This package provides comprehensive UI controls for the Grundfos ALPHA HWR pump:
-# - Pump enable/disable switch (controls whether pump operates in its configured mode)
-# - Pump motor active indicator (shows if motor is physically running)
-# - Schedule enable/disable switch
-# - Remote mode buttons (enable/disable)
+# Everything you drive from Home Assistant, layered on the pump package:
+# - Engage Pump, Remote Mode, Schedule Enabled, Temperature AutoAdapt and the
+#   two flow-limit switches
 # - Control mode selector for the exposed operating modes
-# - Setpoint controls for the supported control modes
+# - Setpoint, temperature-range, cycle-time and flow-limit numbers
+# - Restart and Read Pump Clock buttons, Pump Motor Active indicator
+# - The schedule editor helpers used by the Lovelace schedule card: day/layer
+#   selects, time and date numbers, save/clear/vacation buttons. They are
+#   `internal: true`, so they add nothing to the Home Assistant entity list
+#   unless a dashboard references them. The schedule services themselves are
+#   registered by the component (components/alpha_hwr/api_bridge.cpp) and
+#   exist whether or not this package is loaded.
 #
 # Usage:
 #   packages:
-#     alpha_hwr: !include packages/alpha_hwr_pairing.yaml
+#     alpha_hwr: !include packages/alpha_hwr.yaml
 #     alpha_hwr_controls: !include packages/alpha_hwr_controls.yaml
 #
 # Requirements:
@@ -21,7 +26,16 @@
 #
 # ==============================================================================
 
-# Ensure switch and button components are included
+# Editor state shared by the schedule-editor helpers below.
+globals:
+  - id: sched_edit_day
+    type: int
+    initial_value: '0'
+  - id: sched_edit_layer
+    type: int
+    initial_value: '0'
+
+
 switch:
   # ── Flow limiter enables (issue #299) ────────────────────────────────────
   #
@@ -193,7 +207,172 @@ button:
           ESP_LOGI("button", "Manual pump clock read requested");
           id(pump).read_pump_clock();
 
+  - platform: template
+    name: "Save Schedule Entry"
+    icon: "mdi:content-save"
+    internal: true
+    on_press:
+      - lambda: |-
+          uint8_t layer = (uint8_t)id(sched_edit_layer);
+          uint8_t day = (uint8_t)id(sched_edit_day);
+          uint8_t sh = (uint8_t)id(sched_start_hour).state;
+          uint8_t sm = (uint8_t)id(sched_start_minute).state;
+          uint8_t eh = (uint8_t)id(sched_end_hour).state;
+          uint8_t em = (uint8_t)id(sched_end_minute).state;
+          
+          static const char* DAYS[] = {"Monday","Tuesday","Wednesday","Thursday","Friday","Saturday","Sunday"};
+          
+          ESP_LOGI("sched_editor", "Saving: %s L%d %02d:%02d-%02d:%02d",
+                   DAYS[day], layer, sh, sm, eh, em);
+          
+          esphome::alpha_hwr::ScheduleEntry entry(
+            DAYS[day], sh, sm, eh, em, 0x02, layer, true);
+          
+          id(pump).set_schedule_entry(layer, day, entry, [](bool success) {
+            if (success) {
+              ESP_LOGI("sched_editor", "✓ Schedule entry saved");
+            } else {
+              ESP_LOGW("sched_editor", "✗ Failed to save schedule entry");
+            }
+          });
 
+  - platform: template
+    name: "Clear Schedule Entry"
+    icon: "mdi:delete"
+    internal: true
+    on_press:
+      - lambda: |-
+          uint8_t layer = (uint8_t)id(sched_edit_layer);
+          uint8_t day = (uint8_t)id(sched_edit_day);
+          
+          static const char* DAYS[] = {"Monday","Tuesday","Wednesday","Thursday","Friday","Saturday","Sunday"};
+          ESP_LOGI("sched_editor", "Clearing: %s L%d", DAYS[day], layer);
+          
+          id(pump).clear_schedule_entry_async(layer, day, [](bool success) {
+            if (success) {
+              ESP_LOGI("sched_editor", "✓ Schedule entry cleared");
+            } else {
+              ESP_LOGW("sched_editor", "✗ Failed to clear schedule entry");
+            }
+          });
+
+  # --------------------------------------------------------------------------
+  # Single Event (One-Time Schedule) Management
+  # --------------------------------------------------------------------------
+
+  - platform: template
+    name: "Add Single Event"
+    icon: "mdi:calendar-plus"
+    internal: true
+    on_press:
+      - lambda: |-
+          // Get event times from the number inputs
+          uint16_t start_month = (uint16_t)id(single_event_start_month).state;
+          uint16_t start_day_val = (uint16_t)id(single_event_start_day).state;
+          uint16_t start_hour = (uint16_t)id(single_event_start_hour).state;
+          uint16_t start_minute = (uint16_t)id(single_event_start_min).state;
+          uint16_t end_month = (uint16_t)id(single_event_end_month).state;
+          uint16_t end_day_val = (uint16_t)id(single_event_end_day).state;
+          uint16_t end_hour = (uint16_t)id(single_event_end_hour).state;
+          uint16_t end_minute = (uint16_t)id(single_event_end_min).state;
+          
+          // Build Unix timestamps anchored to the current year. build_event_window
+          // validates the dates, rolls ranges that wrap New Year into next year,
+          // and refuses to run before system time is synced.
+          uint32_t begin_ts, end_ts;
+          if (!id(pump).build_event_window("single_event",
+                  start_month, start_day_val, start_hour, start_minute,
+                  end_month, end_day_val, end_hour, end_minute,
+                  &begin_ts, &end_ts)) {
+            return;
+          }
+
+          ESP_LOGI("single_event", "Adding event %02d/%02d %02d:%02d - %02d/%02d %02d:%02d",
+                   start_month, start_day_val, start_hour, start_minute,
+                   end_month, end_day_val, end_hour, end_minute);
+
+          // No slot is chosen here, deliberately. This used to pick one with
+          // find_free_single_event_slot() and then write to it by index, which
+          // put a gap between the pick and the write that nothing closed: a
+          // service call resolving in that gap takes the same slot, writes a
+          // live event to it, and this write then overwrites it. Letting the
+          // write-operation layer resolve the slot makes the two one step, and
+          // is what AGENTS section 6 asks for anyway -- it also means this
+          // button gets the recycling WARN and the settle detail that the
+          // service path has (issue #262), which a write by index skips.
+          //
+          // "no free single event slots" now arrives as a rejected settle event
+          // rather than a log line here.
+          id(pump).submit_set_single_event((uint32_t)begin_ts, (uint32_t)end_ts, "");
+
+  - platform: template
+    name: "Clear Single Event"
+    icon: "mdi:calendar-remove"
+    internal: true
+    on_press:
+      - lambda: |-
+          uint8_t idx = (uint8_t)id(single_event_clear_slot).state;
+          ESP_LOGI("single_event", "Clearing single event slot %d", idx);
+          id(pump).clear_single_event(idx, [](bool success) {
+            if (success) {
+              ESP_LOGI("single_event", "✓ Single event cleared");
+            } else {
+              ESP_LOGW("single_event", "✗ Failed to clear single event");
+            }
+          });
+
+  - platform: template
+    name: "Refresh Single Events"
+    icon: "mdi:calendar-refresh"
+    internal: true
+    on_press:
+      - lambda: |-
+          id(pump).read_single_events([](bool success, const std::vector<esphome::alpha_hwr::services::SingleEvent>& events) {
+            if (success) {
+              ESP_LOGI("single_event", "✓ Refreshed %zu events", events.size());
+            }
+          });
+
+  # --------------------------------------------------------------------------
+  # Vacation (multi-day Stop single-event overriding the weekly schedule)
+  # --------------------------------------------------------------------------
+
+  - platform: template
+    name: "Set Vacation"
+    icon: "mdi:beach"
+    internal: true
+    on_press:
+      - lambda: |-
+          uint16_t start_month = (uint16_t)id(vacation_start_month).state;
+          uint16_t start_day_val = (uint16_t)id(vacation_start_day).state;
+          uint16_t end_month = (uint16_t)id(vacation_end_month).state;
+          uint16_t end_day_val = (uint16_t)id(vacation_end_day).state;
+
+          // A vacation spans whole days: 00:00 of the start day through 23:59 of
+          // the end day, anchored to the current year (build_event_window rolls
+          // the end into next year for ranges that wrap New Year, validates the
+          // dates, and refuses to run before system time is synced).
+          uint32_t begin_ts, end_ts;
+          if (!id(pump).build_event_window("vacation",
+                  start_month, start_day_val, 0, 0,
+                  end_month, end_day_val, 23, 59,
+                  &begin_ts, &end_ts)) {
+            return;
+          }
+
+          ESP_LOGI("vacation", "Setting vacation: %02d/%02d 00:00 - %02d/%02d 23:59",
+                   start_month, start_day_val, end_month, end_day_val);
+
+          id(pump).submit_set_vacation(begin_ts, end_ts, "");
+
+  - platform: template
+    name: "Clear Vacation"
+    icon: "mdi:beach"
+    internal: true
+    on_press:
+      - lambda: |-
+          ESP_LOGI("vacation", "Clearing active vacation");
+          id(pump).submit_clear_vacation("");
 
 select:
   # Pump Control Mode Selector
@@ -277,11 +456,79 @@ select:
           bool queued = id(pump).set_control_mode(mode);
           ESP_LOGI("select", "Mode change %s: %s", queued ? "queued" : "rejected", x.c_str());
 
+  - platform: template
+    name: "Schedule Editor Day"
+    id: sched_editor_day
+    icon: "mdi:calendar"
+    internal: true
+    optimistic: true
+    options:
+      - "Monday"
+      - "Tuesday"
+      - "Wednesday"
+      - "Thursday"
+      - "Friday"
+      - "Saturday"
+      - "Sunday"
+    initial_option: "Monday"
+    set_action:
+      - lambda: |-
+          int idx = 0;
+          if (x == "Tuesday") idx = 1;
+          else if (x == "Wednesday") idx = 2;
+          else if (x == "Thursday") idx = 3;
+          else if (x == "Friday") idx = 4;
+          else if (x == "Saturday") idx = 5;
+          else if (x == "Sunday") idx = 6;
+          id(sched_edit_day) = idx;
+          
+          // Load current entry for this day from cache
+          uint8_t layer = (uint8_t)id(sched_edit_layer);
+          esphome::alpha_hwr::ScheduleEntry entry;
+          if (id(pump).get_cached_schedule_entry(layer, idx, &entry)) {
+            if (entry.is_enabled()) {
+              auto start_h = id(sched_start_hour);
+              auto start_m = id(sched_start_minute);
+              auto end_h = id(sched_end_hour);
+              auto end_m = id(sched_end_minute);
+              start_h->publish_state(entry.get_begin_hour());
+              start_m->publish_state(entry.get_begin_minute());
+              end_h->publish_state(entry.get_end_hour());
+              end_m->publish_state(entry.get_end_minute());
+              ESP_LOGI("sched_editor", "Loaded: %s %02d:%02d-%02d:%02d",
+                       x.c_str(), entry.get_begin_hour(), entry.get_begin_minute(),
+                       entry.get_end_hour(), entry.get_end_minute());
+            } else {
+              ESP_LOGI("sched_editor", "%s: no schedule (disabled)", x.c_str());
+            }
+          }
+
+  - platform: template
+    name: "Schedule Editor Layer"
+    id: sched_editor_layer
+    icon: "mdi:layers"
+    internal: true
+    optimistic: true
+    options:
+      - "Layer 0"
+      - "Layer 1"
+      - "Layer 2"
+      - "Layer 3"
+      - "Layer 4"
+    initial_option: "Layer 0"
+    set_action:
+      - lambda: |-
+          int idx = 0;
+          if (x == "Layer 1") idx = 1;
+          else if (x == "Layer 2") idx = 2;
+          else if (x == "Layer 3") idx = 3;
+          else if (x == "Layer 4") idx = 4;
+          id(sched_edit_layer) = idx;
+
+number:
 # ========== Control Mode Setpoints ==========
 # Each control mode has specific setpoint parameters
 # These number entities dynamically show/hide based on the active mode
-
-number:
   # Constant Pressure Setpoint (Mode 0)
   - platform: template
     name: "Constant Pressure Setpoint"
@@ -610,7 +857,7 @@ number:
   # Grundfos GO app, which is the failure this whole cluster has been about.
   #
   # These read as unknown until the limiter has been read, which needs
-  # `flow_limiter` or `flow_limited` declared -- `alpha_hwr_pairing.yaml` does.
+  # `flow_limiter` or `flow_limited` declared -- `alpha_hwr.yaml` does.
   #
   # gal/min with no device_class on purpose: Home Assistant then does no unit
   # conversion, so the entity shows exactly the number the service takes and
@@ -671,6 +918,195 @@ number:
           const auto &c = id(pump).limiter_state().min_flow;
           id(pump).set_flow_limiter_from_entity(601, c.enabled, x);
 
+  - platform: template
+    name: "Schedule Start Hour"
+    id: sched_start_hour
+    icon: "mdi:clock-start"
+    internal: true
+    optimistic: true
+    min_value: 0
+    max_value: 23
+    step: 1
+    initial_value: 6
+
+  - platform: template
+    name: "Schedule Start Minute"
+    id: sched_start_minute
+    icon: "mdi:clock-start"
+    internal: true
+    optimistic: true
+    min_value: 0
+    max_value: 59
+    step: 5
+    initial_value: 0
+
+  - platform: template
+    name: "Schedule End Hour"
+    id: sched_end_hour
+    icon: "mdi:clock-end"
+    internal: true
+    optimistic: true
+    min_value: 0
+    max_value: 23
+    step: 1
+    initial_value: 8
+
+  - platform: template
+    name: "Schedule End Minute"
+    id: sched_end_minute
+    icon: "mdi:clock-end"
+    internal: true
+    optimistic: true
+    min_value: 0
+    max_value: 59
+    step: 5
+    initial_value: 0
+
+  # Single Event time inputs
+  - platform: template
+    name: "Single Event Start Month"
+    id: single_event_start_month
+    icon: "mdi:calendar-start"
+    internal: true
+    optimistic: true
+    min_value: 1
+    max_value: 12
+    step: 1
+    initial_value: 1
+
+  - platform: template
+    name: "Single Event Start Day"
+    id: single_event_start_day
+    icon: "mdi:calendar-start"
+    internal: true
+    optimistic: true
+    min_value: 1
+    max_value: 31
+    step: 1
+    initial_value: 1
+
+  - platform: template
+    name: "Single Event Start Hour"
+    id: single_event_start_hour
+    icon: "mdi:clock-start"
+    internal: true
+    optimistic: true
+    min_value: 0
+    max_value: 23
+    step: 1
+    initial_value: 6
+
+  - platform: template
+    name: "Single Event Start Minute"
+    id: single_event_start_min
+    icon: "mdi:clock-start"
+    internal: true
+    optimistic: true
+    min_value: 0
+    max_value: 59
+    step: 5
+    initial_value: 0
+
+  - platform: template
+    name: "Single Event End Month"
+    id: single_event_end_month
+    icon: "mdi:calendar-end"
+    internal: true
+    optimistic: true
+    min_value: 1
+    max_value: 12
+    step: 1
+    initial_value: 1
+
+  - platform: template
+    name: "Single Event End Day"
+    id: single_event_end_day
+    icon: "mdi:calendar-end"
+    internal: true
+    optimistic: true
+    min_value: 1
+    max_value: 31
+    step: 1
+    initial_value: 1
+
+  - platform: template
+    name: "Single Event End Hour"
+    id: single_event_end_hour
+    icon: "mdi:clock-end"
+    internal: true
+    optimistic: true
+    min_value: 0
+    max_value: 23
+    step: 1
+    initial_value: 8
+
+  - platform: template
+    name: "Single Event End Minute"
+    id: single_event_end_min
+    icon: "mdi:clock-end"
+    internal: true
+    optimistic: true
+    min_value: 0
+    max_value: 59
+    step: 5
+    initial_value: 0
+
+  - platform: template
+    name: "Single Event Clear Slot"
+    id: single_event_clear_slot
+    icon: "mdi:numeric"
+    internal: true
+    optimistic: true
+    min_value: 0
+    max_value: 34
+    step: 1
+    initial_value: 0
+
+  # Vacation date inputs (whole-day granularity — a vacation is a multi-day
+  # Stop single-event running 00:00 of the start day to 23:59 of the end day).
+  - platform: template
+    name: "Vacation Start Month"
+    id: vacation_start_month
+    icon: "mdi:calendar-start"
+    internal: true
+    optimistic: true
+    min_value: 1
+    max_value: 12
+    step: 1
+    initial_value: 1
+
+  - platform: template
+    name: "Vacation Start Day"
+    id: vacation_start_day
+    icon: "mdi:calendar-start"
+    internal: true
+    optimistic: true
+    min_value: 1
+    max_value: 31
+    step: 1
+    initial_value: 1
+
+  - platform: template
+    name: "Vacation End Month"
+    id: vacation_end_month
+    icon: "mdi:calendar-end"
+    internal: true
+    optimistic: true
+    min_value: 1
+    max_value: 12
+    step: 1
+    initial_value: 1
+
+  - platform: template
+    name: "Vacation End Day"
+    id: vacation_end_day
+    icon: "mdi:calendar-end"
+    internal: true
+    optimistic: true
+    min_value: 1
+    max_value: 31
+    step: 1
+    initial_value: 1
 
 binary_sensor:
   # Pump Motor Active (read-only indicator)

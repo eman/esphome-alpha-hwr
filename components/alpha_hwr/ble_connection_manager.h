@@ -21,7 +21,7 @@ namespace core {
  *
  * Populated by cache_adv_info_from_service_data(), which is wired to the
  * esp32_ble_tracker on_ble_service_data_advertise trigger in YAML (see
- * packages/alpha_hwr_pairing.yaml).  Available on the first scan hit, so it
+ * packages/alpha_hwr.yaml).  Available on the first scan hit, so it
  * can drive conditional logic (e.g. encryption timing) before the GATT
  * connection opens.
  *
@@ -84,7 +84,7 @@ class BLEConnectionManager {
 
   // Advertisement info — populated at scan time via cache_adv_info_from_service_data(),
   // before the connection opens.  Call this from an on_ble_service_data_advertise
-  // trigger in YAML (see packages/alpha_hwr_pairing.yaml for the wiring).
+  // trigger in YAML (see packages/alpha_hwr.yaml for the wiring).
   const PumpAdvertisementInfo &get_advertisement_info() const { return adv_info_; }
   void set_advertisement_callback(std::function<void(const PumpAdvertisementInfo &)> cb) {
     advertisement_callback_ = std::move(cb);

@@ -7,8 +7,8 @@ esphome:
 # ==============================================================================
 #
 # The pump package on its own: full telemetry and diagnostics, no control UI.
-# For controls and schedules see hwr-pump-schedule-example.yaml and
-# hwr-pump-dhw-example.yaml.
+# For the control UI see hwr-pump-controls-example.yaml; for the DHW demand
+# detector alongside it, hwr-pump-dhw-example.yaml.
 #
 # The node pairs with the pump on its first connection and keeps the bond in
 # NVS. The pump only offers to pair while it is in Bluetooth pairing mode,
@@ -32,6 +32,9 @@ substitutions:
   mac_address: "00:00:00:00:00:00"  # ← CHANGE THIS to your pump's MAC
 
 packages:
+  # Pinned to the last release, where the pump package still carried its old
+  # name. On main it is packages/alpha_hwr.yaml; the release script moves this
+  # line at the next release.
   alpha_hwr: github://eman/esphome-alpha-hwr/packages/alpha_hwr_pairing.yaml@v0.16.0
 
 esp32:
@@ -101,8 +104,8 @@ button:
     name: "Restart HWR Pump"
 
 # Optional: Add schedule control switch
-# For a complete example with schedule management, control modes, and remote mode,
-# see: hwr-pump-schedule-example.yaml
+# For the full control UI, including schedule management, control modes and
+# remote mode, see: hwr-pump-controls-example.yaml
 # Uncomment to enable schedule management
 # switch:
 #   - platform: template

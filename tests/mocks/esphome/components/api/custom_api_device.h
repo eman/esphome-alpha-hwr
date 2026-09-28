@@ -37,7 +37,7 @@ namespace api {
 
 /// One service argument, in the only three types the bridge uses. ESPHome
 /// service variables are bool/float/string here on purpose: int-typed ones hit
-/// an ESP32-C3 RISC-V linker bug (see packages/alpha_hwr_schedule_editor.yaml).
+/// an ESP32-C3 RISC-V linker bug (see components/alpha_hwr/api_bridge.h).
 struct ServiceArg {
   enum Kind { BOOL, FLOAT, STRING } kind;
   bool b{false};

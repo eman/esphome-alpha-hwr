@@ -368,9 +368,9 @@ Releases follow **semantic versioning** (`vMAJOR.MINOR.PATCH`). Because this lib
    # Bulk-replace the previous tag across all example YAMLs and packages
    old=vOLD; new=vX.Y.Z
    sed -i '' "s|@${old}|@${new}|g" \
-     hwr-pump-example.yaml hwr-pump-schedule-example.yaml \
-     dhw-demand-example.yaml hwr-pump-dhw-example.yaml \
-     packages/alpha_hwr_pairing.yaml packages/dhw_demand_detector.yaml
+     hwr-pump-example.yaml hwr-pump-controls-example.yaml \
+     hwr-pump-dhw-example.yaml \
+     packages/alpha_hwr.yaml packages/dhw_demand_detector.yaml
    git add -u && git commit -m "Pin examples and packages to ${new}"
    git push
    ```
@@ -382,10 +382,9 @@ Releases follow **semantic versioning** (`vMAJOR.MINOR.PATCH`). Because this lib
 | File | Role |
 |---|---|
 | `hwr-pump-example.yaml` | Pump package example |
-| `hwr-pump-schedule-example.yaml` | Schedule management example |
-| `dhw-demand-example.yaml` | DHW demand detector example |
+| `hwr-pump-controls-example.yaml` | Pump + controls example |
 | `hwr-pump-dhw-example.yaml` | Pump + controls + DHW demand example |
-| `packages/alpha_hwr_pairing.yaml` | `external_components` source for the pump package |
+| `packages/alpha_hwr.yaml` | `external_components` source for the pump package |
 | `packages/dhw_demand_detector.yaml` | `external_components` source for DHW demand package (including commented examples) |
 
 Do **not** update files under `.esphome/` — that directory is a local build cache and is not committed.

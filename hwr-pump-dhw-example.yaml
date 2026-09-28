@@ -22,10 +22,10 @@ esphome:
 #
 # Why this file exists rather than only the README: the three packages here
 # interact in ways the other examples do not exercise. alpha_hwr_controls.yaml
-# reads `id(motor_speed)` directly, so the rpm sensor cannot be renamed the way
-# dhw-demand-example.yaml renames it -- a collision that only appears when the
-# controls and dhw_demand packages are loaded together. Validating the
-# combination in CI is the only thing that keeps the recipe honest.
+# reads `id(motor_speed)` directly, so the rpm sensor cannot be renamed -- a
+# collision that only appears when the controls and dhw_demand packages are
+# loaded together. Validating the combination in CI is the only thing that
+# keeps the recipe honest.
 # ==============================================================================
 
 substitutions:
@@ -42,6 +42,9 @@ substitutions:
 # whenever a config key changes between releases, and the config stops
 # validating.
 packages:
+  # Pinned to the last release, where the pump package still carried its old
+  # name. On main it is packages/alpha_hwr.yaml; the release script moves this
+  # line at the next release.
   alpha_hwr: github://eman/esphome-alpha-hwr/packages/alpha_hwr_pairing.yaml@v0.16.0
   alpha_hwr_controls: github://eman/esphome-alpha-hwr/packages/alpha_hwr_controls.yaml@v0.16.0
   dhw_demand: github://eman/esphome-alpha-hwr/packages/dhw_demand_detector.yaml@v0.16.0
@@ -69,12 +72,11 @@ ota:
 # ── Alpha HWR sensor IDs ───────────────────────────────────────────────────────
 #
 # Give the pump sensors stable IDs so dhw_demand: can reference them below.
-# These merge with the sensor declarations already made by alpha_hwr_pairing.yaml.
+# These merge with the sensor declarations already made by the pump package.
 #
 # Note what is NOT here: `rpm:`. alpha_hwr_controls.yaml refers to the speed
-# sensor as `id(motor_speed)`, which is the id alpha_hwr_pairing.yaml assigns.
-# Renaming it here -- as dhw-demand-example.yaml does, since it loads no
-# controls package -- fails validation with "Couldn't find ID 'motor_speed'".
+# sensor as `id(motor_speed)`, which is the id the pump package assigns.
+# Renaming it here fails validation with "Couldn't find ID 'motor_speed'".
 alpha_hwr:
   current:
     id: motor_current_sensor

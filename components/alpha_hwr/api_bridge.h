@@ -42,7 +42,7 @@ class AlphaHwrComponent;
  * Compiled only when the `api:` component is configured (USE_API); every
  * shipped package already configures it. Service arguments deliberately use
  * only bool/float/string — int-typed service variables hit an ESP32-C3
- * RISC-V linker bug (see packages/alpha_hwr_schedule_editor.yaml).
+ * RISC-V linker bug.
  */
 class AlphaHwrApiBridge : public api::CustomAPIDevice {
  public:
@@ -61,8 +61,9 @@ class AlphaHwrApiBridge : public api::CustomAPIDevice {
   void on_set_flow_limiter(std::string limiter, bool enabled, float limit_gpm, std::string op_id);
   void on_set_pump_state(std::string state, std::string op_id);  // "off" | "engaged" | "scheduled"
 
-  // Schedule services, migrated from packages/alpha_hwr_schedule_editor.yaml
-  // with their names and single data-string formats unchanged (the string
+  // Schedule services, migrated from the YAML schedule editor package (since
+  // folded into alpha_hwr_controls.yaml) with their names and single
+  // data-string formats unchanged (the string
   // format is the ESP32-C3 int32 linker-bug workaround); op_id is a new,
   // optional second argument. Parse failures used to silently return in the
   // YAML lambdas — here they become an immediate terminal `rejected` event.
