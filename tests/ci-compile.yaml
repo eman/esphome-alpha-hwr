@@ -29,9 +29,8 @@ substitutions:
   component_source: ../components
 
 packages:
-  alpha_hwr: !include ../packages/alpha_hwr_pairing.yaml
+  alpha_hwr: !include ../packages/alpha_hwr.yaml
   alpha_hwr_controls: !include ../packages/alpha_hwr_controls.yaml
-  alpha_hwr_schedule_editor: !include ../packages/alpha_hwr_schedule_editor.yaml
   dhw_demand: !include ../packages/dhw_demand_detector.yaml
 
 # The gap histogram (issue #176 part 1) is commented out in the pairing package

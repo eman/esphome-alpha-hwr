@@ -4,11 +4,11 @@ This directory contains reusable YAML packages for the Grundfos ALPHA HWR pump c
 
 ## Available Packages
 
-### `alpha_hwr_pairing.yaml` - The pump package
-The BLE link plus every telemetry and diagnostic entity the component exposes.
-The node pairs with the pump on first connection, while the pump is in
-Bluetooth pairing mode, and keeps the bond in NVS. (The file keeps its
-historical name; configs reference it by URL.)
+### `alpha_hwr.yaml` - The pump
+The BLE link plus every telemetry and diagnostic entity the component exposes,
+and the schedule read-back sensors. The node pairs with the pump on first
+connection, while the pump is in Bluetooth pairing mode, and keeps the bond in
+NVS.
 
 **Sensors included:**
 - Flow Rate (m³/h), Head (m), Head Rate, Motor Speed (RPM), Power (W)
@@ -22,13 +22,16 @@ historical name; configs reference it by URL.)
   clock drift and last clock sync
 - Device info, heap, reset reason, component version and build
 
+Also the **Suspend Pump Link** switch, for handing the pump to the Grundfos GO
+app without powering the node down.
+
 **Usage:**
 ```yaml
 substitutions:
   mac_address: "AA:BB:CC:DD:EE:FF"
 
 packages:
-  alpha_hwr: github://eman/esphome-alpha-hwr/packages/alpha_hwr_pairing.yaml@main
+  alpha_hwr: github://eman/esphome-alpha-hwr/packages/alpha_hwr.yaml@main
 
 esphome:
   name: my-hwr-pump
@@ -39,24 +42,23 @@ esphome:
 takes more than a button press (see `docs/configuration.md`, "Pairing"). The
 bond is stored in NVS and reconnects reuse it.
 
----
-
-### `alpha_hwr_controls.yaml` - Control UI
-Recommended control surface. Adds pump enable, remote mode, schedule toggle,
-mode select and setpoint controls. Requires `alpha_hwr_pairing.yaml`.
+`alpha_hwr_pairing.yaml` is this package's old name. It still loads it, and
+goes away in the release after next.
 
 ---
 
-### `alpha_hwr_schedule.yaml` - Lighter Schedule/Mode UI
-Simpler alternative to `alpha_hwr_controls.yaml`. Avoid combining both unless
-you want duplicate controls. Requires `alpha_hwr_pairing.yaml`.
-
----
-
-### `alpha_hwr_schedule_editor.yaml` - Schedule Editor Helpers
-Helper entities for weekly and single-event editing, used by the Lovelace
-schedule card. The schedule services themselves are registered by the component,
-not by this package. Requires `alpha_hwr_pairing.yaml`.
+### `alpha_hwr_controls.yaml` - Everything you drive from Home Assistant
+Layers on `alpha_hwr.yaml`:
+- Engage Pump, Remote Mode, Schedule Enabled, Temperature AutoAdapt and the
+  flow-limit switches
+- Control mode select
+- Setpoint, temperature-range, cycle-time and flow-limit numbers
+- Restart and Read Pump Clock buttons, Pump Motor Active indicator
+- The schedule editor helpers the Lovelace schedule card uses (day/layer
+  selects, time and date numbers, save/clear/vacation buttons). They are
+  `internal: true`, so they add nothing to the entity list unless a dashboard
+  references them. The schedule services themselves are registered by the
+  component and exist either way.
 
 ---
 
@@ -74,7 +76,7 @@ to enable pump-on detection. See `docs/configuration.md` for the full key list.
    - Use ESPHome's Bluetooth scan feature
    - Or use a BLE scanner app (e.g., nRF Connect)
 
-2. **Start from the pump package**, `alpha_hwr_pairing.yaml`, and add
+2. **Start from the pump package**, `alpha_hwr.yaml`, and add
    `alpha_hwr_controls.yaml` if you want the control UI.
 
 3. **Create your device config:**
@@ -83,7 +85,7 @@ to enable pump-on detection. See `docs/configuration.md` for the full key list.
      mac_address: "AA:BB:CC:DD:EE:FF"  # Your pump's MAC
    
    packages:
-     alpha_hwr: github://eman/esphome-alpha-hwr/packages/alpha_hwr_pairing.yaml@main
+     alpha_hwr: github://eman/esphome-alpha-hwr/packages/alpha_hwr.yaml@main
    
    esphome:
      name: hwr-pump-basement
@@ -112,7 +114,7 @@ You can customize sensor names and add filters by overriding the package:
 
 ```yaml
 packages:
-  alpha_hwr: github://eman/esphome-alpha-hwr/packages/alpha_hwr_pairing.yaml@main
+  alpha_hwr: github://eman/esphome-alpha-hwr/packages/alpha_hwr.yaml@main
 
 # Override specific sensor configurations
 alpha_hwr:
@@ -128,7 +130,7 @@ Or add additional sensors to the same device:
 
 ```yaml
 packages:
-  alpha_hwr: github://eman/esphome-alpha-hwr/packages/alpha_hwr_pairing.yaml@main
+  alpha_hwr: github://eman/esphome-alpha-hwr/packages/alpha_hwr.yaml@main
 
 sensor:
   - platform: wifi_signal
@@ -159,8 +161,8 @@ sensor:
 
 See the root directory for complete example configurations:
 - `hwr-pump-example.yaml` - The pump package on its own
-- `hwr-pump-schedule-example.yaml` - Pump with schedule UI and services
-- `dhw-demand-example.yaml` - Combined `alpha_hwr` + `dhw_demand`
+- `hwr-pump-controls-example.yaml` - Pump plus the control UI
+- `hwr-pump-dhw-example.yaml` - Pump, control UI and `dhw_demand`
 
 ---
 
@@ -203,8 +205,8 @@ See the root directory for complete example configurations:
 
 These packages follow the **principle of least surprise**:
 
-- `alpha_hwr_pairing.yaml` - Pairs on first connection and keeps the bond;
-  the one thing it needs from you is the pump in pairing mode that first time
-- The UI and service packages layer on top without touching the link
+- `alpha_hwr.yaml` - Pairs on first connection and keeps the bond; the one
+  thing it needs from you is the pump in pairing mode that first time
+- `alpha_hwr_controls.yaml` layers on top without touching the link
 
 The packages are designed to be **drop-in replacements** for manually configuring the component, reducing boilerplate and ensuring consistency across deployments.

@@ -1,0 +1,448 @@
+# ==============================================================================
+# ALPHA HWR Package
+# ==============================================================================
+#
+# The pump package: the BLE link, every telemetry and diagnostic entity the
+# component exposes, and the schedule read-back sensors. Add
+# alpha_hwr_controls.yaml on top for the control UI and the schedule editor
+# helpers.
+#
+# The node pairs with the pump on first connection and keeps the bond in NVS.
+# Put the pump into Bluetooth pairing mode for that first connection -- it
+# takes more than a button press; see docs/configuration.md, "Pairing".
+#
+# Telemetry: flow, head, head rate, water / PCB / control-box temperature,
+# motor speed, power, AC and DC voltage, motor current, inlet pressure, active
+# alarms and warnings, run state, control mode, flow limiter.
+# Diagnostics: pump ready, pairing status, link status / fault / recycles /
+# longest gap, pump clock DST check, heap, reset reason, component version and
+# build, serial and firmware versions.
+# Schedules: the five layers, single events, vacation, schedule hash and stall.
+# History: event log, trends, cycle timestamps, start count, operating hours,
+# clock drift and last clock sync.
+#
+# Requirements:
+# - ESP32 with BLE support
+# - Substitutions: ${mac_address} must be defined
+#
+# Usage:
+#   substitutions:
+#     mac_address: "AA:BB:CC:DD:EE:FF"
+#
+#   packages:
+#     alpha_hwr: !include packages/alpha_hwr.yaml
+# ==============================================================================
+
+substitutions:
+  # This component's release version, surfaced as the "Component Version"
+  # diagnostic entity below (issue #95). Kept in sync automatically by
+  # tools/bump_version.sh, which rewrites it alongside the @vX.Y.Z package pin.
+  component_version: "0.16.0"
+
+  # Where the component's C++ and codegen are loaded from. Overridable so a
+  # config can point it at a working tree without also having to declare a
+  # second `external_components` entry: two sources for the same component name
+  # both resolve, both get fetched, and which one *wins* comes down to
+  # `install_meta_finder` inserting each at the front of `sys.meta_path` -- last
+  # processed wins, which is neither stated in the config nor stable if the
+  # merge order ever changes. The tests/ci-compile*.yaml configs set this to
+  # `../components`; ESPHome's shorthand source validator tries a filesystem
+  # directory before the github:// pattern, so one substitution covers both.
+  #
+  # Rewritten by tools/bump_version.sh, which matches the @vX.Y.Z.
+  component_source: github://eman/esphome-alpha-hwr@v0.16.0
+
+esphome:
+  # Publish the (constant) component version once at boot (issue #95).
+  on_boot:
+    priority: -100
+    then:
+      - text_sensor.template.publish:
+          id: component_version_sensor
+          state: "${component_version}"
+
+external_components:
+  - source: ${component_source}
+    components: [alpha_hwr, dhw_demand]
+
+esp32_ble_tracker:
+  # The ESP32 shares one radio between WiFi and BLE. A window equal to the
+  # interval scans 100% of the time, which ESPHome warns starves WiFi. 30 ms of
+  # every 320 ms (ESPHome's default, ~9%) still sees the pump's advertisements:
+  # benched 2026-09-27, READY 11 s after boot with advertisement identifiers
+  # populated. It did not remove the node's multi-second WiFi stalls (PR #320).
+  scan_parameters:
+    interval: 320ms
+    window: 30ms
+  # Populate advertisement identifiers (product_version etc.) before the
+  # GATT connection opens.  ESPHome's BLEClientNode does not receive scan
+  # result events directly, so we hook them here via the tracker trigger.
+  # Filtered by MAC so a second Grundfos device on the same network cannot
+  # populate the one-shot advertisement cache with the wrong identifiers.
+  on_ble_service_data_advertise:
+    - mac_address: ${mac_address}
+      service_uuid: FE5D
+      then:
+        - lambda: "pump->on_ble_service_data_seen(x);"
+
+ble_client:
+  - mac_address: ${mac_address}
+    id: hwr_pump_client
+
+logger:
+  # INFO by default: every log line is an API frame fanned out to *every*
+  # subscriber, and a node being actively debugged (Home Assistant + an
+  # `esphome logs` stream + a script) is exactly when heap pressure on the API
+  # write path can reboot it (issue #127). Override with `logger: level: DEBUG`
+  # in your own config when you need it — the main config wins over the package.
+  level: INFO
+
+# Runtime heap, so a slow leak or fragmentation trend is visible before it
+# aborts in the API write path, and answerable afterwards (issue #127).
+# These publish on every 60s poll — heap genuinely moves, so unlike the control
+# entities there is nothing here to gate on change.
+debug:
+  update_interval: 60s
+
+sensor:
+  - platform: debug
+    free:
+      name: "Free Heap"
+    block:
+      name: "Largest Free Block"
+    min_free:
+      name: "Min Free Heap"
+    fragmentation:
+      name: "Heap Fragmentation"
+
+# Ensure text_sensor component is included in build
+text_sensor:
+  # This ESPHome component's own version (issue #95). Distinct from the pump's
+  # Software/Hardware/BLE/Product Version entities below, which report the pump
+  # firmware. Recorded in Home Assistant history so the component version that
+  # produced any state is answerable after the fact.
+  - platform: template
+    name: "Component Version"
+    id: component_version_sensor
+    icon: "mdi:package-variant"
+    entity_category: diagnostic
+    update_interval: never  # constant value; published once at boot (see esphome.on_boot)
+
+  # Why the node last rebooted — published once at boot. A panic reboot is
+  # otherwise indistinguishable from an OTA or a power cycle after the fact.
+  - platform: debug
+    reset_reason:
+      name: "Reset Reason"
+
+# ==============================================================================
+# Diagnostic control
+# ==============================================================================
+#
+# Here rather than in alpha_hwr_controls.yaml, and the reason is which
+# configurations ship with it. The switch below is for handing the pump to
+# something else, which only matters for a node that is BONDED AND CONNECTED --
+# and that is this package. hwr-pump-example.yaml loads this package alone, so
+# putting it there would have left them without the switch that
+# docs/configuration.md tells them to turn on. Raised in review on #285.
+switch:
+  # Diagnostic suspend (issue #243). The pump accepts one BLE connection at a
+  # time, so while this node is connected nothing else can reach the pump --
+  # not the Grundfos GO app (which is how you unlock the front panel, which is
+  # how you re-pair), and not another client doing bench work or protocol
+  # discovery. Before this switch the only way to hand the pump over was to
+  # remove power from the node. Clearing the bond is NOT the alternative: that
+  # strands the pump until someone re-pairs at the pump itself.
+  #
+  # Not persisted: a reboot comes back connected. A node that refuses to talk to
+  # the pump because someone flipped a switch a week ago is a worse failure than
+  # the inconvenience it solves.
+  # No entity_category, deliberately. Home Assistant groups `diagnostic` and
+  # `config` entities onto a separate card, leaves both out of auto-generated
+  # dashboards, and excludes both from voice assistants -- so categorising this
+  # would hide the one control someone needs at the exact moment they are trying
+  # to get another client onto the pump. It reports nothing; you reach for it on
+  # purpose. HA also caches the category in the entity registry, so a later
+  # change does not cleanly propagate to installs that already have the entity:
+  # whatever it ships as is what existing users keep. Raised in review on #285.
+  - platform: template
+    name: "Suspend Pump Link"
+    id: suspend_pump_link_switch
+    icon: "mdi:bluetooth-off"
+    optimistic: false
+    lambda: 'return id(pump).is_suspended();'
+    turn_on_action:
+      - lambda: 'id(pump).set_suspended(true);'
+    turn_off_action:
+      - lambda: 'id(pump).set_suspended(false);'
+
+api:
+  # Required by the alpha_hwr programmatic write services + write_settled event (issue #92)
+  custom_services: true
+  homeassistant_services: true
+
+time:
+  - platform: homeassistant
+    id: hwr_time
+
+alpha_hwr:
+   id: pump
+   ble_client_id: hwr_pump_client
+   time_id: hwr_time
+   # The component's default since the pump was measured to require a bond
+   # (issue #244); stated here so the package does not depend on it. It does
+   # NOT control whether a bond forms -- the pump can initiate and ESPHome
+   # consents before this component sees the event (issue #245). Renamed from
+   # `enable_pairing`, which is still accepted.
+   initiate_pairing: true
+    
+   # Pairing Status
+   pairing_status:
+     name: "Pairing Status"
+   ready_status:
+     name: "Pump Ready"
+
+   # Which build is installed: component source revision + firmware build time.
+   # "Component Version" below is the release version and only changes at a
+   # release, so it cannot tell two builds apart (issue #124).
+   component_build:
+     name: "Component Build"
+
+   # Pump Link Status (coarse connection health) + latched last-failure detail
+   pump_link_status:
+     name: "Pump Link Status"
+   pump_last_link_failure:
+     name: "Pump Link Fault"
+   # The pump keeps its OWN daylight-saving rule and applies it to its own
+   # clock, twice a year (issue #286). Schedule windows are stored in the
+   # pump's local time and converted using THIS node's timezone offset, so the
+   # two rules have to agree or every stored window is an hour out on one side
+   # of a transition -- and the symptom shows up months after the cause, as
+   # "my schedule moved an hour in November".
+   #
+   # Reads "OK (...)" with the rule spelled out when they agree, and names both
+   # rules when they do not. Nothing is corrected automatically: the GO app,
+   # this component and the Python library all write this pump's clock, and the
+   # pump cannot say which base a value arrived in.
+   pump_clock_dst:
+     name: "Pump Clock DST"
+
+   # The pump's MaxFlow/MinFlow limiters (issue #274). These are set from the
+   # Grundfos GO app, separately from the setpoint, and they constrain the pump
+   # BELOW what it was asked for -- while every other signal says the write
+   # worked, because it did. Measured on one installation with MaxFlow at
+   # 1.6 gpm: 3000 RPM commanded, 1883 delivered, settled `accepted`, with the
+   # pump reporting 3000 back as its own stored value.
+   #
+   # "Pump Flow Limiter" names which limiter is enabled or limiting and at what
+   # cap; "Pump Flow Limited" is the one-bit form to put in an automation. The
+   # reads are only issued when at least one of these is configured.
+   flow_limiter:
+     name: "Pump Flow Limiter"
+   flow_limited:
+     name: "Pump Flow Limited"
+
+   # Link recycle counter and the longest quiet interval seen since boot
+   # (issue #176). The fault sensor above shows the reason *during* a
+   # reconnect and clears on recovery, so repeated recycles read as a flap you
+   # have to be watching to catch. This counter is a value an automation can
+   # threshold on instead: it reads 0 in normal operation and only climbs while
+   # the link is failing -- to deliver data, or (with ready_timeout enabled,
+   # which is not the default) to become usable at all. The gap is what a
+   # data_timeout
+   # default should be chosen from, since it records what this installation
+   # actually does rather than what the poll interval predicts.
+   link_recycles:
+     name: "Pump Link Recycles"
+   link_max_gap:
+     name: "Pump Link Longest Gap"
+
+   # The gap histogram: how MANY quiet intervals passed each length, where
+   # "Longest Gap" above reports only the worst one. Each counter is the number
+   # of times a `data_timeout` of that length would have fired, which is the
+   # number the default has to be chosen from (issue #176 part 1).
+   #
+   # OFF by default, deliberately. This is a measurement instrument for one
+   # decision, not a feature: switching it on costs eight diagnostic entities
+   # and a boot warning on every install, to answer a question only the people
+   # actually running the measurement are asking.
+   #
+   # To take part in a measurement run, uncomment the block below AND set
+   # `data_timeout: 600s` in your own config. The second half is not optional:
+   # a counter at or above the budget in force cannot fill, because the watchdog
+   # cuts the interval short first, so at the shipped 60s default the top rungs
+   # read zero however badly the pump behaves. `esphome config` says so if you
+   # forget. "Gaps Truncated" is the trust check afterwards — it counts the
+   # intervals that were cut short rather than ending on their own.
+   #
+   # See docs/configuration.md, and tools/link_gap_report.py for reading them.
+   #
+   # link_gaps_over_15s:
+   #   name: "Pump Link Gaps Over 15s"
+   # link_gaps_over_20s:
+   #   name: "Pump Link Gaps Over 20s"
+   # link_gaps_over_30s:
+   #   name: "Pump Link Gaps Over 30s"
+   # link_gaps_over_45s:
+   #   name: "Pump Link Gaps Over 45s"
+   # link_gaps_over_60s:
+   #   name: "Pump Link Gaps Over 60s"
+   # link_gaps_over_90s:
+   #   name: "Pump Link Gaps Over 90s"
+   # link_gaps_truncated:
+   #   name: "Pump Link Gaps Truncated"
+   # link_watch_time:
+   #   name: "Pump Link Watched Time"
+
+   # Bad-CRC frame drops (issue #260). A passenger on the same trip: it costs one
+   # more entity and rides along with the run above at no extra collection cost,
+   # and link_gap_report.py prints it as a rate per watched hour beside the gap
+   # histogram.
+   #
+   # It answers a question the gap counters cannot. They say how long the link
+   # went QUIET; this says how many frames arrived CORRUPTED while it did not.
+   # Both present from outside as an unexplained write timeout, and until this
+   # existed the whole record of a drop was one log line -- so a sighting had no
+   # baseline to be compared against and meant nothing either way.
+   #
+   # Useful on its own, without the histogram, if you are chasing unexplained
+   # timeouts: it needs no raised data_timeout and no measurement run.
+   #
+   # link_crc_drops:
+   #   name: "Pump Link CRC Drops"
+
+   # Run state, and the alarm for the illegal "schedule on but pump stopped"
+   # state that silently loses every window (issue #124). "Engage Pump" reads
+   # off for both AUTO and STOP once the schedule is on, so these are the only
+   # entities that distinguish a scheduled pump from a stalled one.
+   pump_run_state:
+     name: "Pump Run State"
+   schedule_stalled:
+     name: "Schedule Stalled"
+
+   # Enhanced Electrical (requires pairing)
+   voltage:
+     name: "AC Voltage"
+   voltage_dc:
+     name: "DC Voltage"
+   current:
+     name: "Motor Current"
+   
+   # Basic Telemetry
+   power:
+     name: "Power Consumption"
+   rpm:
+     id: motor_speed
+     name: "Motor Speed"
+   flow:
+     name: "Flow Rate"
+   head:
+     name: "Head"
+   head_rate:
+     name: "Head Rate"
+     entity_category: diagnostic
+   
+   # Pressure Sensors (requires pairing)
+   inlet_pressure:
+     name: "Inlet Pressure"
+   
+   # Temperature Sensors (all)
+   temp_media:
+     name: "Water Temperature"
+     id: temp_media_sensor
+   temp_pcb:
+     name: "PCB Temperature"
+   temp_control_box:
+     name: "Control Box Temperature"
+   
+   # Alarms & Warnings
+   alarms:
+     name: "Active Alarms"
+   warnings:
+     name: "Active Warnings"
+   
+   # Canonical schedule hash — sync-verification sensor for an external
+   # scheduler driving upload_schedule ("unknown" until fully cached)
+   schedule_hash:
+      name: "Schedule Hash"
+
+   # Per-layer schedule read-back (issue #7) — each layer's compact JSON
+   # always fits HA's 255-char state cap, enabling full-grid recovery
+   schedule_layer_0:
+      name: "Schedule Layer 0"
+   schedule_layer_1:
+      name: "Schedule Layer 1"
+   schedule_layer_2:
+      name: "Schedule Layer 2"
+   schedule_layer_3:
+      name: "Schedule Layer 3"
+   schedule_layer_4:
+      name: "Schedule Layer 4"
+   
+   # Single Events Display
+   single_events:
+      name: "Single Events"
+
+   # Vacation (active pump-off period; multi-day Stop single-event)
+   vacation:
+      name: "Vacation"
+
+   # Event Log Display
+   event_log:
+      name: "Event Log"
+      entity_category: diagnostic
+      internal: true
+   
+   # History Trends Display
+   history:
+      name: "History Trends"
+      entity_category: diagnostic
+      internal: true
+   
+   # Cycle Timestamps (last 10 cycles)
+   cycle_timestamps:
+      name: "Cycle Timestamps"
+      entity_category: diagnostic
+      internal: true
+   
+   # Operating Statistics (Diagnostic)
+   start_count:
+      name: "Start Count"
+   operating_hours:
+      name: "Operating Hours"
+
+   # Clock Sync Diagnostics
+   clock_diff:
+      name: "Clock Drift"
+      id: hwr_clock_diff
+   last_clock_sync:
+      name: "Last Clock Sync"
+      id: hwr_last_clock_sync
+   
+   # Control Mode Display
+   control_mode:
+      name: "Control Mode"
+      icon: "mdi:cog"
+   
+   # Device Information (Diagnostic)
+   # These appear in the Device Info card's diagnostic section in Home Assistant
+   serial_number:
+      name: "Serial Number"
+      entity_category: diagnostic
+   software_version:
+      name: "Software Version"  
+      entity_category: diagnostic
+   hardware_version:
+      name: "Hardware Version"
+      entity_category: diagnostic
+   ble_version:
+      name: "BLE Version"
+      entity_category: diagnostic
+   product_name:
+      name: "Product Name"
+      entity_category: diagnostic
+   # Advertisement-derived BLE firmware discriminator (family/type/version
+   # bytes broadcast in the FE5D service data, captured at scan time before
+   # the GATT connection opens).
+   product_version:
+      name: "Product Version"
+      entity_category: diagnostic
