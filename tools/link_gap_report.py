@@ -65,18 +65,35 @@ THRESHOLDS_S = [15, 20, 30, 45, 60, 90]
 
 # The smallest budget that is defensible on the firmware's own timings.
 #
-# The arithmetic behind this moved and the number deliberately did not. It was
-# 31.5 s -- the calculated worst case from connection-open to first inbound data
-# with the opening sequence's backstop firing -- plus 30% margin, giving 41.
-# Removing that sequence (issue #174) took the worst case to 16.0 s, which the
-# same margin would put at 21.
+# Now derived from measurement rather than from constants (issue #315). It was
+# 41: the calculated 31.5 s worst case with the opening sequence's backstop
+# firing, plus 30% margin. Removing that sequence (#174) put the calculation at
+# 16.0 s, and this comment used to say the number stayed at 41 pending "the
+# measurement this tool exists to serve".
 #
-# The floor stays at 41 because it is not only a restatement of that worst case:
-# it also has to sit clear of the missed-poll-cycle rungs and satisfy the
-# tolerance rule below, and lowering a recommendation floor is a policy change
-# with no evidence behind it. Revisit it with the measurement this tool exists
-# to serve, not with a recomputed constant.
-FLOOR_S = 41
+# That measurement exists (#316), and it moved the worst case the OPPOSITE way
+# from what was expected. The 16.0 s calculation costed service discovery at
+# three 1 s retry delays; a discovery attempt actually takes 2.143 s measured,
+# and up to four run. Worst case to first inbound data is 24.62 s, not 16.0 --
+# see the sizing note in components/alpha_hwr/link_watchdog.h for the full
+# derivation. With the same 30% margin:
+#
+#   24.62 x 1.3 = 32
+#
+# Lower than 41, and it changes nothing about which rungs pass: 15/20/30 fail on
+# either number and 45 is the smallest survivor. The value of re-deriving it was
+# to stop the floor being an unexplained constant, not to unlock a shorter
+# default.
+#
+# What it rests on: the worst case includes the discovery-retry path, which has
+# never been observed -- discovery succeeded first try on all three boots
+# measured. It is in because a budget below it would recycle EVERY connect
+# needing a retry, systematically rather than occasionally, and each recycle
+# takes another run at the bond-erasing window (issue #14). Exclude that path
+# and the floor is ~20 s, which WOULD put 20 s and 30 s back on the ladder --
+# so this is the assumption to revisit first if the ladder ever matters more
+# than the margin.
+FLOOR_S = 32
 
 # What a spurious recycle is worth. Each one takes another run at the
 # encryption-on-open window that can erase the bond (issue #14), so the budget
@@ -534,12 +551,11 @@ def print_recommendation(passing: list[int], reported: list[int], problems: list
             print(f"  Conservative alternative: {alternative}s")
 
     print("\n  Decision rule")
-    print(f"    Floor      T >= {FLOOR_S}s. The calculated worst case from")
-    print("               connection-open to first inbound data is 16.0s")
-    print("               (link_watchdog.h), which with 30% margin would give 21s.")
-    print("               The floor is deliberately above that: it also has to")
-    print("               clear the missed-poll-cycle rungs, and lowering it is a")
-    print("               policy change this measurement has not made yet.")
+    print(f"    Floor      T >= {FLOOR_S}s. The MEASURED worst case from")
+    print("               connection-open to first inbound data is 24.62s")
+    print("               (link_watchdog.h, issue #316), which with 30% margin")
+    print(f"               gives {FLOOR_S}. Typical is 5.8-6.5s; the worst case is")
+    print("               dominated by a discovery-retry path never yet observed.")
     print(f"    Tolerance  Under {TOLERANCE_PER_DAY:.4f} spurious recycles per node-day (one per")
     print("               30 days). Each recycle takes another run at the")
     print("               encryption-on-open window that can erase the bond (#14).")
