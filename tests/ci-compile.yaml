@@ -86,7 +86,10 @@ api:
   custom_services: true
   homeassistant_services: true
   encryption:
-    key: "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA="
+    # No key on purpose: ESPHome 2026.9 rejects the all-zeros placeholder this
+    # carried, and a real one would put a working key in the tree. With the key
+    # omitted the node provisions one at runtime, which is all a config check
+    # or compile needs.
 
 ota:
   - platform: esphome
