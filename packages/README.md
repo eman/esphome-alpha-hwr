@@ -1,6 +1,9 @@
 # ESPHome ALPHA HWR Packages
 
-This directory contains reusable YAML packages for the Grundfos ALPHA HWR pump component.
+The reusable YAML packages for the `alpha_hwr` and `dhw_demand` components,
+and the one place that lists what each package declares. The README has the
+quick start and the recipes; `docs/configuration.md` has the options behind
+each entity; `examples/` has complete, CI-validated configs.
 
 ## Available Packages
 
@@ -38,9 +41,8 @@ esphome:
 # ... rest of your config
 ```
 
-**Note:** put the pump into Bluetooth pairing mode for the first connection; it
-takes more than a button press (see `docs/configuration.md`, "Pairing"). The
-bond is stored in NVS and reconnects reuse it.
+Pair the pump on the first connection: see the README's
+[Pairing](../README.md#pairing) section.
 
 `alpha_hwr_pairing.yaml` is this package's old name. It still loads it, and
 goes away in the release after next.
@@ -72,39 +74,8 @@ to enable pump-on detection. See `docs/configuration.md` for the full key list.
 
 ## Quick Start
 
-1. **Find your pump's MAC address:**
-   - Use ESPHome's Bluetooth scan feature
-   - Or use a BLE scanner app (e.g., nRF Connect)
-
-2. **Start from the pump package**, `alpha_hwr.yaml`, and add
-   `alpha_hwr_controls.yaml` if you want the control UI.
-
-3. **Create your device config:**
-   ```yaml
-   substitutions:
-     mac_address: "AA:BB:CC:DD:EE:FF"  # Your pump's MAC
-   
-   packages:
-     alpha_hwr: github://eman/esphome-alpha-hwr/packages/alpha_hwr.yaml@main
-   
-   esphome:
-     name: hwr-pump-basement
-   
-   esp32:
-     board: esp32-c3-devkitm-1
-   
-   wifi:
-     ssid: !secret wifi_ssid
-     password: !secret wifi_password
-   
-   api:
-   ota:
-   ```
-
-4. **Flash and enjoy!**
-   ```bash
-   esphome run my-device.yaml
-   ```
+In the README: [Quick start](../README.md#quick-start). Complete configs are in
+[`examples/`](../examples/).
 
 ---
 
@@ -159,10 +130,10 @@ sensor:
 
 ## Examples
 
-See the root directory for complete example configurations:
-- `hwr-pump-example.yaml` - The pump package on its own
-- `hwr-pump-controls-example.yaml` - Pump plus the control UI
-- `hwr-pump-dhw-example.yaml` - Pump, control UI and `dhw_demand`
+[`examples/`](../examples/), all validated by CI; the three that load the
+packages are release-pinned. The README's
+[Examples in this repo](../README.md#examples-in-this-repo) says what each one is
+for and how secrets work.
 
 ---
 
@@ -175,8 +146,8 @@ See the root directory for complete example configurations:
 
 ### Pairing Fails
 - The pump only offers to pair while it is in Bluetooth pairing mode, and
-  getting it there takes more than a button press: see `docs/configuration.md`,
-  "Pairing"
+  getting it there takes more than a button press: see the README's
+  [Pairing](../README.md#pairing) section
 - Leave `initiate_pairing` at its default of `true` (formerly `enable_pairing`,
   still accepted)
 - **Do not** clear the node's bond to retry. A pump that holds a bond for a node
@@ -185,28 +156,7 @@ See the root directory for complete example configurations:
 - Check logs for pairing error messages
 
 ### Sensors Show "Unknown"
-- No sensor updates until the pump is paired to the node. A never-paired peer
-  is refused at the link layer, and a peer with a stale bond is dropped about
-  2 s after connecting (issues #244, #230)
-- Voltage/current sensors **require** pairing to be enabled
+- Nothing updates until the pump is paired to the node; see the README's
+  [Pairing](../README.md#pairing) section
 - Wait 10-30 seconds after connection for first telemetry update
 
----
-
-## Requirements
-
-- **ESP32** with BLE support (ESP32, ESP32-C3, ESP32-S3)
-- **ESPHome 2024.6.0 or newer**
-- **ESP-IDF framework** (recommended for BLE stability)
-
----
-
-## Package Philosophy
-
-These packages follow the **principle of least surprise**:
-
-- `alpha_hwr.yaml` - Pairs on first connection and keeps the bond; the one
-  thing it needs from you is the pump in pairing mode that first time
-- `alpha_hwr_controls.yaml` layers on top without touching the link
-
-The packages are designed to be **drop-in replacements** for manually configuring the component, reducing boilerplate and ensuring consistency across deployments.

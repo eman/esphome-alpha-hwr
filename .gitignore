@@ -1,5 +1,6 @@
 # ESPHome
-/.esphome/
+# ESPHome build caches, beside whichever config was built (root, examples/, tests/)
+.esphome/
 .pio/
 deps/
 .temp/
@@ -94,7 +95,6 @@ hwr-pump.yaml
 # something the repo should carry.
 link_gap_log.jsonl
 resources
-components/alpha_hwr/secrets.yaml
 
 # Subagent worktrees (created by tooling, never part of the project)
 .claude/worktrees/

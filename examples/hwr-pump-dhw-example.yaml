@@ -7,18 +7,16 @@ esphome:
 # ==============================================================================
 #
 # The combined recipe: pump telemetry, the full control UI, and on-device DHW
-# demand detection in one node. This is README §5 as a file you can flash.
+# demand detection in one node: the README's combined recipe as a file you can
+# flash.
 #
-# Setup Instructions:
-# 1. Replace the MAC address below with your ALPHA HWR pump's BLE MAC address
-# 2. Set the three HA entity substitutions to match your installation
-# 3. Create your secrets file and fill in your own values:
-#      cp secrets-example.yaml secrets.yaml
-#    Not optional: this config reads WiFi, the API encryption key and the
-#    OTA password from it, and the template's key and OTA password are
-#    deliberately unusable so that copying it and building fails rather
-#    than producing a node anyone can read or reflash.
-# 4. Flash to your ESP32
+# Setup:
+# 1. Replace the MAC address below with your ALPHA HWR pump's BLE MAC address.
+# 2. Set the three HA entity substitutions to match your installation.
+# 3. Copy secrets-example.yaml to examples/secrets.yaml and fill it in (see
+#    README, "Examples in this repo"). The template's key and OTA password are
+#    deliberately unusable, so the build fails until you set your own.
+# 4. Put the pump into Bluetooth pairing mode and flash. See README, "Pairing".
 #
 # Why this file exists rather than only the README: the three packages here
 # interact in ways the other examples do not exercise. alpha_hwr_controls.yaml

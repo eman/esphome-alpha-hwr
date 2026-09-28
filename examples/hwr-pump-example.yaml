@@ -10,22 +10,12 @@ esphome:
 # For the control UI see hwr-pump-controls-example.yaml; for the DHW demand
 # detector alongside it, hwr-pump-dhw-example.yaml.
 #
-# The node pairs with the pump on its first connection and keeps the bond in
-# NVS. The pump only offers to pair while it is in Bluetooth pairing mode,
-# which takes more than a button press: see docs/configuration.md, "Pairing".
-#
-# Setup Instructions:
-# 1. Replace the MAC address below with your pump's BLE MAC address
-# 2. Create your secrets file and fill in your own values:
-#      cp secrets-example.yaml secrets.yaml
-#    This config reads WiFi, the API encryption key and the OTA password from
-#    it, so there is nothing to edit here and no working credential is carried
-#    in this file. ESPHome refuses to build until each secret is defined —
-#    which is the point: a config that ships a key anyone can read is not
-#    encrypted, and a published OTA password lets anything on your LAN flash
-#    this node.
-# 3. Put the pump into Bluetooth pairing mode and flash the ESP32; watch the
-#    logs for "BLE authentication complete". Reconnects reuse the stored bond.
+# Setup:
+# 1. Replace the MAC address below with your pump's BLE MAC address.
+# 2. Copy secrets-example.yaml to examples/secrets.yaml and fill it in (see
+#    README, "Examples in this repo"). The template's key and OTA password are
+#    deliberately unusable, so the build fails until you set your own.
+# 3. Put the pump into Bluetooth pairing mode and flash. See README, "Pairing".
 # ==============================================================================
 
 substitutions:

@@ -21,7 +21,7 @@
 //   * raw_state == state here, because the components under test never install
 //     filters on their own outputs. Raw *callbacks* are a different matter:
 //     USE_SENSOR_FILTER is a global define switched on by any sensor in the
-//     YAML carrying `filters:`, and this project's own hwr-pump-dhw-example.yaml
+//     YAML carrying `filters:`, and this project's examples/hwr-pump-dhw-example.yaml
 //     puts a `multiply` on the sensor feeding `pump_flow`. So real builds have
 //     it on, and there raw callbacks fire from publish_state() BEFORE state and
 //     has_state are updated. The mock reproduces that ordering rather than the

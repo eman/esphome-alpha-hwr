@@ -2,28 +2,12 @@
 # ALPHA HWR Package
 # ==============================================================================
 #
-# The pump package: the BLE link, every telemetry and diagnostic entity the
-# component exposes, and the schedule read-back sensors. Add
-# alpha_hwr_controls.yaml on top for the control UI and the schedule editor
-# helpers.
+# The pump: the BLE link, every telemetry and diagnostic entity the component
+# exposes, and the schedule read-back sensors. Add alpha_hwr_controls.yaml on
+# top for the control UI.
 #
-# The node pairs with the pump on first connection and keeps the bond in NVS.
-# Put the pump into Bluetooth pairing mode for that first connection -- it
-# takes more than a button press; see docs/configuration.md, "Pairing".
-#
-# Telemetry: flow, head, head rate, water / PCB / control-box temperature,
-# motor speed, power, AC and DC voltage, motor current, inlet pressure, active
-# alarms and warnings, run state, control mode, flow limiter.
-# Diagnostics: pump ready, pairing status, link status / fault / recycles /
-# longest gap, pump clock DST check, heap, reset reason, component version and
-# build, serial and firmware versions.
-# Schedules: the five layers, single events, vacation, schedule hash and stall.
-# History: event log, trends, cycle timestamps, start count, operating hours,
-# clock drift and last clock sync.
-#
-# Requirements:
-# - ESP32 with BLE support
-# - Substitutions: ${mac_address} must be defined
+# What it declares, entity by entity: packages/README.md. Options for the
+# alpha_hwr: block: docs/configuration.md. Pairing the pump: README, "Pairing".
 #
 # Usage:
 #   substitutions:
@@ -141,7 +125,7 @@ text_sensor:
 # Here rather than in alpha_hwr_controls.yaml, and the reason is which
 # configurations ship with it. The switch below is for handing the pump to
 # something else, which only matters for a node that is BONDED AND CONNECTED --
-# and that is this package. hwr-pump-example.yaml loads this package alone, so
+# and that is this package. examples/hwr-pump-example.yaml loads it alone, so
 # putting it there would have left them without the switch that
 # docs/configuration.md tells them to turn on. Raised in review on #285.
 switch:
@@ -319,7 +303,7 @@ alpha_hwr:
    schedule_stalled:
      name: "Schedule Stalled"
 
-   # Enhanced Electrical (requires pairing)
+   # Electrical
    voltage:
      name: "AC Voltage"
    voltage_dc:
@@ -341,7 +325,7 @@ alpha_hwr:
      name: "Head Rate"
      entity_category: diagnostic
    
-   # Pressure Sensors (requires pairing)
+   # Pressure
    inlet_pressure:
      name: "Inlet Pressure"
    

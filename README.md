@@ -15,12 +15,14 @@ in the component stack directly from GitHub.
 | --- | --- | --- |
 | `packages/alpha_hwr.yaml` | The pump: BLE link, full telemetry, diagnostics and schedule read-back | Pair the pump with the node on first use; see [Pairing](#pairing) |
 | `packages/alpha_hwr_controls.yaml` | Everything you drive from Home Assistant: switches, mode select, setpoints, flow limiters, and the hidden helper entities the Lovelace schedule card uses | Layers on `alpha_hwr.yaml` |
-| `packages/dhw_demand_detector.yaml` | The `dhw_demand` component wired to household flow, tank temperature and DHW charge sensors from Home Assistant | Works with or without the pump; see §3 and §4 |
+| `packages/dhw_demand_detector.yaml` | The `dhw_demand` component wired to household flow, tank temperature and DHW charge sensors from Home Assistant | Works with or without the pump; see the two `dhw_demand` recipes below |
 
 Two layers for the pump, one for the detector. `alpha_hwr_pairing.yaml` is the
-pump package's old name and still loads it, for one release.
+pump package's old name and still loads it, for one release. What each package
+declares, entity by entity, is in [`packages/README.md`](packages/README.md);
+the options behind them are in [`docs/configuration.md`](docs/configuration.md).
 
-The pump package also sets `logger: level: INFO` and expose node-health
+The pump package also sets `logger: level: INFO` and exposes node-health
 diagnostics (`Free Heap`, `Min Free Heap`, `Largest Free Block`, `Heap
 Fragmentation`, `Reset Reason`). Log lines and state changes are API frames
 delivered to every connected subscriber, so DEBUG is opt-in — put your own
@@ -29,6 +31,10 @@ delivered to every connected subscriber, so DEBUG is opt-in — put your own
 
 ## Requirements
 
+- **ESPHome 2026.2.0 or newer.** Older releases reject the pump package's heap
+  diagnostics (`min_free`, `fragmentation`) on ESP32. The firmware was built
+  against 2026.2.0 when this floor was set; CI builds against the latest
+  release.
 - **alpha_hwr**: ESP32-class board with BLE (`ESP32`, `ESP32-C3`, `ESP32-S3`)
 - **dhw_demand standalone**: any ESPHome-capable board if you only use Home
   Assistant-fed sensors
@@ -40,12 +46,11 @@ delivered to every connected subscriber, so DEBUG is opt-in — put your own
 - `framework.type: esp-idf` is strongly recommended for BLE-based ALPHA HWR
   nodes
 
-## Using these packages from an external ESPHome config
+## Quick start
 
-The package URLs below are meant to be used from another ESPHome project. The
-package files already pull the required external components for `alpha_hwr`.
-
-### 1. Pump telemetry and diagnostics
+The package URLs are meant to be used from another ESPHome project; the package
+files pull in the component source themselves. This is the pump with the
+control UI. Drop the `alpha_hwr_controls` line for telemetry only.
 
 ```yaml
 esphome:
@@ -61,43 +66,6 @@ substitutions:
 # ahead — and any key added since the release is rejected as "an invalid option
 # for [alpha_hwr]". ESPHome does not dedupe these blocks; the last merged entry
 # wins, so a top-level declaration overrides the package's.
-external_components:
-  - source: github://eman/esphome-alpha-hwr@main
-    components: [alpha_hwr]
-
-packages:
-  alpha_hwr: github://eman/esphome-alpha-hwr/packages/alpha_hwr.yaml@main
-
-esp32:
-  board: esp32-c3-devkitm-1
-  variant: esp32c3
-  framework:
-    type: esp-idf
-
-wifi:
-  ssid: !secret wifi_ssid
-  password: !secret wifi_password
-
-api:
-  encryption:
-    key: !secret api_key
-
-ota:
-  - platform: esphome
-    password: !secret ota_password
-```
-
-### 2. Add the control UI
-
-```yaml
-esphome:
-  name: hwr-pump
-  friendly_name: HWR Pump
-
-substitutions:
-  mac_address: "AA:BB:CC:DD:EE:FF"
-
-# See §1 — required whenever the packages track @main.
 external_components:
   - source: github://eman/esphome-alpha-hwr@main
     components: [alpha_hwr]
@@ -125,7 +93,12 @@ ota:
     password: !secret ota_password
 ```
 
-### 3. Standalone `dhw_demand`
+Then pair the pump on the first connection: see [Pairing](#pairing). The same
+recipe, release-pinned and validated by CI, is
+[`examples/hwr-pump-controls-example.yaml`](examples/hwr-pump-controls-example.yaml);
+the other examples are listed under [Examples in this repo](#examples-in-this-repo).
+
+### Standalone `dhw_demand`
 
 When you use `dhw_demand` without `alpha_hwr`, declare the component explicitly
 with `external_components`. `flow_entity` is a Home Assistant sensor reporting
@@ -160,7 +133,7 @@ ota:
   - platform: esphome
 ```
 
-### 4. Combined `alpha_hwr` + `dhw_demand`
+### Combined `alpha_hwr` + `dhw_demand`
 
 If you want pump telemetry plus DHW demand detection, combine the packages and
 wire the pump sensors into the detector:
@@ -233,8 +206,8 @@ default). It never displaces a stronger tier and only ever adds demand. It is
 entirely optional; leave it out and the other two tiers are unaffected.
 
 For a complete working version of this combined recipe, see
-`hwr-pump-dhw-example.yaml` — it is release-pinned and validated by CI, so it
-cannot drift out of step with the packages the way an untested snippet can.
+`examples/hwr-pump-dhw-example.yaml` — it is release-pinned and validated by CI,
+so it cannot drift out of step with the packages the way an untested snippet can.
 
 ## Local development override
 
@@ -259,7 +232,7 @@ Beware the mismatch this exists to avoid: a release-pinned *package* against a
 working-tree *component* disagree the moment a config key changes between
 releases, and validation fails on a key the pinned side does not know. Point
 both at the same place — either both local, or both at the same tag. This is
-why `hwr-pump-dhw-example.yaml` says not to add a local block on top of its
+why `examples/hwr-pump-dhw-example.yaml` says not to add a local block on top of its
 tagged packages.
 
 ## Programmatic control (services + `write_settled` event)
@@ -340,43 +313,43 @@ switch to hand it over, and off again after; see
 
 ## Examples in this repo
 
-Each example reads WiFi, the API encryption key and the OTA password from
-`secrets.yaml`, so start by creating one:
+The examples live in [`examples/`](examples/):
+
+- `hwr-pump-example.yaml` — the pump package on its own: telemetry and
+  diagnostics, no control UI
+- `hwr-pump-controls-example.yaml` — pump plus the control UI
+- `hwr-pump-dhw-example.yaml` — the combined recipe: pump, control UI and
+  `dhw_demand`
+- `discovery-example.yaml` — a throwaway that logs the MAC address of any ALPHA
+  HWR pump in range, for filling in `mac_address`
+
+The three pump examples read WiFi, the API encryption key and the OTA password
+from `secrets.yaml`; the discovery example reads WiFi and the API key. ESPHome
+resolves `!secret` beside the config it is loading, so the file goes next to the
+examples:
 
 ```bash
-cp secrets-example.yaml secrets.yaml   # then fill in your own values
+cp secrets-example.yaml examples/secrets.yaml   # then fill in your own values
 ```
+
+Every `secrets.yaml` in the tree is gitignored, so it cannot be committed by
+accident.
 
 Filling it in is not optional. The template's `api_key` is deliberately not a
 valid key, its `ap_password` is deliberately too short, and its `ota_password`
 is deliberately commented out, so building straight after the copy fails with an
-error naming whichever you have not set.
-That is the point: no example in this repository carries a credential that would
-work if flashed, because an encryption key published in a public repository is
-not encryption, and a published OTA password lets anything on your LAN flash the
-node. `secrets.yaml` is gitignored.
-
-(The `tests/ci-compile*.yaml` harnesses do still hold a placeholder key. They
-exist so CI can compile the component before any secrets are seeded, they are
-not a recipe, and nothing instructs anyone to flash them.)
+error naming whichever you have not set. That is the point: no example in this
+repository carries a credential that would work if flashed, because an
+encryption key published in a public repository is not encryption, and a
+published OTA password lets anything on your LAN flash the node.
 
 One caveat ESPHome does not warn about: an *empty* `ota_password` is accepted and
 silently disables OTA authentication altogether, and an empty `ap_password`
 likewise leaves the fallback hotspot open. Set real values rather than blanking
 them.
 
-`components/alpha_hwr/discovery_example.yaml` is nested, and ESPHome resolves
-`!secret` relative to the config file, so it needs its own copy:
-
-```bash
-cp secrets.yaml components/alpha_hwr/secrets.yaml
-```
-
-- `hwr-pump-example.yaml` — the pump package on its own: telemetry and
-  diagnostics, no control UI
-- `hwr-pump-controls-example.yaml` — pump plus the control UI
-- `hwr-pump-dhw-example.yaml` — the §4 combination: pump, control UI and
-  `dhw_demand`
+(`tests/ci-compile.yaml` is a CI harness, not a recipe; it omits the API key so
+that CI can compile the component before any secrets are seeded.)
 
 ## Optional Lovelace schedule card
 
