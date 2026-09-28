@@ -329,7 +329,7 @@ resolves `!secret` beside the config it is loading, so the file goes next to the
 examples:
 
 ```bash
-cp secrets-example.yaml examples/secrets.yaml   # then fill in your own values
+cp examples/secrets-example.yaml examples/secrets.yaml   # then fill in your own values
 ```
 
 Every `secrets.yaml` in the tree is gitignored, so it cannot be committed by

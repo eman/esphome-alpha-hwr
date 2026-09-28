@@ -246,7 +246,7 @@ jobs:
       # throwaway one here. ESPHome resolves !secret beside the config file,
       # hence the copy into examples/.
       #
-      # Deliberately NOT `cp secrets-example.yaml secrets.yaml`. That template
+      # Deliberately NOT `cp examples/secrets-example.yaml examples/secrets.yaml`. That template
       # ships an invalid api_key and a commented-out ota_password so that a user
       # who copies it and builds gets an error instead of a node secured with a
       # key published in this repository. CI therefore needs its own values, and
