@@ -50,13 +50,15 @@
 //   - no notification arrived on it either, and
 //   - the pump ended it, not us.
 //
-// The data term matters because unbonded operation is a supported mode:
-// `enable_pairing` defaults to false and passive telemetry needs no bond, so a
-// perfectly healthy installation can run unbonded forever. Such a link
-// subscribes and carries data; a stalled one is dropped by the pump within
-// about 2 s, before anything flows. Without the data term, a healthy unbonded
-// node would accumulate a "stall" cycle on every ordinary reconnect and
-// eventually report a fault that is not there.
+// The data term is what separates a stall from a link that worked. This
+// comment used to justify it with "unbonded operation is a supported mode, so
+// a healthy installation can run unbonded forever". Issue #244 measured
+// otherwise: a peer the pump has never bonded to gets no connection at all,
+// and one it holds a stale bond for is dropped within about 2 s, before
+// anything flows. The term stays for the reason that was always true
+// underneath it: a link that carried data is not a stall whatever its bond
+// state, and without the term every ordinary reconnect would count toward a
+// fault that is not there.
 //
 // The fourth term is about a different wrong answer, and it has two halves
 // because there are two ways a link can end without the pump having decided
