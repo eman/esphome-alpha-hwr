@@ -41,9 +41,8 @@ esphome:
 # ... rest of your config
 ```
 
-**Note:** put the pump into Bluetooth pairing mode for the first connection; it
-takes more than a button press (see `docs/configuration.md`, "Pairing"). The
-bond is stored in NVS and reconnects reuse it.
+Pair the pump on the first connection: see the README's
+[Pairing](../README.md#pairing) section.
 
 `alpha_hwr_pairing.yaml` is this package's old name. It still loads it, and
 goes away in the release after next.
@@ -131,7 +130,8 @@ sensor:
 
 ## Examples
 
-[`examples/`](../examples/), each release-pinned and validated by CI. The README's
+[`examples/`](../examples/), all validated by CI; the three that load the
+packages are release-pinned. The README's
 [Examples in this repo](../README.md#examples-in-this-repo) says what each one is
 for and how secrets work.
 
@@ -146,8 +146,8 @@ for and how secrets work.
 
 ### Pairing Fails
 - The pump only offers to pair while it is in Bluetooth pairing mode, and
-  getting it there takes more than a button press: see `docs/configuration.md`,
-  "Pairing"
+  getting it there takes more than a button press: see the README's
+  [Pairing](../README.md#pairing) section
 - Leave `initiate_pairing` at its default of `true` (formerly `enable_pairing`,
   still accepted)
 - **Do not** clear the node's bond to retry. A pump that holds a bond for a node
@@ -156,9 +156,7 @@ for and how secrets work.
 - Check logs for pairing error messages
 
 ### Sensors Show "Unknown"
-- No sensor updates until the pump is paired to the node. A never-paired peer
-  is refused at the link layer, and a peer with a stale bond is dropped about
-  2 s after connecting (issues #244, #230)
-- Voltage/current sensors **require** pairing to be enabled
+- Nothing updates until the pump is paired to the node; see the README's
+  [Pairing](../README.md#pairing) section
 - Wait 10-30 seconds after connection for first telemetry update
 

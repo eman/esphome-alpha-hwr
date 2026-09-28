@@ -7,8 +7,8 @@
 # scan for and identify ALPHA HWR devices on your network.
 #
 # Once you have the MAC address, use it in your main configuration (see
-# hwr-pump-example.yaml beside this file). Secrets come from the repository's
-# root secrets.yaml, through the examples/secrets.yaml symlink.
+# hwr-pump-example.yaml beside this file). Secrets come from
+# examples/secrets.yaml; see README, "Examples in this repo".
 #
 # ============================================================================
 
@@ -90,7 +90,7 @@ esp32_ble_tracker:
 # ============================================================================
 #
 # 1. Flash this configuration to your ESP32 device
-# 2. Open the logs (esphome logs alpha-hwr-discovery.yaml)
+# 2. Open the logs (esphome logs examples/discovery-example.yaml)
 # 3. Wait for the discovery logs - they will show any ALPHA HWR pumps found
 # 4. Note the MAC address from the logs
 # 5. Update your main configuration with the discovered MAC

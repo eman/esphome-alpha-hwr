@@ -8,9 +8,6 @@ deps/
 
 # Secrets
 secrets.yaml
-# examples/secrets.yaml is a committed symlink to ../secrets.yaml. ESPHome
-# resolves !secret beside the config file; the link carries no secret itself.
-!examples/secrets.yaml
 # Keep secrets-example.yaml
 
 # Python

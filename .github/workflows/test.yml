@@ -243,8 +243,8 @@ jobs:
         run: esphome config tests/ci-compile.yaml
 
       # The examples reference !secret. secrets.yaml is gitignored, so seed a
-      # throwaway one here. ESPHome resolves !secret beside the config file;
-      # examples/secrets.yaml is a committed symlink to this one.
+      # throwaway one here. ESPHome resolves !secret beside the config file,
+      # hence the copy into examples/.
       #
       # Deliberately NOT `cp secrets-example.yaml secrets.yaml`. That template
       # ships an invalid api_key and a commented-out ota_password so that a user
@@ -262,6 +262,7 @@ jobs:
           api_key: "$KEY"
           ota_password: "ci-ota-password"
           EOF
+          cp secrets.yaml examples/secrets.yaml
 
       # The published examples pin a release tag, so this catches drift between
       # the documented recipes and the packages they load.

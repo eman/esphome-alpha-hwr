@@ -303,7 +303,7 @@ alpha_hwr:
    schedule_stalled:
      name: "Schedule Stalled"
 
-   # Enhanced Electrical (requires pairing)
+   # Electrical
    voltage:
      name: "AC Voltage"
    voltage_dc:
@@ -325,7 +325,7 @@ alpha_hwr:
      name: "Head Rate"
      entity_category: diagnostic
    
-   # Pressure Sensors (requires pairing)
+   # Pressure
    inlet_pressure:
      name: "Inlet Pressure"
    

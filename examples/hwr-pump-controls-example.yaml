@@ -5,19 +5,13 @@
 # The pump package plus the control UI: everything you drive from Home
 # Assistant, and the hidden helper entities the Lovelace schedule card uses.
 #
-# Features Included (via packages):
-# - Full telemetry and diagnostics
-# - Engage Pump, Remote Mode, Schedule Enabled and Temperature AutoAdapt switches
-# - Control mode selector and the setpoint, temperature-range and cycle-time numbers
-# - Flow limiter switches and numbers
-# - Schedule editor helpers (per day/layer entries, single events, vacation)
+# What each package declares: packages/README.md.
 #
 # Setup:
 # 1. Replace the MAC address below with your pump's BLE MAC address.
-# 2. Create secrets.yaml at the repository root (see README, "Examples in this
-#    repo"); examples/secrets.yaml is a symlink to it. The template's key and
-#    OTA password are deliberately unusable, so the build fails until you set
-#    your own.
+# 2. Copy secrets-example.yaml to examples/secrets.yaml and fill it in (see
+#    README, "Examples in this repo"). The template's key and OTA password are
+#    deliberately unusable, so the build fails until you set your own.
 # 3. Put the pump into Bluetooth pairing mode and flash. See README, "Pairing".
 #
 # ==============================================================================

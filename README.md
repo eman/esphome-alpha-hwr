@@ -31,6 +31,10 @@ delivered to every connected subscriber, so DEBUG is opt-in — put your own
 
 ## Requirements
 
+- **ESPHome 2026.2.0 or newer.** Older releases reject the pump package's heap
+  diagnostics (`min_free`, `fragmentation`) on ESP32. That is the oldest release
+  the package config validates on; firmware builds are verified against the
+  latest release, which is what CI uses.
 - **alpha_hwr**: ESP32-class board with BLE (`ESP32`, `ESP32-C3`, `ESP32-S3`)
 - **dhw_demand standalone**: any ESPHome-capable board if you only use Home
   Assistant-fed sensors
@@ -319,16 +323,17 @@ The examples live in [`examples/`](examples/):
 - `discovery-example.yaml` — a throwaway that logs the MAC address of any ALPHA
   HWR pump in range, for filling in `mac_address`
 
-Each reads WiFi, the API encryption key and the OTA password from `secrets.yaml`,
-so start by creating one at the repository root:
+The three pump examples read WiFi, the API encryption key and the OTA password
+from `secrets.yaml`; the discovery example reads WiFi and the API key. ESPHome
+resolves `!secret` beside the config it is loading, so the file goes next to the
+examples:
 
 ```bash
-cp secrets-example.yaml secrets.yaml   # then fill in your own values
+cp secrets-example.yaml examples/secrets.yaml   # then fill in your own values
 ```
 
-`examples/secrets.yaml` is a committed symlink to that file, because ESPHome
-resolves `!secret` beside the config it is loading. The link carries no secret;
-`secrets.yaml` itself is gitignored.
+Every `secrets.yaml` in the tree is gitignored, so it cannot be committed by
+accident.
 
 Filling it in is not optional. The template's `api_key` is deliberately not a
 valid key, its `ap_password` is deliberately too short, and its `ota_password`

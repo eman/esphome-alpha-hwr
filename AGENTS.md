@@ -154,7 +154,7 @@ Note: `examples/hwr-pump-example.yaml` is for documentation and compilation test
   * *Bad*: `// Send 0x02`
   * *Good*: `// Send 0x02 (Class 10 Start Byte) - See Protocol Doc Sec 3.1`
 * **PR/Commit Messages**: Clearly state what changed and what was tested.
-* **README updates**: If a new feature is added (e.g., a "Boost Mode" switch), update the `README.md` and `examples/hwr-pump-example.yaml` Config section immediately.
+* **README updates**: If a new feature is added (e.g., a "Boost Mode" switch), add it to the package's entity list in `packages/README.md` (the one place entity lists live) and to the `README.md` if it changes setup or usage.
 
 ## 6. Architecture: Layered Service-Based Design
 

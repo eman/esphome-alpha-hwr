@@ -16,8 +16,8 @@
  * So neither header works on its own across the supported range: including
  * `helpers.h` for it stops compiling once that shim is removed, and including
  * `alloc_helpers.h` unconditionally breaks every core older than 2026.5.0 --
- * where the file does not exist at all. `packages/README.md` declares a floor
- * of ESPHome 2024.6.0, so both ends have to keep building.
+ * where the file does not exist at all. The README declares a floor of
+ * ESPHome 2026.2.0, below 2026.5.0, so both ends have to keep building.
  *
  * Hence the version guard, which is the same idiom `alpha_hwr.cpp` already uses
  * for the `get_build_time_string()` split at 2026.1.0. It lives in one header

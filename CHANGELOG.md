@@ -38,8 +38,8 @@ release tag carries the new one; the release script moves them.
   existed to offer telemetry without pairing, which the pump does not support.
   What the package actually delivered was a node with `initiate_pairing` off, which bonds by
   accident when the pump asks and configures no security parameters while doing
-  it. One pump package remains, `alpha_hwr_pairing.yaml`, which keeps its
-  historical name because configs reference it by URL.
+  it. One pump package remains, now `alpha_hwr.yaml` (see Changed); its old
+  name, `alpha_hwr_pairing.yaml`, still loads it for one release.
 
 ### Changed
 
@@ -47,9 +47,10 @@ release tag carries the new one; the release script moves them.
   home.** `hwr-pump-example.yaml`, `hwr-pump-controls-example.yaml` and
   `hwr-pump-dhw-example.yaml` moved from the repository root, and the discovery
   example moved out of `components/alpha_hwr/` to join them. ESPHome resolves
-  `!secret` beside the config it loads, so `examples/secrets.yaml` is a
-  committed symlink to the root `secrets.yaml`; the nested copy the discovery
-  example used to need, and the CI step that seeded it, are gone.
+  `!secret` beside the config it loads, so the examples read
+  `examples/secrets.yaml`, created from the root `secrets-example.yaml`
+  template; the separate nested copy the discovery example used to need is
+  gone.
 
   The same claims used to be repeated across the package headers, both READMEs
   and the docs, which is how a wrong one survived in five places. Now the
@@ -57,6 +58,13 @@ release tag carries the new one; the release script moves them.
   `packages/README.md` is the only place that lists what each package
   declares; `docs/configuration.md` is the option reference; and the package
   and example headers say what the file is for and point at those.
+
+- **The README states the minimum ESPHome version: 2026.2.0.** The only floor
+  the repo declared was "2024.6.0 or newer" in the packages README, which had
+  been untrue for a while: the pump package's `min_free` and `fragmentation`
+  heap sensors are rejected on ESP32 by every release before 2026.2.0. Found by
+  validating the CI config against the monthly releases; firmware builds are
+  verified only against the latest release, in CI.
 
 - **Two layers for the pump: `packages/alpha_hwr.yaml` and
   `packages/alpha_hwr_controls.yaml`.** The pump package is the file formerly
