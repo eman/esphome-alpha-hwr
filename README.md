@@ -32,9 +32,9 @@ delivered to every connected subscriber, so DEBUG is opt-in — put your own
 ## Requirements
 
 - **ESPHome 2026.2.0 or newer.** Older releases reject the pump package's heap
-  diagnostics (`min_free`, `fragmentation`) on ESP32. That is the oldest release
-  the package config validates on; firmware builds are verified against the
-  latest release, which is what CI uses.
+  diagnostics (`min_free`, `fragmentation`) on ESP32. The firmware was built
+  against 2026.2.0 when this floor was set; CI builds against the latest
+  release.
 - **alpha_hwr**: ESP32-class board with BLE (`ESP32`, `ESP32-C3`, `ESP32-S3`)
 - **dhw_demand standalone**: any ESPHome-capable board if you only use Home
   Assistant-fed sensors

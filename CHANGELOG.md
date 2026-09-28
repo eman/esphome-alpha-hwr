@@ -63,8 +63,9 @@ release tag carries the new one; the release script moves them.
   the repo declared was "2024.6.0 or newer" in the packages README, which had
   been untrue for a while: the pump package's `min_free` and `fragmentation`
   heap sensors are rejected on ESP32 by every release before 2026.2.0. Found by
-  validating the CI config against the monthly releases; firmware builds are
-  verified only against the latest release, in CI.
+  validating the CI config against the monthly releases, then confirmed by
+  building the CI firmware against 2026.2.0: every `alpha_hwr` and `dhw_demand`
+  source compiles, with no warnings from either component.
 
 - **Two layers for the pump: `packages/alpha_hwr.yaml` and
   `packages/alpha_hwr_controls.yaml`.** The pump package is the file formerly
