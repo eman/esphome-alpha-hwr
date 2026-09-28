@@ -4,6 +4,29 @@
 
 ### Changed
 
+- **The BLE scan duty cycle drops from 100% to ~9%** ([#320](https://github.com/eman/esphome-alpha-hwr/pull/320)).
+  The packages and `components/alpha_hwr/discovery_example.yaml` scanned with
+  `interval: 1.1s` / `window: 1.1s`, which is continuous scanning on the radio
+  the ESP32 shares between WiFi and BLE, and which ESPHome warns about at
+  config time. They now use `interval: 320ms` / `window: 30ms`, ESPHome's
+  default. The 1.1 s values dated from the initial commit with no recorded
+  rationale. Nodes that override `scan_parameters` themselves are unaffected.
+
+  This is config hygiene, **not a fix for WiFi stalls**, and should not be read
+  as one. It was benched as a fix and failed. On an ESP32-C3 node, paired
+  pings against a nearby control node showed multi-second stalls every 15–60 s
+  at every setting tried:
+
+  | Window / interval | Node avg | Node max | Control avg |
+  |---|---|---|---|
+  | 300 ms / 320 ms | 419 ms | 5.2 s | 37 ms |
+  | 30 ms / 320 ms | 411 ms | 4.6 s | 74 ms |
+
+  In each stall, ICMP replies and API frames arrive together at the moment it
+  ends, so the node's WiFi goes quiet and then flushes, independent of scan
+  duty. The 30 ms window still discovers the pump: READY 11 s after boot, with
+  advertisement identifiers populated, 0 link recycles and 10 s telemetry.
+
 - **The `data_timeout` sizing note and the report's recommendation floor are now
   derived from measurement rather than constants** (issues #315, #316, #223).
 

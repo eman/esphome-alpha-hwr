@@ -46,9 +46,14 @@ api:
     key: !secret api_key
 
 esp32_ble_tracker:
+  # The ESP32 shares one radio between WiFi and BLE. A window equal to the
+  # interval scans 100% of the time, which ESPHome warns starves WiFi. 30 ms of
+  # every 320 ms (ESPHome's default, ~9%) still sees the pump's advertisements:
+  # benched 2026-09-27, READY 11 s after boot with advertisement identifiers
+  # populated. It did not remove the node's multi-second WiFi stalls (PR #320).
   scan_parameters:
-    interval: 1.1s
-    window: 1.1s
+    interval: 320ms
+    window: 30ms
     active: true
 
   # Discover by Grundfos Service Data UUID (matches the actual pump
