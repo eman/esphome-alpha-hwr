@@ -13,41 +13,14 @@ in the component stack directly from GitHub.
 
 | Package | Purpose | Notes |
 | --- | --- | --- |
-| `packages/alpha_hwr_pairing.yaml` | The pump package: BLE link, full telemetry, diagnostics and schedule read-back | Pair the pump with the node on first use; see [Pairing](#pairing) |
-| `packages/alpha_hwr_controls.yaml` | Recommended control UI | Adds pump enable, remote mode, schedule toggle, mode select, and setpoint controls |
-| `packages/alpha_hwr_schedule.yaml` | Lighter schedule/remote/mode UI | Simpler alternative to `alpha_hwr_controls.yaml`. **Pick one — including both fails validation**, see below |
-| `packages/alpha_hwr_schedule_editor.yaml` | ESPHome services and helper entities for weekly/single-event editing | Pair with `alpha_hwr_pairing.yaml` |
-| `packages/dhw_demand_detector.yaml` | DHW detector outputs plus Home Assistant supplementary sensors | Works standalone or alongside `alpha_hwr` |
+| `packages/alpha_hwr.yaml` | The pump: BLE link, full telemetry, diagnostics and schedule read-back | Pair the pump with the node on first use; see [Pairing](#pairing) |
+| `packages/alpha_hwr_controls.yaml` | Everything you drive from Home Assistant: switches, mode select, setpoints, flow limiters, and the hidden helper entities the Lovelace schedule card uses | Layers on `alpha_hwr.yaml` |
+| `packages/dhw_demand_detector.yaml` | The `dhw_demand` component wired to household flow, tank temperature and DHW charge sensors from Home Assistant | Works with or without the pump; see §3 and §4 |
 
-### `alpha_hwr_controls.yaml` and `alpha_hwr_schedule.yaml` are mutually exclusive
+Two layers for the pump, one for the detector. `alpha_hwr_pairing.yaml` is the
+pump package's old name and still loads it, for one release.
 
-They are two designs for the same UI, not layers, so a config that includes both
-does not build. It is not a cosmetic duplication — ESPHome stops at the first
-collision:
-
-```
-Duplicate switch entity with name 'Schedule Enabled' found.
-```
-
-Rename that and the next appears (`Duplicate select entity with name 'Pump
-Control Mode'`), and rename that and a third does (`ID pump_mode_select
-redefined!`). Two conflicting entities, three errors. Renaming all three does
-produce a valid config, but you would be maintaining a fork of the package to
-get two overlapping sets of the same controls.
-
-Choose by what you want:
-
-- **`alpha_hwr_controls.yaml`** for most installs. Its mode select reads the
-  pump's actual mode; the other assumes whatever it last wrote and asserts
-  "Constant Speed" at boot. It also adds the setpoint numbers, Engage Pump, and
-  Temperature AutoAdapt.
-- **`alpha_hwr_schedule.yaml`** for a smaller entity list: a schedule toggle, two
-  remote-mode buttons, and an optimistic mode select. Its select offers ten
-  modes against the other's six — the extra four are the AutoAdapt variants,
-  which are a wider surface than a hot-water recirculation install typically
-  needs.
-
-Both pump packages also set `logger: level: INFO` and expose node-health
+The pump package also sets `logger: level: INFO` and expose node-health
 diagnostics (`Free Heap`, `Min Free Heap`, `Largest Free Block`, `Heap
 Fragmentation`, `Reset Reason`). Log lines and state changes are API frames
 delivered to every connected subscriber, so DEBUG is opt-in — put your own
@@ -93,7 +66,7 @@ external_components:
     components: [alpha_hwr]
 
 packages:
-  alpha_hwr: github://eman/esphome-alpha-hwr/packages/alpha_hwr_pairing.yaml@main
+  alpha_hwr: github://eman/esphome-alpha-hwr/packages/alpha_hwr.yaml@main
 
 esp32:
   board: esp32-c3-devkitm-1
@@ -130,7 +103,7 @@ external_components:
     components: [alpha_hwr]
 
 packages:
-  alpha_hwr: github://eman/esphome-alpha-hwr/packages/alpha_hwr_pairing.yaml@main
+  alpha_hwr: github://eman/esphome-alpha-hwr/packages/alpha_hwr.yaml@main
   alpha_hwr_controls: github://eman/esphome-alpha-hwr/packages/alpha_hwr_controls.yaml@main
 
 esp32:
@@ -152,26 +125,7 @@ ota:
     password: !secret ota_password
 ```
 
-### 3. Add schedule editor services
-
-Add the schedule editor package on top of the paired pump config:
-
-```yaml
-# See §1 — required whenever the packages track @main.
-external_components:
-  - source: github://eman/esphome-alpha-hwr@main
-    components: [alpha_hwr]
-
-packages:
-  alpha_hwr: github://eman/esphome-alpha-hwr/packages/alpha_hwr_pairing.yaml@main
-  alpha_hwr_controls: github://eman/esphome-alpha-hwr/packages/alpha_hwr_controls.yaml@main
-  alpha_hwr_schedule_editor: github://eman/esphome-alpha-hwr/packages/alpha_hwr_schedule_editor.yaml@main
-```
-
-`alpha_hwr_schedule_editor.yaml` exposes ESPHome services such as
-`set_schedule_entry` and `set_single_event`.
-
-### 4. Standalone `dhw_demand`
+### 3. Standalone `dhw_demand`
 
 When you use `dhw_demand` without `alpha_hwr`, declare the component explicitly
 with `external_components`. `flow_entity` is a Home Assistant sensor reporting
@@ -206,14 +160,14 @@ ota:
   - platform: esphome
 ```
 
-### 5. Combined `alpha_hwr` + `dhw_demand`
+### 4. Combined `alpha_hwr` + `dhw_demand`
 
 If you want pump telemetry plus DHW demand detection, combine the packages and
 wire the pump sensors into the detector:
 
 ```yaml
 # Required: the packages below track @main, so the component source must too.
-# Without this, alpha_hwr_pairing.yaml's own pin supplies the components while
+# Without this, alpha_hwr.yaml's own pin supplies the components while
 # the packages supply @main config keys, and validation fails on keys the
 # pinned release does not know.
 external_components:
@@ -221,7 +175,7 @@ external_components:
     components: [alpha_hwr, dhw_demand]
 
 packages:
-  alpha_hwr: github://eman/esphome-alpha-hwr/packages/alpha_hwr_pairing.yaml@main
+  alpha_hwr: github://eman/esphome-alpha-hwr/packages/alpha_hwr.yaml@main
   alpha_hwr_controls: github://eman/esphome-alpha-hwr/packages/alpha_hwr_controls.yaml@main
   dhw_demand: github://eman/esphome-alpha-hwr/packages/dhw_demand_detector.yaml@main
 
@@ -229,7 +183,7 @@ alpha_hwr:
   current:
     id: motor_current_sensor
   # Do not rename the rpm sensor: alpha_hwr_controls.yaml refers to it as
-  # `id(motor_speed)`, which is the id alpha_hwr_pairing.yaml already assigns.
+  # `id(motor_speed)`, which is the id alpha_hwr.yaml already assigns.
   flow:
     id: flow_rate_sensor
 
@@ -280,8 +234,7 @@ entirely optional; leave it out and the other two tiers are unaffected.
 
 For a complete working version of this combined recipe, see
 `hwr-pump-dhw-example.yaml` — it is release-pinned and validated by CI, so it
-cannot drift out of step with the packages the way an untested snippet can. For
-the detector without the control UI, see `dhw-demand-example.yaml`.
+cannot drift out of step with the packages the way an untested snippet can.
 
 ## Local development override
 
@@ -306,7 +259,7 @@ Beware the mismatch this exists to avoid: a release-pinned *package* against a
 working-tree *component* disagree the moment a config key changes between
 releases, and validation fails on a key the pinned side does not know. Point
 both at the same place — either both local, or both at the same tag. This is
-why `dhw-demand-example.yaml` says not to add a local block on top of its
+why `hwr-pump-dhw-example.yaml` says not to add a local block on top of its
 tagged packages.
 
 ## Programmatic control (services + `write_settled` event)
@@ -329,8 +282,8 @@ examples: [`docs/programmatic-interface.md`](docs/programmatic-interface.md).
 ## Schedule services and entity names
 
 The schedule services are registered by the component itself
-(`alpha_hwr_schedule_editor.yaml` adds the optional Lovelace helper
-entities). Home Assistant sees them as:
+(`alpha_hwr_controls.yaml` carries the hidden helper entities the Lovelace
+schedule card drives). Home Assistant sees them as:
 
 - `esphome.<node_name>_set_schedule_entry`
 - `esphome.<node_name>_clear_schedule_entry`
@@ -348,7 +301,7 @@ entities). Home Assistant sees them as:
 - `esphome.name: hwr-pump`
 - Home Assistant service: `esphome.hwr_pump_set_schedule_entry`
 
-The paired package also publishes schedule read-back text sensors using the same
+The pump package also publishes schedule read-back text sensors using the same
 node-name prefix. ESPHome text sensors surface in Home Assistant under the
 `sensor` domain, so these are `sensor.hwr_pump_schedule_layer_0` and
 `sensor.hwr_pump_schedule_hash` — there is no `text_sensor.` domain in Home
@@ -421,9 +374,8 @@ cp secrets.yaml components/alpha_hwr/secrets.yaml
 
 - `hwr-pump-example.yaml` — the pump package on its own: telemetry and
   diagnostics, no control UI
-- `hwr-pump-schedule-example.yaml` — pump with schedule UI/services
-- `dhw-demand-example.yaml` — `alpha_hwr` + `dhw_demand`
-- `hwr-pump-dhw-example.yaml` — the §5 combination: `alpha_hwr` + control UI +
+- `hwr-pump-controls-example.yaml` — pump plus the control UI
+- `hwr-pump-dhw-example.yaml` — the §4 combination: pump, control UI and
   `dhw_demand`
 
 ## Optional Lovelace schedule card
@@ -441,11 +393,11 @@ which removes that whole class.
 
 ### Prerequisites
 
-- Use `alpha_hwr_pairing.yaml` so Home Assistant gets the per-layer schedule
-  read-back sensors, the `Schedule Enabled` switch, and the single-event text
-  sensor.
-- Use `alpha_hwr_schedule_editor.yaml` so Home Assistant gets the
-  `esphome.<node_name>_*` services the card calls when you edit schedules.
+- Load `alpha_hwr.yaml`, which publishes the per-layer schedule read-back
+  sensors and the single-event text sensor, and `alpha_hwr_controls.yaml`,
+  which carries the `Schedule Enabled` switch and the hidden helper entities
+  the card drives. The `esphome.<node_name>_*` services the card calls are
+  registered by the component itself.
 
 ### Install the card with HACS (recommended)
 
@@ -538,9 +490,9 @@ so dragging and editing are unaffected.
 - `device` must match the ESPHome node-derived service prefix: `esphome.name`
   with `-` converted to `_`. For example, if `esphome.name: hwr-pump`, use
   `device: hwr_pump`.
-- The default entity IDs assume the standard names from `alpha_hwr_pairing.yaml`
-  (`Schedule Layer 0..4`, `Schedule Enabled`) and
-  `alpha_hwr_schedule_editor.yaml`. Set `layer_entities` / `enabled_entity` /
+- The default entity IDs assume the standard names from `alpha_hwr.yaml`
+  (`Schedule Layer 0..4`, `Single Events`) and `alpha_hwr_controls.yaml`
+  (`Schedule Enabled`). Set `layer_entities` / `enabled_entity` /
   `single_events_entity` only to point at non-default IDs.
 
 ## References

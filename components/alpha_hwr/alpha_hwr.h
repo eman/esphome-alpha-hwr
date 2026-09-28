@@ -1747,7 +1747,7 @@ public:
   /**
    * Build a begin/end Unix-timestamp pair from wall-clock month/day/hour/minute
    * fields, anchored to the current local year. Shared by the "Add Single Event"
-   * and "Set Vacation" editor buttons (alpha_hwr_schedule_editor.yaml).
+   * and "Set Vacation" editor buttons (alpha_hwr_controls.yaml).
    *
    *  - Requires synced system time; refuses to build the pre-2020 timestamps an
    *    unsynced (epoch-1970) clock would otherwise produce.

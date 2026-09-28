@@ -67,7 +67,7 @@ pump link is up:
 [W][alpha_hwr]:   Schedule windows run on the pump's own RTC, which drifts
 ```
 
-`alpha_hwr_pairing.yaml` already wires this up, so this applies to configs that
+`alpha_hwr.yaml` already wires this up, so this applies to configs that
 declare `alpha_hwr:` by hand:
 
 ```yaml
@@ -108,7 +108,7 @@ valid. The pump keeps being written, from an ESP RTC that nobody is correcting,
 and no warning fires. What is detected is a clock that was never set, not one
 that stopped being kept.
 
-If you use `alpha_hwr_pairing.yaml`, the **Last Clock Sync** text sensor reports
+If you use `alpha_hwr.yaml`, the **Last Clock Sync** text sensor reports
 when a write was last confirmed by the pump and **Clock Drift** reports how far
 off the pump was when it was found; the two together are the way to check this
 is working. On hand-written blocks that declare neither, the log is the only
@@ -179,7 +179,7 @@ text_sensor:
 It reads `OK (Mar Sun#2 02:00 - Nov Sun#1 02:00, +60 min)` when the two agree,
 and names both rules when they do not.
 
-`alpha_hwr_pairing.yaml` declares it. **On hand-written blocks you have to add
+`alpha_hwr.yaml` declares it. **On hand-written blocks you have to add
 it**, and adding it is the only way to get
 the check at all: the 94/102 read is skipped entirely when the entity is absent,
 so there is no log warning to fall back on either. That is the same
@@ -363,7 +363,7 @@ because a latched fault is often why you are reaching for the switch; and a
 genuine failure of the reconnect itself publishes normally rather than being
 suppressed.
 
-**Which package provides it.** The switch ships in `alpha_hwr_pairing.yaml`,
+**Which package provides it.** The switch ships in `alpha_hwr.yaml`,
 alongside the link diagnostics it acts on. A hand-written `alpha_hwr:` block
 holds the pump just the same — it is the *connection* that holds it — so add
 the switch yourself:
@@ -687,7 +687,7 @@ part. The watchdog still recovers a deaf link, just more slowly. Do this
 and the run would produce reassuring zeros whatever the pump did.
 
 **2. Declare the entities.** Uncomment the histogram block in
-`packages/alpha_hwr_pairing.yaml`, or name the eight keys in your own
+`packages/alpha_hwr.yaml`, or name the eight keys in your own
 `alpha_hwr:` block. `esphome config` warns if the budget is still too small for
 the rungs you declared.
 
@@ -1062,7 +1062,7 @@ The caps are reported in **gallons per minute**, because that is the unit they
 were entered in: the values land on the wire in m³/s, and every limit value seen
 on two pumps converts to an exact gpm figure.
 
-`alpha_hwr_pairing.yaml` declares both. The reads are only issued when at least
+`alpha_hwr.yaml` declares both. The reads are only issued when at least
 one of them is configured — five frames per connection and three per control poll
 otherwise buy nothing.
 

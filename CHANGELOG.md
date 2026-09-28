@@ -4,18 +4,34 @@
 
 ### Migration
 
-Two related changes in this release follow from #244, which settled that the
-pump pairs like any other Bluetooth device.
+Changes in this release that can touch an existing config. The first two
+follow from #244, which settled that the pump pairs like any other Bluetooth
+device; the rest cut the package layout down to two layers for the pump.
 
 | Change | What breaks | What to do |
 | --- | --- | --- |
 | `packages/alpha_hwr_base.yaml` is removed | A config loading it `@main` fails at the package fetch. Configs pinned to a release tag (`@v0.16.0` or earlier) keep working | Load `packages/alpha_hwr_pairing.yaml` instead. Every entity the base package declared is in it under the same name, plus the rest |
 | `initiate_pairing` defaults to `true` | **Nothing fails.** A hand-written `alpha_hwr:` block that never set the option now initiates pairing and configures security parameters, which is what the pump requires; before, such a node bonded anyway when the pump asked, with none configured (#245) | Nothing, unless you want the old behaviour: then set `initiate_pairing: false` explicitly |
+| `packages/alpha_hwr_pairing.yaml` is renamed `packages/alpha_hwr.yaml` | **Nothing fails yet.** The old name still loads the new file, and is removed in the release after this one | Change the reference to `alpha_hwr.yaml` |
+| `packages/alpha_hwr_schedule.yaml` is removed | A config loading it `@main` fails at the package fetch. It was a four-entity subset of the controls package, frozen since February | Load `alpha_hwr_controls.yaml`. `Schedule Enabled` and `Pump Control Mode` keep their names; the two remote-mode buttons become the `Remote Mode` switch |
+| `packages/alpha_hwr_schedule_editor.yaml` is folded into `alpha_hwr_controls.yaml` | A config loading it `@main` fails at the package fetch. Its helper entities are `internal: true`, so nothing changes in Home Assistant | Drop the line; load `alpha_hwr_controls.yaml` if you were not already |
 
-`hwr-pairing-example.yaml` is also gone; `hwr-pump-example.yaml` now loads the
-pump package and is the example it used to be.
+Of the examples, `hwr-pairing-example.yaml` and `dhw-demand-example.yaml` are
+gone and `hwr-pump-schedule-example.yaml` is now `hwr-pump-controls-example.yaml`.
+Three remain: the pump alone, the pump with the control UI, and both with the
+DHW demand detector. They keep the pump package's old name until the next
+release tag carries the new one; the release script moves them.
 
 ### Removed
+
+- **`packages/alpha_hwr_schedule.yaml` and `packages/alpha_hwr_schedule_editor.yaml`**,
+  plus `dhw-demand-example.yaml` and the CI config that built the schedule
+  package. Four pump packages were three too many to choose between. The
+  schedule package was a frozen subset of the controls package that collided
+  with it; the schedule editor package was 27 hidden helper entities for the
+  Lovelace card that nobody wants without the controls, with a header still
+  claiming to provide services that moved into C++ months ago. Both are now
+  inside `alpha_hwr_controls.yaml`. See Migration.
 
 - **`packages/alpha_hwr_base.yaml`, `hwr-pairing-example.yaml` and the CI
   config that validated the base package** (issue #244). The base package
@@ -26,6 +42,12 @@ pump package and is the example it used to be.
   historical name because configs reference it by URL.
 
 ### Changed
+
+- **Two layers for the pump: `packages/alpha_hwr.yaml` and
+  `packages/alpha_hwr_controls.yaml`.** The pump package is the file formerly
+  named `alpha_hwr_pairing.yaml`, which still loads it for one release. The
+  README's package table, usage sections, schedule-services notes and Lovelace
+  prerequisites, the packages README and the docs describe the two layers.
 
 - **`initiate_pairing` defaults to `true`** (issue #244). See Migration.
 

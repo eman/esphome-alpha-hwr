@@ -1,9 +1,9 @@
 # Schedule Management via Home Assistant
 
 This document covers the pump's schedule services. The services are registered
-by the component itself (`components/alpha_hwr/api_bridge.cpp`); the
-`packages/alpha_hwr_schedule_editor.yaml` package adds the optional Lovelace
-helper entities.
+by the component itself (`components/alpha_hwr/api_bridge.cpp`);
+`packages/alpha_hwr_controls.yaml` carries the hidden helper entities the
+Lovelace schedule card drives.
 
 ## Service name format
 
@@ -77,7 +77,7 @@ whichever slot holds the active `Stop` event (settles `accepted` with no change
 if there is no active vacation). The **Vacation** text sensor shows the active
 range; the **Single Events** sensor labels each event `(run)` or `(off)`.
 
-For a click-driven UI, `alpha_hwr_schedule_editor.yaml` provides matching
+For a click-driven UI, `alpha_hwr_controls.yaml` provides matching
 helper entities: four `number` inputs (**Vacation Start Month/Day**,
 **Vacation End Month/Day**) plus **Set Vacation** and **Clear Vacation**
 buttons. "Set Vacation" holds the pump off from 00:00 of the start day through
@@ -267,10 +267,10 @@ curl -X POST \
 ## Notes
 
 - The services are registered by the component itself (`api_bridge.cpp`);
-  `alpha_hwr_schedule_editor.yaml` adds the optional Lovelace helper entities
-  (day/layer selects, time/date `number` inputs, save/clear/vacation buttons);
-  `alpha_hwr_pairing.yaml` provides the schedule, single-event, and vacation
-  text sensors.
+  `alpha_hwr_controls.yaml` carries the Lovelace helper entities (day/layer
+  selects, time/date `number` inputs, save/clear/vacation buttons);
+  `alpha_hwr.yaml` provides the schedule, single-event, and vacation text
+  sensors.
 - Single events temporarily override the weekly schedule while active.
 - Schedule writes take a few seconds to propagate over BLE.
 - Call `refresh_schedule` or `refresh_single_events` after bulk updates if you

@@ -64,15 +64,20 @@ echo ""
 echo "Step 2: Updating version pins in example YAMLs and packages..."
 FILES=(
     "hwr-pump-example.yaml"
-    "hwr-pump-schedule-example.yaml"
-    "dhw-demand-example.yaml"
+    "hwr-pump-controls-example.yaml"
     "hwr-pump-dhw-example.yaml"
-    "packages/alpha_hwr_pairing.yaml"
+    "packages/alpha_hwr.yaml"
     "packages/dhw_demand_detector.yaml"
 )
 
 for file in "${FILES[@]}"; do
     if [ -f "$file" ]; then
+        # The pump package was renamed from alpha_hwr_pairing.yaml after
+        # v0.16.0. Release-pinned references had to keep the old name until a
+        # tag carried the new one; this moves them (and drops the note that
+        # explained the lag) the first time it runs, and is a no-op after.
+        perl -pi -e "s|packages/alpha_hwr_pairing\.yaml\@|packages/alpha_hwr.yaml\@|g" "$file"
+        perl -0pi -e "s|  # Pinned to the last release, where the pump package still carried its old\n  # name\. On main it is packages/alpha_hwr\.yaml; the release script moves this\n  # line at the next release\.\n||g" "$file"
         # Use perl -pi (like the CHANGELOG edit above) rather than sed -i '' so the
         # in-place edits are portable across BSD (macOS) and GNU (Linux) systems.
         perl -pi -e "s|\@v[0-9]+\.[0-9]+\.[0-9]+|\@${NEW_VERSION}|g" "$file"

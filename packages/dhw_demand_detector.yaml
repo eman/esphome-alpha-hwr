@@ -7,7 +7,7 @@
 #
 # This package works standalone (no pump required). Pump telemetry can be
 # added in your main YAML to enable pump-on detection; see the example at
-# dhw-demand-example.yaml.
+# hwr-pump-dhw-example.yaml.
 #
 # Required substitutions (must be set in your main YAML):
 #   ${flow_entity}            — HA entity ID for flow meter (GPM)
@@ -28,7 +28,7 @@
 #   packages:
 #     dhw_demand: github://eman/esphome-alpha-hwr/packages/dhw_demand_detector.yaml@v0.16.0
 #
-# Usage with alpha_hwr pump (see dhw-demand-example.yaml for full example):
+# Usage with alpha_hwr pump (see hwr-pump-dhw-example.yaml for full example):
 #
 #   packages:
 #     alpha_hwr: github://eman/esphome-alpha-hwr/packages/alpha_hwr_pairing.yaml@v0.16.0
@@ -36,7 +36,7 @@
 #
 #   # The alpha_hwr package already declares external_components for both
 #   # alpha_hwr and dhw_demand, so no separate declaration is needed.
-#   # See dhw-demand-example.yaml for a complete working configuration.
+#   # See hwr-pump-dhw-example.yaml for a complete working configuration.
 # ==============================================================================
 
 sensor:
@@ -89,7 +89,7 @@ sensor:
 # `inlet_pressure`, `pump_power` and `pump_head_rate` were removed in issue
 # #149 along with the hydraulic vote tier that read them; a config still
 # setting one now fails validation with an explanation.
-# See dhw-demand-example.yaml for a complete working configuration.
+# See hwr-pump-dhw-example.yaml for a complete working configuration.
 
 dhw_demand:
   # ── Outputs ─────────────────────────────────────────────────────────────────
