@@ -24,6 +24,9 @@ release tag carries the new one; the release script moves them.
 
 ### Removed
 
+- **`.geminiignore` and `.clang-tidy`.** The first whitelisted a `reference/`
+  directory that does not exist; nothing ran the second (linting is cppcheck).
+
 - **`packages/alpha_hwr_schedule.yaml` and `packages/alpha_hwr_schedule_editor.yaml`**,
   plus `dhw-demand-example.yaml` and the CI config that built the schedule
   package. Four pump packages were three too many to choose between. The
@@ -42,6 +45,17 @@ release tag carries the new one; the release script moves them.
   name, `alpha_hwr_pairing.yaml`, still loads it for one release.
 
 ### Changed
+
+- **AGENTS.md carries rules and structure, not a status log.** The five-phase
+  "COMPLETE" checklist (section 7) is replaced by a map of where each kind of
+  fact is documented, and the strategic principles no longer list "passive
+  telemetry" as a phase. Section numbers are unchanged, because code comments
+  cite them. The development standards now point at `docs/units-audit.md`.
+
+- **`tools/bump_version.sh` refuses to ship the `alpha_hwr_pairing.yaml` shim
+  twice.** If the previous release tag already carried the shim, the release
+  stops until it is removed, keeping the "one release" promise without anyone
+  having to remember it.
 
 - **The examples live in `examples/`, and each fact about the packages has one
   home.** `hwr-pump-example.yaml`, `hwr-pump-controls-example.yaml` and

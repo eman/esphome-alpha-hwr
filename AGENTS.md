@@ -6,7 +6,7 @@ This document serves as the **primary reference for AI Agents** and developers w
 
 Our mission is to provide a robust, reliable, and feature-rich ESPHome component for the **Grundfos ALPHA HWR** hot water recirculation pump.
 
-### core Objectives
+### Core Objectives
 
 1. **Control Capability**: Implement bi-directional control (Start/Stop, Set Mode, Schedules) via BLE.
 2. **Stability**: Ensure the component is stable significantly longer than the transient connection times of a mobile app.
@@ -14,11 +14,7 @@ Our mission is to provide a robust, reliable, and feature-rich ESPHome component
 
 ### Strategic Principles
 
-* **Incrementalism**: We build complexity layer-by-layer.
-  * *Phase 1:* Passive Telemetry (READ only).
-  * *Phase 2:* Bonded Telemetry (BLE pairing + READ).
-  * *Phase 3:* Basic Control (WRITE commands).
-  * *Phase 4:* Complex Management (Schedules, Time Sync).
+* **Incrementalism**: Build complexity layer by layer, and prove each layer on hardware before anything depends on it.
 * **Simple Configuration**: The `examples/hwr-pump-example.yaml` configuration should demonstrate best practices and be the reference for users. We prioritize good architecture over backward compatibility since this is a new library.
 * **No Regressions**: New features (e.g., adding schedule writing) must not break existing features (e.g., live flow rate reporting).
 
@@ -74,6 +70,7 @@ Agents should consult these resources before making architectural decisions:
   * `ESP_LOGW`: Retries, unexpected (but handled) data, timeout warnings.
   * `ESP_LOGE`: Critical failures, unrecoverable errors.
 * **Endianness**: The GENI protocol is **Big-Endian**. Always use helper functions (e.g., `read_float_be`, `put_unaligned_be32`) or standard `htonl`/`ntohl` to ensure portability. **Do not assume host endianness.**
+* **Units**: Before adding or changing an entity, check its unit and scale factor against `docs/units-audit.md`, and add its row there.
 * **State Machines**: Explicitly model complex interactions (e.g., the connection lifecycle) as state machines `enum class State { IDLE, SERVICE_DISCOVERY, SUBSCRIBING, STABILIZING, READY }`. Avoid deep nested `if/else` in the loop.
 
 ### Python (Support Scripts/Tools)
@@ -170,7 +167,7 @@ The ESPHome component follows a layered, service-based architecture. This archit
 5. **Core Layer Manages State**: Transport handles BLE I/O, Session tracks connection state, BLEConnectionManager handles the connection lifecycle.
 6. **One Write Path**: Every pump write — entity-originated or service-originated — goes through the write-operation layer (`services::WriteOperationService`, issue #92), which serializes write sequences, confirms each write against a pump readback, and reports exactly one terminal settle result per operation.
 
-### ESPHome Component Implementation (COMPLETED)
+### Component Layout
 
 > **Note on Structure**: ESPHome requires a flat file structure in `components/alpha_hwr/`, so the layered architecture is implemented using **C++ namespaces** instead of subdirectories. This provides the same logical separation while maintaining ESPHome compatibility.
 
@@ -225,52 +222,23 @@ components/alpha_hwr/
 4. **Keep Services Focused**: Each service should own a single domain (telemetry, control, schedules, etc.).
 5. **No New Standalone Write Paths**: Anything that writes to the pump must be a `WriteCommand` in the operation layer (see §9), so it inherits serialization, confirm readbacks, and the one-terminal-event contract.
 
-## 7. Current Status & Implementation Progress
+## 7. Where Things Are Documented
 
-### Completed Features
+Each kind of fact has one home. Update that home; point at it from anywhere else rather than restating it, because a restated fact drifts (a wrong claim about pairing once survived in five files at once).
 
-#### Phase 1-2: Telemetry & Connection (COMPLETE)
+| Fact | Home |
+| --- | --- |
+| Quick start, recipes, pairing walkthrough, examples and secrets | `README.md` |
+| What each package declares, entity by entity | `packages/README.md` |
+| Component options and their defaults | `docs/configuration.md` |
+| Services and the `write_settled` contract | `docs/programmatic-interface.md` |
+| Schedule services and read-back sensors | `docs/schedule-management.md` |
+| Every entity's unit and scale factor | `docs/units-audit.md` (check a new entity against it before adding it) |
+| Component structure | `docs/architecture.md` and section 6 above |
+| What changed, and why | `CHANGELOG.md` |
+| Complete, CI-validated configs | `examples/` |
 
-* [x] BLE discovery and connection
-* [x] BLE pairing and bonding
-* [x] ~~GENI "authentication handshake"~~ — there was never one. The four packets
-  the connection opened with were GENIbus reads whose replies nothing consumed,
-  and they were removed in issue #174. Nothing in the protocol this component
-  speaks is a challenge/response.
-* [x] Live telemetry streaming (flow rate, pressure, power, temperature)
-* [x] All sensors exposed to Home Assistant
-* [x] Connection stability and reconnection logic
-
-#### Phase 3: Basic Control (COMPLETE)
-
-* [x] Start/Stop pump commands
-* [x] Mode selection (Auto, Manual, Off)
-* [x] Setpoint adjustments (temperature targets)
-* [x] Control buttons in Home Assistant
-
-#### Phase 4: Schedule Management (COMPLETE)
-
-* [x] Schedule reading from all 5 layers (0-4)
-* [x] Schedule parsing and decoding
-* [x] Schedule display in Home Assistant
-* [x] Schedule packet building (53-byte APDU format)
-* [x] Schedule validation logic
-* [x] **Schedule write persistence** (RESOLVED via Non-Blocking Transaction Manager)
-
-Additional services beyond the original phases: `device_info_service` (device
-ID strings + statistics), `time_service` (RTC sync), `event_log_service`,
-`history_service`.
-
-#### Phase 5: Programmatic Write-and-Verify Interface (COMPLETE — issue #92)
-
-* [x] `WriteOperationService`: one serialized write path with confirm readbacks and terminal statuses (accepted/clamped/rejected/timeout/superseded)
-* [x] Entity writes routed through the operation layer (anti-clobber for the dashboard too)
-* [x] HA services (`set_pump_enabled`, `set_mode`, `set_setpoint`, `set_temperature_range`, `set_cycle_times`) registered in C++ (`api_bridge`)
-* [x] Schedule services migrated from YAML to `api_bridge` with verify readbacks (previously they reported success unconditionally)
-* [x] `esphome.alpha_hwr_write_settled` event: exactly one terminal event per write, self-identifying via caller-supplied `op_id`
-* [x] Host test suite `tests/test_write_operations.cpp` (pump simulator driving every terminal status)
-
-See `docs/programmatic-interface.md` for the public contract.
+Feature history lives in `CHANGELOG.md` and git; this file carries rules and structure, not a status log.
 
 ## 8. The Solution: Non-Blocking BLE Transaction Manager
 

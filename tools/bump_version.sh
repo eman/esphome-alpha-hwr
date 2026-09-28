@@ -46,6 +46,22 @@ fi
 
 echo "Pulling latest main..."
 git pull origin main
+git fetch -q --tags origin
+
+# packages/alpha_hwr_pairing.yaml is a one-release shim for the pump package's
+# old name. The shim, the README and the changelog all promise it goes in the
+# release after the one that first shipped it, so hold the release to that
+# rather than relying on anyone to remember. Keyed on the previous tag's copy
+# being the shim (it says "Deprecated name"), not on a version number: before
+# the rename that path held the real package.
+SHIM="packages/alpha_hwr_pairing.yaml"
+LAST_TAG=$(git describe --tags --abbrev=0 2>/dev/null || true)
+if [ -f "$SHIM" ] && [ -n "$LAST_TAG" ] \
+   && git show "$LAST_TAG:$SHIM" 2>/dev/null | grep -q "Deprecated name"; then
+    echo "Error: $LAST_TAG already shipped the $SHIM shim, so this release must remove it."
+    echo "Delete the file, drop its mentions in README.md and packages/README.md, and add a Removed entry to CHANGELOG.md."
+    exit 1
+fi
 
 echo "=========================================="
 echo "Starting Release Process for $NEW_VERSION"
