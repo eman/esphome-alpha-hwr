@@ -993,6 +993,32 @@ MUTATIONS=(
 # most common suppressed cell (loop reading fractionally above the meter, i.e.
 # instrument mismatch rather than water) while looking like a null-safety tweak.
 "dhw-in-use-reopens-the-negative-residual|components/dhw_demand/dhw_demand_logic.h|  if (in.dhw_in_use_sustained && std::isnan(r.demand_gpm)) {|  if (in.dhw_in_use_sustained && (std::isnan(r.demand_gpm) || r.demand_gpm < 0.0f)) {"
+# The dhw_in_use tier's independent-support rule (issue #330). The tier used to
+# fire on sustained-and-unmeasured alone, and 15 of its 20 firings in one
+# house's record were the recirculation loop. Each mutation removes one clause
+# of the rule that separated those 15 from the 5 real taps, or lets the tier
+# fire without consulting it at all.
+# (Mutated at the rule's fall-through rather than at the tier's `||` test, which
+# this file cannot express because `|` is the field separator.)
+"dhw-in-use-fires-without-support|components/dhw_demand/dhw_demand_logic.h|  return DhwInUseSupport::UNSUPPORTED;|  return DhwInUseSupport::CARRIED_DRAW;"
+"dhw-in-use-veto-removed|components/dhw_demand/dhw_demand_logic.h|  if (meter_fresh && !std::isnan(in.flow) && in.flow <= t.demand_flow)\n    return DhwInUseSupport::VETOED;|"
+"dhw-in-use-veto-ignores-meter-age|components/dhw_demand/dhw_demand_logic.h|  if (meter_fresh && !std::isnan(in.flow) && in.flow <= t.demand_flow)|  if (!std::isnan(in.flow) && in.flow <= t.demand_flow)"
+"dhw-in-use-carries-a-draw-from-before-the-flag|components/dhw_demand/dhw_demand_logic.h|    const bool inside_run = demand_age <= run_age;|    const bool inside_run = true;"
+"dhw-in-use-carries-forever|components/dhw_demand/dhw_demand_logic.h|    const bool recent = demand_age <= t.dhw_in_use_carry_max_ms;|    const bool recent = true;"
+"dhw-in-use-carry-window-off-by-one|components/dhw_demand/dhw_demand_logic.h|    const bool recent = demand_age <= t.dhw_in_use_carry_max_ms;|    const bool recent = demand_age < t.dhw_in_use_carry_max_ms;"
+"dhw-in-use-carries-past-a-measured-no-draw|components/dhw_demand/dhw_demand_logic.h|        in.last_measured_no_draw_ms != 0 &&\n        (in.now_ms - in.last_measured_no_draw_ms) <= demand_age;|        false;"
+"dhw-in-use-loop-bias-margin-dropped|components/dhw_demand/dhw_demand_logic.h|      (in.flow - in.pump_flow) > (t.demand_flow + t.dhw_in_use_loop_bias_gpm))|      (in.flow - in.pump_flow) > t.demand_flow)"
+"dhw-in-use-loop-reading-age-unbounded|components/dhw_demand/dhw_demand_logic.h|      reading_is_fresh(in.pump_flow_last_update_ms, in.now_ms,\n                       t.flow_max_stale_ms) &&\n      reading_taken_after_settle|      reading_taken_after_settle"
+"dhw-in-use-loop-reading-speed-unchecked|components/dhw_demand/dhw_demand_logic.h|      std::fabs(in.motor_speed - in.pump_flow_speed_at_update) <=\n          t.dhw_in_use_speed_tolerance_rpm &&|"
+"dhw-in-use-loop-reading-may-predate-settle|components/dhw_demand/dhw_demand_logic.h|      reading_taken_after_settle(in.pump_flow_last_update_ms,\n                                 in.pump_on_since_ms, in.now_ms,\n                                 t.pump_on_settle_ms) &&|"
+"settle-predicate-rollover-unsafe|components/dhw_demand/dhw_demand_logic.h|  return run_age >= reading_age && (run_age - reading_age) >= settle_ms;|  return last_update_ms >= pump_on_since_ms + settle_ms;"
+# The memory the rule reads lives in the component. A continuation tick or the
+# tier's own firing stamping it would let the tier carry itself; a subtraction
+# no-draw that does not stamp would let a closed tap be carried on the loop.
+"dhw-in-use-tier-stamps-its-own-firing|components/dhw_demand/dhw_demand.cpp|    if (!std::isnan(result.demand_gpm)) {\n      if (result.demand_gpm > pump_on_demand_flow_threshold_)\n        last_metered_demand_ms_ = now;|    if (result.demand) {\n      last_metered_demand_ms_ = now;\n    }\n    if (!std::isnan(result.demand_gpm)) {\n      if (result.demand_gpm > pump_on_demand_flow_threshold_)\n        last_metered_demand_ms_ = now;"
+"dhw-in-use-no-draw-never-stamped|components/dhw_demand/dhw_demand.cpp|      else\n        last_measured_no_draw_ms_ = now;|"
+"dhw-in-use-pump-off-verdict-never-stamped|components/dhw_demand/dhw_demand.cpp|      last_metered_demand_ms_ = now;\n      // Demand level: scale by flow if available, else moderate default.|      // Demand level: scale by flow if available, else moderate default."
+"dhw-in-use-loop-speed-never-captured|components/dhw_demand/dhw_demand.cpp|        pump_flow_speed_at_update_ = read_sensor_(motor_speed_);|        pump_flow_speed_at_update_ = 0.0f;"
 "frozen-motor-asserts-pump-off|components/dhw_demand/dhw_demand_logic.h|  } else if (out.motor_frozen) {\n    out.pump_on = true;|  } else if (out.motor_frozen) {\n    out.pump_on = false;"
 "motor-staleness-mask-removed|components/dhw_demand/dhw_demand_logic.h|  out.speed_used = reading_is_fresh(in.motor_speed_last_update_ms, in.now_ms, in.motor_max_stale_ms)\n                       ? in.motor_speed\n                       : NAN;|  out.speed_used = in.motor_speed;"
 "motor-current-staleness-mask-removed|components/dhw_demand/dhw_demand_logic.h|  out.current_used =\n      reading_is_fresh(in.motor_current_last_update_ms, in.now_ms, in.motor_max_stale_ms)\n          ? in.motor_current\n          : NAN;|  out.current_used = in.motor_current;"

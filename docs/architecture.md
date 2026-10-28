@@ -146,6 +146,23 @@ two are normally paired, with pump telemetry feeding the detector.
   draw up to roughly 0.4 GPM — and the evidence that none occurred is one house
   over one month. The trade is still the right one, but it is a trade. See
   [issue #173](https://github.com/eman/esphome-alpha-hwr/issues/173).
+- **And where nothing measured the loop, it still needs something independent
+  of the loop to vouch for a tap.** The heater's flag rises 1–3 minutes into an
+  ordinary recirculation run with no tap open, and the subtraction is
+  unavailable at every start, whenever a channel is stale, and for the whole
+  run on a pump under its speed floor — so "sustained and unmeasured" describes
+  the loop as well as a tap. Of the tier's 20 firings in one house's record, 15
+  had no tap behind them. What separated the 5 was *when the flag rose* against
+  the last tick that measured demand. So `dhw_in_use_tap_support()` requires
+  either a draw that flow, thermal, charge or the subtraction declared inside
+  the flag's current run, within `dhw_in_use_carry_max_seconds` and not since
+  contradicted by a measured no-draw, or the meter above the loop by more than
+  `dhw_in_use_loop_bias_gpm` over the threshold with the speed floor lifted —
+  and a fresh meter reading at or under the threshold vetoes either. The
+  component keeps the memory this reads (the last metered-demand and
+  measured-no-draw stamps, and the speed captured beside each loop reading);
+  the rule itself is pure and pinned case by case in the host test. See
+  [issue #330](https://github.com/eman/esphome-alpha-hwr/issues/330).
 - **Release-hold on the output**: demand is recomputed from scratch each tick, so an
   input dithering around its threshold would chatter the binary sensor. Rising edges
   pass through immediately; falling edges are held for `demand_release_seconds`.

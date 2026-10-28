@@ -832,6 +832,274 @@ void test_an_unmeasurable_continuation_expires() {
 // nominally tautological, but the test is not: dropping the nullptr guard in
 // read_sensor_() segfaults here, and `make test` fails on the exit code.
 // `make test-asan` (a CI job) turns the near misses into failures too.
+// ── The dhw_in_use tier's support stamps (issue #330) ────────────────────────
+// The rule itself is pinned in test_dhw_demand_logic.cpp. What lives only in
+// the .cpp is the memory it reads: which ticks stamp "something metered a
+// draw", which stamp "the subtraction measured a no-draw", which stamp nothing
+// at all, and the speed captured beside each loop-flow reading. Each of those
+// is a line in update() or a callback, and a wrong one is invisible to the
+// pure-logic test.
+
+// A pump-on tick with every channel published, so the staleness registers are
+// stamped at `now` before the component reads them.
+static void pump_on_tick(Rig &r, uint32_t now, float rpm, float loop,
+                         float meter, float flag) {
+  r.at(now);
+  r.motor_speed.publish_state(rpm);
+  if (!std::isnan(loop))
+    r.pump_flow.publish_state(loop);
+  r.flow.publish_state(meter);
+  r.dhw_in_use.publish_state(flag);
+  r.tick(now);
+}
+
+void test_dhw_in_use_carries_a_measured_draw_then_lets_go() {
+  std::cout << "\n=== dhw_in_use carries a measured draw, then lets go ==="
+            << std::endl;
+  Rig r;
+  r.det.set_demand_release_seconds(0);  // observe raw demand, not the hold
+  r.det.set_dhw_in_use_min_seconds(0);  // the sustain guard has its own tests
+  r.det.setup();
+
+  // The flag is up from the start, before anything is metered. One confirmed
+  // pump-off tick so the pump-on edge below is a known boundary.
+  pump_on_tick(r, T0, 0.0f, 0.0f, 0.0f, 1.0f);
+
+  // Pump starts. Inside the settle window the subtraction declines, so tier 3
+  // is reached with the flag sustained and nothing metered: the #330 shape.
+  uint32_t on = T0 + TICK_MS;
+  pump_on_tick(r, on, 2400.0f, 1.31f, 1.31f, 1.0f);
+  TEST_ASSERT(r.method_state() == "pump_on_uncertain",
+              "A sustained flag over a fresh pump start with nothing metered "
+              "publishes nothing");
+
+  // A tap opens and the subtraction measures it on four ticks. Each stamps.
+  uint32_t last_measured = 0;
+  for (int i = 2; i <= 5; i++) {
+    last_measured = T0 + i * TICK_MS;
+    pump_on_tick(r, last_measured, 2400.0f, 1.31f, 3.11f, 1.0f);
+  }
+  TEST_ASSERT(r.method_state() == "deterministic_pump_on_subtraction",
+              "The subtraction measures the draw while the loop reports");
+
+  // The loop-flow channel goes silent. For 30 s the last reading is still
+  // fresh and the subtraction keeps measuring; past that it is NaN and the
+  // flag is the only thing left -- supported by the draw it saw measured.
+  for (int i = 1; i <= 3; i++)
+    pump_on_tick(r, last_measured + i * TICK_MS, 2400.0f, NAN, 3.11f, 1.0f);
+  TEST_ASSERT(r.method_state() == "deterministic_pump_on_subtraction",
+              "A 30 s old loop reading is still differenced");
+  last_measured += 3 * TICK_MS;
+
+  uint32_t blind = last_measured + TICK_MS;  // loop reading now 40 s old
+  pump_on_tick(r, blind, 2400.0f, NAN, 3.11f, 1.0f);
+  TEST_ASSERT(r.method_state() == "deterministic_dhw_in_use",
+              "With the subtraction gone, the flag carries the metered draw");
+  TEST_ASSERT(r.demand.state == true, "...and demand stays true");
+
+  // A fresh meter reading 0.00 vetoes the carry for that tick only.
+  pump_on_tick(r, blind + TICK_MS, 2400.0f, NAN, 0.0f, 1.0f);
+  TEST_ASSERT(r.method_state() == "pump_on_uncertain",
+              "A fresh meter at 0.00 vetoes: no draw can be behind it");
+  pump_on_tick(r, blind + 2 * TICK_MS, 2400.0f, NAN, 3.11f, 1.0f);
+  TEST_ASSERT(r.method_state() == "deterministic_dhw_in_use",
+              "...and the carry resumes when the meter reads again");
+
+  // The carry window runs from the last tick that measured the draw, not from
+  // the first blind tick. 120 s after it the flag is on its own again.
+  uint32_t at_limit = last_measured + 120000;
+  for (uint32_t now = blind + 3 * TICK_MS; now <= at_limit; now += TICK_MS)
+    pump_on_tick(r, now, 2400.0f, NAN, 3.11f, 1.0f);
+  TEST_ASSERT(r.method_state() == "deterministic_dhw_in_use",
+              "The carry holds through the 120 s window");
+  pump_on_tick(r, at_limit + TICK_MS, 2400.0f, NAN, 3.11f, 1.0f);
+  TEST_ASSERT(r.method_state() == "pump_on_uncertain",
+              "One tick past the window the flag alone publishes nothing");
+  TEST_ASSERT(r.demand.state == false, "...and demand is false");
+}
+
+void test_a_measured_no_draw_ends_the_carry() {
+  std::cout << "\n=== A measured no-draw ends the dhw_in_use carry ==="
+            << std::endl;
+  Rig r;
+  r.det.set_demand_release_seconds(0);
+  r.det.set_dhw_in_use_min_seconds(0);
+  r.det.setup();
+
+  pump_on_tick(r, T0, 0.0f, 0.0f, 0.0f, 1.0f);
+  pump_on_tick(r, T0 + TICK_MS, 2400.0f, 1.31f, 1.31f, 1.0f);
+  pump_on_tick(r, T0 + 2 * TICK_MS, 2400.0f, 1.31f, 3.11f, 1.0f);
+  TEST_ASSERT(r.method_state() == "deterministic_pump_on_subtraction",
+              "The draw is measured");
+
+  // The tap closes while the loop still reports: the subtraction measures a
+  // no-draw, which stamps.
+  pump_on_tick(r, T0 + 3 * TICK_MS, 2400.0f, 1.31f, 1.31f, 1.0f);
+  TEST_ASSERT(r.method_state() == "pump_on_uncertain",
+              "The subtraction measures the tap closed");
+
+  // Then the loop channel goes silent with the flag still up. Without the
+  // no-draw stamp this is the carried-draw shape: metered 40 s ago, inside the
+  // flag's run, and the flag stays up for a while after a tap closes.
+  for (int i = 4; i <= 7; i++)
+    pump_on_tick(r, T0 + i * TICK_MS, 2400.0f, NAN, 1.31f, 1.0f);
+  TEST_ASSERT(r.method_state() == "pump_on_uncertain",
+              "A no-draw measured after the draw ends the carry");
+  TEST_ASSERT(r.demand.state == false, "...so the flag alone publishes nothing");
+}
+
+void test_continuation_and_the_tier_itself_do_not_stamp() {
+  std::cout << "\n=== Neither a continuation tick nor the tier's own firing "
+               "counts as a metered draw ==="
+            << std::endl;
+
+  // Case 7 of #330: the tier fires on the meter standing above the loop by
+  // more than any bias (1800 rpm, under the speed floor, so no subtraction).
+  // On the next tick the meter reads only the loop. If the tier's own firing
+  // had stamped last_metered_demand, support (a) would now carry it.
+  {
+    Rig r;
+    r.det.set_demand_release_seconds(0);
+    r.det.set_dhw_in_use_min_seconds(0);
+    r.det.setup();
+
+    pump_on_tick(r, T0, 0.0f, 0.0f, 0.0f, 0.0f);
+    // Edge tick. The loop reading published here is inside the settle window.
+    pump_on_tick(r, T0 + TICK_MS, 1800.0f, 0.31f, 0.31f, 0.0f);
+    // 10 s in: a fresh loop reading at the current speed, a meter 1.05 GPM
+    // above it, and the flag rising now.
+    pump_on_tick(r, T0 + 2 * TICK_MS, 1800.0f, 0.31f, 1.36f, 1.0f);
+    TEST_ASSERT(r.method_state() == "deterministic_dhw_in_use",
+                "Under the speed floor, a meter 1.05 GPM over the loop "
+                "supports the flag");
+    TEST_ASSERT(r.demand.state == true, "...and demand is published");
+
+    pump_on_tick(r, T0 + 3 * TICK_MS, 1800.0f, 0.31f, 0.56f, 1.0f);
+    TEST_ASSERT(r.method_state() == "pump_on_uncertain",
+                "When the meter falls back toward the loop the tier cannot "
+                "vouch for itself");
+    TEST_ASSERT(r.demand.state == false, "...so demand ends");
+  }
+
+  // The speed captured beside the loop reading is what makes (b) decline
+  // after a step-up. Two rigs, identical except that in one the pump moves
+  // from 1650 to 1800 rpm after its last loop reading. Both stay under the
+  // speed floor so the subtraction never answers and tier 3 decides; the
+  // meter reads 0.85 GPM over the stored loop reading in both. Only the
+  // captured speed separates them.
+  {
+    Rig steady, stepped;
+    for (Rig *r : {&steady, &stepped}) {
+      r->det.set_demand_release_seconds(0);
+      r->det.set_dhw_in_use_min_seconds(0);
+      r->det.setup();
+      pump_on_tick(*r, T0, 0.0f, 0.0f, 0.0f, 0.0f);
+      pump_on_tick(*r, T0 + TICK_MS, 1650.0f, 0.25f, 0.71f, 0.0f);
+      // 10 s in: the loop reading whose speed (1650) is captured.
+      pump_on_tick(*r, T0 + 2 * TICK_MS, 1650.0f, 0.25f, 0.71f, 1.0f);
+    }
+    for (int i = 3; i <= 5; i++) {
+      pump_on_tick(steady, T0 + i * TICK_MS, 1650.0f, NAN, 1.10f, 1.0f);
+      pump_on_tick(stepped, T0 + i * TICK_MS, 1800.0f, NAN, 1.10f, 1.0f);
+    }
+    TEST_ASSERT(steady.method_state() == "deterministic_dhw_in_use",
+                "At the speed the loop reading was taken, 0.85 GPM over it "
+                "supports the flag");
+    TEST_ASSERT(stepped.method_state() == "pump_on_uncertain",
+                "After a 150 rpm step-up the same reading describes a loop "
+                "the meter is no longer seeing, and does not");
+  }
+
+  // Case 6: a continuation carried on a stored capture measures nothing at
+  // its own tick, so it must not stamp. The draw is metered while the pump is
+  // off, the flag rises after the pump starts, and the continuation then runs
+  // blind (1650 rpm, no subtraction) until it expires at 300 s. If the
+  // continuation ticks had stamped, the flag would carry the draw past the
+  // expiry; they did not, so the last metered tick predates the flag's run.
+  {
+    Rig r;
+    r.det.set_demand_release_seconds(0);
+    r.det.set_dhw_in_use_min_seconds(0);
+    r.det.setup();
+
+    pump_on_tick(r, T0, 0.0f, 0.0f, 1.80f, 0.0f);
+    pump_on_tick(r, T0 + TICK_MS, 0.0f, 0.0f, 1.80f, 0.0f);
+    TEST_ASSERT(r.method_state() == "deterministic_flow",
+                "A pump-off draw is metered");
+
+    uint32_t on = T0 + 2 * TICK_MS;
+    pump_on_tick(r, on, 1650.0f, 0.25f, 0.71f, 0.0f);
+    TEST_ASSERT(r.method_state() == "deterministic_continuation",
+                "The draw carries across the pump start");
+
+    // The flag rises. Continuation outranks the flag for as long as it holds.
+    uint32_t now = on + TICK_MS;
+    for (; now < on + 300000; now += TICK_MS)
+      pump_on_tick(r, now, 1650.0f, 0.25f, 0.71f, 1.0f);
+    TEST_ASSERT(r.method_state() == "deterministic_continuation",
+                "The blind continuation holds up to its expiry");
+
+    pump_on_tick(r, now, 1650.0f, 0.25f, 0.71f, 1.0f);
+    TEST_ASSERT(r.method_state() == "pump_on_uncertain",
+                "Once it expires, the flag has no metered draw inside its "
+                "run to carry: continuation ticks did not stamp");
+    TEST_ASSERT(r.demand.state == false, "...and demand ends with it");
+  }
+}
+
+void test_a_pump_off_verdict_supports_the_flag_across_a_start() {
+  std::cout << "\n=== A pump-off verdict is a metered draw the flag may carry ==="
+            << std::endl;
+  // The stamp a pump-off flow verdict leaves is the only one this exercises:
+  // the subtraction never runs here (1650 rpm, under the floor), and the
+  // continuation is not armed because the tap closed before the pump started.
+  Rig r;
+  r.det.set_demand_release_seconds(0);
+  r.det.set_dhw_in_use_min_seconds(0);
+  r.det.setup();
+
+  // The flag is up before the draw. Two pump-off ticks of flow, then the tap
+  // closes and the pump is still off.
+  pump_on_tick(r, T0, 0.0f, 0.0f, 1.80f, 1.0f);
+  pump_on_tick(r, T0 + TICK_MS, 0.0f, 0.0f, 1.80f, 1.0f);
+  TEST_ASSERT(r.method_state() == "deterministic_flow", "A pump-off draw");
+  pump_on_tick(r, T0 + 2 * TICK_MS, 0.0f, 0.0f, 0.0f, 1.0f);
+  TEST_ASSERT(r.method_state() == "deterministic_idle",
+              "...and it closes before the pump starts");
+
+  // The pump starts under the speed floor; the meter reads the loop. Nothing
+  // measures here, and the continuation has no capture. The flag carries the
+  // draw metered 20 s ago.
+  pump_on_tick(r, T0 + 3 * TICK_MS, 1650.0f, 0.25f, 0.71f, 1.0f);
+  TEST_ASSERT(r.method_state() == "deterministic_dhw_in_use",
+              "A flow verdict from before the start supports the flag");
+  TEST_ASSERT(r.demand.state == true, "...and demand is published");
+}
+
+void test_dhw_in_use_support_thresholds_are_configurable() {
+  std::cout << "\n=== The support rule's thresholds reach the decision ==="
+            << std::endl;
+  // The carried-draw shape from the first test, with the carry disabled and
+  // the bias margin set beyond any meter: both supports must decline.
+  Rig r;
+  r.det.set_demand_release_seconds(0);
+  r.det.set_dhw_in_use_min_seconds(0);
+  r.det.set_dhw_in_use_carry_max_seconds(0);
+  r.det.set_dhw_in_use_loop_bias_gpm(5.0f);
+  r.det.setup();
+
+  pump_on_tick(r, T0, 0.0f, 0.0f, 0.0f, 1.0f);
+  pump_on_tick(r, T0 + TICK_MS, 2400.0f, 1.31f, 1.31f, 1.0f);
+  pump_on_tick(r, T0 + 2 * TICK_MS, 2400.0f, 1.31f, 3.11f, 1.0f);
+  TEST_ASSERT(r.method_state() == "deterministic_pump_on_subtraction",
+              "The draw is measured");
+  for (int i = 3; i <= 6; i++)
+    pump_on_tick(r, T0 + i * TICK_MS, 2400.0f, NAN, 3.11f, 1.0f);
+  TEST_ASSERT(r.method_state() == "pump_on_uncertain",
+              "With the carry disabled and the margin out of reach, the flag "
+              "publishes nothing");
+}
+
 void test_unwired_component_is_inert() {
   std::cout << "\n=== A component with nothing wired ticks safely ==="
             << std::endl;
@@ -864,6 +1132,11 @@ int main() {
   test_a_continuously_measured_draw_never_expires();
   test_an_isolated_stopped_tick_does_not_accumulate();
   test_an_unmeasurable_continuation_expires();
+  test_dhw_in_use_carries_a_measured_draw_then_lets_go();
+  test_a_measured_no_draw_ends_the_carry();
+  test_continuation_and_the_tier_itself_do_not_stamp();
+  test_a_pump_off_verdict_supports_the_flag_across_a_start();
+  test_dhw_in_use_support_thresholds_are_configurable();
   test_unwired_component_is_inert();
 
   std::cout << "\n==========================================" << std::endl;

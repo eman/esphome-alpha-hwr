@@ -42,8 +42,15 @@ void DhwDemandComponent::setup() {
   }
   if (pump_flow_ != nullptr) {
     pump_flow_->add_on_state_callback([this](float v) {
-      if (!std::isnan(v))
+      if (!std::isnan(v)) {
         pump_flow_last_update_ms_ = millis();
+        // The speed this loop reading was taken at, for the dhw_in_use tier's
+        // meter-above-loop support (issue #330). alpha_hwr publishes the two
+        // in the same telemetry poll, so if speed lands after flow this is
+        // one poll old — a mismatch the tolerance either absorbs or rejects,
+        // and rejecting is the conservative direction.
+        pump_flow_speed_at_update_ = read_sensor_(motor_speed_);
+      }
     });
   }
   // The motor channel decides which branch runs, so its age matters most --
@@ -84,6 +91,12 @@ void DhwDemandComponent::dump_config() {
                 pump_on_demand_max_stale_seconds_);
   ESP_LOGCONFIG(TAG, "    flow_max_stale: %d s", flow_max_stale_seconds_);
   ESP_LOGCONFIG(TAG, "    dhw_in_use_min: %d s", dhw_in_use_min_seconds_);
+  ESP_LOGCONFIG(TAG, "    dhw_in_use_carry_max: %d s",
+                dhw_in_use_carry_max_seconds_);
+  ESP_LOGCONFIG(TAG, "    dhw_in_use_loop_bias: %.2f GPM",
+                dhw_in_use_loop_bias_gpm_);
+  ESP_LOGCONFIG(TAG, "    dhw_in_use_speed_tolerance: %.0f RPM",
+                dhw_in_use_speed_tolerance_rpm_);
   ESP_LOGCONFIG(TAG, "    flow_latch: %d s", flow_latch_seconds_);
   ESP_LOGCONFIG(TAG, "    pump_on_continuation_max: %d s",
                 pump_on_continuation_max_seconds_);
@@ -253,7 +266,10 @@ PumpOnThresholds DhwDemandComponent::pump_on_thresholds_() const {
       (uint32_t) pump_on_demand_settle_seconds_ * 1000,
       (uint32_t) pump_on_continuation_max_seconds_ * 1000,
       kDefaultPumpOnThresholds.continuation_release,
-      kDefaultPumpOnThresholds.continuation_release_ticks};
+      kDefaultPumpOnThresholds.continuation_release_ticks,
+      (uint32_t) dhw_in_use_carry_max_seconds_ * 1000,
+      dhw_in_use_loop_bias_gpm_,
+      dhw_in_use_speed_tolerance_rpm_};
 }
 
 // ── Publish & session helpers ─────────────────────────────────────────────────
@@ -471,6 +487,9 @@ void DhwDemandComponent::update() {
                                   &method);
     if (confidence > 0.0f) {
       demand = true;
+      // A pump-off verdict is flow, thermal or charge: each measures something
+      // the loop is not, so it can later support the dhw_in_use tier (#330).
+      last_metered_demand_ms_ = now;
       // Demand level: scale by flow if available, else moderate default.
       if (!std::isnan(flow) && flow > flow_threshold_) {
         demand_level = std::min(1.0f, flow / 2.5f);
@@ -500,12 +519,54 @@ void DhwDemandComponent::update() {
     in.continuation_since_ms = pre_pump_on_flow_since_ms_;
     in.measured_stopped_ticks = continuation_stopping_ticks_;
     in.dhw_in_use_sustained = dhw_in_use_sustained;
+    in.dhw_in_use_high_since_ms = dhw_in_use_sustained_.high_since_ms;
+    in.last_metered_demand_ms = last_metered_demand_ms_;
+    in.last_measured_no_draw_ms = last_measured_no_draw_ms_;
+    in.pump_flow_speed_at_update = pump_flow_speed_at_update_;
 
     PumpOnResult result = decide_pump_on(in, pump_on_thresholds_());
     demand = result.demand;
     confidence = result.confidence;
     demand_level = result.demand_level;
     method = result.method;
+
+    // Stamp what the subtraction measured, for the dhw_in_use tier's support
+    // rule (issue #330). Only a *measurement* stamps: a continuation tick
+    // carried on a stored capture measures nothing at its own tick, and the
+    // dhw_in_use tier's own firing must never count, or it would carry
+    // itself. Stamped after the decision so this tick's reading cannot
+    // support this tick's verdict -- it is the memory the next tick consults.
+    if (!std::isnan(result.demand_gpm)) {
+      if (result.demand_gpm > pump_on_demand_flow_threshold_)
+        last_metered_demand_ms_ = now;
+      else
+        last_measured_no_draw_ms_ = now;
+    }
+
+    switch (result.dhw_in_use_support) {
+      case DhwInUseSupport::NOT_REACHED:
+        break;
+      case DhwInUseSupport::VETOED:
+        ESP_LOGD(TAG, "dhw_in_use flag sustained but the meter reads %.2f GPM, "
+                      "at or under %.2f: no draw can be behind it",
+                 flow, pump_on_demand_flow_threshold_);
+        break;
+      case DhwInUseSupport::UNSUPPORTED:
+        ESP_LOGD(TAG, "dhw_in_use flag sustained with no measurement and "
+                      "nothing independent of the loop supporting a tap");
+        break;
+      case DhwInUseSupport::CARRIED_DRAW:
+        ESP_LOGD(TAG, "dhw_in_use carries a metered draw from %u s ago",
+                 (unsigned) ((now - last_metered_demand_ms_) / 1000));
+        break;
+      case DhwInUseSupport::METER_ABOVE_LOOP:
+        ESP_LOGD(TAG, "dhw_in_use supported: meter %.2f exceeds loop %.2f by "
+                      "more than %.2f GPM at %.0f RPM",
+                 flow, pump_flow,
+                 pump_on_demand_flow_threshold_ + dhw_in_use_loop_bias_gpm_,
+                 motor_speed);
+        break;
+    }
 
     // Two of the three releases retire the capture, for different reasons.
     //
