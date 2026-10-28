@@ -88,6 +88,7 @@ class DhwDemandComponent : public PollingComponent {
  protected:
   // ── Detection helpers ──────────────────────────────────────────────────────
   float read_sensor_(sensor::Sensor *s);
+  float fresh_motor_speed_();
   float compute_deriv_(float current, float &prev, uint32_t &prev_ms,
                       uint32_t now);
   bool flow_latch_active_();

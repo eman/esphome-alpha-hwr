@@ -1027,6 +1027,21 @@ void test_dhw_in_use_needs_independent_support() {
   TEST_ASSERT(std::string(method_of(run)) == "deterministic_dhw_in_use",
               "A loop reading taken once the estimate has settled is accepted");
 
+  // ── 12b. ...and neither is a meter reading from the previous run ────────
+  // Found in Copilot's review of PR #331. A restart at the same speed passes
+  // the meter's speed check, so a 30 s old 1.36 GPM reading from the last run
+  // would be differenced against this run's fresh 0.31 GPM loop.
+  PumpOnInputs restarted = bench;
+  restarted.flow = 1.36f;
+  restarted.pump_on_since_ms = restarted.now_ms - 20000;
+  restarted.pump_flow_last_update_ms = restarted.now_ms;
+  restarted.flow_last_update_ms = restarted.now_ms - 30000;  // before the start
+  TEST_ASSERT(std::string(method_of(restarted)) == "pump_on_uncertain",
+              "A meter reading from before the restart is rejected");
+  restarted.flow_last_update_ms = restarted.now_ms - 15000;  // 5 s into the run
+  TEST_ASSERT(std::string(method_of(restarted)) == "deterministic_dhw_in_use",
+              "A meter reading from this run is accepted");
+
   // The predicate behind 12, on its own and across the millis() rollover.
   TEST_ASSERT(reading_taken_after_settle(0, 500, 1000, 10000) == false,
               "A channel that never reported was not taken after anything");

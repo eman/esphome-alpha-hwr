@@ -197,10 +197,13 @@ release tag carries the new one; the release script moves them.
   - **The meter above the loop.** `flow − pump_flow` more than
     `pump_on_demand_flow_threshold` + `dhw_in_use_loop_bias_gpm` (new, default
     0.45, the largest no-draw bias measured below the speed floor), with the
-    floor lifted. The loop reading may be up to `flow_max_stale_seconds` old,
-    must have been taken within `dhw_in_use_speed_tolerance_rpm` (new, default
-    100) of the current speed, as must the meter reading, and not before the motor started or inside its
-    first `pump_on_demand_settle_seconds`.
+    floor lifted. The loop reading may be up to `flow_max_stale_seconds` old
+    and may not fall inside the run's first `pump_on_demand_settle_seconds`.
+    Neither the loop reading nor the meter reading may predate the motor
+    start, and both must have been taken within
+    `dhw_in_use_speed_tolerance_rpm` (new, default 100) of the current speed.
+    A reading that arrives while the speed is itself stale is recorded with no
+    speed and cannot support.
 
   Replayed over the 20 events: the 15 loop and silent-meter events publish
   nothing; the 5 taps keep every demand cell except the last 50 s of one draw,

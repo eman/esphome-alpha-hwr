@@ -1018,7 +1018,7 @@ MUTATIONS=(
 "dhw-in-use-tier-stamps-its-own-firing|components/dhw_demand/dhw_demand.cpp|    if (!std::isnan(result.demand_gpm)) {\n      if (result.demand_gpm > pump_on_demand_flow_threshold_)\n        last_metered_demand_ms_ = now;|    if (result.demand) {\n      last_metered_demand_ms_ = now;\n    }\n    if (!std::isnan(result.demand_gpm)) {\n      if (result.demand_gpm > pump_on_demand_flow_threshold_)\n        last_metered_demand_ms_ = now;"
 "dhw-in-use-no-draw-never-stamped|components/dhw_demand/dhw_demand.cpp|      else\n        last_measured_no_draw_ms_ = now;|"
 "dhw-in-use-pump-off-verdict-never-stamped|components/dhw_demand/dhw_demand.cpp|      last_metered_demand_ms_ = now;\n      // Demand level: scale by flow if available, else moderate default.|      // Demand level: scale by flow if available, else moderate default."
-"dhw-in-use-loop-speed-never-captured|components/dhw_demand/dhw_demand.cpp|        pump_flow_speed_at_update_ = read_sensor_(motor_speed_);|        pump_flow_speed_at_update_ = 0.0f;"
+"dhw-in-use-loop-speed-never-captured|components/dhw_demand/dhw_demand.cpp|        pump_flow_speed_at_update_ = fresh_motor_speed_();|        pump_flow_speed_at_update_ = 0.0f;"
 # Found in review on PR #331. The pump-on decision must see the staleness-
 # masked speed: with the raw cache, a stale current speed equals the stale
 # speed captured beside the loop reading and the tolerance check passes
@@ -1030,7 +1030,13 @@ MUTATIONS=(
 # channels, so after a speed drop it can still read the faster loop. Support
 # (b) checks the meter reading's speed as well as the loop reading's.
 "dhw-in-use-meter-reading-speed-unchecked|components/dhw_demand/dhw_demand_logic.h|      std::fabs(in.motor_speed - in.flow_speed_at_update) <=\n          t.dhw_in_use_speed_tolerance_rpm &&|      true &&"
-"dhw-in-use-meter-speed-never-captured|components/dhw_demand/dhw_demand.cpp|        flow_speed_at_update_ = read_sensor_(motor_speed_);|        flow_speed_at_update_ = 1800.0f;"
+"dhw-in-use-meter-speed-never-captured|components/dhw_demand/dhw_demand.cpp|        flow_speed_at_update_ = fresh_motor_speed_();|        flow_speed_at_update_ = 1800.0f;"
+# Found in Copilot's third review of PR #331: a reading recorded during a
+# motor-telemetry gap must carry no speed, in either channel, and a meter
+# reading from the previous run must not survive a same-speed restart.
+"dhw-in-use-meter-labelled-with-a-stale-speed|components/dhw_demand/dhw_demand.cpp|        flow_speed_at_update_ = fresh_motor_speed_();|        flow_speed_at_update_ = read_sensor_(motor_speed_);"
+"dhw-in-use-loop-labelled-with-a-stale-speed|components/dhw_demand/dhw_demand.cpp|        pump_flow_speed_at_update_ = fresh_motor_speed_();|        pump_flow_speed_at_update_ = read_sensor_(motor_speed_);"
+"dhw-in-use-meter-from-the-previous-run|components/dhw_demand/dhw_demand_logic.h|      !reading_predates_pump_start(in.flow_last_update_ms, in.pump_on_since_ms,\n                                   in.now_ms) &&|"
 "frozen-motor-asserts-pump-off|components/dhw_demand/dhw_demand_logic.h|  } else if (out.motor_frozen) {\n    out.pump_on = true;|  } else if (out.motor_frozen) {\n    out.pump_on = false;"
 "motor-staleness-mask-removed|components/dhw_demand/dhw_demand_logic.h|  out.speed_used = reading_is_fresh(in.motor_speed_last_update_ms, in.now_ms, in.motor_max_stale_ms)\n                       ? in.motor_speed\n                       : NAN;|  out.speed_used = in.motor_speed;"
 "motor-current-staleness-mask-removed|components/dhw_demand/dhw_demand_logic.h|  out.current_used =\n      reading_is_fresh(in.motor_current_last_update_ms, in.now_ms, in.motor_max_stale_ms)\n          ? in.motor_current\n          : NAN;|  out.current_used = in.motor_current;"

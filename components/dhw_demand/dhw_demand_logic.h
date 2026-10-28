@@ -885,6 +885,10 @@ inline DhwInUseSupport dhw_in_use_tap_support(const PumpOnInputs &in,
       !std::isnan(in.flow_speed_at_update) &&
       std::fabs(in.motor_speed - in.flow_speed_at_update) <=
           t.dhw_in_use_speed_tolerance_rpm &&
+      // A meter reading from the previous run can match a restart at the same
+      // speed, so it is also held to the subtraction's own start test.
+      !reading_predates_pump_start(in.flow_last_update_ms, in.pump_on_since_ms,
+                                   in.now_ms) &&
       (in.flow - in.pump_flow) > (t.demand_flow + t.dhw_in_use_loop_bias_gpm))
     return DhwInUseSupport::METER_ABOVE_LOOP;
 

@@ -1088,6 +1088,62 @@ void test_a_pump_off_verdict_supports_the_flag_across_a_start() {
 // faster loop while speed and loop flow already describe the slower one. The
 // difference then looks like a draw with no tap open. The component records
 // the speed beside each meter reading, as it does beside each loop reading.
+// Found in Copilot's third review of PR #331. The speed recorded beside a
+// loop or meter reading was the cached speed even when the cache was past its
+// bound, so a reading that arrived during a motor-telemetry gap was labelled
+// with a speed nobody knew was current. Once telemetry recovered at that same
+// speed, the label matched and vouched for it. Each channel is checked on its
+// own: the reading that arrives in the gap is recorded with no speed at all.
+static void run_recovery(Rig &r, bool meter_in_gap) {
+  r.det.set_demand_release_seconds(0);
+  r.det.set_dhw_in_use_min_seconds(0);
+  r.det.setup();
+  pump_on_tick(r, T0, 0.0f, 0.0f, 0.0f, 1.0f);
+  for (int i = 1; i <= 3; i++)
+    pump_on_tick(r, T0 + i * TICK_MS, 1800.0f, 0.31f, 0.31f, 1.0f);
+
+  // The motor channel goes silent. 40 s on its last speed is past the 30 s
+  // bound, and one channel reports into that gap.
+  uint32_t gap = T0 + 3 * TICK_MS + 40000;
+  r.at(gap);
+  if (meter_in_gap)
+    r.flow.publish_state(1.36f);
+  else
+    r.pump_flow.publish_state(0.31f);
+  r.dhw_in_use.publish_state(1.0f);
+  r.tick(gap);
+
+  // Telemetry recovers at the same speed; the other channel reports now.
+  uint32_t back = gap + TICK_MS;
+  r.at(back);
+  r.motor_speed.publish_state(1800.0f);
+  if (meter_in_gap)
+    r.pump_flow.publish_state(0.31f);
+  else
+    r.flow.publish_state(1.36f);
+  r.dhw_in_use.publish_state(1.0f);
+  r.tick(back);
+}
+
+void test_a_reading_taken_in_a_motor_gap_carries_no_speed() {
+  std::cout << "\n=== A reading taken while the motor speed was stale carries "
+               "no speed ==="
+            << std::endl;
+  {
+    Rig r;
+    run_recovery(r, true);
+    TEST_ASSERT(r.method_state() == "pump_on_uncertain",
+                "A meter reading from the gap is not vouched for by the speed "
+                "that came back after it");
+  }
+  {
+    Rig r;
+    run_recovery(r, false);
+    TEST_ASSERT(r.method_state() == "pump_on_uncertain",
+                "...nor is a loop reading from the gap");
+  }
+}
+
 void test_a_meter_lagging_a_speed_drop_cannot_support_the_flag() {
   std::cout << "\n=== A meter reading from before a speed drop cannot support "
                "the flag ==="
@@ -1134,17 +1190,24 @@ void test_a_stale_speed_cannot_validate_the_meter_above_the_loop() {
 
   pump_on_tick(r, T0, 0.0f, 0.0f, 0.0f, 0.0f);
   pump_on_tick(r, T0 + TICK_MS, 1800.0f, 0.31f, 0.31f, 0.0f);
-  // 10 s in: the loop reading this test turns on, captured at 1800 rpm.
   pump_on_tick(r, T0 + 2 * TICK_MS, 1800.0f, 0.31f, 0.31f, 1.0f);
+  // 20 s in, all three channels report together at 1800 rpm: a meter 1.05
+  // GPM over the loop, which supports the flag while the speed is current.
+  uint32_t gap_start = T0 + 3 * TICK_MS;
+  pump_on_tick(r, gap_start, 1800.0f, 0.31f, 1.36f, 1.0f);
+  TEST_ASSERT(r.method_state() == "deterministic_dhw_in_use",
+              "With every reading current, the meter above the loop supports "
+              "the flag");
 
-  // The motor and loop channels go silent together; the meter and the flag
-  // keep reporting. 40 s on, the speed is past its 30 s bound but the loop
-  // reading is inside the 60 s one that support (b) allows.
-  uint32_t gap_start = T0 + 2 * TICK_MS;
+  // The motor and loop channels go silent together. The meter reports only
+  // on change, so a steady reading does not re-report either; only the flag
+  // does. 40 s on, the speed is past its 30 s bound while the loop and meter
+  // readings are both inside the 60 s one -- and both were labelled with a
+  // speed that was current when they were taken. Only the current speed's
+  // own age can say the comparison is no longer possible.
   for (int i = 1; i <= 4; i++) {
     uint32_t now = gap_start + i * TICK_MS;
     r.at(now);
-    r.flow.publish_state(1.36f);
     r.dhw_in_use.publish_state(1.0f);
     r.tick(now);
   }
@@ -1253,6 +1316,7 @@ int main() {
   test_a_measured_no_draw_ends_the_carry();
   test_continuation_and_the_tier_itself_do_not_stamp();
   test_a_pump_off_verdict_supports_the_flag_across_a_start();
+  test_a_reading_taken_in_a_motor_gap_carries_no_speed();
   test_a_meter_lagging_a_speed_drop_cannot_support_the_flag();
   test_a_stale_speed_cannot_validate_the_meter_above_the_loop();
   test_an_expired_support_stamp_cannot_return_after_a_wrap();

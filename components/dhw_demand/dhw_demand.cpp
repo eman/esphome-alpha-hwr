@@ -41,7 +41,7 @@ void DhwDemandComponent::setup() {
         // The speed this meter reading was taken at, for the same support as
         // the loop's below: a reading from before a speed change describes a
         // loop that is no longer running (found in review on PR #331).
-        flow_speed_at_update_ = read_sensor_(motor_speed_);
+        flow_speed_at_update_ = fresh_motor_speed_();
       }
     });
   }
@@ -54,7 +54,7 @@ void DhwDemandComponent::setup() {
         // in the same telemetry poll, so if speed lands after flow this is
         // one poll old — a mismatch the tolerance either absorbs or rejects,
         // and rejecting is the conservative direction.
-        pump_flow_speed_at_update_ = read_sensor_(motor_speed_);
+        pump_flow_speed_at_update_ = fresh_motor_speed_();
       }
     });
   }
@@ -122,6 +122,19 @@ float DhwDemandComponent::read_sensor_(sensor::Sensor *s) {
     return NAN;
   float v = s->state;
   return std::isnan(v) ? NAN : v;
+}
+
+// The motor speed to record beside a loop or meter reading, or NaN when the
+// speed is past the same bound decide_pump_state() masks it at. A reading
+// taken during a motor-telemetry gap must not be labelled with the cached
+// speed: after telemetry recovers, that label can match the real speed and
+// vouch for a reading that described a different loop (found in review on
+// PR #331).
+float DhwDemandComponent::fresh_motor_speed_() {
+  if (!reading_is_fresh(motor_speed_last_update_ms_, millis(),
+                        (uint32_t) pump_on_demand_max_stale_seconds_ * 1000))
+    return NAN;
+  return read_sensor_(motor_speed_);
 }
 
 float DhwDemandComponent::compute_deriv_(float current, float &prev,
