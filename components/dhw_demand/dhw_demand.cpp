@@ -473,6 +473,19 @@ void DhwDemandComponent::update() {
     }
   }
 
+  // Retire the #330 support stamps once they are past the carry window. The
+  // rule compares them as millis() ages, which wrap: a stamp left in place
+  // would come back inside the window ~49.7 days later and carry a flag run
+  // with nothing behind it (found in review, PR #331). A no-draw stamp older
+  // than the window is older than any draw the window can still carry, so it
+  // can no longer decide anything either.
+  const uint32_t carry_ms = (uint32_t) dhw_in_use_carry_max_seconds_ * 1000;
+  if (last_metered_demand_ms_ != 0 && now - last_metered_demand_ms_ > carry_ms)
+    last_metered_demand_ms_ = 0;
+  if (last_measured_no_draw_ms_ != 0 &&
+      now - last_measured_no_draw_ms_ > carry_ms)
+    last_measured_no_draw_ms_ = 0;
+
   // ── 5. Run detection branch ───────────────────────────────────────────────
   bool demand = false;
   float confidence = 0.0f;
@@ -511,7 +524,11 @@ void DhwDemandComponent::update() {
     in.pre_pump_on_flow = pre_pump_on_flow_;
     in.flow = flow;
     in.pump_flow = pump_flow;
-    in.motor_speed = motor_speed;
+    // The staleness-masked speed, not the raw cache: a speed past its bound is
+    // unknown, and the meter-above-loop support would otherwise compare a
+    // stale current speed with the identical stale speed captured beside the
+    // loop reading and pass trivially (found in review, PR #331).
+    in.motor_speed = pump_state.speed_used;
     in.now_ms = now;
     in.flow_last_update_ms = flow_last_update_ms_;
     in.pump_flow_last_update_ms = pump_flow_last_update_ms_;

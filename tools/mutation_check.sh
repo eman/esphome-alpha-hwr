@@ -1019,6 +1019,13 @@ MUTATIONS=(
 "dhw-in-use-no-draw-never-stamped|components/dhw_demand/dhw_demand.cpp|      else\n        last_measured_no_draw_ms_ = now;|"
 "dhw-in-use-pump-off-verdict-never-stamped|components/dhw_demand/dhw_demand.cpp|      last_metered_demand_ms_ = now;\n      // Demand level: scale by flow if available, else moderate default.|      // Demand level: scale by flow if available, else moderate default."
 "dhw-in-use-loop-speed-never-captured|components/dhw_demand/dhw_demand.cpp|        pump_flow_speed_at_update_ = read_sensor_(motor_speed_);|        pump_flow_speed_at_update_ = 0.0f;"
+# Found in review on PR #331. The pump-on decision must see the staleness-
+# masked speed: with the raw cache, a stale current speed equals the stale
+# speed captured beside the loop reading and the tolerance check passes
+# trivially. And the support stamps must be retired past the carry window, or
+# a millis() wrap brings an expired draw back inside it.
+"dhw-in-use-reads-the-raw-stale-speed|components/dhw_demand/dhw_demand.cpp|    in.motor_speed = pump_state.speed_used;|    in.motor_speed = motor_speed;"
+"dhw-in-use-keeps-an-expired-draw-stamp|components/dhw_demand/dhw_demand.cpp|  if (last_metered_demand_ms_ != 0 && now - last_metered_demand_ms_ > carry_ms)\n    last_metered_demand_ms_ = 0;|"
 "frozen-motor-asserts-pump-off|components/dhw_demand/dhw_demand_logic.h|  } else if (out.motor_frozen) {\n    out.pump_on = true;|  } else if (out.motor_frozen) {\n    out.pump_on = false;"
 "motor-staleness-mask-removed|components/dhw_demand/dhw_demand_logic.h|  out.speed_used = reading_is_fresh(in.motor_speed_last_update_ms, in.now_ms, in.motor_max_stale_ms)\n                       ? in.motor_speed\n                       : NAN;|  out.speed_used = in.motor_speed;"
 "motor-current-staleness-mask-removed|components/dhw_demand/dhw_demand_logic.h|  out.current_used =\n      reading_is_fresh(in.motor_current_last_update_ms, in.now_ms, in.motor_max_stale_ms)\n          ? in.motor_current\n          : NAN;|  out.current_used = in.motor_current;"

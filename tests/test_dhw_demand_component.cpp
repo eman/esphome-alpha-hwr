@@ -1076,6 +1076,82 @@ void test_a_pump_off_verdict_supports_the_flag_across_a_start() {
   TEST_ASSERT(r.demand.state == true, "...and demand is published");
 }
 
+// Found in review on PR #331. During a telemetry gap the motor speed and the
+// loop reading go stale together, because they arrive on the same poll. The
+// meter-above-loop support compares the speed the loop reading was taken at
+// against the *current* speed -- and a stale current speed is the same number
+// as the stale captured one, so the check passed trivially while the pump's
+// real speed was unknown. decide_pump_state() already masks a stale speed to
+// NaN; the pump-on decision has to be fed that, not the raw cached value.
+void test_a_stale_speed_cannot_validate_the_meter_above_the_loop() {
+  std::cout << "\n=== A stale motor speed cannot vouch for a loop reading ==="
+            << std::endl;
+  Rig r;
+  r.det.set_demand_release_seconds(0);
+  r.det.set_dhw_in_use_min_seconds(0);
+  r.det.setup();
+
+  pump_on_tick(r, T0, 0.0f, 0.0f, 0.0f, 0.0f);
+  pump_on_tick(r, T0 + TICK_MS, 1800.0f, 0.31f, 0.31f, 0.0f);
+  // 10 s in: the loop reading this test turns on, captured at 1800 rpm.
+  pump_on_tick(r, T0 + 2 * TICK_MS, 1800.0f, 0.31f, 0.31f, 1.0f);
+
+  // The motor and loop channels go silent together; the meter and the flag
+  // keep reporting. 40 s on, the speed is past its 30 s bound but the loop
+  // reading is inside the 60 s one that support (b) allows.
+  uint32_t gap_start = T0 + 2 * TICK_MS;
+  for (int i = 1; i <= 4; i++) {
+    uint32_t now = gap_start + i * TICK_MS;
+    r.at(now);
+    r.flow.publish_state(1.36f);
+    r.dhw_in_use.publish_state(1.0f);
+    r.tick(now);
+  }
+  TEST_ASSERT(r.method_state() == "pump_on_uncertain",
+              "With the speed 40 s stale, a matching captured speed proves "
+              "nothing and the meter above the loop does not support the flag");
+  TEST_ASSERT(r.demand.state == false, "...so no demand is published");
+}
+
+// Also found in review on PR #331. The support stamps are millis() values and
+// the rule compares them as ages, which wrap. A stamp left in place for ~49.7
+// days becomes "recent" again, so an expired draw would come back to support a
+// flag run. The component retires a stamp once it is older than the carry
+// window, the same reason it retires an expired continuation capture.
+void test_an_expired_support_stamp_cannot_return_after_a_wrap() {
+  std::cout << "\n=== An expired support stamp is retired before millis() "
+               "wraps back to it ==="
+            << std::endl;
+  Rig r;
+  r.det.set_demand_release_seconds(0);
+  r.det.set_dhw_in_use_min_seconds(0);
+  r.det.setup();
+
+  pump_on_tick(r, T0, 0.0f, 0.0f, 0.0f, 1.0f);
+  pump_on_tick(r, T0 + TICK_MS, 2400.0f, 1.31f, 1.31f, 1.0f);
+  uint32_t metered = T0 + 2 * TICK_MS;
+  pump_on_tick(r, metered, 2400.0f, 1.31f, 3.11f, 1.0f);
+  TEST_ASSERT(r.method_state() == "deterministic_pump_on_subtraction",
+              "A draw is metered, stamping the support time");
+
+  // The carry window passes with the flag up and the loop silent.
+  for (uint32_t now = metered + 40000; now <= metered + 130000; now += TICK_MS)
+    pump_on_tick(r, now, 2400.0f, NAN, 3.11f, 1.0f);
+  TEST_ASSERT(r.method_state() == "pump_on_uncertain",
+              "Past the 120 s carry window the flag alone publishes nothing");
+
+  // One full millis() period later the clock reads 100 s after the stamp.
+  // mock_millis is a uint32_t, so setting it back to metered + 100 s *is* that
+  // instant: 2^32 ms on, the subtraction the stamp is compared with wraps to
+  // the same 100 s. A retained stamp would be inside the 120 s window again.
+  // 100 s rather than less so the last loop reading is past the meter's 60 s
+  // bound: the meter-above-loop support must not be what answers here.
+  pump_on_tick(r, metered + 100000, 2400.0f, NAN, 3.11f, 1.0f);
+  TEST_ASSERT(r.method_state() == "pump_on_uncertain",
+              "After a wrap the expired draw does not come back to carry "
+              "the flag");
+}
+
 void test_dhw_in_use_support_thresholds_are_configurable() {
   std::cout << "\n=== The support rule's thresholds reach the decision ==="
             << std::endl;
@@ -1136,6 +1212,8 @@ int main() {
   test_a_measured_no_draw_ends_the_carry();
   test_continuation_and_the_tier_itself_do_not_stamp();
   test_a_pump_off_verdict_supports_the_flag_across_a_start();
+  test_a_stale_speed_cannot_validate_the_meter_above_the_loop();
+  test_an_expired_support_stamp_cannot_return_after_a_wrap();
   test_dhw_in_use_support_thresholds_are_configurable();
   test_unwired_component_is_inert();
 
