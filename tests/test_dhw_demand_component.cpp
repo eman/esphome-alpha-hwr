@@ -1083,6 +1083,47 @@ void test_a_pump_off_verdict_supports_the_flag_across_a_start() {
 // as the stale captured one, so the check passed trivially while the pump's
 // real speed was unknown. decide_pump_state() already masks a stale speed to
 // NaN; the pump-on decision has to be fed that, not the raw cached value.
+// Found in Copilot's re-review of PR #331. The meter reports on change and
+// lags the pump's own channels, so after a speed drop it can go on reading the
+// faster loop while speed and loop flow already describe the slower one. The
+// difference then looks like a draw with no tap open. The component records
+// the speed beside each meter reading, as it does beside each loop reading.
+void test_a_meter_lagging_a_speed_drop_cannot_support_the_flag() {
+  std::cout << "\n=== A meter reading from before a speed drop cannot support "
+               "the flag ==="
+            << std::endl;
+  Rig r;
+  r.det.set_demand_release_seconds(0);
+  r.det.set_dhw_in_use_min_seconds(0);
+  r.det.setup();
+
+  pump_on_tick(r, T0, 0.0f, 0.0f, 0.0f, 1.0f);
+  // Recirculating at 2400 rpm with no tap: the meter reads the loop.
+  for (int i = 1; i <= 3; i++)
+    pump_on_tick(r, T0 + i * TICK_MS, 2400.0f, 1.31f, 1.31f, 1.0f);
+
+  // The pump steps down to 1800 rpm, under the subtraction's floor. Its own
+  // channels report the slower loop at once; the meter has not reported yet,
+  // so its last reading, 20 s old and inside its 60 s bound, is the 2400 one.
+  uint32_t drop = T0 + 4 * TICK_MS;
+  for (int i = 0; i < 2; i++) {
+    uint32_t now = drop + i * TICK_MS;
+    r.at(now);
+    r.motor_speed.publish_state(1800.0f);
+    r.pump_flow.publish_state(0.31f);
+    r.dhw_in_use.publish_state(1.0f);
+    r.tick(now);
+    TEST_ASSERT(r.method_state() == "pump_on_uncertain",
+                "1.31 GPM read at 2400 rpm minus 0.31 read at 1800 is not a "
+                "draw, and the flag is not supported by it");
+  }
+
+  // A tap opens and the meter reports it at the new speed: 1.05 over the loop.
+  pump_on_tick(r, drop + 2 * TICK_MS, 1800.0f, 0.31f, 1.36f, 1.0f);
+  TEST_ASSERT(r.method_state() == "deterministic_dhw_in_use",
+              "A meter reading taken at the current speed still supports it");
+}
+
 void test_a_stale_speed_cannot_validate_the_meter_above_the_loop() {
   std::cout << "\n=== A stale motor speed cannot vouch for a loop reading ==="
             << std::endl;
@@ -1212,6 +1253,7 @@ int main() {
   test_a_measured_no_draw_ends_the_carry();
   test_continuation_and_the_tier_itself_do_not_stamp();
   test_a_pump_off_verdict_supports_the_flag_across_a_start();
+  test_a_meter_lagging_a_speed_drop_cannot_support_the_flag();
   test_a_stale_speed_cannot_validate_the_meter_above_the_loop();
   test_an_expired_support_stamp_cannot_return_after_a_wrap();
   test_dhw_in_use_support_thresholds_are_configurable();

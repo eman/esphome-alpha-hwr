@@ -758,6 +758,7 @@ void test_pump_on_tier_ordering() {
       flag_below_speed_floor.now_ms - 200000;
   flag_below_speed_floor.motor_speed = 1800.0f;
   flag_below_speed_floor.pump_flow_speed_at_update = 1800.0f;
+  flag_below_speed_floor.flow_speed_at_update = 1800.0f;
   flag_below_speed_floor.pump_flow = 0.31f;
   flag_below_speed_floor.flow = 1.36f;
   r = decide_pump_on(flag_below_speed_floor, t);
@@ -806,6 +807,7 @@ static PumpOnInputs tier3_habitat() {
   PumpOnInputs in = live_tick();
   in.pump_flow_last_update_ms = in.now_ms - 40000;  // past the 30 s bound
   in.pump_flow_speed_at_update = in.motor_speed;
+  in.flow_speed_at_update = in.motor_speed;
   in.dhw_in_use_sustained = true;
   in.dhw_in_use_high_since_ms = in.now_ms - 200000;
   return in;
@@ -950,6 +952,7 @@ void test_dhw_in_use_needs_independent_support() {
   bench.pump_flow_last_update_ms = bench.now_ms;  // fresh, but under the floor
   bench.motor_speed = 1800.0f;
   bench.pump_flow_speed_at_update = 1800.0f;
+  bench.flow_speed_at_update = 1800.0f;
   bench.pump_flow = 0.31f;
   bench.flow = 1.05f;  // 0.74 over the loop
   r = decide_pump_on(bench, t);
@@ -983,6 +986,7 @@ void test_dhw_in_use_needs_independent_support() {
   stepped_up.motor_speed = 2600.0f;
   stepped_up.pump_flow = 0.30f;
   stepped_up.flow = 1.90f;
+  stepped_up.flow_speed_at_update = 2600.0f;
   stepped_up.pump_flow_speed_at_update = 1650.0f;
   TEST_ASSERT(std::string(method_of(stepped_up)) == "pump_on_uncertain",
               "A loop reading from 1650 rpm says nothing about 2600 rpm");
@@ -992,6 +996,23 @@ void test_dhw_in_use_needs_independent_support() {
   stepped_up.pump_flow_speed_at_update = NAN;
   TEST_ASSERT(std::string(method_of(stepped_up)) == "pump_on_uncertain",
               "A loop reading whose speed is unknown cannot be compared");
+
+  // ── 11b. ...and so must the meter's (found in review on PR #331) ────────
+  // The meter reports on change and can be up to 60 s old. After a drop from
+  // 2400 to 1800 rpm it can still read the faster loop, 1.31 GPM, while the
+  // pump already reports its own 0.31: a 1.00 GPM "draw" with no tap open.
+  PumpOnInputs dropped = bench;
+  dropped.flow = 1.31f;
+  dropped.flow_last_update_ms = dropped.now_ms - 40000;
+  dropped.flow_speed_at_update = 2400.0f;
+  TEST_ASSERT(std::string(method_of(dropped)) == "pump_on_uncertain",
+              "A meter reading from 2400 rpm says nothing about 1800 rpm");
+  dropped.flow_speed_at_update = 1820.0f;
+  TEST_ASSERT(std::string(method_of(dropped)) == "deterministic_dhw_in_use",
+              "The same reading taken within the tolerance supports (b)");
+  dropped.flow_speed_at_update = NAN;
+  TEST_ASSERT(std::string(method_of(dropped)) == "pump_on_uncertain",
+              "A meter reading whose speed is unknown cannot be compared");
 
   // ── 12. Not from before the motor started, nor its first 10 s ───────────
   PumpOnInputs run = bench;

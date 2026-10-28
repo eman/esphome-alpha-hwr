@@ -217,6 +217,9 @@ class DhwDemandComponent : public PollingComponent {
   // reading only describes the loop the meter is seeing if the pump has not
   // changed speed since; see dhw_in_use_tap_support. NaN until known.
   float pump_flow_speed_at_update_{NAN};
+  // The same for the household meter, which reports on change and lags the
+  // pump's own channels; see dhw_in_use_tap_support. NaN until known.
+  float flow_speed_at_update_{NAN};
   // When something that *measures* last declared demand (a pump-off flow,
   // thermal or charge verdict, or a subtraction above threshold), and when the
   // subtraction last measured a no-draw. Continuation ticks and the dhw_in_use

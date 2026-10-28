@@ -1026,6 +1026,11 @@ MUTATIONS=(
 # a millis() wrap brings an expired draw back inside it.
 "dhw-in-use-reads-the-raw-stale-speed|components/dhw_demand/dhw_demand.cpp|    in.motor_speed = pump_state.speed_used;|    in.motor_speed = motor_speed;"
 "dhw-in-use-keeps-an-expired-draw-stamp|components/dhw_demand/dhw_demand.cpp|  if (last_metered_demand_ms_ != 0 && now - last_metered_demand_ms_ > carry_ms)\n    last_metered_demand_ms_ = 0;|"
+# Found in Copilot's re-review of PR #331: the meter lags the pump's own
+# channels, so after a speed drop it can still read the faster loop. Support
+# (b) checks the meter reading's speed as well as the loop reading's.
+"dhw-in-use-meter-reading-speed-unchecked|components/dhw_demand/dhw_demand_logic.h|      std::fabs(in.motor_speed - in.flow_speed_at_update) <=\n          t.dhw_in_use_speed_tolerance_rpm &&|      true &&"
+"dhw-in-use-meter-speed-never-captured|components/dhw_demand/dhw_demand.cpp|        flow_speed_at_update_ = read_sensor_(motor_speed_);|        flow_speed_at_update_ = 1800.0f;"
 "frozen-motor-asserts-pump-off|components/dhw_demand/dhw_demand_logic.h|  } else if (out.motor_frozen) {\n    out.pump_on = true;|  } else if (out.motor_frozen) {\n    out.pump_on = false;"
 "motor-staleness-mask-removed|components/dhw_demand/dhw_demand_logic.h|  out.speed_used = reading_is_fresh(in.motor_speed_last_update_ms, in.now_ms, in.motor_max_stale_ms)\n                       ? in.motor_speed\n                       : NAN;|  out.speed_used = in.motor_speed;"
 "motor-current-staleness-mask-removed|components/dhw_demand/dhw_demand_logic.h|  out.current_used =\n      reading_is_fresh(in.motor_current_last_update_ms, in.now_ms, in.motor_max_stale_ms)\n          ? in.motor_current\n          : NAN;|  out.current_used = in.motor_current;"

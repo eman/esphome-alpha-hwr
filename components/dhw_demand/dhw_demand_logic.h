@@ -746,6 +746,12 @@ struct PumpOnInputs {
   // captured by the component in that channel's state callback. NaN when the
   // speed was unknown then, which makes the meter-above-loop support decline.
   float pump_flow_speed_at_update{NAN};
+
+  // The same for the household meter's reading (found in review on PR #331).
+  // The meter reports on change and may be up to flow_max_stale_ms old, so
+  // after a speed drop it can still describe the faster loop while the speed
+  // and loop readings already describe the slower one. NaN makes (b) decline.
+  float flow_speed_at_update{NAN};
 };
 
 // Why the dhw_in_use tier fired or declined, past its two older gates (flag
@@ -875,6 +881,9 @@ inline DhwInUseSupport dhw_in_use_tap_support(const PumpOnInputs &in,
                                  in.pump_on_since_ms, in.now_ms,
                                  t.pump_on_settle_ms) &&
       std::fabs(in.motor_speed - in.pump_flow_speed_at_update) <=
+          t.dhw_in_use_speed_tolerance_rpm &&
+      !std::isnan(in.flow_speed_at_update) &&
+      std::fabs(in.motor_speed - in.flow_speed_at_update) <=
           t.dhw_in_use_speed_tolerance_rpm &&
       (in.flow - in.pump_flow) > (t.demand_flow + t.dhw_in_use_loop_bias_gpm))
     return DhwInUseSupport::METER_ABOVE_LOOP;

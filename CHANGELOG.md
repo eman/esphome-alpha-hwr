@@ -199,7 +199,7 @@ release tag carries the new one; the release script moves them.
     0.45, the largest no-draw bias measured below the speed floor), with the
     floor lifted. The loop reading may be up to `flow_max_stale_seconds` old,
     must have been taken within `dhw_in_use_speed_tolerance_rpm` (new, default
-    100) of the current speed, and not before the motor started or inside its
+    100) of the current speed, as must the meter reading, and not before the motor started or inside its
     first `pump_on_demand_settle_seconds`.
 
   Replayed over the 20 events: the 15 loop and silent-meter events publish

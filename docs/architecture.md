@@ -160,7 +160,7 @@ two are normally paired, with pump telemetry feeding the detector.
   `dhw_in_use_loop_bias_gpm` over the threshold with the speed floor lifted —
   and a fresh meter reading at or under the threshold vetoes either. The
   component keeps the memory this reads (the last metered-demand and
-  measured-no-draw stamps, and the speed captured beside each loop reading);
+  measured-no-draw stamps, and the speed captured beside each loop and meter reading);
   the rule itself is pure and pinned case by case in the host test. See
   [issue #330](https://github.com/eman/esphome-alpha-hwr/issues/330).
 - **Release-hold on the output**: demand is recomputed from scratch each tick, so an

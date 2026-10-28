@@ -207,9 +207,10 @@ CONFIG_SCHEMA = cv.Schema(
         # 1650 rpm), which is the floor this support deliberately lifts.
         cv.Optional(CONF_DHW_IN_USE_LOOP_BIAS_GPM, default=0.45): cv.positive_float,
         # For that second support, how far the pump's speed may have moved
-        # since its loop reading was taken. A reading from a lower speed
-        # invents a draw after a step-up (0.3 GPM read at 1650 rpm against
-        # 1.6 GPM of loop at 2600).
+        # since its loop reading was taken, and since the meter's was. A loop
+        # reading from a lower speed invents a draw after a step-up (0.3 GPM
+        # read at 1650 rpm against 1.6 GPM of loop at 2600); a meter that has
+        # not yet reported a step-down invents one the other way.
         cv.Optional(CONF_DHW_IN_USE_SPEED_TOLERANCE_RPM, default=100.0): cv.positive_float,
         cv.Optional(CONF_FLOW_LATCH_SECONDS, default=30): cv.positive_int,
         # Disarms the latch above for this long after a pump-off edge, so

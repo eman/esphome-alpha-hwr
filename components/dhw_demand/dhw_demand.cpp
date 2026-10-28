@@ -36,8 +36,13 @@ void DhwDemandComponent::setup() {
   // on `pump_on_uncertain`.
   if (flow_sensor_ != nullptr) {
     flow_sensor_->add_on_state_callback([this](float v) {
-      if (!std::isnan(v))
+      if (!std::isnan(v)) {
         flow_last_update_ms_ = millis();
+        // The speed this meter reading was taken at, for the same support as
+        // the loop's below: a reading from before a speed change describes a
+        // loop that is no longer running (found in review on PR #331).
+        flow_speed_at_update_ = read_sensor_(motor_speed_);
+      }
     });
   }
   if (pump_flow_ != nullptr) {
@@ -540,6 +545,7 @@ void DhwDemandComponent::update() {
     in.last_metered_demand_ms = last_metered_demand_ms_;
     in.last_measured_no_draw_ms = last_measured_no_draw_ms_;
     in.pump_flow_speed_at_update = pump_flow_speed_at_update_;
+    in.flow_speed_at_update = flow_speed_at_update_;
 
     PumpOnResult result = decide_pump_on(in, pump_on_thresholds_());
     demand = result.demand;

@@ -160,9 +160,9 @@ dhw_demand:
   # pump_on_demand_flow_threshold plus this margin, with the speed floor
   # lifted. 0.45 GPM is the largest no-draw bias measured below the floor.
   dhw_in_use_loop_bias_gpm: 0.45
-  # For that second support, the loop reading must have been taken within
-  # this many RPM of the current speed, or it describes a loop the meter is
-  # no longer seeing.
+  # For that second support, the loop and meter readings must both have been
+  # taken within this many RPM of the current speed, or they describe a loop
+  # that is no longer running.
   dhw_in_use_speed_tolerance_rpm: 100
   flow_latch_seconds: 30
   # Disarms the latch above for this long after the pump stops. Loop flow
