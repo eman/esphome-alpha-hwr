@@ -1247,7 +1247,10 @@ void test_a_subtraction_at_one_speed_still_stamps_a_carry() {
   pump_on_tick(r, T0 + 2 * TICK_MS, 2400.0f, 1.31f, 3.11f, 1.0f);
   TEST_ASSERT(r.method_state() == "deterministic_pump_on_subtraction",
               "A tap is measured with every reading at 2400 rpm");
-  pump_on_tick(r, T0 + 3 * TICK_MS, 1800.0f, 0.31f, 2.11f, 1.0f);
+  // 0.70 GPM clears the veto but sits 0.39 over the loop, inside support (b)'s
+  // 0.75 margin, so only the carried draw can make the flag fire here (found
+  // in review on PR #333: at 2.11 GPM support (b) passed this on its own).
+  pump_on_tick(r, T0 + 3 * TICK_MS, 1800.0f, 0.31f, 0.70f, 1.0f);
   TEST_ASSERT(r.method_state() == "deterministic_dhw_in_use",
               "Under the floor the measured draw carries the flag");
 }
