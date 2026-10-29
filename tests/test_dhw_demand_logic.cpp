@@ -18,6 +18,9 @@ using esphome::dhw_demand::DhwInUseSupport;
 using esphome::dhw_demand::reading_taken_after_settle;
 using esphome::dhw_demand::DemandHold;
 using esphome::dhw_demand::kDefaultPumpOnThresholds;
+using esphome::dhw_demand::meter_reading_at_current_speed;
+using esphome::dhw_demand::subtraction_stamp;
+using esphome::dhw_demand::SubtractionStamp;
 using esphome::dhw_demand::prev_tick_confirms_flow_onset;
 using esphome::dhw_demand::pump_off_flow_onset_is_confirmed;
 using esphome::dhw_demand::ContinuationInputs;
@@ -1883,6 +1886,59 @@ void test_speed_wins_over_current_when_both_are_fresh() {
               "...and the current channel is used only when speed is absent");
 }
 
+// What a subtraction leaves behind for the carry. A draw stamps only when the
+// meter reading behind it was taken at the current speed: across a step-down
+// the meter still reads the faster loop for a poll, and stamping that phantom
+// carried the dhw_in_use flag as demand for the whole carry window.
+void test_a_subtraction_stamps_only_a_draw_metered_at_the_current_speed() {
+  std::cout << "\n=== A subtraction stamps a draw only against a meter at the "
+               "current speed ==="
+            << std::endl;
+  const PumpOnThresholds t = kDefaultPumpOnThresholds;
+  PumpOnInputs in = live_tick();
+  in.flow_speed_at_update = in.motor_speed;
+
+  TEST_ASSERT(subtraction_stamp(in, t, NAN) == SubtractionStamp::NONE,
+              "No subtraction, no stamp");
+  TEST_ASSERT(subtraction_stamp(in, t, 0.0f) == SubtractionStamp::NO_DRAW,
+              "A difference of zero is a measured no-draw");
+  TEST_ASSERT(subtraction_stamp(in, t, t.demand_flow) ==
+                  SubtractionStamp::NO_DRAW,
+              "...and so is one exactly at the threshold, which does not fire");
+  TEST_ASSERT(subtraction_stamp(in, t, 0.69f) == SubtractionStamp::METERED_DRAW,
+              "A draw measured with the meter at the current speed stamps");
+
+  // The bench case: speed 2400 now, the meter last read at 3000.
+  PumpOnInputs skewed = in;
+  skewed.motor_speed = 2400.0f;
+  skewed.flow_speed_at_update = 3000.0f;
+  TEST_ASSERT(!meter_reading_at_current_speed(skewed, t),
+              "A meter reading from 3000 rpm is not at 2400");
+  TEST_ASSERT(subtraction_stamp(skewed, t, 0.69f) == SubtractionStamp::NONE,
+              "...so the draw it implies is not stamped");
+  TEST_ASSERT(subtraction_stamp(skewed, t, 0.0f) == SubtractionStamp::NO_DRAW,
+              "A no-draw is stamped regardless: a skewed one can only end a "
+              "carry early");
+
+  PumpOnInputs edge = in;
+  edge.flow_speed_at_update = in.motor_speed - t.dhw_in_use_speed_tolerance_rpm;
+  TEST_ASSERT(subtraction_stamp(edge, t, 0.69f) ==
+                  SubtractionStamp::METERED_DRAW,
+              "A meter reading exactly at the tolerance is at the current speed");
+  edge.flow_speed_at_update -= 1.0f;
+  TEST_ASSERT(subtraction_stamp(edge, t, 0.69f) == SubtractionStamp::NONE,
+              "...and one a step past it is not");
+
+  PumpOnInputs unknown = in;
+  unknown.flow_speed_at_update = NAN;
+  TEST_ASSERT(subtraction_stamp(unknown, t, 0.69f) == SubtractionStamp::NONE,
+              "A meter reading of unknown speed cannot vouch for a draw");
+  unknown = in;
+  unknown.motor_speed = NAN;
+  TEST_ASSERT(!meter_reading_at_current_speed(unknown, t),
+              "Nor can any reading when the current speed is unknown");
+}
+
 int main() {
   std::cout << "==========================================================="
             << std::endl;
@@ -1909,6 +1965,7 @@ int main() {
   test_dhw_in_use_sustain_never_arms_without_the_sensor();
   test_pump_on_tier_ordering();
   test_dhw_in_use_needs_independent_support();
+  test_a_subtraction_stamps_only_a_draw_metered_at_the_current_speed();
   test_loop_flow_from_before_the_pump_start_is_not_subtracted();
   test_meter_flow_from_before_the_pump_start_is_not_subtracted();
   test_flow_latch_is_disarmed_after_a_shutdown();

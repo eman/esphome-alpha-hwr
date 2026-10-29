@@ -1015,8 +1015,8 @@ MUTATIONS=(
 # The memory the rule reads lives in the component. A continuation tick or the
 # tier's own firing stamping it would let the tier carry itself; a subtraction
 # no-draw that does not stamp would let a closed tap be carried on the loop.
-"dhw-in-use-tier-stamps-its-own-firing|components/dhw_demand/dhw_demand.cpp|    if (!std::isnan(result.demand_gpm)) {\n      if (result.demand_gpm > pump_on_demand_flow_threshold_)\n        last_metered_demand_ms_ = now;|    if (result.demand) {\n      last_metered_demand_ms_ = now;\n    }\n    if (!std::isnan(result.demand_gpm)) {\n      if (result.demand_gpm > pump_on_demand_flow_threshold_)\n        last_metered_demand_ms_ = now;"
-"dhw-in-use-no-draw-never-stamped|components/dhw_demand/dhw_demand.cpp|      else\n        last_measured_no_draw_ms_ = now;|"
+"dhw-in-use-tier-stamps-its-own-firing|components/dhw_demand/dhw_demand.cpp|    switch (subtraction_stamp(in, pump_on_thresholds_(), result.demand_gpm)) {|    if (result.demand)\n      last_metered_demand_ms_ = now;\n    switch (subtraction_stamp(in, pump_on_thresholds_(), result.demand_gpm)) {"
+"dhw-in-use-no-draw-never-stamped|components/dhw_demand/dhw_demand.cpp|      case SubtractionStamp::NO_DRAW:\n        last_measured_no_draw_ms_ = now;\n        break;|      case SubtractionStamp::NO_DRAW:\n        break;"
 "dhw-in-use-pump-off-verdict-never-stamped|components/dhw_demand/dhw_demand.cpp|      last_metered_demand_ms_ = now;\n      // Demand level: scale by flow if available, else moderate default.|      // Demand level: scale by flow if available, else moderate default."
 "dhw-in-use-loop-speed-never-captured|components/dhw_demand/dhw_demand.cpp|        pump_flow_speed_at_update_ = fresh_motor_speed_();|        pump_flow_speed_at_update_ = 0.0f;"
 # Found in review on PR #331. The pump-on decision must see the staleness-
@@ -1029,7 +1029,7 @@ MUTATIONS=(
 # Found in Copilot's re-review of PR #331: the meter lags the pump's own
 # channels, so after a speed drop it can still read the faster loop. Support
 # (b) checks the meter reading's speed as well as the loop reading's.
-"dhw-in-use-meter-reading-speed-unchecked|components/dhw_demand/dhw_demand_logic.h|      std::fabs(in.motor_speed - in.flow_speed_at_update) <=\n          t.dhw_in_use_speed_tolerance_rpm &&|      true &&"
+"dhw-in-use-meter-reading-speed-unchecked|components/dhw_demand/dhw_demand_logic.h|  return !std::isnan(in.motor_speed) && !std::isnan(in.flow_speed_at_update) &&\n         std::fabs(in.motor_speed - in.flow_speed_at_update) <=\n             t.dhw_in_use_speed_tolerance_rpm;|  return true;"
 "dhw-in-use-meter-speed-never-captured|components/dhw_demand/dhw_demand.cpp|        flow_speed_at_update_ = fresh_motor_speed_();|        flow_speed_at_update_ = 1800.0f;"
 # Found in Copilot's third review of PR #331: a reading recorded during a
 # motor-telemetry gap must carry no speed, in either channel, and a meter
@@ -1037,6 +1037,14 @@ MUTATIONS=(
 "dhw-in-use-meter-labelled-with-a-stale-speed|components/dhw_demand/dhw_demand.cpp|        flow_speed_at_update_ = fresh_motor_speed_();|        flow_speed_at_update_ = read_sensor_(motor_speed_);"
 "dhw-in-use-loop-labelled-with-a-stale-speed|components/dhw_demand/dhw_demand.cpp|        pump_flow_speed_at_update_ = fresh_motor_speed_();|        pump_flow_speed_at_update_ = read_sensor_(motor_speed_);"
 "dhw-in-use-meter-from-the-previous-run|components/dhw_demand/dhw_demand_logic.h|      !reading_predates_pump_start(in.flow_last_update_ms, in.pump_on_since_ms,\n                                   in.now_ms) &&|"
+# A subtraction stamps a metered draw only when the meter reading behind it was
+# taken at the current speed. Across a step-down the meter still reads the
+# faster loop for a poll; stamping that phantom carried the dhw_in_use flag as
+# demand for the whole 120 s carry window under the speed floor.
+"dhw-in-use-stamp-ignores-meter-speed|components/dhw_demand/dhw_demand_logic.h|  return meter_reading_at_current_speed(in, t) ? SubtractionStamp::METERED_DRAW\n                                               : SubtractionStamp::NONE;|  return SubtractionStamp::METERED_DRAW;"
+"dhw-in-use-support-b-drops-meter-speed|components/dhw_demand/dhw_demand_logic.h|      meter_reading_at_current_speed(in, t) &&|"
+"dhw-in-use-no-draw-gated-on-meter-speed|components/dhw_demand/dhw_demand_logic.h|  if (demand_gpm <= t.demand_flow)\n    return SubtractionStamp::NO_DRAW;|  if (demand_gpm <= t.demand_flow)\n    return meter_reading_at_current_speed(in, t) ? SubtractionStamp::NO_DRAW : SubtractionStamp::NONE;"
+"dhw-in-use-metered-draw-never-stamped|components/dhw_demand/dhw_demand.cpp|      case SubtractionStamp::METERED_DRAW:\n        last_metered_demand_ms_ = now;\n        break;|      case SubtractionStamp::METERED_DRAW:\n        break;"
 "frozen-motor-asserts-pump-off|components/dhw_demand/dhw_demand_logic.h|  } else if (out.motor_frozen) {\n    out.pump_on = true;|  } else if (out.motor_frozen) {\n    out.pump_on = false;"
 "motor-staleness-mask-removed|components/dhw_demand/dhw_demand_logic.h|  out.speed_used = reading_is_fresh(in.motor_speed_last_update_ms, in.now_ms, in.motor_max_stale_ms)\n                       ? in.motor_speed\n                       : NAN;|  out.speed_used = in.motor_speed;"
 "motor-current-staleness-mask-removed|components/dhw_demand/dhw_demand_logic.h|  out.current_used =\n      reading_is_fresh(in.motor_current_last_update_ms, in.now_ms, in.motor_max_stale_ms)\n          ? in.motor_current\n          : NAN;|  out.current_used = in.motor_current;"

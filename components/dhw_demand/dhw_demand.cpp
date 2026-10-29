@@ -585,11 +585,22 @@ void DhwDemandComponent::update() {
     // dhw_in_use tier's own firing must never count, or it would carry
     // itself. Stamped after the decision so this tick's reading cannot
     // support this tick's verdict -- it is the memory the next tick consults.
-    if (!std::isnan(result.demand_gpm)) {
-      if (result.demand_gpm > pump_on_demand_flow_threshold_)
+    // A draw stamps only when the meter reading behind it was taken at the
+    // current speed; see subtraction_stamp() for the false demand that
+    // happens otherwise.
+    switch (subtraction_stamp(in, pump_on_thresholds_(), result.demand_gpm)) {
+      case SubtractionStamp::METERED_DRAW:
         last_metered_demand_ms_ = now;
-      else
+        break;
+      case SubtractionStamp::NO_DRAW:
         last_measured_no_draw_ms_ = now;
+        break;
+      case SubtractionStamp::NONE:
+        if (!std::isnan(result.demand_gpm))
+          ESP_LOGD(TAG, "Subtraction read %.2f GPM against a meter reading "
+                        "from another speed; not carried as a metered draw",
+                   result.demand_gpm);
+        break;
     }
 
     switch (result.dhw_in_use_support) {
