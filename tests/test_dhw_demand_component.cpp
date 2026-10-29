@@ -1186,6 +1186,72 @@ static void run_recovery(Rig &r, bool meter_in_gap) {
   r.tick(back);
 }
 
+// Found on the bench after PR #331. The subtraction differences the meter
+// against the loop, and the meter reports on change and lags the pump's own
+// channels. When the pump steps down, speed and loop flow drop together in one
+// poll while the meter still reads the faster loop, so for that tick the
+// difference is a draw that does not exist. That one-tick misfire predates
+// #330. What #330 added is the carry: the misfire stamped the support time,
+// and once the pump was under the speed floor nothing measured a no-draw to
+// end it, so the dhw_in_use flag published demand on it for the whole carry
+// window. A subtraction only stamps when the meter reading it used was taken
+// at the speed it is being differenced at.
+void test_a_skewed_subtraction_does_not_stamp_a_carry() {
+  std::cout << "\n=== A subtraction against a meter from another speed does "
+               "not stamp the carry ==="
+            << std::endl;
+  Rig r;
+  r.det.set_demand_release_seconds(0);
+  r.det.set_dhw_in_use_min_seconds(0);
+  r.det.setup();
+
+  pump_on_tick(r, T0, 0.0f, 0.0f, 0.0f, 1.0f);
+  for (int i = 1; i <= 3; i++)
+    pump_on_tick(r, T0 + i * TICK_MS, 3000.0f, 2.00f, 2.00f, 1.0f);
+
+  // The step-down poll: speed and loop report together, the meter has not
+  // reported since it read the 3000 rpm loop.
+  uint32_t step = T0 + 4 * TICK_MS;
+  r.at(step);
+  r.motor_speed.publish_state(2400.0f);
+  r.pump_flow.publish_state(1.31f);
+  r.dhw_in_use.publish_state(1.0f);
+  r.tick(step);
+
+  // Under the floor at 1800 rpm. The meter catches up and reads the loop it
+  // sees now, a little above the pump's own low-speed estimate. Nothing here
+  // is a draw, and no subtraction runs under the floor to say so.
+  for (int i = 1; i <= 4; i++) {
+    uint32_t now = step + i * TICK_MS;
+    pump_on_tick(r, now, 1800.0f, 0.31f, 0.70f, 1.0f);
+    TEST_ASSERT(r.method_state() == "pump_on_uncertain",
+                "The step-down tick's skewed difference does not carry the "
+                "flag through the run under the floor");
+  }
+  TEST_ASSERT(r.demand.state == false, "...so no demand is published");
+}
+
+// The other side of the same rule: a draw measured with the meter and the
+// pump at the same speed still stamps, so it is carried exactly as before.
+void test_a_subtraction_at_one_speed_still_stamps_a_carry() {
+  std::cout << "\n=== A subtraction against a meter at the same speed still "
+               "stamps the carry ==="
+            << std::endl;
+  Rig r;
+  r.det.set_demand_release_seconds(0);
+  r.det.set_dhw_in_use_min_seconds(0);
+  r.det.setup();
+
+  pump_on_tick(r, T0, 0.0f, 0.0f, 0.0f, 1.0f);
+  pump_on_tick(r, T0 + TICK_MS, 2400.0f, 1.31f, 1.31f, 1.0f);
+  pump_on_tick(r, T0 + 2 * TICK_MS, 2400.0f, 1.31f, 3.11f, 1.0f);
+  TEST_ASSERT(r.method_state() == "deterministic_pump_on_subtraction",
+              "A tap is measured with every reading at 2400 rpm");
+  pump_on_tick(r, T0 + 3 * TICK_MS, 1800.0f, 0.31f, 2.11f, 1.0f);
+  TEST_ASSERT(r.method_state() == "deterministic_dhw_in_use",
+              "Under the floor the measured draw carries the flag");
+}
+
 void test_a_reading_taken_in_a_motor_gap_carries_no_speed() {
   std::cout << "\n=== A reading taken while the motor speed was stale carries "
                "no speed ==="
@@ -1378,6 +1444,8 @@ int main() {
   test_a_measured_no_draw_ends_the_carry();
   test_continuation_and_the_tier_itself_do_not_stamp();
   test_a_pump_off_verdict_supports_the_flag_across_a_start();
+  test_a_skewed_subtraction_does_not_stamp_a_carry();
+  test_a_subtraction_at_one_speed_still_stamps_a_carry();
   test_a_reading_taken_in_a_motor_gap_carries_no_speed();
   test_a_meter_lagging_a_speed_drop_cannot_support_the_flag();
   test_a_stale_speed_cannot_validate_the_meter_above_the_loop();

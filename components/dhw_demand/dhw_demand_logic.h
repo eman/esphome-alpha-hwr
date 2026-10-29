@@ -754,6 +754,20 @@ struct PumpOnInputs {
   float flow_speed_at_update{NAN};
 };
 
+// Was the meter reading taken at the speed the pump is running at now?
+//
+// The meter reports on change and lags the pump's own channels, which report
+// speed and loop flow together in one poll. Across a speed change the meter
+// can therefore still describe the old loop, and differencing it against the
+// new one measures a draw that does not exist. motor_speed is the staleness-
+// masked speed, so an unknown current speed fails this too.
+inline bool meter_reading_at_current_speed(const PumpOnInputs &in,
+                                           const PumpOnThresholds &t) {
+  return !std::isnan(in.motor_speed) && !std::isnan(in.flow_speed_at_update) &&
+         std::fabs(in.motor_speed - in.flow_speed_at_update) <=
+             t.dhw_in_use_speed_tolerance_rpm;
+}
+
 // Why the dhw_in_use tier fired or declined, past its two older gates (flag
 // sustained, subtraction unavailable). Reported so the component can log which
 // support carried a firing without re-deriving it (issue #144).
@@ -882,9 +896,7 @@ inline DhwInUseSupport dhw_in_use_tap_support(const PumpOnInputs &in,
                                  t.pump_on_settle_ms) &&
       std::fabs(in.motor_speed - in.pump_flow_speed_at_update) <=
           t.dhw_in_use_speed_tolerance_rpm &&
-      !std::isnan(in.flow_speed_at_update) &&
-      std::fabs(in.motor_speed - in.flow_speed_at_update) <=
-          t.dhw_in_use_speed_tolerance_rpm &&
+      meter_reading_at_current_speed(in, t) &&
       // A meter reading from the previous run can match a restart at the same
       // speed, so it is also held to the subtraction's own start test.
       !reading_predates_pump_start(in.flow_last_update_ms, in.pump_on_since_ms,
@@ -893,6 +905,36 @@ inline DhwInUseSupport dhw_in_use_tap_support(const PumpOnInputs &in,
     return DhwInUseSupport::METER_ABOVE_LOOP;
 
   return DhwInUseSupport::UNSUPPORTED;
+}
+
+// What a tick's subtraction leaves behind for support (a): a metered draw, a
+// measured no-draw, or nothing.
+//
+// A draw counts only when the meter reading behind it was taken at the current
+// speed. When the pump steps down, its own speed and loop flow drop together in
+// one poll while the meter still reads the faster loop, so for that tick the
+// subtraction reads a draw that does not exist. That one-tick misfire predates
+// #330 and is tier 2's own business. Stamping it is not: under the speed floor
+// no later subtraction runs to measure a no-draw, so the stamp carried the
+// dhw_in_use flag as demand for the whole carry window, 120 s by default. It
+// was reproduced on the bench, a 3000 to 2400 rpm step and then a run at
+// 1800, and the host test test_a_skewed_subtraction_does_not_stamp_a_carry
+// replays it.
+//
+// A no-draw needs no such test. A skewed no-draw comes from a meter lagging a
+// step *up*, and all it can do is end a carry early, which costs recall and
+// never invents demand.
+enum class SubtractionStamp : uint8_t { NONE, METERED_DRAW, NO_DRAW };
+
+inline SubtractionStamp subtraction_stamp(const PumpOnInputs &in,
+                                          const PumpOnThresholds &t,
+                                          float demand_gpm) {
+  if (std::isnan(demand_gpm))
+    return SubtractionStamp::NONE;
+  if (demand_gpm <= t.demand_flow)
+    return SubtractionStamp::NO_DRAW;
+  return meter_reading_at_current_speed(in, t) ? SubtractionStamp::METERED_DRAW
+                                               : SubtractionStamp::NONE;
 }
 
 // The pump-on branch, in priority order. Extracted from

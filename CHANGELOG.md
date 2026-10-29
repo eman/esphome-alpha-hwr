@@ -166,6 +166,20 @@ release tag carries the new one; the release script moves them.
 
 ### Fixed
 
+- **`dhw_demand`: a speed step-down no longer carries the `dhw_in_use` flag
+  as demand for two minutes.** The meter reports on change and lags the pump,
+  whose speed and loop flow arrive together in one poll. When the pump stepped
+  down, the meter still read the faster loop for that poll, and the
+  subtraction measured a draw that did not exist. That one-tick misfire
+  predates #330. What #330 added is that it stamped the carried-draw support,
+  and under the speed floor no later subtraction runs to measure a no-draw, so
+  the flag published demand on it for the full `dhw_in_use_carry_max_seconds`.
+  A subtraction now stamps a draw only when the meter reading behind it was
+  taken within `dhw_in_use_speed_tolerance_rpm` of the current speed. A draw
+  measured at one speed is carried exactly as before. Found on the bench and
+  reproduced on the host: 3000 to 2400 rpm, then a run at 1800, published
+  demand for 120 s with no tap open.
+
 - **`dhw_demand`: the `dhw_in_use` tier no longer fires on the recirculation
   loop itself** ([#330](https://github.com/eman/esphome-alpha-hwr/issues/330)).
   The tier's two gates — the heater's flag continuously high past
