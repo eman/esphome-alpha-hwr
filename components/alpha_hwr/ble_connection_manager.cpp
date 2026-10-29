@@ -332,6 +332,7 @@ void BLEConnectionManager::suspend_link() {
   // Deliberately no note_failure(). The disconnect that follows reports
   // ESP_GATT_CONN_TERMINATE_LOCAL_HOST (0x16), which pairing_stall.h already
   // excludes from counting, and the component masks it off the fault surface.
+  teardown_requested_ = true;
   if (client_ != nullptr) {
     client_->disconnect();
   }
@@ -397,6 +398,7 @@ void BLEConnectionManager::handle_connection_opened(const esp_ble_gattc_cb_param
   bonded_at_open_ = check_is_bonded(client_->get_remote_bda());
 
   // Notify component of connection
+  teardown_requested_ = false;
   if (connection_callback_) {
     connection_callback_();
   }
@@ -411,6 +413,19 @@ void BLEConnectionManager::handle_connection_opened(const esp_ble_gattc_cb_param
   // bonded open is not a candidate at all. See pairing_stall.h.
   pairing_stall_.on_connection_opened(bonded_at_open_);
   release_pairing_stall_hold_();
+
+  // The component may have refused this connection from inside its callback:
+  // an OPEN that lands while the link is suspended is closed again right there
+  // (issue #243; BLEClientBase::disconnect() cannot cancel a connect that has no
+  // conn_id yet, so the OPEN is still dispatched). Everything below assumes a
+  // link we mean to keep. Requesting encryption on one we have just asked to
+  // close drops it mid-SMP, and an encryption failure on a bonded reconnect is
+  // the path on which ESP-IDF can erase the pump's bond (issue #14) -- the
+  // exact window every other teardown here is arranged to stay out of.
+  if (teardown_requested_) {
+    ESP_LOGI(TAG, "Connection refused by the component; not requesting encryption on it");
+    return;
+  }
 
   // Request encryption only when we already have a stored bond.
   // - Bonded:   request encryption immediately so the pump can resume the
@@ -867,6 +882,7 @@ void BLEConnectionManager::handle_gattc_event(esp_gattc_cb_event_t event, esp_ga
       discovery_retry_count_ = 0;
       encryption_pending_ = false;
       subscription_deferred_ = false;
+      teardown_requested_ = false;
       break;
     }
     

@@ -284,7 +284,10 @@ void AlphaHwrComponent::setup() {
       // reach LINK_FAIL_K and publish "Reconnecting". An automation reads that
       // as a fault, which is the thing issue #243 says a suspension must not
       // be recorded as.
-      this->link_consecutive_failures_++;
+      //
+      // Saturating: a pump that is away for three weeks would otherwise wrap
+      // this to zero and publish one spurious "healthy" link evaluation.
+      if (this->link_consecutive_failures_ < UINT16_MAX) this->link_consecutive_failures_++;
     }
     this->link_reached_ready_ = false;
     this->evaluate_link_status();
@@ -1390,7 +1393,15 @@ void AlphaHwrComponent::do_control_cache_sync(uint32_t gen) {
     if (success) {
       ESP_LOGD(TAG, "Control cache sync complete");
     } else {
-      ESP_LOGW(TAG, "Control cache sync failed, retrying in 5s");
+      // One warning per connection, not one every five seconds for as long as
+      // the pump declines: a pump that never answers a control read would
+      // otherwise write 720 WARN lines an hour.
+      if (this->control_sync_warned_gen_ != gen) {
+        this->control_sync_warned_gen_ = gen;
+        ESP_LOGW(TAG, "Control cache sync failed, retrying every 5s (further retries logged at debug)");
+      } else {
+        ESP_LOGD(TAG, "Control cache sync failed, retrying in 5s");
+      }
       this->set_timeout(5000, [this, gen]() {
         this->do_control_cache_sync(gen);
       });
@@ -1560,10 +1571,17 @@ void AlphaHwrComponent::update() {
     // one 4.5 minute session on the reporter's node (issue #243).
     if (this->suspended_) {
       ESP_LOGD(TAG, "Skipping polls - link suspended");
+    } else if (!this->not_ready_warned_) {
+      // Nor is an outage: the link status entity already says "Reconnecting".
+      // Warn once when the polls stop, then at debug until they resume.
+      this->not_ready_warned_ = true;
+      ESP_LOGW(TAG, "Skipping polls - not ready (logged at debug until the link is back)");
     } else {
-      ESP_LOGW(TAG, "Skipping polls - not ready");
+      ESP_LOGD(TAG, "Skipping polls - not ready");
     }
+    return;
   }
+  this->not_ready_warned_ = false;
 }
 
 bool AlphaHwrComponent::submit_clock_sync_(const char *reason) {

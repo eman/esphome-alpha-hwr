@@ -252,6 +252,67 @@ void test_frozen_motor_never_enters_pump_off_branch() {
   TEST_ASSERT(r.demand.state == true, "Demand raised once the reading is live");
 }
 
+// ── 3a. A start hidden inside a frozen-motor gap is still a start ─────────────
+// The frozen regime assumes the pump ON without knowing it. Keyed on the
+// previous *tick*, the edge detector saw "assumed on" followed by "known on"
+// and stamped nothing, so the settle window -- the 10 s after a start in which
+// the pump's own loop-flow estimate is still ramping and reads low against a
+// loop the meter already sees moving -- never applied to a start the link had
+// missed. The edge is a transition between known states.
+void test_a_start_hidden_in_a_motor_gap_is_still_an_edge() {
+  std::cout << "\n=== A start the link missed still stamps its edge ==="
+            << std::endl;
+  Rig r;
+  r.det.setup();
+
+  // Pump off and known so, house quiet.
+  for (int i = 0; i <= 1; i++) {
+    uint32_t now = T0 + i * TICK_MS;
+    r.at(now);
+    r.motor_speed.publish_state(0.0f);
+    r.pump_flow.publish_state(0.0f);
+    r.flow.publish_state(0.0f);
+    r.tick(now);
+  }
+  TEST_ASSERT(r.method_state() == "deterministic_idle", "Known off, no flow: idle");
+
+  // The motor and loop channels go silent for 40 s: past the 30 s staleness
+  // bound, so the detector is in the frozen regime, assuming ON. Meter at 0.
+  for (int i = 2; i <= 5; i++) {
+    uint32_t now = T0 + i * TICK_MS;
+    r.at(now);
+    r.flow.publish_state(0.0f);
+    r.tick(now);
+  }
+  TEST_ASSERT(r.method_state() == "pump_on_uncertain",
+              "A frozen motor holds the detector in pump-on uncertainty");
+
+  // Telemetry returns. The pump started during the gap and is ramping: the
+  // loop estimate is still 1.0 GPM under the meter. Inside the settle window
+  // that difference is the ramp, not a draw.
+  uint32_t back = T0 + 6 * TICK_MS;
+  r.at(back);
+  r.motor_speed.publish_state(3172.0f);
+  r.pump_flow.publish_state(0.713f);
+  r.flow.publish_state(1.712f);
+  r.tick(back);
+  TEST_ASSERT(r.method_state() == "pump_on_uncertain",
+              "The ramp-up reading right after a start the link missed is not a draw");
+  TEST_ASSERT(r.demand.state == false, "...so no demand is raised from it");
+
+  // The same readings a tick later, outside the window, are a subtraction
+  // verdict again: the stamp defers the judgement, it does not suppress it.
+  uint32_t settled = T0 + 8 * TICK_MS;
+  r.at(settled);
+  r.motor_speed.publish_state(3172.0f);
+  r.pump_flow.publish_state(0.713f);
+  r.flow.publish_state(1.712f);
+  r.tick(settled);
+  TEST_ASSERT(r.method_state() == "deterministic_pump_on_subtraction",
+              "Once the estimate has settled the same difference is a draw");
+  TEST_ASSERT(r.demand.state == true, "...and demand is raised");
+}
+
 // ── 3b. Recirculation must not arm the onset debounce ────────────────────────
 // Issue #147, at the pump-ON → pump-OFF transition. Flow was above threshold on
 // the previous tick, but that tick was pump-ON, when the meter is reading the
@@ -854,6 +915,7 @@ int main() {
   test_idle_publishes_once();
   test_flow_onset_takes_two_ticks();
   test_frozen_motor_never_enters_pump_off_branch();
+  test_a_start_hidden_in_a_motor_gap_is_still_an_edge();
   test_recirculation_does_not_arm_the_onset_debounce();
   test_flow_latch_holds_then_expires();
   test_derivative_spans_a_nan_gap();

@@ -47,11 +47,14 @@ void TimeService::get_clock_async(std::function<void(ESPTime)> callback) {
   
   // Send Class 10 GET: Object 94, SubID 101 (DateTimeActual)
   // send_apdu_command signature: (apdu, len, expect_type_low_ver, expect_type_high, callback, timeout_ms)
-  // Use wildcard matching (0, 0) to accept any Class 10 response, matching Python's behavior
-  // Reference: base.py::match_class10_response only checks p[4] == 0x0A
+  // DateTimeActual answers with type 322 v1, header bytes `00 01 42 01`: two
+  // bench captures (2026-08-15) and the reference client's measured table
+  // (alpha-hwr matcher.py RESPONSE_TYPES) agree. Matched on that rather than
+  // on any Class 10 frame, so a late reply to some other read cannot be
+  // parsed as the pump's clock.
   transport_->send_apdu_command(
     apdu, sizeof(apdu),
-    0, 0,
+    0x4201, 0x0001,
     [callback](bool success, const uint8_t *data, size_t len) {
       if (!success || !data || len == 0) {
         ESP_LOGW(TAG, "Clock read timeout or failed");

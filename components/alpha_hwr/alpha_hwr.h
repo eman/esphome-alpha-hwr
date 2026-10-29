@@ -1017,6 +1017,10 @@ private:
   uint32_t link_last_open_ms_{0};
   uint32_t link_last_eval_ms_{0};
   uint16_t link_consecutive_failures_{0};
+  /// Log cadence: the read-chain generation whose control-cache sync failure
+  /// has already been warned about, and whether the "not ready" poll skip has.
+  uint32_t control_sync_warned_gen_{UINT32_MAX};
+  bool not_ready_warned_{false};
   /// Diagnostic suspend (issue #243): the link is down because someone asked for
   /// it, not because anything failed.
   ///

@@ -241,6 +241,12 @@ class BLEConnectionManager {
   // Set when service discovery completed while encryption was still pending;
   // the subscription is then performed from the AUTH_CMPL success handler.
   bool subscription_deferred_{false};
+  // Set by suspend_link() for the connection it is closing. Checked by
+  // handle_connection_opened() after the component's callback: an OPEN that
+  // arrives while suspended is torn down from inside that callback, and the
+  // encryption request that would otherwise follow must not be sent on a link
+  // already being closed (see the comment there).
+  bool teardown_requested_{false};
   
   // Service discovery retry mechanism
   uint8_t discovery_retry_count_{0};

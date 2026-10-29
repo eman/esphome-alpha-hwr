@@ -178,6 +178,9 @@ struct PumpSim {
   // [name][enable][limit f32][kp][ti][td]. The PID bytes are distinctive
   // on purpose -- a write that dropped them would otherwise be invisible.
   bool respond_limiter_reads{true};
+  // Answer the MinFlow (601) config read with the MaxFlow record: what a late
+  // 86/600 reply does on the wire, since the two records share one type code.
+  bool answer_min_flow_read_with_max_flow{false};
   bool honor_limiter_writes{true};
   bool ack_limiter_write{true};
   bool limiter_max_enabled{false};
@@ -669,7 +672,7 @@ struct Harness {
       frames_limiter_read++;
       if (sim.respond_limiter_reads) {
         if (lsub == 600) inject_limiter_config_frame(true);
-        else if (lsub == 601) inject_limiter_config_frame(false);
+        else if (lsub == 601) inject_limiter_config_frame(sim.answer_min_flow_read_with_max_flow);
         else if (lsub == 640) inject_limiter_status_frame(0x01);
         else if (lsub == 641) inject_limiter_status_frame(0x02);
         else if (lsub == 660) inject_limiter_status_frame(0x00);
@@ -4361,6 +4364,29 @@ static void test_set_flow_limiter_refuses_when_the_read_fails() {
               "#299: ...without writing blind over the PID terms");
 }
 
+// The two config records share type 895, so the transport's type match cannot
+// tell a MaxFlow reply from a MinFlow one -- only the record's own name byte
+// can. A late 86/600 reply taken as the 86/601 answer was cached as MinFlow,
+// and the MinFlow write then echoed MaxFlow's name and PID terms to the pump.
+static void test_set_flow_limiter_refuses_a_misnamed_record() {
+  std::cout << "\n=== set_flow_limiter: a record naming the other limiter is not this read's ===" << std::endl;
+  Harness h;
+  h.prime_cache();
+  h.sim.answer_min_flow_read_with_max_flow = true;
+  const int writes_before = h.frames_limiter_write;
+
+  h.write_op.submit_set_flow_limiter(601, true, 2.0f, "lim_misnamed");
+  h.advance(45000);
+
+  const WriteResult *r = h.result_for("lim_misnamed");
+  TEST_ASSERT(h.events_for("lim_misnamed") == 1, "exactly one terminal event");
+  TEST_ASSERT(r && r->status == WriteStatus::REJECTED,
+              "a reply naming MaxFlow does not satisfy the MinFlow read");
+  TEST_ASSERT(h.frames_limiter_write == writes_before,
+              "...so nothing is written back under MaxFlow's name and PID terms");
+  TEST_ASSERT(!h.sim.limiter_min_enabled, "...and the pump's MinFlow is untouched");
+}
+
 static void test_clear_vacation_none_active() {
   std::cout << "\n=== clear_vacation: no active vacation settles accepted ===" << std::endl;
   Harness h;
@@ -5739,6 +5765,7 @@ int main() {
   test_set_flow_limiter_keeps_the_cap_when_not_asserted();
   test_set_flow_limiter_refuses_an_unknown_sub();
   test_set_flow_limiter_refuses_when_the_read_fails();
+  test_set_flow_limiter_refuses_a_misnamed_record();
   test_clear_vacation_falls_back_to_the_soonest_upcoming();
   test_clear_vacation_none_active();
   test_clear_single_event();
