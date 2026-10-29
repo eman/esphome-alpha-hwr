@@ -23,10 +23,7 @@ substitutions:
   mac_address: "00:00:00:00:00:00"  # ← CHANGE THIS to your pump's MAC
 
 packages:
-  # Pinned to the last release, where the pump package still carried its old
-  # name. On main it is packages/alpha_hwr.yaml; the release script moves this
-  # line at the next release.
-  alpha_hwr: github://eman/esphome-alpha-hwr/packages/alpha_hwr_pairing.yaml@v0.16.0
+  alpha_hwr: github://eman/esphome-alpha-hwr/packages/alpha_hwr.yaml@v0.17.0
 
 esp32:
   board: esp32-c3-devkitm-1

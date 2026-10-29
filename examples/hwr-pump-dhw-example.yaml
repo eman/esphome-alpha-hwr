@@ -41,12 +41,9 @@ substitutions:
 # whenever a config key changes between releases, and the config stops
 # validating.
 packages:
-  # Pinned to the last release, where the pump package still carried its old
-  # name. On main it is packages/alpha_hwr.yaml; the release script moves this
-  # line at the next release.
-  alpha_hwr: github://eman/esphome-alpha-hwr/packages/alpha_hwr_pairing.yaml@v0.16.0
-  alpha_hwr_controls: github://eman/esphome-alpha-hwr/packages/alpha_hwr_controls.yaml@v0.16.0
-  dhw_demand: github://eman/esphome-alpha-hwr/packages/dhw_demand_detector.yaml@v0.16.0
+  alpha_hwr: github://eman/esphome-alpha-hwr/packages/alpha_hwr.yaml@v0.17.0
+  alpha_hwr_controls: github://eman/esphome-alpha-hwr/packages/alpha_hwr_controls.yaml@v0.17.0
+  dhw_demand: github://eman/esphome-alpha-hwr/packages/dhw_demand_detector.yaml@v0.17.0
 
 esp32:
   board: esp32-c3-devkitm-1

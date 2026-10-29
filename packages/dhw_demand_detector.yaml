@@ -22,11 +22,11 @@
 #     dhw_charge_entity:      sensor.water_heater_dhw_charge
 #
 #   external_components:
-#     - source: github://eman/esphome-alpha-hwr@v0.16.0
+#     - source: github://eman/esphome-alpha-hwr@v0.17.0
 #       components: [dhw_demand]
 #
 #   packages:
-#     dhw_demand: github://eman/esphome-alpha-hwr/packages/dhw_demand_detector.yaml@v0.16.0
+#     dhw_demand: github://eman/esphome-alpha-hwr/packages/dhw_demand_detector.yaml@v0.17.0
 #
 # With the pump: examples/hwr-pump-dhw-example.yaml is the complete, CI-validated
 # configuration. The pump package already declares external_components for

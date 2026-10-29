@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+## [0.17.0] - 2026-10-28
+
 ### Migration
 
 Changes in this release that can touch an existing config. The first two
