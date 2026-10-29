@@ -324,36 +324,32 @@ Releases follow **semantic versioning** (`vMAJOR.MINOR.PATCH`). Because this lib
 
 ### Creating a Release
 
-1. **Merge all PRs** for the release into `main`.
-2. **Tag and publish** via the GitHub CLI:
+1. **Merge all PRs** for the release into `main`, and make sure every change
+   has its CHANGELOG entry under `[Unreleased]`.
+2. **Run the release script** from a clean checkout of `main`:
    ```bash
-   gh release create vX.Y.Z \
-     --title "vX.Y.Z — Short description" \
-     --notes-file /tmp/release_notes.md
+   tools/bump_version.sh vX.Y.Z "Short description"
    ```
-3. **Update all version pins** in the repository (see below) and commit directly to `main`:
-   ```bash
-   # Bulk-replace the previous tag across all example YAMLs and packages
-   old=vOLD; new=vX.Y.Z
-   sed -i '' "s|@${old}|@${new}|g" \
-     examples/hwr-pump-example.yaml examples/hwr-pump-controls-example.yaml \
-     examples/hwr-pump-dhw-example.yaml \
-     packages/alpha_hwr.yaml packages/dhw_demand_detector.yaml
-   git add -u && git commit -m "Pin examples and packages to ${new}"
-   git push
-   ```
+   It turns `[Unreleased]` into the dated version header, moves every `@vOLD`
+   pin in the files below to the new tag, stamps the Lovelace card and
+   `manifest.json`, commits `Release vX.Y.Z`, pushes, and runs
+   `gh release create --generate-notes`. The pins are updated *before* the tag
+   is cut, so the tag itself carries the right pins -- do not tag by hand first.
+3. **Check the release page** and edit the generated notes if the CHANGELOG
+   section says it better.
 
 ### Files That Must Be Updated on Every Release
 
-> **Rule**: whenever a new release tag is created, every `@vX.Y.Z` ref in the files below must be updated to the new tag. Failing to do so means users who copy-paste the examples will pull an outdated version.
+> **Rule**: whenever a new release tag is created, every `@vX.Y.Z` ref in the files below must be updated to the new tag. Failing to do so means users who copy-paste the examples will pull an outdated version. `tools/bump_version.sh` does this; the list is here so a change to the layout updates the script too.
 
 | File | Role |
 |---|---|
 | `examples/hwr-pump-example.yaml` | Pump package example |
 | `examples/hwr-pump-controls-example.yaml` | Pump + controls example |
 | `examples/hwr-pump-dhw-example.yaml` | Pump + controls + DHW demand example |
-| `packages/alpha_hwr.yaml` | `external_components` source for the pump package |
+| `packages/alpha_hwr.yaml` | `component_source` default: the `external_components` source for the pump package |
 | `packages/dhw_demand_detector.yaml` | `external_components` source for DHW demand package (including commented examples) |
+| `dist/alpha-hwr-schedule-card.js`, `manifest.json` | Card version header and `CARD_VERSION`; HACS manifest |
 
 Do **not** update files under `.esphome/` — that directory is a local build cache and is not committed.
 
@@ -497,7 +493,7 @@ When the pump is running the household flow meter sees recirculation flow in add
 | `demand` | `binary_sensor` | `ON` when DHW demand is detected |
 | `confidence` | `sensor` (0–1) | Confidence of current detection result |
 | `session_duration` | `sensor` (seconds) | Elapsed seconds of current demand session; 0 when idle |
-| `detection_method` | `text_sensor` | Which detection path fired (e.g., `deterministic_flow`, `deterministic_pump_on`, `deterministic_continuation`, `pump_on_uncertain`, `deterministic_idle`) |
+| `detection_method` | `text_sensor` | Which detection path fired (e.g., `deterministic_flow`, `deterministic_pump_on_subtraction`, `deterministic_continuation`, `deterministic_dhw_in_use`, `pump_on_uncertain`, `deterministic_idle`) |
 
 ### 11.6 Session Tracking
 

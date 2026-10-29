@@ -31,7 +31,7 @@ events fire.
 | `control_state_poll_interval` | time | `30s` | Interval for periodic control state polling. Set to `0s` to disable. |
 | `data_timeout` | time | `60s` | Tear the BLE link down after this long with no data from the pump, so the normal reconnect runs. Set to `0s` to disable. |
 | `ready_timeout` | time | `300s` | Report a fault if the pump has not become usable this long after connecting. Naming only; see `ready_recycle`. `0s` disables. |
-| `ready_recycle` | boolean | `false` | Also tear the link down when `ready_timeout` expires, so the normal reconnect runs. **Opt-in** — see below. |
+| `ready_recycle` | count (0–100) | `0` | How many times to also tear the link down when `ready_timeout` expires, so the normal reconnect runs; `0` never does. A boolean is still accepted: `true` means without limit, `false` means `0`. **Opt-in** — see below. |
 | `frame_logging` | boolean | `false` | Log every GENI frame sent and received, whole, at INFO. Diagnostic capture only, and it reaches every API subscriber — see below before turning it on. |
 | `connect_after_boot_delay` | time | `0s` | Hold the **first** BLE connection this long after boot, so a log client is attached before the link opens. Troubleshooting only — see below. |
 

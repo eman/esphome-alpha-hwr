@@ -18,12 +18,16 @@ NVS.
 - AC Voltage (V), DC Voltage (V), Motor Current (A)
 - Inlet Pressure (bar)
 - Water, PCB and Control Box Temperature (°C)
-- Active Alarms and Warnings, Run State, Control Mode, Flow Limiter
+- Active Alarms and Warnings, Pump Run State, Control Mode, Pump Flow Limiter
+  and Pump Flow Limited
 - Pump Ready, Pairing Status, Pump Link Status / Fault / Recycles / Longest Gap
-- Schedule layers, single events, vacation, schedule hash and stall
-- Event log, history trends, cycle timestamps, start count, operating hours,
-  clock drift and last clock sync
-- Device info, heap, reset reason, component version and build
+- Schedule Layer 0-4, Single Events, Vacation, Schedule Hash, Schedule Stalled
+- Start Count, Operating Hours, Clock Drift, Last Clock Sync, Pump Clock DST
+- Event Log, History Trends and Cycle Timestamps — declared `internal: true`,
+  so they are read and logged but not sent to Home Assistant; give them a
+  `name:` override to export them
+- Device info (serial, software/hardware/BLE/product version, product name),
+  heap, reset reason, component version and build
 
 Also the **Suspend Pump Link** switch, for handing the pump to the Grundfos GO
 app without powering the node down.
@@ -44,8 +48,8 @@ esphome:
 Pair the pump on the first connection: see the README's
 [Pairing](../README.md#pairing) section.
 
-`alpha_hwr_pairing.yaml` is this package's old name. It still loads it, and
-goes away in the release after next.
+`alpha_hwr_pairing.yaml` is this package's old name. It still loads it in
+this release and is removed in the next one.
 
 ---
 
@@ -54,8 +58,10 @@ Layers on `alpha_hwr.yaml`:
 - Engage Pump, Remote Mode, Schedule Enabled, Temperature AutoAdapt and the
   flow-limit switches
 - Control mode select
-- Setpoint, temperature-range, cycle-time and flow-limit numbers
-- Restart and Read Pump Clock buttons, Pump Motor Active indicator
+- Setpoint numbers for every control mode (Constant Pressure / Speed / Flow,
+  Proportional Pressure), Temperature Range Min/Max, Cycle Time ON/OFF and
+  Cycle Flow, Max/Min Flow Limit
+- Restart HWR Pump and Read Pump Clock buttons, Pump Motor Active indicator
 - The schedule editor helpers the Lovelace schedule card uses (day/layer
   selects, time and date numbers, save/clear/vacation buttons). They are
   `internal: true`, so they add nothing to the entity list unless a dashboard
@@ -66,9 +72,13 @@ Layers on `alpha_hwr.yaml`:
 
 ### `dhw_demand_detector.yaml` - DHW Demand Detection
 Declares the `dhw_demand` component wired to Home Assistant supplementary
-sensors (household flow in GPM, lower tank temperature, DHW charge). Works
-standalone without a pump; wire `motor_speed` and `pump_flow` from `alpha_hwr`
-to enable pump-on detection. See `docs/configuration.md` for the full key list.
+sensors (household flow in GPM, lower tank temperature, DHW charge, and
+optionally the water heater's DHW in-use flag). Works standalone without a pump;
+wire `motor_speed` and `pump_flow` from `alpha_hwr` to enable pump-on
+detection. See `docs/configuration.md` for the full key list.
+
+**Entities declared:** DHW Demand (binary sensor), DHW Detection Confidence,
+DHW Demand Level, DHW Session Duration, DHW Detection Method.
 
 ---
 

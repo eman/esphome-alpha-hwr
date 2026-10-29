@@ -90,6 +90,8 @@ text_sensor:
     mac_address:
       name: "WiFi MAC"
 
+# The pump package declares no restart button. alpha_hwr_controls.yaml does,
+# under this same name, so drop this block if you add that package.
 button:
   - platform: restart
     name: "Restart HWR Pump"

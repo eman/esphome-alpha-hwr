@@ -59,16 +59,13 @@ esphome:
 
 substitutions:
   mac_address: "AA:BB:CC:DD:EE:FF"
-
-# Required whenever the packages track @main. Each package self-declares an
-# `external_components` block pinned to the release it shipped with, so without
-# this the component source stays at that tag while the package config moves
-# ahead — and any key added since the release is rejected as "an invalid option
-# for [alpha_hwr]". ESPHome does not dedupe these blocks; the last merged entry
-# wins, so a top-level declaration overrides the package's.
-external_components:
-  - source: github://eman/esphome-alpha-hwr@main
-    components: [alpha_hwr]
+  # Required whenever the packages track @main. The pump package declares its
+  # own `external_components` source, pinned to the release it shipped with, so
+  # without this the component code stays at that tag while the package config
+  # moves ahead — and any key added since is rejected as "an invalid option for
+  # [alpha_hwr]". Override the package's substitution rather than adding a
+  # second `external_components` block (see "Running from a local checkout").
+  component_source: github://eman/esphome-alpha-hwr@main
 
 packages:
   alpha_hwr: github://eman/esphome-alpha-hwr/packages/alpha_hwr.yaml@main
@@ -177,8 +174,9 @@ dhw_demand:
 
 `motor_speed` and `pump_flow` are what make pump-on detection work: while the
 pump is running, household demand is measured as `flow − pump_flow`, gated on
-`motor_speed`. Without both, the detector still works while the pump is off and
-reports `pump_on_uncertain` whenever it is running.
+`motor_speed`. Without both, the detector still works while the pump is off and,
+unless a `dhw_in_use` flag is wired (below), reports `pump_on_uncertain`
+whenever it is running.
 
 If your water heater exposes a DHW in-use flag, wire it as `dhw_in_use` for a
 third detection tier:

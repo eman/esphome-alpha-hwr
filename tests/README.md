@@ -60,19 +60,15 @@ The test suite verifies:
 
 ## Reference Implementation
 
-The test vectors and expected values are verified against:
-- Python reference: `reference/alpha-hwr/src/alpha_hwr/protocol/`
-- Protocol docs: `reference/alpha-hwr/docs/protocol/wire_format.md`
+The test vectors and expected values are verified against the sibling
+`alpha-hwr` Python repository (checked out next to this one):
+- Python reference: `../alpha-hwr/src/alpha_hwr/protocol/`
+- Protocol docs: `../alpha-hwr/docs/protocol/wire_format.md`
 
 ## Test Results
 
-Current status:
-```
-Tests passed: 35
-Tests failed: 0
-
-✓ ALL TESTS PASSED!
-```
+`make test` prints one result block per binary and exits non-zero if any
+assertion failed; the suite is run by CI on every push.
 
 ## Development Notes
 

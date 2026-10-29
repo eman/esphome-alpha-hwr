@@ -73,10 +73,10 @@ end-to-end in `tests/test_write_operations.cpp` against the pump simulator.
 
 ## Re-verify
 
-Authoritative resources (sibling repo `alpha-hwr/resources/`, subset vendored
-under `reference/`):
+Authoritative resources (sibling repo `alpha-hwr`, checked out next to this
+one):
 
-1. `reference/alpha-hwr/src/alpha_hwr/protocol/telemetry_decoder.py`,
+1. `../alpha-hwr/src/alpha_hwr/protocol/telemetry_decoder.py`,
    `services/control.py`, `services/history.py` — the reference decoders.
 2. `resources/unit_conversion/unit_index_mapping.csv`,
    `unit_factor_mapping.csv` — GENI unit-index → multiplier and unit→unit
