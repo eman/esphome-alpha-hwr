@@ -436,9 +436,11 @@ void Rig::answer_outstanding_writes() {
         // capture recorded in time_service.cpp -- 2026-08-15 20:38:55, with the
         // five trailing bytes nothing reads -- so the parser under test sees
         // the bytes the pump really sends rather than a tidied version.
+        // The header is the captured one too, `00 01 42 01`: the read is
+        // matched on it.
         const uint8_t clock[12] = {0x07, 0xEA, 0x08, 0x0F, 0x14, 0x26,
                                    0x37, 0x48, 0x00, 0x06, 0x00, 0x01};
-        notify(data_object_frame(0x01, 0x42, clock, sizeof(clock)));
+        notify(data_object_frame(0x42, 0x01, clock, sizeof(clock), 0x0001));
       } else if (obj == 84 && sub == 1 && answer_overview) {
         // ClockProgramOverview (Obj 84 Sub 1) -- the other cache Pump Ready
         // waits on. Built with the same envelope as the write-operation
@@ -2481,6 +2483,38 @@ void test_release_restores_the_link() {
   TEST_ASSERT(!r.component.is_suspended(), "  ...and the flag is down");
 }
 
+// An OPEN that lands while suspended is torn down from inside the component's
+// connection callback (BLEClientBase::disconnect() cannot cancel a connect that
+// has no conn_id yet, so the OPEN is still dispatched). The manager used to go
+// on from that callback as if the link were one we meant to keep, and request
+// encryption on it. A link dropped mid-SMP is an encryption failure on a bonded
+// reconnect, which is the path that can erase the pump's bond (issue #14).
+void test_an_open_while_suspended_is_closed_without_requesting_encryption() {
+  std::cout << "\n=== An OPEN while suspended requests no encryption ===" << std::endl;
+  Rig r;
+  arm_the_settle_path(r);  // bonded, so the encryption branch is the live one
+  r.component.set_pairing_enabled(true);  // ...and taken: the rig defaults it off
+  r.setup();
+  r.component.set_suspended(true);
+
+  const int encryption_before = esp_gap_mock().set_encryption;
+  const int disconnects_before = r.client.mock_disconnect_calls();
+  r.open(ESP_GATT_OK);
+
+  TEST_ASSERT(r.client.mock_disconnect_calls() == disconnects_before + 1,
+              "the connection is torn down again");
+  TEST_ASSERT(esp_gap_mock().set_encryption == encryption_before,
+              "  ...and no encryption was requested on the link being closed");
+
+  // The flag is per connection: the next OPEN, with the suspend released, is an
+  // ordinary bonded open and requests encryption as before.
+  r.disconnect(ESP_GATT_CONN_TERMINATE_LOCAL_HOST);
+  r.component.set_suspended(false);
+  r.open(ESP_GATT_OK);
+  TEST_ASSERT(esp_gap_mock().set_encryption == encryption_before + 1,
+              "a kept connection still requests encryption");
+}
+
 // The guard the first test cannot reach: a suspend arriving while the settle
 // timer is ALREADY running. Guard 1 stops the timer being armed during a
 // suspend; only guard 2 stops a timer armed before it from firing into one.
@@ -2960,6 +2994,7 @@ int main() {
   test_ready_clears_on_disconnect();
   test_a_disconnect_does_not_publish_a_drift_reading();
   test_suspend_drops_the_link_and_stops_reconnecting();
+  test_an_open_while_suspended_is_closed_without_requesting_encryption();
   test_release_restores_the_link();
   test_a_suspend_during_a_settle_window_is_not_undone_by_the_timer();
   test_a_suspended_link_reads_as_suspended_not_as_a_fault();

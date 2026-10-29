@@ -10,7 +10,7 @@ device; the rest cut the package layout down to two layers for the pump.
 
 | Change | What breaks | What to do |
 | --- | --- | --- |
-| `packages/alpha_hwr_base.yaml` is removed | A config loading it `@main` fails at the package fetch. Configs pinned to a release tag (`@v0.16.0` or earlier) keep working | Load `packages/alpha_hwr_pairing.yaml` instead. Every entity the base package declared is in it under the same name, plus the rest |
+| `packages/alpha_hwr_base.yaml` is removed | A config loading it `@main` fails at the package fetch. Configs pinned to a release tag (`@v0.16.0` or earlier) keep working | Load `packages/alpha_hwr.yaml` instead. Every entity the base package declared is in it under the same name, plus the rest |
 | `initiate_pairing` defaults to `true` | **Nothing fails.** A hand-written `alpha_hwr:` block that never set the option now initiates pairing and configures security parameters, which is what the pump requires; before, such a node bonded anyway when the pump asked, with none configured (#245) | Nothing, unless you want the old behaviour: then set `initiate_pairing: false` explicitly |
 | `packages/alpha_hwr_pairing.yaml` is renamed `packages/alpha_hwr.yaml` | **Nothing fails yet.** The old name still loads the new file, and is removed in the release after this one | Change the reference to `alpha_hwr.yaml` |
 | `packages/alpha_hwr_schedule.yaml` is removed | A config loading it `@main` fails at the package fetch. It was a four-entity subset of the controls package, frozen since February | Load `alpha_hwr_controls.yaml`. `Schedule Enabled` and `Pump Control Mode` keep their names; the two remote-mode buttons become the `Remote Mode` switch |
@@ -99,7 +99,7 @@ release tag carries the new one; the release script moves them.
   corrected.
 
 - **The BLE scan duty cycle drops from 100% to ~9%** ([#320](https://github.com/eman/esphome-alpha-hwr/pull/320)).
-  The packages and `components/alpha_hwr/discovery_example.yaml` scanned with
+  The packages and the discovery example (now `examples/discovery-example.yaml`) scanned with
   `interval: 1.1s` / `window: 1.1s`, which is continuous scanning on the radio
   the ESP32 shares between WiFi and BLE, and which ESPHome warns about at
   config time. They now use `interval: 320ms` / `window: 30ms`, ESPHome's
@@ -153,7 +153,8 @@ release tag carries the new one; the release script moves them.
   never missed a poll cycle, and the default's tolerance for five has never
   been called on.
 
-- **The base package no longer claims to work without pairing** (issue #244). Measured 2026-09-27 from a Linux host the pump had
+- **The pump package no longer claims to work without pairing** (issue #244; written against
+  `alpha_hwr_base.yaml`, since folded into `alpha_hwr.yaml` -- see Migration). Measured 2026-09-27 from a Linux host the pump had
   never bonded to: three direct connection requests in a row drew no link-layer
   reply, each given up by the controller within 150-300 ms as `Connection Failed
   to be Established (0x3e)`. Combined with the 90 ESP32 cycles already on record
@@ -250,6 +251,72 @@ release tag carries the new one; the release script moves them.
 
   `MIN_DAYS` is untouched. It gates whether a report prints at all, which is a
   separate question from what the evidence supports.
+
+- **A connection the component refuses is no longer encrypted first.** With the
+  link suspended (the Suspend Pump Link switch, issue #243), the component's
+  open-callback already dropped a connection the stack opened anyway. The
+  connection manager then went on to request encryption and a connection-parameter
+  update on the link it had just been told to close -- the one sequence a bond
+  must never run on a link that is being torn down (issue #14). The manager now
+  stops at the refusal. Covered by a host test that opens a link while suspended
+  and asserts no `esp_ble_set_encryption` call.
+
+- **A flow-limiter reply is checked against the limiter it was asked about.** The
+  MaxFlow and MinFlow records share one type code (895 for config, 896 for
+  status), so the transport's type match could not tell them apart, and the
+  record's own name byte was not checked. A late 86/600 reply taken as the 86/601
+  answer was cached as MinFlow, and the next MinFlow write echoed MaxFlow's name
+  and PID terms back to the pump. The reply's name must now match the sub-id
+  that was read, or it is discarded and logged; the limitation-manager record
+  (660), which names whichever limiter is binding, is exempt.
+
+- **The statistics, clock, trend and cycle-timestamp reads match their reply by
+  type.** These four were matched on "any Class 10 frame", so the late reply to a
+  read that had already timed out -- the clock's, say -- could answer the next
+  one and be parsed as a start count, a trend value, or the pump's time. They now
+  carry the reply types the reference client measured on the pump (`alpha-hwr`
+  `matcher.py`, 2026-08-04): statistics `00 00 F8 02`, clock `00 01 42 01`
+  (also in two bench captures here), trends `00 03 B2 01` / `00 03 B3 01` for
+  power-on time, cycle timestamps `00 03 E8 01`. A pump answering with a
+  different type would now time these reads out rather than mis-parse them; if
+  yours does, the frame it sends is worth an issue. The DST-rule read keeps the
+  wildcard, having no measured type on record.
+
+- **`dhw_demand`: a pump start the link missed still counts as a start.** The
+  pump-on edge was keyed on the previous *tick*, and the frozen-motor regime
+  assumes the pump on without knowing it -- so a start inside a telemetry gap
+  arrived as "assumed on" then "known on" with no tick-to-tick change, and was
+  never stamped. Its settle window (`pump_on_settle_seconds`) and the
+  predates-start check then did not apply to the one run where the ramp-up loop
+  estimate was certain to be read against a loop the meter already saw moving,
+  and the ramp read as a draw. Both edges are now transitions between *known*
+  states. Boot behaviour is unchanged: the first known ON still stamps.
+
+- **An infinite setpoint is refused before the wire**, with the same `invalid`
+  verdict NaN gets. Only NaN was checked; `inf` passed the range clamp untouched.
+
+- **Log cadence on a pump that will not answer.** A control-cache sync that keeps
+  failing warned every 5 s for as long as the pump declined (720 lines an hour);
+  it now warns once per connection and retries at debug. "Skipping polls - not
+  ready" during an outage likewise warns once and then logs at debug until the
+  link is back -- the link-status entity already says "Reconnecting". The
+  consecutive-failure counter behind that entity saturates instead of wrapping
+  after ~65 000 attempts.
+
+- **Documentation.** The Migration table told configs that loaded the removed
+  base package to load `alpha_hwr_pairing.yaml`, the name this release
+  deprecates; it now says `alpha_hwr.yaml`. The README quick start asked for a
+  second `external_components` block, which the "Running from a local checkout"
+  section a page later explains does not work as described; it now overrides the
+  package's `component_source` substitution, as that section says.
+  `docs/configuration.md` typed `ready_recycle` as a boolean defaulting to
+  `false`; it is a count (0-100, `0` off) that still accepts a boolean (#257).
+  `packages/README.md` now lists every entity the three packages declare,
+  including the ones marked `internal: true`, and says so. AGENTS §10's release
+  steps described a by-hand process that disagreed with `tools/bump_version.sh`
+  on order and file list; they now describe the script. `tests/README.md` and
+  `docs/units-audit.md` pointed at a vendored `reference/` tree that does not
+  exist; the Python reference is the sibling `alpha-hwr` checkout.
 
 ## [0.16.0] - 2026-08-25
 

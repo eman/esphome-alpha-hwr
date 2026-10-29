@@ -409,6 +409,11 @@ void DhwDemandComponent::update() {
   const bool pump_state_known = pump_state.pump_state_known;
   const bool pump_on = pump_state.pump_on;
 
+  // The last state that was actually read, before this tick updates it. Never
+  // known yet reads as "off" so that the first known ON stamps a start, which
+  // is what prev_pump_on_'s boot default of false did.
+  const bool prev_known_on = pump_state_ever_known_ && last_known_pump_on_;
+
   if (pump_state_known) {
     last_known_pump_on_ = pump_on;
     pump_state_ever_known_ = true;
@@ -450,12 +455,20 @@ void DhwDemandComponent::update() {
   // a boundary that never happened. Leaving the stamp at 0 makes both abstain,
   // which is the safe direction — the staleness bound and the latch keep
   // behaving exactly as they did before.
-  if (prev_pump_on_ && pump_confirmed_off) {
+  //
+  // The edge is a transition between *known* states, not between ticks. The
+  // frozen regime assumes ON without knowing it, so a start that happens
+  // inside a telemetry gap arrives as "assumed on" and then "known on" -- no
+  // tick-to-tick change -- and keyed on prev_pump_on_ the start was never
+  // stamped. Its settle window and reading_predates_pump_start then did not
+  // apply to the run, which is the one run where the ramp-up estimate was
+  // guaranteed to be read against a loop the meter already saw moving.
+  if (prev_known_on && pump_confirmed_off) {
     pump_off_since_ms_ = now;
     ESP_LOGD(TAG, "Pump off edge at %u ms; flow latch disarmed for %d s", now,
              latch_pump_off_suppression_seconds_);
   }
-  if (!prev_pump_on_ && pump_on && pump_state_known) {
+  if (!prev_known_on && pump_on && pump_state_known) {
     pump_on_since_ms_ = now;
     ESP_LOGD(TAG, "Pump on edge at %u ms; loop-flow readings before it are "
                   "not subtractable",

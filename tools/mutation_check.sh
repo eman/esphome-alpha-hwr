@@ -262,7 +262,7 @@ MUTATIONS=(
 # A NaN is still refused before the wire, and not for a reason about range: the
 # all-ones float doubles as the SETPOINT_KEEP sentinel, so a NaN reads as "leave
 # the setpoint alone" -- a write that silently does nothing rather than fails.
-"setpoint-nan-reaches-the-wire|components/alpha_hwr/write_operation_service.cpp|  if (std::isnan(op->value)) {|  if (false) {"
+"setpoint-nan-reaches-the-wire|components/alpha_hwr/write_operation_service.cpp|  if (!std::isfinite(op->value)) {|  if (false) {"
 # The range read must reject a degenerate answer rather than caching it, so that
 # setpoint_ranges_known() does not claim a complete set off the back of one.
 # Note what this does NOT do: get_setpoint_range() re-checks max > min on every

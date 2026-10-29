@@ -164,6 +164,20 @@ static constexpr uint16_t SUB_LIMITER_STATUS_MAX_FLOW = 640;
 static constexpr uint16_t SUB_LIMITER_STATUS_MIN_FLOW = 641;
 static constexpr uint16_t SUB_LIMITATION_MANAGER = 660;
 
+/// Which limiter a config or status sub-id is *about*, so a reply can be
+/// checked against the request it is taken to answer. The manager record
+/// (660) names whichever limiter is binding, or NONE, so it maps to NONE here
+/// and is not checked.
+inline LimiterName limiter_name_for_sub(uint16_t sub) {
+  switch (sub) {
+    case SUB_LIMITER_CONFIG_MAX_FLOW:
+    case SUB_LIMITER_STATUS_MAX_FLOW: return LimiterName::MAX_FLOW;
+    case SUB_LIMITER_CONFIG_MIN_FLOW:
+    case SUB_LIMITER_STATUS_MIN_FLOW: return LimiterName::MIN_FLOW;
+    default:                          return LimiterName::NONE;
+  }
+}
+
 inline LimiterName limiter_name_from_byte(uint8_t b) {
   switch (b) {
     case 0x01: return LimiterName::MAX_FLOW;

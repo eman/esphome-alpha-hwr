@@ -190,10 +190,15 @@ void DeviceInfoService::read_statistics_async(std::function<void(bool, uint32_t,
   // Build Class 10 read for Object 93, Sub-ID 1 (operation_history_pump_obj)
   // APDU: [Class=0x0A][OpSpec=0x03][ObjID=0x5D][SubH=0x00][SubL=0x01]
   uint8_t apdu[] = {0x0A, 0x03, 0x5D, 0x00, 0x01};  // Object 93 = 0x5D, Sub 1
+  // The reply carries type 248 v2: header bytes `00 00 F8 02`, measured on the
+  // reference pump (alpha-hwr matcher.py RESPONSE_TYPES, 2026-08-04). Matched
+  // on that rather than on "any Class 10 frame": with a wildcard, the late
+  // reply to a timed-out read of a different object -- the clock, say -- was
+  // accepted here and parsed as a start count and operating hours.
   transport_.send_apdu_command(
     apdu, sizeof(apdu),
-    0,  // Use wildcard matching (reference only checks Class 10)
-    0,  // Use wildcard matching
+    0xF802,  // (TypeL << 8) | Version
+    0x0000,  // TypeH
     [on_complete](bool success, const uint8_t *data, size_t len) {
       if (!success || !data || len < 15) {
         ESP_LOGW(TAG, "Statistics read failed or no data (len=%zu)", len);

@@ -118,9 +118,14 @@ void HistoryService::read_trends_async(
     apdu[3] = (sub_id >> 8) & 0xFF;
     apdu[4] = sub_id & 0xFF;
 
-    // Use wildcard response matching — accept any non-register Class 10 response.
+    // Matched on the reply type measured on the reference pump (alpha-hwr
+    // matcher.py RESPONSE_TYPES, 2026-08-04): the three process trends answer
+    // with type 946 v1 (`00 03 B2 01`) and the power-on-time trend with 947 v1
+    // (`00 03 B3 01`). A wildcard here let any late Class 10 reply stand in
+    // for a channel.
     // Timeout: 1500 ms — trend reads either respond immediately or not at all.
-    transport_.send_apdu_command(apdu, sizeof(apdu), 0, 0,
+    const uint16_t type_low_ver = (sub_id == 454) ? 0xB301 : 0xB201;
+    transport_.send_apdu_command(apdu, sizeof(apdu), type_low_ver, 0x0003,
         [idx, trends, on_complete, self, cfg](
             bool success, const uint8_t *payload, size_t payload_len) {
       if (success && payload_len >= 32) {  // 3 header + 29 data
@@ -208,8 +213,9 @@ void HistoryService::read_cycle_timestamps_async(
   apdu[3] = (sub_id >> 8) & 0xFF;
   apdu[4] = sub_id & 0xFF;
 
-  // Use wildcard matching for Object 88 responses
-  transport_.send_apdu_command(apdu, sizeof(apdu), 0, 0,
+  // Both cycle-timestamp records answer with type 1000 v1 (`00 03 E8 01`),
+  // measured on the reference pump (alpha-hwr matcher.py RESPONSE_TYPES).
+  transport_.send_apdu_command(apdu, sizeof(apdu), 0xE801, 0x0003,
       [on_complete](bool success, const uint8_t *payload, size_t payload_len) {
     std::vector<uint32_t> timestamps;
 

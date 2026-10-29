@@ -226,8 +226,10 @@ static void test_single_events_abandoned() {
 
 /// One trend channel's reply: 3-byte Class 10 sub-header then the 29-byte
 /// TrendData body, whose first four bytes are the current value as a big-endian
-/// float. 32 bytes is the minimum the handler accepts.
-static std::vector<uint8_t> trend_reply(float current) {
+/// float. 32 bytes is the minimum the handler accepts. The header carries the
+/// type the real pump answers with -- 946 v1 for channels 0-2, 947 v1 for the
+/// power-on-time channel -- since the reads are matched on it.
+static std::vector<uint8_t> trend_reply(float current, int channel = 0) {
   std::vector<uint8_t> body{0x00, 0x00, 0x1D};
   uint32_t bits;
   static_assert(sizeof(bits) == sizeof(current), "float is not 32-bit here");
@@ -237,17 +239,66 @@ static std::vector<uint8_t> trend_reply(float current) {
   body.push_back((bits >> 8) & 0xFF);
   body.push_back(bits & 0xFF);
   while (body.size() < 32) body.push_back(0x01);
-  return with_crc(class10_response(0x0000, 0x0000, body));
+  return with_crc(class10_response(0x0003, channel == 3 ? 0xB301 : 0xB201, body));
 }
 
 /// Drive the four trend reads to a complete answer.
 static void answer_all_four_trends(Rig &rig) {
   for (int i = 0; i < 4; i++) {
     step(rig.transport, 2);
-    auto reply = trend_reply(1.0f + i);
+    auto reply = trend_reply(1.0f + i, i);
     rig.transport.on_notification(reply.data(), reply.size());
   }
   step(rig.transport, 2);
+}
+
+/// The trend, statistics, clock and cycle-timestamp reads used to be matched on
+/// "any Class 10 frame". The reply to a read that had already timed out -- the
+/// clock's, say -- then arrived during the next such read and was accepted as
+/// its answer: 32 bytes of DateTimeActual parsed as a trend's current value, or
+/// as a start count. The reads now carry the reply types measured on the
+/// reference pump (alpha-hwr matcher.py RESPONSE_TYPES), so a frame of another
+/// type is left for the transport to log and drop.
+static void test_a_late_reply_of_another_type_does_not_answer_a_trend_read() {
+  std::cout << "\n=== A late clock reply is not a trend reading ===" << std::endl;
+  Rig rig;
+  services::HistoryService svc(rig.transport, rig.session);
+
+  bool completed = false;
+  bool ok = false;
+  std::vector<services::TrendSeries> got;
+  svc.read_trends_async(
+      [&](bool success, const std::vector<services::TrendSeries> &trends) {
+        completed = true;
+        ok = success;
+        got = trends;
+      });
+  step(rig.transport, 2);  // the Flow trend read is in flight
+  TEST_ASSERT(rig.commands_sent == 1, "history: one read in flight");
+
+  // A DateTimeActual reply (type 322 v1, `00 01 42 01`) padded to the 32
+  // bytes a trend reply needs, so the only thing refusing it is its type.
+  std::vector<uint8_t> clock_body{0x00, 0x00, 0x0C, 0x07, 0xEA, 0x08, 0x0F, 0x14,
+                                  0x26, 0x37, 0x48, 0x00, 0x06, 0x00, 0x01};
+  while (clock_body.size() < 32) clock_body.push_back(0x00);
+  auto late_clock = with_crc(class10_response(0x0001, 0x4201, clock_body));
+  rig.transport.on_notification(late_clock.data(), late_clock.size());
+  step(rig.transport, 2);
+  TEST_ASSERT(rig.commands_sent == 1,
+              "history: the clock reply did not advance the trend chain");
+  TEST_ASSERT(!completed, "history: ...nor complete it");
+
+  // The real reply, and the three after it, do.
+  for (int i = 0; i < 4; i++) {
+    auto reply = trend_reply(1.0f + i, i);
+    rig.transport.on_notification(reply.data(), reply.size());
+    step(rig.transport, 2);
+  }
+  TEST_ASSERT(completed && ok, "history: the typed replies complete the read");
+  TEST_ASSERT(got.size() == 4, "history: ...with all four channels");
+  TEST_ASSERT(got.size() == 4 && got[0].current_value == 1.0f,
+              "history: ...and the Flow channel holds the trend value, not "
+              "four bytes of the clock");
 }
 
 /// The whole point of the issue. A disconnect used to leave this callback
@@ -677,6 +728,7 @@ int main() {
 
   test_history_completion();
   test_history_abandoned();
+  test_a_late_reply_of_another_type_does_not_answer_a_trend_read();
   test_event_log_abandoned();
   test_single_events_abandoned();
   test_no_accumulation();

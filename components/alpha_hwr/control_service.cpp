@@ -374,11 +374,24 @@ void ControlService::read_one_limiter_(uint16_t sub, bool is_config,
         const uint8_t *body = payload + offset;
         const size_t body_len = payload_len - offset;
 
+        // The record names the limiter it describes, and the two config
+        // records (and the two per-limiter status records) share one type
+        // code, so the type match above cannot tell a MaxFlow reply from a
+        // MinFlow one. A reply whose name byte is not the limiter this read
+        // asked about -- a late 86/600 answering the 86/601 request -- is not
+        // this record, and caching it would hand the limiter write the other
+        // limiter's name and PID terms to echo back. The manager record (660)
+        // names whichever limiter is binding, or NONE, so it is not checked.
+        const LimiterName expected = limiter_name_for_sub(sub);
         bool decoded = false;
+        bool misnamed = false;
+        LimiterName got = LimiterName::NONE;
         if (is_config) {
           const LimiterConfig c = decode_limiter_config(body, body_len);
           decoded = c.valid;
-          if (c.valid) {
+          got = c.name;
+          misnamed = c.valid && expected != LimiterName::NONE && c.name != expected;
+          if (c.valid && !misnamed) {
             if (sub == SUB_LIMITER_CONFIG_MAX_FLOW) limiters_.max_flow = c;
             if (sub == SUB_LIMITER_CONFIG_MIN_FLOW) limiters_.min_flow = c;
             ESP_LOGD(TAG, "Limiter %u: %s %s at %.2f gpm", static_cast<unsigned>(sub),
@@ -388,7 +401,9 @@ void ControlService::read_one_limiter_(uint16_t sub, bool is_config,
         } else {
           const LimiterStatus s = decode_limiter_status(body, body_len);
           decoded = s.valid;
-          if (s.valid) {
+          got = s.name;
+          misnamed = s.valid && expected != LimiterName::NONE && s.name != expected;
+          if (s.valid && !misnamed) {
             if (sub == SUB_LIMITER_STATUS_MAX_FLOW) limiters_.max_flow_status = s;
             if (sub == SUB_LIMITER_STATUS_MIN_FLOW) limiters_.min_flow_status = s;
             if (sub == SUB_LIMITATION_MANAGER) limiters_.manager = s;
@@ -397,7 +412,12 @@ void ControlService::read_one_limiter_(uint16_t sub, bool is_config,
                      s.limiting ? "LIMITING" : "idle", s.reference);
           }
         }
-        if (!decoded) {
+        if (misnamed) {
+          ESP_LOGW(TAG, "Limiter reply for Sub %u names %s, not %s; discarded",
+                   static_cast<unsigned>(sub), limiter_name_string(got),
+                   limiter_name_string(expected));
+          decoded = false;
+        } else if (!decoded) {
           ESP_LOGW(TAG, "Limiter reply for Sub %u too short (len=%zu)",
                    static_cast<unsigned>(sub), payload_len);
         } else if (on_limiter_update_) {

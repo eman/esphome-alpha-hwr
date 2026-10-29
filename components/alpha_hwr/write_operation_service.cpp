@@ -1028,8 +1028,9 @@ void WriteOperationService::run_set_setpoint_(uint32_t seq) {
   // NaN has nothing for the pump to clamp to, and the all-ones float doubles as
   // the SETPOINT_KEEP sentinel on the wire, so a NaN would read as "leave the
   // setpoint alone" -- a write that silently does nothing rather than one that
-  // fails.
-  if (std::isnan(op->value)) {
+  // fails. An infinity is refused with it: it is not a value the pump can clamp
+  // either, and the range check below cannot bound what has no bound.
+  if (!std::isfinite(op->value)) {
     finish_(seq, WriteStatus::INVALID, "setpoint is not a number");
     return;
   }
