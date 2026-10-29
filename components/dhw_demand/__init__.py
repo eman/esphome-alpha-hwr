@@ -43,6 +43,9 @@ CONF_PUMP_ON_DEMAND_MIN_SPEED_RPM = "pump_on_demand_min_speed_rpm"
 CONF_PUMP_ON_DEMAND_MAX_STALE_SECONDS = "pump_on_demand_max_stale_seconds"
 CONF_FLOW_MAX_STALE_SECONDS = "flow_max_stale_seconds"
 CONF_DHW_IN_USE_MIN_SECONDS = "dhw_in_use_min_seconds"
+CONF_DHW_IN_USE_CARRY_MAX_SECONDS = "dhw_in_use_carry_max_seconds"
+CONF_DHW_IN_USE_LOOP_BIAS_GPM = "dhw_in_use_loop_bias_gpm"
+CONF_DHW_IN_USE_SPEED_TOLERANCE_RPM = "dhw_in_use_speed_tolerance_rpm"
 CONF_FLOW_LATCH_SECONDS = "flow_latch_seconds"
 CONF_LATCH_PUMP_OFF_SUPPRESSION_SECONDS = "latch_pump_off_suppression_seconds"
 CONF_PUMP_ON_SETTLE_SECONDS = "pump_on_demand_settle_seconds"
@@ -190,6 +193,25 @@ CONFIG_SCHEMA = cv.Schema(
         # Bounded for the same uint32_t wrap reason as the staleness keys,
         # and 0 is legal and meaningful: "high right now is enough".
         cv.Optional(CONF_DHW_IN_USE_MIN_SECONDS, default=70): cv.int_range(min=0, max=3600),
+        # The dhw_in_use tier's independent-support rule (issue #330). The
+        # heater's flag rises 1-3 minutes into an ordinary recirculation run
+        # with no tap open, so sustained-and-unmeasured is not enough: the
+        # tier also needs either a draw that flow, thermal, charge or the
+        # subtraction declared inside the flag's run and no more than this
+        # long ago (the longest real carry on record was 100 s), or ...
+        # Bounded for the uint32_t wrap reason; 0 disables the carry.
+        cv.Optional(CONF_DHW_IN_USE_CARRY_MAX_SECONDS, default=120): cv.int_range(min=0, max=3600),
+        # ... the meter reading above the pump's own loop reading by more than
+        # pump_on_demand_flow_threshold plus this. 0.45 GPM is the largest
+        # no-draw bias measured below pump_on_demand_min_speed_rpm (at
+        # 1650 rpm), which is the floor this support deliberately lifts.
+        cv.Optional(CONF_DHW_IN_USE_LOOP_BIAS_GPM, default=0.45): cv.positive_float,
+        # For that second support, how far the pump's speed may have moved
+        # since its loop reading was taken, and since the meter's was. A loop
+        # reading from a lower speed invents a draw after a step-up (0.3 GPM
+        # read at 1650 rpm against 1.6 GPM of loop at 2600); a meter that has
+        # not yet reported a step-down invents one the other way.
+        cv.Optional(CONF_DHW_IN_USE_SPEED_TOLERANCE_RPM, default=100.0): cv.positive_float,
         cv.Optional(CONF_FLOW_LATCH_SECONDS, default=30): cv.positive_int,
         # Disarms the latch above for this long after a pump-off edge, so
         # the latch cannot be armed by the pump's own collapsing loop flow.
@@ -279,6 +301,9 @@ async def to_code(config):
     cg.add(var.set_pump_on_demand_max_stale_seconds(config[CONF_PUMP_ON_DEMAND_MAX_STALE_SECONDS]))
     cg.add(var.set_flow_max_stale_seconds(config[CONF_FLOW_MAX_STALE_SECONDS]))
     cg.add(var.set_dhw_in_use_min_seconds(config[CONF_DHW_IN_USE_MIN_SECONDS]))
+    cg.add(var.set_dhw_in_use_carry_max_seconds(config[CONF_DHW_IN_USE_CARRY_MAX_SECONDS]))
+    cg.add(var.set_dhw_in_use_loop_bias_gpm(config[CONF_DHW_IN_USE_LOOP_BIAS_GPM]))
+    cg.add(var.set_dhw_in_use_speed_tolerance_rpm(config[CONF_DHW_IN_USE_SPEED_TOLERANCE_RPM]))
     cg.add(var.set_flow_latch_seconds(config[CONF_FLOW_LATCH_SECONDS]))
     cg.add(var.set_latch_pump_off_suppression_seconds(config[CONF_LATCH_PUMP_OFF_SUPPRESSION_SECONDS]))
     cg.add(var.set_pump_on_demand_settle_seconds(config[CONF_PUMP_ON_SETTLE_SECONDS]))

@@ -132,6 +132,30 @@ struct PumpOnThresholds {
   // Two ticks at the 10 s cadence still releases a genuinely stopped draw
   // within 20 s, against the whole-run hold this replaces.
   uint8_t continuation_release_ticks;
+
+  // ── The dhw_in_use tier's independent-support rule (issue #330) ─────────
+  // The heater's flag goes up 1–3 minutes into an ordinary recirculation run
+  // with no tap open, so sustained-and-unmeasured is not enough to fire on.
+  // See dhw_in_use_tap_support for the rule these three numbers parameterise.
+
+  // How long a draw that flow, thermal, charge or the subtraction declared may
+  // go on being carried by the flag after its last such tick. The five real
+  // taps in the #330 record carried at most 100 s past their last metered
+  // tick; 120 s covers them with one tick of slack. 0 disables the carry.
+  uint32_t dhw_in_use_carry_max_ms;
+
+  // How far the meter must read above the loop, over and above demand_flow,
+  // before that alone supports the flag with the speed floor lifted. 0.45 GPM
+  // is the largest no-draw bias measured below the floor (1650 rpm, the table
+  // under min_speed_rpm), so a difference beyond demand_flow + this is more
+  // than any low-speed estimator error explains.
+  float dhw_in_use_loop_bias_gpm;
+
+  // How far the pump's speed may have moved since its loop-flow reading was
+  // taken for that reading to still describe the loop the meter is seeing. A
+  // reading from a lower speed invents a draw after a step-up: 0.3 GPM read
+  // at 1650 rpm against 1.6 GPM of loop at 2600.
+  float dhw_in_use_speed_tolerance_rpm;
 };
 
 inline constexpr PumpOnThresholds kDefaultPumpOnThresholds{
@@ -144,6 +168,9 @@ inline constexpr PumpOnThresholds kDefaultPumpOnThresholds{
     /*continuation_max_ms=*/300000,
     /*continuation_release=*/0.0f,  // GPM of computed demand
     /*continuation_release_ticks=*/2,
+    /*dhw_in_use_carry_max_ms=*/120000,
+    /*dhw_in_use_loop_bias_gpm=*/0.45f,
+    /*dhw_in_use_speed_tolerance_rpm=*/100.0f,
 };
 
 // The intensity a tier publishes when it is confident a draw is happening but
@@ -369,6 +396,31 @@ inline bool pump_flow_estimate_is_settled(uint32_t pump_on_since_ms,
   if (settle_ms == 0 || pump_on_since_ms == 0)
     return true;
   return (uint32_t) (now_ms - pump_on_since_ms) >= settle_ms;
+}
+
+// Was this reading taken at least settle_ms into the current pump run?
+//
+// The two tests above ask about *now*: is the current tick past the start, and
+// past the settle window. This asks the same two things about the *reading*,
+// which matters when a reading is allowed to be older than the window — the
+// dhw_in_use support rule accepts a loop-flow reading up to a minute old, so a
+// reading taken 3 s into the run can be fresh-by-age while still describing an
+// impeller that was spinning up. Ages are compared, not stamps, so this wraps
+// correctly at the millis() rollover like its siblings.
+//
+// pump_on_since_ms == 0 means no start has been observed and this abstains
+// (true); last_update_ms == 0 means the channel has never reported (false).
+inline bool reading_taken_after_settle(uint32_t last_update_ms,
+                                       uint32_t pump_on_since_ms,
+                                       uint32_t now_ms, uint32_t settle_ms) {
+  if (last_update_ms == 0)
+    return false;
+  if (pump_on_since_ms == 0)
+    return true;
+  const uint32_t reading_age = now_ms - last_update_ms;
+  const uint32_t run_age = now_ms - pump_on_since_ms;
+  // reading_age + settle_ms <= run_age, written so the sum cannot wrap.
+  return run_age >= reading_age && (run_age - reading_age) >= settle_ms;
 }
 
 // Is the falling-edge flow latch disarmed because the pump just stopped?
@@ -673,6 +725,44 @@ struct PumpOnInputs {
   // release threshold. The caller owns the count; see
   // PumpOnThresholds::continuation_release_ticks.
   uint8_t measured_stopped_ticks{0};
+
+  // ── What the dhw_in_use tier needs beyond the flag (issue #330) ─────────
+  // When the flag's current continuous run began — SustainedHigh::high_since_ms.
+  // Only meaningful while dhw_in_use_sustained is true.
+  uint32_t dhw_in_use_high_since_ms{0};
+
+  // The last tick on which something that *measures* declared demand: a
+  // pump-off flow, thermal or charge verdict, or a subtraction above
+  // demand_flow. Continuation ticks do not stamp it — they measure nothing at
+  // their own tick — and the dhw_in_use tier's own ticks never do, or the tier
+  // would carry itself. 0 means never.
+  uint32_t last_metered_demand_ms{0};
+
+  // The last tick on which the subtraction measured a no-draw (at or under
+  // demand_flow). 0 means never.
+  uint32_t last_measured_no_draw_ms{0};
+
+  // The motor speed at the moment the current pump_flow reading was taken,
+  // captured by the component in that channel's state callback. NaN when the
+  // speed was unknown then, which makes the meter-above-loop support decline.
+  float pump_flow_speed_at_update{NAN};
+
+  // The same for the household meter's reading (found in review on PR #331).
+  // The meter reports on change and may be up to flow_max_stale_ms old, so
+  // after a speed drop it can still describe the faster loop while the speed
+  // and loop readings already describe the slower one. NaN makes (b) decline.
+  float flow_speed_at_update{NAN};
+};
+
+// Why the dhw_in_use tier fired or declined, past its two older gates (flag
+// sustained, subtraction unavailable). Reported so the component can log which
+// support carried a firing without re-deriving it (issue #144).
+enum class DhwInUseSupport : uint8_t {
+  NOT_REACHED,       // the flag was not sustained, or a measurement existed
+  VETOED,            // a fresh meter reading at or under demand_flow
+  UNSUPPORTED,       // nothing independent of the loop vouched for a tap
+  CARRIED_DRAW,      // a metered draw inside the flag's run, still being carried
+  METER_ABOVE_LOOP,  // the meter exceeds the loop by more than any bias
 };
 
 // One pump-on decision. `demand_gpm` is the computed household draw where the
@@ -691,7 +781,119 @@ struct PumpOnResult {
   // re-deriving the reason from `method` — a replica of this decision in the
   // .cpp is exactly what issue #144 removed.
   ContinuationVerdict continuation{ContinuationVerdict::NOT_ARMED};
+
+  // What tier 3 decided, and on what. Set only when that tier was reached.
+  DhwInUseSupport dhw_in_use_support{DhwInUseSupport::NOT_REACHED};
 };
+
+// Does something other than the recirculation loop say a tap is open?
+//
+// The dhw_in_use tier's two older gates — the flag sustained past
+// dhw_in_use_min_seconds, and the subtraction unavailable — turned out to
+// describe the loop as well as they describe a tap (issue #330). The heater's
+// flag rises 1–3 minutes into an ordinary pump run with nobody drawing, and
+// the subtraction is unavailable at every start, whenever a channel is stale,
+// and for the whole run on a pump under its speed floor. Replaying one house's
+// stored data, the tier fired in 20 pump-on events: 13 where the meter read
+// the loop (its median within 0.23 GPM of the pump's own reading), 2 with the
+// meter silent, and 5 real taps.
+//
+// What separated the 15 from the 5 was *when the flag rose* against the last
+// tick that measured demand. In all 15 loop events the flag rose after the
+// last such tick (34 s after at the closest), or there was no such tick. In 4
+// of the 5 taps it rose before or during a draw the meter measured; the fifth
+// was a bench run at 1800 rpm where the meter read 1.36 GPM against the pump's
+// 0.31 — more than any low-speed bias explains.
+//
+// So the tier now also needs one of two supports, and must clear a veto:
+//
+//   Veto.    A fresh meter reading at or under demand_flow. Whatever the pump
+//            is doing, a draw cannot exceed what the meter reads. Seen at a
+//            tap closing: meter 0.00 while the speed was still carried at
+//            2775 rpm.
+//
+//   (a)      A draw the meter saw, still being carried. Flow, thermal, charge
+//            or the subtraction declared demand at or after the start of the
+//            flag's current run, no more than dhw_in_use_carry_max_ms ago, and
+//            the subtraction has not measured a no-draw since. Without the
+//            last clause a tap that closes while the pump keeps running and
+//            the flag stays up is carried on the loop for as long as the flag
+//            stays up.
+//
+//   (b)      The meter above the loop: meter − loop > demand_flow +
+//            dhw_in_use_loop_bias_gpm. The speed floor does not apply — the
+//            margin is what replaces it — but the loop reading has to describe
+//            the loop the meter is seeing: taken within the meter's own 60 s
+//            bound (a reading from before a tap opened reads high against the
+//            throttled loop, which can hide a draw but not invent one), at a
+//            speed within dhw_in_use_speed_tolerance_rpm of the current one,
+//            and not from before the motor started or its first
+//            pump_on_settle_ms.
+//
+// Replayed over the 20 events: the 15 loop and silent-meter events publish
+// nothing; the 5 taps keep every demand cell except the last 50 s of one draw,
+// where the meter read under 0.3 GPM and then 0.00 as the tap closed. On the
+// controlled bench corpus nothing changes: point precision 0.949 / recall
+// 0.918, event recall 6/6.
+//
+// Known costs, none seen in the record: a tap that starts mid-run while the
+// flag is already up from the loop is missed until (b) sees it, and (b) cannot
+// if the loop reading is over 60 s old or the tap is small (0.4 GPM at
+// 1800 rpm stays under the margin); and a flag flicker mid-tap starts a new
+// run, so (a)'s support ends for the rest of that tap.
+//
+// Note what this is not: not a raw-flow rule. (a) keys off ticks that measured
+// something; (b) is the subtraction's own expression with a wider margin in
+// place of the speed floor; the veto is the one direction in which the raw
+// meter *can* decide, because a draw cannot exceed it.
+inline DhwInUseSupport dhw_in_use_tap_support(const PumpOnInputs &in,
+                                              const PumpOnThresholds &t) {
+  const bool meter_fresh = reading_is_fresh(in.flow_last_update_ms, in.now_ms,
+                                            t.flow_max_stale_ms);
+
+  if (meter_fresh && !std::isnan(in.flow) && in.flow <= t.demand_flow)
+    return DhwInUseSupport::VETOED;
+
+  // (a) A metered draw inside the flag's run, still being carried. Ages rather
+  // than stamps throughout, so this wraps at the millis() rollover like the
+  // rest of the file: the older event has the larger age. A zero carry window
+  // disables this support through the `recent` test alone -- a stamp is always
+  // from an earlier tick, so its age is never zero.
+  if (in.last_metered_demand_ms != 0 && in.dhw_in_use_high_since_ms != 0) {
+    const uint32_t demand_age = in.now_ms - in.last_metered_demand_ms;
+    const uint32_t run_age = in.now_ms - in.dhw_in_use_high_since_ms;
+    const bool inside_run = demand_age <= run_age;
+    const bool recent = demand_age <= t.dhw_in_use_carry_max_ms;
+    const bool no_draw_since =
+        in.last_measured_no_draw_ms != 0 &&
+        (in.now_ms - in.last_measured_no_draw_ms) <= demand_age;
+    if (inside_run && recent && !no_draw_since)
+      return DhwInUseSupport::CARRIED_DRAW;
+  }
+
+  // (b) The meter above the loop by more than any bias. The loop reading's
+  // provenance is checked three ways; the speed floor is deliberately absent.
+  if (meter_fresh && !std::isnan(in.flow) && !std::isnan(in.pump_flow) &&
+      !std::isnan(in.motor_speed) && !std::isnan(in.pump_flow_speed_at_update) &&
+      reading_is_fresh(in.pump_flow_last_update_ms, in.now_ms,
+                       t.flow_max_stale_ms) &&
+      reading_taken_after_settle(in.pump_flow_last_update_ms,
+                                 in.pump_on_since_ms, in.now_ms,
+                                 t.pump_on_settle_ms) &&
+      std::fabs(in.motor_speed - in.pump_flow_speed_at_update) <=
+          t.dhw_in_use_speed_tolerance_rpm &&
+      !std::isnan(in.flow_speed_at_update) &&
+      std::fabs(in.motor_speed - in.flow_speed_at_update) <=
+          t.dhw_in_use_speed_tolerance_rpm &&
+      // A meter reading from the previous run can match a restart at the same
+      // speed, so it is also held to the subtraction's own start test.
+      !reading_predates_pump_start(in.flow_last_update_ms, in.pump_on_since_ms,
+                                   in.now_ms) &&
+      (in.flow - in.pump_flow) > (t.demand_flow + t.dhw_in_use_loop_bias_gpm))
+    return DhwInUseSupport::METER_ABOVE_LOOP;
+
+  return DhwInUseSupport::UNSUPPORTED;
+}
 
 // The pump-on branch, in priority order. Extracted from
 // DhwDemandComponent::update() so the *ordering* is under test and not only the
@@ -854,7 +1056,17 @@ inline PumpOnResult decide_pump_on(const PumpOnInputs &in,
   // left every one of the tier's corpus-confirmed true positives — they all
   // live in the no-measurement cells this still fires on. See
   // eman/dhw-sensor-apps#102 and its fix in #103.
+  //
+  // The gate above was necessary and not sufficient (issue #330). The cells
+  // it leaves — unmeasured, flag sustained — are also where the loop itself
+  // raises the flag: 15 of the 20 firings in one house's record had no tap
+  // behind them. So the tier further needs something independent of the loop
+  // to vouch for a tap; see dhw_in_use_tap_support for the rule and the data.
   if (in.dhw_in_use_sustained && std::isnan(r.demand_gpm)) {
+    r.dhw_in_use_support = dhw_in_use_tap_support(in, t);
+  }
+  if (r.dhw_in_use_support == DhwInUseSupport::CARRIED_DRAW ||
+      r.dhw_in_use_support == DhwInUseSupport::METER_ABOVE_LOOP) {
     r.demand = true;
     r.confidence = 0.6f;
     // Past that gate the subtraction is by definition unavailable, so there is

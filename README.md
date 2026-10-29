@@ -200,10 +200,14 @@ float. The Home Assistant entity must therefore report a number — `0`/`1` or
 flag is a `binary_sensor`, map it to a numeric template sensor in Home
 Assistant first.
 
-The flag is unusable bare — it fires often and briefly — so it only declares a
-pump-on draw after holding continuously for `dhw_in_use_min_seconds` (70 s by
-default). It never displaces a stronger tier and only ever adds demand. It is
-entirely optional; leave it out and the other two tiers are unaffected.
+The flag is unusable bare — it fires often and briefly, and it also rises a few
+minutes into an ordinary recirculation run — so it only declares a pump-on draw
+after holding continuously for `dhw_in_use_min_seconds` (70 s by default), and
+only when something independent of the pump's loop supports a tap: a draw the
+detector already metered inside the flag's run, or the meter reading well above
+the pump's own loop flow (see `docs/configuration.md`). It never displaces a
+stronger tier and only ever adds demand. It is entirely optional; leave it out
+and the other two tiers are unaffected.
 
 For a complete working version of this combined recipe, see
 `examples/hwr-pump-dhw-example.yaml` — it is release-pinned and validated by CI,

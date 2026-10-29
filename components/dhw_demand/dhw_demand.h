@@ -63,6 +63,13 @@ class DhwDemandComponent : public PollingComponent {
   }
   void set_flow_max_stale_seconds(int v) { flow_max_stale_seconds_ = v; }
   void set_dhw_in_use_min_seconds(int v) { dhw_in_use_min_seconds_ = v; }
+  void set_dhw_in_use_carry_max_seconds(int v) {
+    dhw_in_use_carry_max_seconds_ = v;
+  }
+  void set_dhw_in_use_loop_bias_gpm(float v) { dhw_in_use_loop_bias_gpm_ = v; }
+  void set_dhw_in_use_speed_tolerance_rpm(float v) {
+    dhw_in_use_speed_tolerance_rpm_ = v;
+  }
   void set_flow_latch_seconds(int v) { flow_latch_seconds_ = v; }
   void set_latch_pump_off_suppression_seconds(int v) {
     latch_pump_off_suppression_seconds_ = v;
@@ -81,6 +88,7 @@ class DhwDemandComponent : public PollingComponent {
  protected:
   // ── Detection helpers ──────────────────────────────────────────────────────
   float read_sensor_(sensor::Sensor *s);
+  float fresh_motor_speed_();
   float compute_deriv_(float current, float &prev, uint32_t &prev_ms,
                       uint32_t now);
   bool flow_latch_active_();
@@ -140,6 +148,15 @@ class DhwDemandComponent : public PollingComponent {
   // How long the heater's DHW in-use flag must stay continuously high before it
   // may declare a pump-on draw on its own. 0 means "high right now is enough".
   int dhw_in_use_min_seconds_{70};              // s
+  // The dhw_in_use tier's independent-support rule (issue #330), defaulted
+  // from kDefaultPumpOnThresholds like the other pump-on numbers so the header
+  // and the host test cannot drift. See dhw_in_use_tap_support.
+  int dhw_in_use_carry_max_seconds_{static_cast<int>(
+      kDefaultPumpOnThresholds.dhw_in_use_carry_max_ms / 1000)};  // s
+  float dhw_in_use_loop_bias_gpm_{
+      kDefaultPumpOnThresholds.dhw_in_use_loop_bias_gpm};  // GPM
+  float dhw_in_use_speed_tolerance_rpm_{
+      kDefaultPumpOnThresholds.dhw_in_use_speed_tolerance_rpm};  // RPM
   int flow_latch_seconds_{30};                 // s
   // Seconds after a confirmed on→off edge during which the flow latch above is
   // disarmed. Matched to flow_latch_seconds_ so the latch cannot reach past the
@@ -194,6 +211,23 @@ class DhwDemandComponent : public PollingComponent {
   // updating current reading would let a frozen 0 RPM outvote it.
   uint32_t motor_speed_last_update_ms_{0};
   uint32_t motor_current_last_update_ms_{0};
+
+  // ── Provenance for the dhw_in_use tier's support rule (issue #330) ───────
+  // The motor speed at the moment the pump_flow channel last reported, taken
+  // in that channel's state callback beside its freshness stamp. A loop-flow
+  // reading only describes the loop the meter is seeing if the pump has not
+  // changed speed since; see dhw_in_use_tap_support. NaN until known.
+  float pump_flow_speed_at_update_{NAN};
+  // The same for the household meter, which reports on change and lags the
+  // pump's own channels; see dhw_in_use_tap_support. NaN until known.
+  float flow_speed_at_update_{NAN};
+  // When something that *measures* last declared demand (a pump-off flow,
+  // thermal or charge verdict, or a subtraction above threshold), and when the
+  // subtraction last measured a no-draw. Continuation ticks and the dhw_in_use
+  // tier's own firings never stamp the first, or the tier would carry itself.
+  // 0 means never; compared as ages so the rollover is safe.
+  uint32_t last_metered_demand_ms_{0};
+  uint32_t last_measured_no_draw_ms_{0};
 
   // ── DHW in-use sustain guard ──────────────────────────────────────────────
   // Ticked in *both* pump branches: the run has to be free to start while the

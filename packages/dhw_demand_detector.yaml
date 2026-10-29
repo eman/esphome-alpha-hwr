@@ -149,6 +149,21 @@ dhw_demand:
   # median duration of 15 s; 70 s clears 89.7 % of those. Only used when
   # dhw_in_use is wired. Set to 0 to accept the bare flag (bench/debug only).
   dhw_in_use_min_seconds: 70
+  # The flag also rises 1-3 minutes into an ordinary recirculation run with
+  # no tap open, so holding is not enough on its own (issue #330). Where no
+  # subtraction is available the tier further needs one of two supports: a
+  # draw that flow, thermal, charge or the subtraction declared inside the
+  # flag's run and no more than this long ago (the longest real carry on
+  # record was 100 s; 0 disables) ...
+  dhw_in_use_carry_max_seconds: 120
+  # ... or the meter above the pump's own loop reading by more than
+  # pump_on_demand_flow_threshold plus this margin, with the speed floor
+  # lifted. 0.45 GPM is the largest no-draw bias measured below the floor.
+  dhw_in_use_loop_bias_gpm: 0.45
+  # For that second support, the loop and meter readings must both have been
+  # taken within this many RPM of the current speed, or they describe a loop
+  # that is no longer running.
+  dhw_in_use_speed_tolerance_rpm: 100
   flow_latch_seconds: 30
   # Disarms the latch above for this long after the pump stops. Loop flow
   # collapses through the flow threshold within seconds of the motor parking,

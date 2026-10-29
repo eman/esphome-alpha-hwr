@@ -165,6 +165,67 @@ release tag carries the new one; the release script moves them.
 
 ### Fixed
 
+- **`dhw_demand`: the `dhw_in_use` tier no longer fires on the recirculation
+  loop itself** ([#330](https://github.com/eman/esphome-alpha-hwr/issues/330)).
+  The tier's two gates — the heater's flag continuously high past
+  `dhw_in_use_min_seconds`, and no subtraction available — turned out to
+  describe an ordinary pump run as well as a tap. The flag rises 1–3 minutes
+  into a recirculation run with nobody drawing, and the subtraction is
+  unavailable at every start, whenever a channel is stale, and for the whole
+  run on a pump under its speed floor. Replaying one house's stored data
+  (2026-02-27 to 2026-09-01), the tier fired on 20 pump-on events: 13 where the
+  meter read the loop, 2 with the meter silent, and 5 real taps.
+
+  What separated the 15 from the 5 was *when the flag rose* against the last
+  tick that measured demand: after it in every loop event (34 s after at the
+  closest), before or during one in 4 of the 5 taps. The fifth was a bench run
+  at 1800 rpm, under the subtraction's floor, where the meter read 1.36 GPM
+  against the pump's own 0.31 — more than any low-speed bias explains.
+
+  The tier now also needs one of two supports, and must clear a veto, in
+  `dhw_in_use_tap_support()`:
+
+  - **Veto.** A fresh meter reading at or under `pump_on_demand_flow_threshold`
+    (0.3 GPM). Whatever the pump is doing, a draw cannot exceed what the meter
+    reads.
+  - **A carried draw.** Flow, thermal, charge or the subtraction declared demand
+    at or after the flag's current run began, no more than
+    `dhw_in_use_carry_max_seconds` (new, default 120; the longest real carry was
+    100 s) ago, and the subtraction has not measured a no-draw since.
+    Continuation ticks do not count — they measure nothing at their own tick —
+    and the tier's own firings never do, or it would carry itself.
+  - **The meter above the loop.** `flow − pump_flow` more than
+    `pump_on_demand_flow_threshold` + `dhw_in_use_loop_bias_gpm` (new, default
+    0.45, the largest no-draw bias measured below the speed floor), with the
+    floor lifted. The loop reading may be up to `flow_max_stale_seconds` old
+    and may not fall inside the run's first `pump_on_demand_settle_seconds`.
+    Neither the loop reading nor the meter reading may predate the motor
+    start, and both must have been taken within
+    `dhw_in_use_speed_tolerance_rpm` (new, default 100) of the current speed.
+    A reading that arrives while the speed is itself stale is recorded with no
+    speed and cannot support.
+
+  Replayed over the 20 events: the 15 loop and silent-meter events publish
+  nothing; the 5 taps keep every demand cell except the last 50 s of one draw,
+  where the meter read under 0.3 GPM and then 0.00 as the tap closed. Scored on
+  the controlled bench corpus nothing changes: point precision 0.949 / recall
+  0.918, event recall 6/6. Known costs, none seen in the record: a tap that
+  starts mid-run while the flag is already up from the loop is missed until the
+  meter clears the loop by the margin, and a flag flicker mid-tap starts a new
+  run, so the carry ends for the rest of that tap.
+
+  The component keeps the memory the rule reads and nothing else: a stamp of
+  the last tick on which something measured demand, a stamp of the last
+  subtraction no-draw, and the motor speed captured beside each `pump_flow`
+  reading in that channel's state callback. The decision, including which
+  support carried a firing, is `PumpOnResult::dhw_in_use_support`, logged at
+  `DEBUG` on every tick the tier is reached. `detection_method` is unchanged:
+  `deterministic_dhw_in_use` still names a firing, `pump_on_uncertain` a
+  decline. The twelve host-test cases the issue lists are in
+  `tests/test_dhw_demand_logic.cpp`; the stamping, the speed capture and the
+  three setters are pinned through the real component in
+  `tests/test_dhw_demand_component.cpp`.
+
 - **`tools/link_gap_report.py` no longer recommends lowering `data_timeout` off a
   run too short to support it** (issue #313). The budget verdict compared a zero
   event count against the tolerance as though it were a rate of zero, so any

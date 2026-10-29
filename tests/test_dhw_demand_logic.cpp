@@ -13,6 +13,9 @@
 
 using esphome::dhw_demand::apply_dhw_in_use_boost;
 using esphome::dhw_demand::decide_pump_on;
+using esphome::dhw_demand::dhw_in_use_tap_support;
+using esphome::dhw_demand::DhwInUseSupport;
+using esphome::dhw_demand::reading_taken_after_settle;
 using esphome::dhw_demand::DemandHold;
 using esphome::dhw_demand::kDefaultPumpOnThresholds;
 using esphome::dhw_demand::prev_tick_confirms_flow_onset;
@@ -286,6 +289,17 @@ static PumpOnInputs live_tick() {
   // Armed a minute ago, well inside the continuation's expiry, so a test that
   // perturbs one field is testing that field and not the expiry.
   in.continuation_since_ms = in.now_ms - 60000;
+  return in;
+}
+
+// The same tick with the heater's flag sustained since well before a draw that
+// something metered 60 s ago: the #330 support that lets the dhw_in_use tier
+// fire where no measurement exists. Used where a test is about one of the
+// tier's *other* gates and must not be masked by this one.
+static PumpOnInputs with_carried_draw(PumpOnInputs in) {
+  in.dhw_in_use_sustained = true;
+  in.dhw_in_use_high_since_ms = in.now_ms - 200000;
+  in.last_metered_demand_ms = in.now_ms - 60000;
   return in;
 }
 
@@ -609,8 +623,12 @@ void test_pump_on_tier_ordering() {
   // moving. (Recorded in the companion detector's bench corpus, which is not
   // tracked in this repo — the shape is reproduced here from its description
   // rather than replayed from it.)
-  PumpOnInputs flag_over_quiet_loop = live_tick();
-  flag_over_quiet_loop.dhw_in_use_sustained = true;
+  //
+  // Since issue #330 the tier also needs independent support, which would
+  // mask this gate: a flag with nothing behind it declines either way. So
+  // every fixture in this block carries a metered draw inside the flag's run
+  // (`with_carried_draw`), and declines *only* because a measurement exists.
+  PumpOnInputs flag_over_quiet_loop = with_carried_draw(live_tick());
   r = decide_pump_on(flag_over_quiet_loop, t);
   TEST_ASSERT(std::string(r.method) == "pump_on_uncertain",
               "A sustained flag over a measured-quiet loop publishes nothing");
@@ -631,8 +649,7 @@ void test_pump_on_tier_ordering() {
   //
   // The intensity half of #143 is still covered, above, where a measured draw
   // reaches tier 2 and scales off the measurement.
-  PumpOnInputs flag_with_small_draw = live_tick();
-  flag_with_small_draw.dhw_in_use_sustained = true;
+  PumpOnInputs flag_with_small_draw = with_carried_draw(live_tick());
   flag_with_small_draw.flow = 1.54f;   // 1.54 - 1.34 = 0.20 GPM, under 0.30
   r = decide_pump_on(flag_with_small_draw, t);
   TEST_ASSERT(std::string(r.method) == "pump_on_uncertain",
@@ -648,8 +665,7 @@ void test_pump_on_tier_ordering() {
   // above the meter, which is instrument mismatch, not water. A gate written as
   // `isnan(gpm) || gpm < 0` would have passed the whole suite and reopened the
   // most common suppressed cell; it does not pass this.
-  PumpOnInputs flag_over_negative_subtraction = live_tick();
-  flag_over_negative_subtraction.dhw_in_use_sustained = true;
+  PumpOnInputs flag_over_negative_subtraction = with_carried_draw(live_tick());
   flag_over_negative_subtraction.flow = 1.319f;  // 1.319 - 1.34 = -0.021 GPM
   r = decide_pump_on(flag_over_negative_subtraction, t);
   TEST_ASSERT(r.demand_gpm < 0.0f,
@@ -665,8 +681,7 @@ void test_pump_on_tier_ordering() {
   // (Exactly 0.30 is not asserted: float subtraction lands either side of the
   // cut depending on the operands, which would make the test about arithmetic
   // rather than about the tier.)
-  PumpOnInputs flag_just_under = live_tick();
-  flag_just_under.dhw_in_use_sustained = true;
+  PumpOnInputs flag_just_under = with_carried_draw(live_tick());
   flag_just_under.flow = 1.63f;  // 1.63 - 1.34 = 0.29 GPM, a hair under
   TEST_ASSERT(std::string(decide_pump_on(flag_just_under, t).method) ==
                   "pump_on_uncertain",
@@ -687,13 +702,23 @@ void test_pump_on_tier_ordering() {
   // tier's recall is mostly earned there. Every one of
   // the tier's corpus-confirmed true positives lives in cells shaped like this
   // one -- the gate above costs it none of them.
+  //
+  // Since issue #330 "no measurement" is necessary but not sufficient: the
+  // flag also rises on the loop itself, so the tier needs something
+  // independent of the loop to vouch for a tap. Here that is a metered draw
+  // 60 s ago inside a flag run that began before it -- the shape of 4 of the
+  // 5 real taps in the #330 record. The rule itself is pinned case by case in
+  // test_dhw_in_use_needs_independent_support below.
   PumpOnInputs flag_with_stale = live_tick();
   flag_with_stale.dhw_in_use_sustained = true;
+  flag_with_stale.dhw_in_use_high_since_ms = flag_with_stale.now_ms - 200000;
+  flag_with_stale.last_metered_demand_ms = flag_with_stale.now_ms - 60000;
   flag_with_stale.flow = 2.22f;  // would look like a big draw on the meter alone
   flag_with_stale.pump_flow_last_update_ms = 900000;
   r = decide_pump_on(flag_with_stale, t);
   TEST_ASSERT(std::string(r.method) == "deterministic_dhw_in_use",
-              "With no measurement to contradict it, the flag still decides");
+              "With no measurement to contradict it and a metered draw being "
+              "carried, the flag decides");
   TEST_ASSERT(r.demand, "The dhw_in_use tier declares demand");
   TEST_ASSERT_NEAR(r.confidence, 0.6f, 0.0001f,
                    "The dhw_in_use tier reports 0.6 confidence");
@@ -702,20 +727,48 @@ void test_pump_on_tier_ordering() {
   TEST_ASSERT_NEAR(r.demand_level, 0.4f, 0.0001f,
                    "A 2.22 GPM meter reading with no measurement still "
                    "publishes the no-claim constant, not 0.89");
+  TEST_ASSERT(r.dhw_in_use_support == DhwInUseSupport::CARRIED_DRAW,
+              "...and reports which support carried it");
+
+  // The same tick with nothing metered inside the flag's run is the #330
+  // false positive: the flag went up on the loop, and the meter reading the
+  // loop is not a measurement of anything. It used to fire here.
+  PumpOnInputs flag_alone = live_tick();
+  flag_alone.dhw_in_use_sustained = true;
+  flag_alone.dhw_in_use_high_since_ms = flag_alone.now_ms - 200000;
+  flag_alone.flow = 2.22f;
+  flag_alone.pump_flow_last_update_ms = 900000;
+  r = decide_pump_on(flag_alone, t);
+  TEST_ASSERT(std::string(r.method) == "pump_on_uncertain",
+              "A sustained flag with no measurement and no independent "
+              "support publishes nothing (issue #330)");
+  TEST_ASSERT(!r.demand, "...and declares no demand");
+  TEST_ASSERT(r.dhw_in_use_support == DhwInUseSupport::UNSUPPORTED,
+              "...reporting that the tier was reached and found no support");
 
   // A pump below its speed floor is the other way the measurement goes away --
   // a pump clamped at 1650 rpm never offers one at all. The tier must keep
-  // firing there, or the gate would cost recall on exactly the hardware that
-  // needs it most.
+  // firing there when a tap is supported, or the gate would cost recall on
+  // exactly the hardware that needs it most. The support here is the fifth
+  // real tap in the #330 record: a bench run at 1800 rpm where the meter read
+  // 1.36 GPM against the pump's own 0.31, which no low-speed bias explains.
   PumpOnInputs flag_below_speed_floor = live_tick();
   flag_below_speed_floor.dhw_in_use_sustained = true;
-  flag_below_speed_floor.motor_speed = 1650.0f;
+  flag_below_speed_floor.dhw_in_use_high_since_ms =
+      flag_below_speed_floor.now_ms - 200000;
+  flag_below_speed_floor.motor_speed = 1800.0f;
+  flag_below_speed_floor.pump_flow_speed_at_update = 1800.0f;
+  flag_below_speed_floor.flow_speed_at_update = 1800.0f;
+  flag_below_speed_floor.pump_flow = 0.31f;
+  flag_below_speed_floor.flow = 1.36f;
   r = decide_pump_on(flag_below_speed_floor, t);
   TEST_ASSERT(std::string(r.method) == "deterministic_dhw_in_use",
               "Below the speed floor there is no measurement, so the flag "
-              "still decides");
+              "decides when the meter clears the loop by more than any bias");
   TEST_ASSERT_NEAR(r.demand_level, 0.4f, 0.0001f,
                    "...at the no-claim constant");
+  TEST_ASSERT(r.dhw_in_use_support == DhwInUseSupport::METER_ABOVE_LOOP,
+              "...and reports the meter-above-loop support");
 
   // An unsustained flag changes nothing — the guard is the whole tier.
   PumpOnInputs unsustained = live_tick();
@@ -744,6 +797,288 @@ void test_pump_on_tier_ordering() {
   TEST_ASSERT(std::string(decide_pump_on(real_draw, t).method) ==
                   "deterministic_pump_on_subtraction",
               "The same meter reading with a stopped loop is a draw");
+}
+
+// The tick the dhw_in_use tier lives on: pump running, loop-flow channel too
+// stale to difference (so the subtraction is NaN and tier 3 is reached), the
+// flag sustained since long before anything else in the scenario, the meter
+// reading the loop. Each case below perturbs this.
+static PumpOnInputs tier3_habitat() {
+  PumpOnInputs in = live_tick();
+  in.pump_flow_last_update_ms = in.now_ms - 40000;  // past the 30 s bound
+  in.pump_flow_speed_at_update = in.motor_speed;
+  in.flow_speed_at_update = in.motor_speed;
+  in.dhw_in_use_sustained = true;
+  in.dhw_in_use_high_since_ms = in.now_ms - 200000;
+  return in;
+}
+
+static const char *method_of(const PumpOnInputs &in) {
+  return decide_pump_on(in, kDefaultPumpOnThresholds).method;
+}
+
+// Issue #330, case by case. The tier's two older gates — flag sustained, no
+// measurement — describe an ordinary recirculation run as well as a tap: the
+// heater's flag rises 1–3 minutes into a pump run with nobody drawing. In one
+// house's record the tier fired on 20 pump-on events and 15 had no tap behind
+// them. The rule pinned here is what separated the 15 from the 5.
+void test_dhw_in_use_needs_independent_support() {
+  std::cout << "\n=== Testing dhw_in_use Independent-Support Rule (#330) ==="
+            << std::endl;
+  const PumpOnThresholds &t = kDefaultPumpOnThresholds;
+
+  TEST_ASSERT(t.dhw_in_use_carry_max_ms == 120000,
+              "Shipped carry window is 120 s (longest real carry was 100 s)");
+  TEST_ASSERT_NEAR(t.dhw_in_use_loop_bias_gpm, 0.45f, 0.0001f,
+                   "Shipped loop bias margin is 0.45 GPM (the 1650 rpm bias)");
+  TEST_ASSERT_NEAR(t.dhw_in_use_speed_tolerance_rpm, 100.0f, 0.0001f,
+                   "Shipped speed tolerance is 100 rpm");
+
+  // ── 1. The flag rose after the metered draw ─────────────────────────────
+  // The discriminating observation. All 15 loop events had the flag rising
+  // *after* the last tick that measured demand (34 s after at the closest);
+  // 4 of the 5 taps had it up before or during one. Same meter, same loop,
+  // same staleness: only the order differs.
+  PumpOnInputs late_flag = tier3_habitat();
+  late_flag.last_metered_demand_ms = late_flag.now_ms - 60000;
+  late_flag.dhw_in_use_high_since_ms = late_flag.now_ms - 30000;  // after it
+  PumpOnResult r = decide_pump_on(late_flag, t);
+  TEST_ASSERT(std::string(r.method) == "pump_on_uncertain",
+              "A flag that rose after the last metered draw does not carry it");
+  TEST_ASSERT(r.dhw_in_use_support == DhwInUseSupport::UNSUPPORTED,
+              "...and the tier reports it found no support");
+
+  PumpOnInputs early_flag = tier3_habitat();
+  early_flag.last_metered_demand_ms = early_flag.now_ms - 60000;
+  early_flag.dhw_in_use_high_since_ms = early_flag.now_ms - 90000;  // before
+  r = decide_pump_on(early_flag, t);
+  TEST_ASSERT(std::string(r.method) == "deterministic_dhw_in_use",
+              "The same window with the flag up since before the draw fires");
+  TEST_ASSERT(r.dhw_in_use_support == DhwInUseSupport::CARRIED_DRAW,
+              "...on the carried draw");
+
+  // ── 2. Nothing metered, flag up for minutes ─────────────────────────────
+  PumpOnInputs nothing_metered = tier3_habitat();
+  TEST_ASSERT(std::string(method_of(nothing_metered)) == "pump_on_uncertain",
+              "A flag up for minutes with nothing ever metered is the loop");
+
+  // ── 3. The carry window ─────────────────────────────────────────────────
+  PumpOnInputs at_window = tier3_habitat();
+  at_window.last_metered_demand_ms = at_window.now_ms - 120000;
+  TEST_ASSERT(std::string(method_of(at_window)) == "deterministic_dhw_in_use",
+              "A metered draw exactly 120 s ago is still carried");
+  PumpOnInputs past_window = tier3_habitat();
+  past_window.last_metered_demand_ms = past_window.now_ms - 130000;
+  TEST_ASSERT(std::string(method_of(past_window)) == "pump_on_uncertain",
+              "A metered draw 130 s ago is not");
+
+  PumpOnThresholds carry_off = t;
+  carry_off.dhw_in_use_carry_max_ms = 0;
+  PumpOnInputs recent = tier3_habitat();
+  recent.last_metered_demand_ms = recent.now_ms - 10000;
+  TEST_ASSERT(std::string(decide_pump_on(recent, carry_off).method) ==
+                  "pump_on_uncertain",
+              "A zero carry window disables support (a) outright");
+
+  // ── 4. A measured no-draw since the metered draw ends the carry ─────────
+  // Without this a tap that closes while the pump keeps running and the flag
+  // stays up is carried on the loop for as long as the flag stays up.
+  PumpOnInputs closed_since = tier3_habitat();
+  closed_since.last_metered_demand_ms = closed_since.now_ms - 60000;
+  closed_since.last_measured_no_draw_ms = closed_since.now_ms - 30000;
+  TEST_ASSERT(std::string(method_of(closed_since)) == "pump_on_uncertain",
+              "A subtraction no-draw after the metered draw ends the carry");
+  PumpOnInputs no_draw_before = tier3_habitat();
+  no_draw_before.last_metered_demand_ms = no_draw_before.now_ms - 60000;
+  no_draw_before.last_measured_no_draw_ms = no_draw_before.now_ms - 90000;
+  TEST_ASSERT(std::string(method_of(no_draw_before)) ==
+                  "deterministic_dhw_in_use",
+              "...but a no-draw from before the draw does not");
+
+  // ── 5. A flag flicker starts a new run ──────────────────────────────────
+  // SustainedHigh re-stamps high_since on the rising edge, so a 20 s dip after
+  // the metered draw leaves the draw outside the new run. The tier reads the
+  // stamp; pin both halves.
+  SustainedHigh flicker;
+  flicker.min_ms = 70000;
+  flicker.update(1.0f, 100000);
+  flicker.update(1.0f, 180000);
+  TEST_ASSERT(flicker.active && flicker.high_since_ms == 100000,
+              "A continuous run is stamped from its first high sample");
+  flicker.update(0.0f, 190000);
+  flicker.update(1.0f, 210000);
+  TEST_ASSERT(flicker.high_since_ms == 210000,
+              "A dip re-stamps the run start on the next rising edge");
+  PumpOnInputs new_run = tier3_habitat();
+  new_run.last_metered_demand_ms = new_run.now_ms - 60000;  // in the old run
+  new_run.dhw_in_use_high_since_ms = new_run.now_ms - 10000;
+  TEST_ASSERT(std::string(method_of(new_run)) == "pump_on_uncertain",
+              "A draw metered in the previous flag run does not support the "
+              "new one");
+
+  // ── 8. The veto: a fresh meter at or under the threshold ────────────────
+  // Whatever the pump is doing, a draw cannot exceed what the meter reads.
+  PumpOnInputs meter_zero = tier3_habitat();
+  meter_zero.last_metered_demand_ms = meter_zero.now_ms - 60000;
+  meter_zero.flow = 0.0f;
+  r = decide_pump_on(meter_zero, t);
+  TEST_ASSERT(std::string(r.method) == "pump_on_uncertain",
+              "A fresh meter reading 0.00 vetoes a supported flag");
+  TEST_ASSERT(r.dhw_in_use_support == DhwInUseSupport::VETOED,
+              "...and says so");
+  PumpOnInputs meter_at = tier3_habitat();
+  meter_at.last_metered_demand_ms = meter_at.now_ms - 60000;
+  meter_at.flow = 0.30f;
+  TEST_ASSERT(std::string(method_of(meter_at)) == "pump_on_uncertain",
+              "A fresh meter at exactly the threshold vetoes too");
+  PumpOnInputs meter_over = tier3_habitat();
+  meter_over.last_metered_demand_ms = meter_over.now_ms - 60000;
+  meter_over.flow = 0.31f;
+  TEST_ASSERT(std::string(method_of(meter_over)) == "deterministic_dhw_in_use",
+              "A fresh meter just over the threshold does not veto");
+  PumpOnInputs meter_stale_zero = tier3_habitat();
+  meter_stale_zero.last_metered_demand_ms = meter_stale_zero.now_ms - 60000;
+  meter_stale_zero.flow = 0.0f;
+  meter_stale_zero.flow_last_update_ms = meter_stale_zero.now_ms - 90000;
+  TEST_ASSERT(std::string(method_of(meter_stale_zero)) ==
+                  "deterministic_dhw_in_use",
+              "A stale zero is not a reading of now and cannot veto");
+
+  // ── 9. Support (b): the meter above the loop by more than any bias ──────
+  // The fifth real tap: 1800 rpm, under the subtraction's speed floor, so the
+  // only way to see it is a margin wider than the worst low-speed bias.
+  // demand_flow + bias = 0.75.
+  PumpOnInputs bench = tier3_habitat();
+  bench.pump_flow_last_update_ms = bench.now_ms;  // fresh, but under the floor
+  bench.motor_speed = 1800.0f;
+  bench.pump_flow_speed_at_update = 1800.0f;
+  bench.flow_speed_at_update = 1800.0f;
+  bench.pump_flow = 0.31f;
+  bench.flow = 1.05f;  // 0.74 over the loop
+  r = decide_pump_on(bench, t);
+  TEST_ASSERT(std::isnan(r.demand_gpm),
+              "At 1800 rpm the subtraction is unavailable, so tier 3 decides");
+  TEST_ASSERT(std::string(r.method) == "pump_on_uncertain",
+              "0.74 GPM over the loop is inside the margin");
+  bench.flow = 1.07f;  // 0.76 over
+  r = decide_pump_on(bench, t);
+  TEST_ASSERT(std::string(r.method) == "deterministic_dhw_in_use",
+              "0.76 GPM over the loop clears it");
+  TEST_ASSERT(r.dhw_in_use_support == DhwInUseSupport::METER_ABOVE_LOOP,
+              "...as meter-above-loop support");
+
+  // ── 10. The loop reading may be up to the meter's bound old ─────────────
+  // A reading from before a tap opened reads high against the throttled loop,
+  // which can hide a draw but not invent one.
+  PumpOnInputs loop_50s = bench;
+  loop_50s.pump_flow_last_update_ms = loop_50s.now_ms - 50000;
+  TEST_ASSERT(std::string(method_of(loop_50s)) == "deterministic_dhw_in_use",
+              "A 50 s old loop reading still supports (b)");
+  PumpOnInputs loop_70s = bench;
+  loop_70s.pump_flow_last_update_ms = loop_70s.now_ms - 70000;
+  TEST_ASSERT(std::string(method_of(loop_70s)) == "pump_on_uncertain",
+              "A 70 s old loop reading does not");
+
+  // ── 11. The loop reading must be from the current speed ─────────────────
+  // 0.3 GPM read at 1650 rpm against 1.6 GPM of loop at 2600 would otherwise
+  // invent a draw after a step-up.
+  PumpOnInputs stepped_up = tier3_habitat();  // 40 s stale, no subtraction
+  stepped_up.motor_speed = 2600.0f;
+  stepped_up.pump_flow = 0.30f;
+  stepped_up.flow = 1.90f;
+  stepped_up.flow_speed_at_update = 2600.0f;
+  stepped_up.pump_flow_speed_at_update = 1650.0f;
+  TEST_ASSERT(std::string(method_of(stepped_up)) == "pump_on_uncertain",
+              "A loop reading from 1650 rpm says nothing about 2600 rpm");
+  stepped_up.pump_flow_speed_at_update = 2600.0f;
+  TEST_ASSERT(std::string(method_of(stepped_up)) == "deterministic_dhw_in_use",
+              "The same reading taken at the current speed supports (b)");
+  stepped_up.pump_flow_speed_at_update = NAN;
+  TEST_ASSERT(std::string(method_of(stepped_up)) == "pump_on_uncertain",
+              "A loop reading whose speed is unknown cannot be compared");
+
+  // ── 11b. ...and so must the meter's (found in review on PR #331) ────────
+  // The meter reports on change and can be up to 60 s old. After a drop from
+  // 2400 to 1800 rpm it can still read the faster loop, 1.31 GPM, while the
+  // pump already reports its own 0.31: a 1.00 GPM "draw" with no tap open.
+  PumpOnInputs dropped = bench;
+  dropped.flow = 1.31f;
+  dropped.flow_last_update_ms = dropped.now_ms - 40000;
+  dropped.flow_speed_at_update = 2400.0f;
+  TEST_ASSERT(std::string(method_of(dropped)) == "pump_on_uncertain",
+              "A meter reading from 2400 rpm says nothing about 1800 rpm");
+  dropped.flow_speed_at_update = 1820.0f;
+  TEST_ASSERT(std::string(method_of(dropped)) == "deterministic_dhw_in_use",
+              "The same reading taken within the tolerance supports (b)");
+  dropped.flow_speed_at_update = NAN;
+  TEST_ASSERT(std::string(method_of(dropped)) == "pump_on_uncertain",
+              "A meter reading whose speed is unknown cannot be compared");
+
+  // ── 12. Not from before the motor started, nor its first 10 s ───────────
+  PumpOnInputs run = bench;
+  run.pump_on_since_ms = run.now_ms - 30000;
+  run.pump_flow_last_update_ms = run.now_ms - 35000;  // before the start
+  TEST_ASSERT(std::string(method_of(run)) == "pump_on_uncertain",
+              "A loop reading from before the motor started is rejected");
+  run.pump_flow_last_update_ms = run.now_ms - 25000;  // 5 s into the run
+  TEST_ASSERT(std::string(method_of(run)) == "pump_on_uncertain",
+              "A loop reading from the first 10 s of the run is rejected");
+  run.pump_flow_last_update_ms = run.now_ms - 20000;  // exactly 10 s in
+  TEST_ASSERT(std::string(method_of(run)) == "deterministic_dhw_in_use",
+              "A loop reading taken once the estimate has settled is accepted");
+
+  // ── 12b. ...and neither is a meter reading from the previous run ────────
+  // Found in Copilot's review of PR #331. A restart at the same speed passes
+  // the meter's speed check, so a 30 s old 1.36 GPM reading from the last run
+  // would be differenced against this run's fresh 0.31 GPM loop.
+  PumpOnInputs restarted = bench;
+  restarted.flow = 1.36f;
+  restarted.pump_on_since_ms = restarted.now_ms - 20000;
+  restarted.pump_flow_last_update_ms = restarted.now_ms;
+  restarted.flow_last_update_ms = restarted.now_ms - 30000;  // before the start
+  TEST_ASSERT(std::string(method_of(restarted)) == "pump_on_uncertain",
+              "A meter reading from before the restart is rejected");
+  restarted.flow_last_update_ms = restarted.now_ms - 15000;  // 5 s into the run
+  TEST_ASSERT(std::string(method_of(restarted)) == "deterministic_dhw_in_use",
+              "A meter reading from this run is accepted");
+
+  // The predicate behind 12, on its own and across the millis() rollover.
+  TEST_ASSERT(reading_taken_after_settle(0, 500, 1000, 10000) == false,
+              "A channel that never reported was not taken after anything");
+  TEST_ASSERT(reading_taken_after_settle(500, 0, 1000, 10000) == true,
+              "With no observed start the settle test abstains");
+  const uint32_t wrap_now = 5000;
+  const uint32_t wrap_start = wrap_now - 15000;  // wraps below zero
+  TEST_ASSERT(reading_taken_after_settle(wrap_now - 3000, wrap_start, wrap_now,
+                                         10000) == true,
+              "12 s into a run that began before the rollover: settled");
+  TEST_ASSERT(reading_taken_after_settle(wrap_now - 14000, wrap_start, wrap_now,
+                                         10000) == false,
+              "1 s into that same run: not settled");
+
+  // ── The veto outranks both supports ─────────────────────────────────────
+  // Not reachable with (b) in practice (the margin implies a meter over the
+  // threshold), but pinned so a reordering cannot let a carried draw survive
+  // a meter that reads nothing.
+  PumpOnInputs carried_but_dry = tier3_habitat();
+  carried_but_dry.last_metered_demand_ms = carried_but_dry.now_ms - 10000;
+  carried_but_dry.flow = 0.0f;
+  TEST_ASSERT(dhw_in_use_tap_support(carried_but_dry, t) ==
+                  DhwInUseSupport::VETOED,
+              "A meter reading 0.00 vetoes even a 10 s old carried draw");
+
+  // ── The tier is not reached where a measurement exists ──────────────────
+  // The #173 gate still runs first: a subtraction in hand means tier 3 never
+  // consults the support rule, however strong the support looks.
+  PumpOnInputs measured_quiet = live_tick();
+  measured_quiet.dhw_in_use_sustained = true;
+  measured_quiet.dhw_in_use_high_since_ms = measured_quiet.now_ms - 200000;
+  measured_quiet.last_metered_demand_ms = measured_quiet.now_ms - 10000;
+  r = decide_pump_on(measured_quiet, t);
+  TEST_ASSERT(std::string(r.method) == "pump_on_uncertain",
+              "A measured no-draw still suppresses the flag, support or not");
+  TEST_ASSERT(r.dhw_in_use_support == DhwInUseSupport::NOT_REACHED,
+              "...and the support rule is not consulted");
 }
 
 void test_pump_on_continuation_predicate() {
@@ -1573,6 +1908,7 @@ int main() {
   test_dhw_in_use_sustain_resets_on_break();
   test_dhw_in_use_sustain_never_arms_without_the_sensor();
   test_pump_on_tier_ordering();
+  test_dhw_in_use_needs_independent_support();
   test_loop_flow_from_before_the_pump_start_is_not_subtracted();
   test_meter_flow_from_before_the_pump_start_is_not_subtracted();
   test_flow_latch_is_disarmed_after_a_shutdown();
