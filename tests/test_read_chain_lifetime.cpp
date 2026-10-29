@@ -296,7 +296,7 @@ static void test_a_late_reply_of_another_type_does_not_answer_a_trend_read() {
   }
   TEST_ASSERT(completed && ok, "history: the typed replies complete the read");
   TEST_ASSERT(got.size() == 4, "history: ...with all four channels");
-  TEST_ASSERT(got.size() == 4 && got[0].current_value == 1.0f * got[0].scale || got[0].current_value == 1.0f,
+  TEST_ASSERT(got.size() == 4 && got[0].current_value == 1.0f,
               "history: ...and the Flow channel holds the trend value, not "
               "four bytes of the clock");
 }

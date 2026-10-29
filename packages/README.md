@@ -24,8 +24,9 @@ NVS.
 - Schedule Layer 0-4, Single Events, Vacation, Schedule Hash, Schedule Stalled
 - Start Count, Operating Hours, Clock Drift, Last Clock Sync, Pump Clock DST
 - Event Log, History Trends and Cycle Timestamps — declared `internal: true`,
-  so they are read and logged but not sent to Home Assistant; give them a
-  `name:` override to export them
+  so they are read and logged but not sent to Home Assistant. To export one,
+  override it with `internal: false` (a `name:` override alone leaves the
+  package's `internal: true` in place)
 - Device info (serial, software/hardware/BLE/product version, product name),
   heap, reset reason, component version and build
 
