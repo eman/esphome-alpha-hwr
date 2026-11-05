@@ -134,7 +134,11 @@ void test_a_short_buffer_is_truncated_not_overrun() {
   std::cout << "\n=== A short buffer is truncated, not overrun ===" << std::endl;
   char buf[16];
   std::memset(buf, 'x', sizeof(buf));
-  format_link_disconnect(buf, sizeof(buf), 0x13, "SERVICE_DISCOVERY");
+  // The length goes through a volatile so the truncation happens at run time.
+  // With every argument a constant, g++ -O2 proves it at compile time and
+  // raises -Wformat-truncation, and CI fails any build with a warning.
+  volatile size_t len = sizeof(buf);
+  format_link_disconnect(buf, len, 0x13, "SERVICE_DISCOVERY");
   TEST_ASSERT(buf[sizeof(buf) - 1] == '\0', "snprintf terminates inside the buffer");
   TEST_ASSERT(std::string(buf) == "Remote Terminat", "...and keeps the leading text");
 }
