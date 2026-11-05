@@ -173,6 +173,10 @@ CONF_LAST_CLOCK_SYNC = "last_clock_sync"
 CONF_PUMP_LINK_STATUS = "pump_link_status"
 CONF_LINK_RECYCLES = "link_recycles"
 CONF_LINK_MAX_GAP = "link_max_gap"
+# The unheld record of link drops (link_disconnect.h): the reason and stage of
+# the most recent one, and how many there have been since boot.
+CONF_LINK_LAST_DISCONNECT = "link_last_disconnect"
+CONF_LINK_DISCONNECTS = "link_disconnects"
 # The tail histogram (issue #176 part 1). These names mirror
 # LINK_GAP_THRESHOLDS_MS in link_watchdog.h, and the coupling is enforced rather
 # than trusted: each generated key resolves to set_link_gaps_over_<T>s_sensor()
@@ -505,6 +509,15 @@ CONFIG_SCHEMA = (
                 entity_category=ENTITY_CATEGORY_DIAGNOSTIC,
                 state_class=STATE_CLASS_MEASUREMENT,
             ),
+            # Every drop since boot (link_disconnect.h). total_increasing for the
+            # same reason as the histogram below: it is a RAM value that restarts
+            # at every boot, and long-term statistics accumulate across the reset.
+            cv.Optional(CONF_LINK_DISCONNECTS): sensor.sensor_schema(
+                icon="mdi:bluetooth-off",
+                accuracy_decimals=0,
+                entity_category=ENTITY_CATEGORY_DIAGNOSTIC,
+                state_class=STATE_CLASS_TOTAL_INCREASING,
+            ),
             # The tail histogram, its trust check, and its denominator (issue #176
             # part 1). link_max_gap above is one point of this distribution; these
             # give its shape, which is what "how often would a budget of T have
@@ -560,6 +573,13 @@ CONFIG_SCHEMA = (
             ),
             cv.Optional(CONF_PUMP_LAST_LINK_FAILURE): text_sensor.text_sensor_schema(
                 icon="mdi:alert-circle-outline",
+            ),
+            # The reason and session stage of the most recent drop, never held
+            # (link_disconnect.h). Diagnostic: the fault sensor above is the
+            # diagnosis; this is the raw record it is made from.
+            cv.Optional(CONF_LINK_LAST_DISCONNECT): text_sensor.text_sensor_schema(
+                icon="mdi:bluetooth-off",
+                entity_category=ENTITY_CATEGORY_DIAGNOSTIC,
             ),
             # Whether the pump's own daylight-saving rule matches this node's
             # timezone (issue #286). Optional, and the read is only issued when
@@ -826,6 +846,9 @@ async def to_code(config):
     if CONF_LINK_MAX_GAP in config:
         sens = await sensor.new_sensor(config[CONF_LINK_MAX_GAP])
         cg.add(var.set_link_max_gap_sensor(sens))
+    if CONF_LINK_DISCONNECTS in config:
+        sens = await sensor.new_sensor(config[CONF_LINK_DISCONNECTS])
+        cg.add(var.set_link_disconnects_sensor(sens))
 
     # One setter per rung, named after the threshold. Deliberately not an
     # index-based setter: the name is the only thing that tells an operator what
@@ -855,6 +878,9 @@ async def to_code(config):
     if CONF_PUMP_LAST_LINK_FAILURE in config:
         sens = await text_sensor.new_text_sensor(config[CONF_PUMP_LAST_LINK_FAILURE])
         cg.add(var.set_pump_last_link_failure_text_sensor(sens))
+    if CONF_LINK_LAST_DISCONNECT in config:
+        sens = await text_sensor.new_text_sensor(config[CONF_LINK_LAST_DISCONNECT])
+        cg.add(var.set_link_last_disconnect_text_sensor(sens))
 
     if CONF_PUMP_CLOCK_DST in config:
         sens = await text_sensor.new_text_sensor(config[CONF_PUMP_CLOCK_DST])

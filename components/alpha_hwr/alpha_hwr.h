@@ -256,6 +256,19 @@ public:
   void set_link_max_gap_sensor(sensor::Sensor *sensor) {
     link_max_gap_sensor_ = sensor;
   }
+  // Drops since boot, every one of them (link_disconnect.h). Same gate as the
+  // two above; it moves once per drop and the baseline 0 goes out once.
+  void set_link_disconnects_sensor(sensor::Sensor *sensor) {
+    link_disconnects_sensor_ = sensor;
+  }
+#ifdef USE_TEXT_SENSOR
+  // The reason and stage of the most recent drop, never held
+  // (link_disconnect.h). Published from the disconnection callback, gated on
+  // change.
+  void set_link_last_disconnect_text_sensor(text_sensor::TextSensor *sensor) {
+    link_last_disconnect_sensor_ = sensor;
+  }
+#endif
   // The tail histogram (issue #176 part 1). One setter per rung rather than one
   // taking an index, and each one static_asserts that the index it writes holds
   // the threshold its own name claims. The name is the only thing telling an
@@ -670,6 +683,10 @@ private:
   // Pump link status (coarse connection-health enum) + latched last failure
   text_sensor::TextSensor *pump_link_status_sensor_{nullptr};
   text_sensor::TextSensor *pump_last_link_failure_sensor_{nullptr};
+  // The unheld record of the last drop (link_disconnect.h), and the last
+  // string published to it, for the change gate.
+  text_sensor::TextSensor *link_last_disconnect_sensor_{nullptr};
+  std::string link_last_disconnect_published_;
 #endif
 
   // Operating statistics sensors
@@ -682,6 +699,13 @@ private:
   // genuinely 0 still has to reach Home Assistant once to be thresholdable.
   uint32_t link_recycles_published_{0xFFFFFFFFu};
   uint32_t link_max_gap_published_{0xFFFFFFFFu};
+  // Every drop since boot, counted in the disconnection callback and
+  // published through the same gate (link_disconnect.h). Saturating, like
+  // link_consecutive_failures_: a counter that wraps publishes one false
+  // "quiet" reading.
+  sensor::Sensor *link_disconnects_sensor_{nullptr};
+  uint32_t link_disconnects_{0};
+  uint32_t link_disconnects_published_{0xFFFFFFFFu};
   // The tail histogram, its trust check, and the time they were drawn from
   // (issue #176 part 1). The counters move at most once per quiet interval past
   // 15 s -- effectively never on a healthy link -- so the change gate above is

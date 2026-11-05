@@ -1,4 +1,5 @@
 #include "ble_connection_manager.h"
+#include "link_disconnect.h"
 #include "esphome/core/log.h"
 #include <algorithm>
 #include <cinttypes>
@@ -852,27 +853,21 @@ void BLEConnectionManager::handle_gattc_event(esp_gattc_cb_event_t event, esp_ga
                         "true before re-pairing, or the pump's offer goes nowhere");
         }
       }
+      // The raw record of this drop, kept regardless of any hold: the component
+      // reads it in the disconnection callback below for Pump Link Last
+      // Disconnect, the surface that exists precisely because the held fault
+      // string hides what happens underneath it (link_disconnect.h).
+      last_disconnect_reason_ = static_cast<uint16_t>(param->disconnect.reason);
       // Latch a human-readable failure reason for the Pump Link Status companion
       // (set before the callback so the component can read it on the same event).
       // Skip while any hold is in place (an auth/encryption failure, or the
       // watchdog's deaf-link reason), so the routine disconnects of the ensuing
       // reconnect loop don't overwrite the real cause before recovery.
       if (failure_hold_admits(failure_hold_, FailureHold::NONE)) {
-        const char *rname;
-        switch (param->disconnect.reason) {
-          case ESP_GATT_CONN_L2C_FAILURE:          rname = "L2CAP Failure"; break;
-          case ESP_GATT_CONN_TIMEOUT:              rname = "Connection Timeout"; break;
-          case ESP_GATT_CONN_TERMINATE_PEER_USER:  rname = "Remote Terminated"; break;
-          case ESP_GATT_CONN_TERMINATE_LOCAL_HOST: rname = "Local Host Terminated"; break;
-          case ESP_GATT_CONN_LMP_TIMEOUT:          rname = "LL Response Timeout"; break;
-          case ESP_GATT_CONN_FAIL_ESTABLISH:       rname = "Failed To Establish"; break;
-          case ESP_GATT_CONN_CONN_CANCEL:          rname = "Connection Cancelled"; break;
-          // ESP_GATT_CONN_UNKNOWN (0) and ESP_GATT_CONN_NONE (0x0101) are
-          // "no known reason" sentinels; let them fall to the default below.
-          default:                                 rname = "Disconnected"; break;
-        }
         char fbuf[48];
-        snprintf(fbuf, sizeof(fbuf), "%s (0x%02x)", rname, param->disconnect.reason);
+        snprintf(fbuf, sizeof(fbuf), "%s (0x%02x)",
+                 disconnect_reason_name(last_disconnect_reason_),
+                 static_cast<unsigned>(last_disconnect_reason_));
         last_failure_ = fbuf;
       }
       scheduler_sequence_++;  // Invalidate any pending scheduler callbacks

@@ -578,6 +578,40 @@ With `data_timeout: 0s` the sensor still records intervals, but there is no
 budget for them to be read against and no recycle to cut them short — it becomes
 a plain "longest quiet period on a live link" number.
 
+#### What the fault sensor cannot show
+
+Pump Link Fault is a *diagnosis*: once it names the cause of an outage — an
+authentication failure, a deaf link, a pump refusing to pair — it holds that
+string over the routine disconnects of the reconnect loop that follows, so the
+cause is not overwritten by its consequences. That is right for an operator and
+blind for an investigator. On one installation a bonded reconnect failed with
+`Pairing Not Supported (0x52)` at 03:25, the fault sensor read that for the next
+ten hours, and nothing Home Assistant kept recorded what the pump did in between:
+how often links opened, what dropped them, or at which stage. Two optional
+sensors fill that in. Both are event-driven and publish nothing on a link that
+stays up.
+
+| Entity | Reads |
+| --- | --- |
+| `link_last_disconnect` | The reason and session stage of the most recent drop, e.g. `Remote Terminated (0x13) in SERVICE_DISCOVERY`. Never held: overwritten on every drop, including the ones this component makes itself (`Local Host Terminated (0x16)` for a recycle or a suspension) |
+| `link_disconnects` | Drops since boot, every one of them. `total_increasing`, so long-term statistics accumulate across reboots |
+
+The stage is in the string because the same code means different things at
+different stages. `Remote Terminated (0x13) in SERVICE_DISCOVERY` within two
+seconds of opening is the pump refusing an unbonded link (#244); the same code
+`in READY` is a pump closing a working link. `Connection Timeout (0x08) in
+READY` is a link going quiet — a supervision timeout, the pump's radio no longer
+answering — where `in SUBSCRIBING` would say the link never got going. `in
+IDLE` means the connection never opened at all: a failed open, or a suspension
+that caught it on the way up.
+
+Read the two together. The text sensor is gated on change, so a reconnect loop
+that drops with the *same* reason every five seconds moves it once; the counter
+is what shows the loop is running, and at what rate. `link_recycles` does not
+serve here: it counts only this node's own watchdog recycles, so a link the pump
+drops before either watchdog fires leaves it at `0` — as it read throughout the
+outage above.
+
 #### The gap histogram
 
 `link_max_gap` reports the worst interval. It cannot report how *many* there

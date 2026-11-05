@@ -1,5 +1,6 @@
 #include "alpha_hwr.h"
 #include "frame_parser.h"
+#include "link_disconnect.h"
 #include "telemetry_decoder.h"
 #include "esphome/core/application.h"  // App.get_build_time_string() for "Component Build"
 #include "esphome/core/version.h"      // ESPHOME_VERSION_CODE / VERSION_CODE
@@ -256,6 +257,13 @@ void AlphaHwrComponent::setup() {
     // connection-open stays as well; it is what arms the watchdog for the new
     // connection.
     this->link_pump_ready_seen_ = false;
+#ifdef USE_TEXT_SENSOR
+    // Pump Link Last Disconnect: take the stage the link died at before the
+    // session forgets it on the next line. The same reason code means
+    // different things at different stages, which is the point of recording it
+    // (link_disconnect.h).
+    const char *const drop_stage = this->session_.get_state_name();
+#endif
     // Invalidate pending initial-read-chain timers so a disconnect mid-chain
     // can't leave them to fire reads against the next connection (issue #18).
     // The chain re-runs fresh on reconnect, so nothing is lost.
@@ -291,6 +299,28 @@ void AlphaHwrComponent::setup() {
     }
     this->link_reached_ready_ = false;
     this->evaluate_link_status();
+
+    // The unheld record of the drop (link_disconnect.h): every drop, including
+    // the ones this component asked for. A watchdog recycle or a suspension
+    // reads "Local Host Terminated (0x16)" here, which is the honest record;
+    // the fault surface is where the reason for it is said. The counter is
+    // published by publish_link_diagnostics_() through the same gate as the
+    // other link counters, so the baseline 0 reaches Home Assistant once.
+    if (this->link_disconnects_ < UINT32_MAX) this->link_disconnects_++;
+#ifdef USE_TEXT_SENSOR
+    if (this->link_last_disconnect_sensor_ != nullptr) {
+      char dbuf[64];
+      core::format_link_disconnect(dbuf, sizeof(dbuf),
+                                   this->ble_manager_.last_disconnect_reason(), drop_stage);
+      // Gated on change: text_sensor::publish_state() does not dedup, and a
+      // reconnect loop drops every ~5 s with the same reason (issue #127). The
+      // counter carries the cadence; this carries the reason.
+      if (this->link_last_disconnect_published_ != dbuf) {
+        this->link_last_disconnect_published_ = dbuf;
+        this->link_last_disconnect_sensor_->publish_state(dbuf);
+      }
+    }
+#endif
 
     // Optional reconnect settle window: after a disconnect, hold off reconnection
     // and start the settle timer only once the pump REAPPEARS (see parse_device),
@@ -868,6 +898,13 @@ void AlphaHwrComponent::publish_link_diagnostics_(uint32_t now_ms) {
     this->link_max_gap_published_ = max_gap_ms;
     this->link_max_gap_sensor_->publish_state(static_cast<float>(max_gap_ms) /
                                               1000.0f);
+  }
+
+  if (this->link_disconnects_sensor_ != nullptr &&
+      this->link_disconnects_published_ != this->link_disconnects_) {
+    this->link_disconnects_published_ = this->link_disconnects_;
+    this->link_disconnects_sensor_->publish_state(
+        static_cast<float>(this->link_disconnects_));
   }
 
   // The tail histogram (issue #176 part 1). Each rung is the number of times a

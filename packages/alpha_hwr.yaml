@@ -240,6 +240,15 @@ alpha_hwr:
    link_max_gap:
      name: "Pump Link Longest Gap"
 
+   # The unheld record of link drops: the reason and session stage of the most
+   # recent one, and how many since boot -- what Pump Link Fault hides while it
+   # holds a diagnosis. See docs/configuration.md, "What the fault sensor
+   # cannot show".
+   link_last_disconnect:
+     name: "Pump Link Last Disconnect"
+   link_disconnects:
+     name: "Pump Link Disconnects"
+
    # The gap histogram: how MANY quiet intervals passed each length, where
    # "Longest Gap" above reports only the worst one. Each counter is the number
    # of times a `data_timeout` of that length would have fired, which is the

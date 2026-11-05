@@ -87,6 +87,12 @@ struct Rig {
   // Pump Clock Drift. Attached by default because the only way to see that a
   // disconnect publishes to it is to have it wired (issue #259).
   esphome::sensor::Sensor clock_drift;
+  // The unheld drop record (link_disconnect.h). Attached by default so every
+  // disconnect in this file exercises the publish path, and because the
+  // frame-budget assertion on the counter is only meaningful on a rig that has
+  // it on.
+  esphome::text_sensor::TextSensor last_disconnect;
+  esphome::sensor::Sensor disconnects;
   // "Pump Clock DST" (issue #286). NOT attached by default: the component only
   // issues the 94/102 read when somebody is asking, and that restraint is
   // itself pinned below.
@@ -127,6 +133,8 @@ struct Rig {
     component.set_link_gaps_truncated_sensor(&gaps_truncated);
     component.set_link_watch_time_sensor(&watch_time);
     component.set_clock_diff_sensor(&clock_drift);
+    component.set_link_last_disconnect_text_sensor(&last_disconnect);
+    component.set_link_disconnects_sensor(&disconnects);
   }
 
   void setup() { component.setup(); }
@@ -1122,6 +1130,99 @@ void test_a_stall_does_not_bury_a_bond_erasing_pairing_failure() {
               "The stall does not replace it. 0x61 is the only pointer to the "
               "reconnect_settle_time mitigation -- the stall is the treatment, "
               "that code is the prevention, and it is the one that recurs");
+}
+
+
+// ── The unheld record of link drops ────────────────────────────────────────
+// link_disconnect.h. The shape is the one recorded on 2026-11-01: a bonded
+// reconnect the pump answered with Pairing Not Supported, the fault surface
+// holding that string -- correctly -- and ten hours of drops underneath it
+// whose reasons, stage and cadence were recorded nowhere. These pin that the
+// two new surfaces see what the held one hides, and that they cost what the
+// issue #127 gate allows.
+
+void test_a_held_fault_does_not_hide_the_drops_underneath() {
+  std::cout << "\n=== A held fault does not hide the drops underneath it ===" << std::endl;
+
+  Rig r;
+  r.component.set_pairing_enabled(true);
+  r.setup();
+  const uint8_t pump[6] = {0x00, 0x1E, 0x2A, 0x00, 0x3C, 0x4D};
+  r.client.mock_set_remote_bda(pump);
+  esp_gap_mock().bond_device_num = 1;
+  std::memcpy(esp_gap_mock().bonded_addr, pump, 6);
+
+  // 03:25:00 -- the bonded reconnect the pump refused.
+  r.open(ESP_GATT_OK);
+  esp_ble_gap_cb_param_t fail{};
+  std::memcpy(fail.ble_security.auth_cmpl.bd_addr, pump, 6);
+  fail.ble_security.auth_cmpl.success = false;
+  fail.ble_security.auth_cmpl.fail_reason = ESP_AUTH_SMP_PAIR_NOT_SUPPORT;
+  r.component.gap_event_handler(ESP_GAP_BLE_AUTH_CMPL_EVT, &fail);
+  r.disconnect(ESP_GATT_CONN_TERMINATE_PEER_USER);
+  r.advance(500, 10);
+  TEST_ASSERT(r.link_fault.state == "Pairing Not Supported (0x52)",
+              "The fault surface holds the pump's refusal, as it should");
+  TEST_ASSERT(r.last_disconnect.state == "Remote Terminated (0x13) in SERVICE_DISCOVERY",
+              "Last Disconnect records the drop that carried it, with the stage");
+
+  // The ten hours: more drops, of two kinds, under the held string.
+  drive_stall_cycles(r, 3, ESP_GATT_CONN_TERMINATE_PEER_USER);
+  TEST_ASSERT(r.link_fault.state == "Pairing Not Supported (0x52)",
+              "...and keeps holding it over the drops that follow");
+  drive_stall_cycles(r, 1, ESP_GATT_CONN_TIMEOUT);
+  TEST_ASSERT(r.link_fault.state == "Pairing Not Supported (0x52)",
+              "A different drop reason does not displace the diagnosis either");
+  TEST_ASSERT(r.last_disconnect.state == "Connection Timeout (0x08) in SERVICE_DISCOVERY",
+              "...but it is recorded, which before this nothing did");
+  TEST_ASSERT(r.disconnects.state == 5.0f,
+              "Five drops, counted -- where Pump Link Recycles reads 0 through the "
+              "whole episode, because none of them was the watchdog's");
+}
+
+void test_last_disconnect_names_the_stage_a_working_link_died_at() {
+  std::cout << "\n=== Last Disconnect names the stage a working link died at ===" << std::endl;
+
+  Rig r;
+  r.setup();
+  r.connect_and_subscribe();
+  r.run_until_ready();
+  TEST_ASSERT(r.ready_is_on(), "Precondition: the link is up and usable");
+
+  r.disconnect(ESP_GATT_CONN_TIMEOUT);
+  TEST_ASSERT(r.last_disconnect.state == "Connection Timeout (0x08) in READY",
+              "The code that reads as a failed attempt in discovery reads here as "
+              "a working link going quiet, which is a different event");
+  TEST_ASSERT(r.link_fault.state == "Connection Timeout (0x08)",
+              "...and the fault surface, with nothing held, shows the same reason "
+              "without the stage -- the two line up byte for byte");
+}
+
+void test_the_drop_record_costs_one_frame_per_change() {
+  std::cout << "\n=== The drop record costs one frame per change, never a repeat ===" << std::endl;
+
+  Rig r;
+  r.setup();
+  r.advance(2000, 2);
+  TEST_ASSERT(r.disconnects.has_state() && r.disconnects.state == 0.0f,
+              "The counter reaches Home Assistant at zero, like the gap counters: "
+              "total_increasing needs the baseline to recognise a reset");
+  TEST_ASSERT(!r.last_disconnect.has_state(),
+              "Nothing has dropped, so Last Disconnect has nothing to say yet");
+  r.disconnects.publish_count = 0;
+
+  const uint8_t pump[6] = {0x00, 0x1E, 0x2A, 0x00, 0x3C, 0x4D};
+  r.client.mock_set_remote_bda(pump);
+  esp_gap_mock().bond_device_num = 0;
+  drive_stall_cycles(r, 4, ESP_GATT_CONN_TERMINATE_PEER_USER);
+  r.advance(60000, 60);  // a minute of link ticks with nothing dropping
+
+  TEST_ASSERT(r.disconnects.state == 4.0f, "Four drops, four counted");
+  TEST_ASSERT(r.disconnects.publish_count == 4,
+              "...and four frames: one per change, none for the ticks between");
+  TEST_ASSERT(r.last_disconnect.publish_count == 1,
+              "The same reason four times is one frame on the text sensor; the "
+              "counter carries the cadence, not a repeat of the string");
 }
 
 
@@ -3024,6 +3125,9 @@ int main() {
   test_a_radio_drop_is_never_reported_as_a_refusal();
   test_the_pump_offering_to_pair_takes_the_fault_back_off();
   test_a_stall_does_not_bury_a_bond_erasing_pairing_failure();
+  test_a_held_fault_does_not_hide_the_drops_underneath();
+  test_last_disconnect_names_the_stage_a_working_link_died_at();
+  test_the_drop_record_costs_one_frame_per_change();
   test_a_link_that_never_becomes_ready_is_recycled();
   test_the_recycle_bound_stops_the_link_being_torn_down();
   test_the_recycle_allowance_is_restored_by_becoming_ready();

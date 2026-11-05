@@ -100,7 +100,7 @@ Two established styles in `tests/`:
 
 **If a component `.cpp` can be compiled against the mocks, it should be.** A file no host target compiles is a file the mutation check cannot reach, and `esphome compile` catching a type error is a ten-minute CI round trip that says nothing about behaviour. `dhw_demand.cpp` sat in exactly that state, and the cost was visible: a block referencing an out-of-scope variable passed 905 green tests and cppcheck, and only the firmware build objected.
 
-`alpha_hwr.cpp`, `ble_connection_manager.cpp` and `api_bridge.cpp` genuinely need ESP-IDF or the API SDK, and stay firmware-build-only. Everything else in `components/` is host-compiled and host-tested, with one exception: `time_service.cpp`, which needs a `esphome/components/time/real_time_clock.h` mock that does not exist yet.
+`alpha_hwr.cpp`, `ble_connection_manager.cpp` and `api_bridge.cpp` need ESP-IDF or the API SDK, and are compiled against the ESP-IDF and ESPHome mocks in `tests/mocks/` by `test_component_wiring.cpp` and `test_api_bridge.cpp` — so a GATT or GAP event can be driven in at the same door the BLE stack uses, and a change to either file gets a host test, not only a firmware build. Everything else in `components/` is host-compiled and host-tested too.
 
 Two things the first round of this taught, worth repeating when adding the next target:
 
