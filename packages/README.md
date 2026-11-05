@@ -20,7 +20,8 @@ NVS.
 - Water, PCB and Control Box Temperature (°C)
 - Active Alarms and Warnings, Pump Run State, Control Mode, Pump Flow Limiter
   and Pump Flow Limited
-- Pump Ready, Pairing Status, Pump Link Status / Fault / Recycles / Longest Gap
+- Pump Ready, Pairing Status, Pump Link Status / Fault / Recycles / Longest Gap /
+  Last Disconnect / Disconnects
 - Schedule Layer 0-4, Single Events, Vacation, Schedule Hash, Schedule Stalled
 - Start Count, Operating Hours, Clock Drift, Last Clock Sync, Pump Clock DST
 - Event Log, History Trends and Cycle Timestamps — declared `internal: true`,

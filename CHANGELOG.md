@@ -2,6 +2,22 @@
 
 ## [Unreleased]
 
+### Added
+
+- **`link_last_disconnect` and `link_disconnects`: the unheld record of link
+  drops.** Pump Link Fault holds the cause of an outage over the routine
+  disconnects that follow it, which is right for an operator and blind for an
+  investigator: on one node a held `Pairing Not Supported (0x52)` covered ten
+  hours of drops whose reasons, stage and cadence were recorded nowhere Home
+  Assistant could keep. The new text sensor is the reason and session stage of
+  the most recent drop (`Remote Terminated (0x13) in SERVICE_DISCOVERY`),
+  overwritten on every drop; the new counter is drops since boot, which a
+  change-gated string cannot show and `link_recycles` does not count. Both are
+  in `packages/alpha_hwr.yaml` as **Pump Link Last Disconnect** and **Pump Link
+  Disconnects**, and documented in `docs/configuration.md`. The reason-name
+  table moved out of `ble_connection_manager.cpp` into `link_disconnect.h`,
+  where it is host-tested.
+
 ## [0.17.0] - 2026-10-28
 
 ### Migration

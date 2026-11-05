@@ -191,6 +191,10 @@ class BLEConnectionManager {
   // failed attempt, and the bond state observed at the last connection-open.
   const std::string &get_last_failure() const { return last_failure_; }
   bool was_bonded_at_open() const { return bonded_at_open_; }
+  /// The reason code of the most recent disconnect, unheld: written on every
+  /// ESP_GATTC_DISCONNECT_EVT before the disconnection callback runs, so the
+  /// component can name the drop that is being reported (link_disconnect.h).
+  uint16_t last_disconnect_reason() const { return last_disconnect_reason_; }
   
  private:
   void subscribe_to_notifications();
@@ -267,6 +271,7 @@ class BLEConnectionManager {
   // Pump Link Status support
   std::string last_failure_;     // latched last failure reason (human-readable)
   bool bonded_at_open_{false};   // bond state captured at the last connection-open
+  uint16_t last_disconnect_reason_{0};  // raw reason of the last drop, never held
   // Why last_failure_ is being held over the routine disconnects of a reconnect
   // loop, if it is. The rank, the release rules and the reasoning behind both
   // live in failure_hold.h, where they are host-tested; every site in the .cpp

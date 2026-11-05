@@ -604,6 +604,18 @@ MUTATIONS=(
 # the operator at the wrong cause, which defeats the whole purpose of naming
 # them; the second is the "distinctness is not correspondence" hole.
 "subscribe-fault-strings-swapped|components/alpha_hwr/subscribe_outcome.h|    case SubscribeOutcome::NO_SERVICE:\n      return \"Subscribe: service not found\";\n    case SubscribeOutcome::NO_CHARACTERISTIC:\n      return \"Subscribe: characteristic not found\";|    case SubscribeOutcome::NO_SERVICE:\n      return \"Subscribe: characteristic not found\";\n    case SubscribeOutcome::NO_CHARACTERISTIC:\n      return \"Subscribe: service not found\";"
+# The unheld drop record (link_disconnect.h). The first two are the table and
+# the string it feeds; the third restores the state this change exists to end,
+# where the raw reason was written only when no fault hold was in force -- so
+# ten hours of drops under a held 0x52 left no record. The last two remove the
+# issue #127 change gates, which is the mistake a periodically-ticking publish
+# path invites: the counter would cost a frame per link tick and the string a
+# frame per drop whether or not anything moved.
+"link-disconnect-timeout-misnamed|components/alpha_hwr/link_disconnect.h|    case 0x08: return \"Connection Timeout\";|    case 0x08: return \"Remote Terminated\";"
+"link-disconnect-stage-dropped|components/alpha_hwr/link_disconnect.h|           static_cast<unsigned>(reason), stage);|           static_cast<unsigned>(reason), \"READY\");"
+"link-last-disconnect-never-recorded|components/alpha_hwr/ble_connection_manager.cpp|      last_disconnect_reason_ = static_cast<uint16_t>(param->disconnect.reason);|      // mutated: the raw reason is never recorded"
+"link-disconnects-republished-every-tick|components/alpha_hwr/alpha_hwr.cpp|      this->link_disconnects_published_ != this->link_disconnects_) {|      true) {"
+"link-last-disconnect-republished-every-drop|components/alpha_hwr/alpha_hwr.cpp|      if (this->link_last_disconnect_published_ != dbuf) {|      if (true) {"
 # Fault-hold rank (issue #175 follow-up). The first restores the exception list
 # the rank replaced: `!= SUBSCRIBE` reads as "hold the specific reason", but an
 # AUTH hold is neither NONE nor SUBSCRIBE, so the watchdog's generic "No data
