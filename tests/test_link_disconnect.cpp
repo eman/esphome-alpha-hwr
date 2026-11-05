@@ -132,15 +132,20 @@ void test_the_reason_half_matches_the_fault_surface() {
 
 void test_a_short_buffer_is_truncated_not_overrun() {
   std::cout << "\n=== A short buffer is truncated, not overrun ===" << std::endl;
-  char buf[16];
-  std::memset(buf, 'x', sizeof(buf));
-  // The length goes through a volatile so the truncation happens at run time.
-  // With every argument a constant, g++ -O2 proves it at compile time and
-  // raises -Wformat-truncation, and CI fails any build with a warning.
-  volatile size_t len = sizeof(buf);
+  char storage[16];
+  // Both the buffer and its length go through volatiles so the truncation is
+  // a run-time event. g++ -O2 can bound the output from either one: from the
+  // length argument, or from the destination's object size when
+  // _FORTIFY_SOURCE (the Ubuntu default CI builds with) routes snprintf
+  // through __snprintf_chk. Given either, it proves the truncation at compile
+  // time and raises -Wformat-truncation, and CI fails any build with a
+  // warning. Hiding only one is not enough; each was tried.
+  char *volatile buf = storage;
+  volatile size_t len = sizeof(storage);
+  std::memset(storage, 'x', sizeof(storage));
   format_link_disconnect(buf, len, 0x13, "SERVICE_DISCOVERY");
-  TEST_ASSERT(buf[sizeof(buf) - 1] == '\0', "snprintf terminates inside the buffer");
-  TEST_ASSERT(std::string(buf) == "Remote Terminat", "...and keeps the leading text");
+  TEST_ASSERT(storage[sizeof(storage) - 1] == '\0', "snprintf terminates inside the buffer");
+  TEST_ASSERT(std::string(storage) == "Remote Terminat", "...and keeps the leading text");
 }
 
 int main() {
