@@ -142,10 +142,17 @@ struct ParsedFrame {
  * Pointers borrow the caller's frame buffer.
  */
 struct Class10ObjectView {
-  uint16_t type{0};
-  uint8_t version{0};
-  const uint8_t* body{nullptr};
-  size_t body_len{0};
+  uint16_t type;
+  uint8_t version;
+  const uint8_t* body;
+  size_t body_len;
+
+  // Default constructor
+  Class10ObjectView()
+    : type(0),
+      version(0),
+      body(nullptr),
+      body_len(0) {}
 };
 
 /**

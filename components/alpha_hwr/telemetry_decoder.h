@@ -153,9 +153,9 @@ struct AlarmWarningTelemetry {
 };
 
 /**
- * Decode energy and power from an OverallEnergyConsumption payload (type 232, version 1).
+ * Decode energy and power from OverallEnergyConsumption (type 232, version 1).
  *
- * Class 10 Object 87, Sub 1 payload format, after the transport strips the header and CRC:
+ * Class 10 Object 87, Sub 1 payload format, after removing the frame header and CRC:
  * - Bytes 0-2: Object size (big-endian uint24)
  * - Bytes 3-10: System energy (big-endian IEEE 754 double, joules)
  * - Bytes 11-14: System power (big-endian IEEE 754 float, watts)

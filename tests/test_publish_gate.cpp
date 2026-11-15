@@ -158,19 +158,24 @@ struct RawGateSensor {
   float state{NAN};
   int count{0};
 };
-}
+}  // namespace
 
 void test_sensor_raw_gate() {
   RawGateSensor sensor;
-  TEST_ASSERT(esphome::alpha_hwr::publish_sensor_if_changed(&sensor, NAN), "First unknown sensor input publishes");
-  TEST_ASSERT(!esphome::alpha_hwr::publish_sensor_if_changed(&sensor, NAN), "Repeated NaN input is gated");
-  TEST_ASSERT(esphome::alpha_hwr::publish_sensor_if_changed(&sensor, 1), "Finite input replaces NaN");
+  TEST_ASSERT(esphome::alpha_hwr::publish_sensor_if_changed(&sensor, NAN),
+              "First unknown sensor input publishes");
+  TEST_ASSERT(!esphome::alpha_hwr::publish_sensor_if_changed(&sensor, NAN),
+              "Repeated NaN input is gated");
+  TEST_ASSERT(esphome::alpha_hwr::publish_sensor_if_changed(&sensor, 1),
+              "Finite input replaces NaN");
   TEST_ASSERT(!esphome::alpha_hwr::publish_sensor_if_changed(&sensor, 1) && sensor.state == 1000,
               "Gate compares raw input rather than converted filter output");
-  sensor.state = 2; // A filter can also make output equal to the next different raw input.
-  TEST_ASSERT(esphome::alpha_hwr::publish_sensor_if_changed(&sensor, 2), "Changed input is not suppressed by filtered output");
+  sensor.state = 2;  // A filter can also make output equal to the next different raw input.
+  TEST_ASSERT(esphome::alpha_hwr::publish_sensor_if_changed(&sensor, 2),
+              "Changed input is not suppressed by filtered output");
   sensor.force = true;
-  TEST_ASSERT(esphome::alpha_hwr::publish_sensor_if_changed(&sensor, 2), "Sensor force_update is honored");
+  TEST_ASSERT(esphome::alpha_hwr::publish_sensor_if_changed(&sensor, 2),
+              "Sensor force_update is honored");
 }
 
 int main() {

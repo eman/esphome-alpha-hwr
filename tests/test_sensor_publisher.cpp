@@ -81,7 +81,6 @@ struct Rig {
 
 }  // namespace
 
-
 // Energy retains the pump's counter while rejecting absent or invalid fields.
 void test_energy_validation_and_publishing() {
   std::cout << "\n=== Energy presence, range validation and publication gating ===" << std::endl;
@@ -92,14 +91,17 @@ void test_energy_validation_and_publishing() {
   sample.has_power = true;
   sample.power_w = 12.5f;
   pub.publish_energy(sample);
-  TEST_ASSERT(!energy.has_state(), "Absent counter stays unknown even when system power is present");
+  TEST_ASSERT(!energy.has_state(),
+              "Absent counter stays unknown even when system power is present");
 
   sample.has_energy = true;
   sample.energy_kwh = 49.125f;
   pub.publish_energy(sample);
-  TEST_ASSERT(near(energy.state, 49.125f) && energy.publish_count == 1, "Valid counter is published");
-  for (float invalid : {-1.0f, std::numeric_limits<float>::quiet_NaN(),
-                        std::numeric_limits<float>::infinity(), -std::numeric_limits<float>::infinity()}) {
+  TEST_ASSERT(near(energy.state, 49.125f) && energy.publish_count == 1,
+              "Valid counter is published");
+  for (float invalid :
+       {-1.0f, std::numeric_limits<float>::quiet_NaN(), std::numeric_limits<float>::infinity(),
+        -std::numeric_limits<float>::infinity()}) {
     sample.energy_kwh = invalid;
     pub.publish_energy(sample);
     TEST_ASSERT(near(energy.state, 49.125f) && energy.publish_count == 1,

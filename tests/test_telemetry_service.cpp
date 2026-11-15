@@ -251,10 +251,9 @@ void test_service_without_a_publisher_is_inert() {
 // Captured HWR 15-55 Object 87/1 reply: OverallEnergyConsumption, type 232 v1.
 // system_energy = 176829746.81838083 J = 49.1193741162 kWh.
 static std::vector<uint8_t> captured_energy_frame() {
-  return {0x24, 0x25, 0xF8, 0xE7, 0x0A, 0x21, 0x00, 0x00, 0xE8, 0x01,
-          0x00, 0x00, 0x1A, 0x41, 0xA5, 0x14, 0x6A, 0x65, 0xA3, 0x02, 0xD0,
-          0x00, 0x00, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x00,
-          0x41, 0xA5, 0x14, 0x6A, 0x65, 0xA3, 0x02, 0xD0, 0x9C, 0x9E};
+  return {0x24, 0x25, 0xF8, 0xE7, 0x0A, 0x21, 0x00, 0x00, 0xE8, 0x01, 0x00, 0x00, 0x1A, 0x41,
+          0xA5, 0x14, 0x6A, 0x65, 0xA3, 0x02, 0xD0, 0x00, 0x00, 0x00, 0x00, 0x00, 0x01, 0x00,
+          0x00, 0x00, 0x00, 0x41, 0xA5, 0x14, 0x6A, 0x65, 0xA3, 0x02, 0xD0, 0x9C, 0x9E};
 }
 
 static esphome::alpha_hwr::protocol::EnergyTelemetry energy_sample(float kwh) {
@@ -265,16 +264,17 @@ static esphome::alpha_hwr::protocol::EnergyTelemetry energy_sample(float kwh) {
 }
 
 static std::vector<uint8_t> object_frame(uint16_t type, uint8_t version, size_t body_size = 8) {
-  std::vector<uint8_t> f = {0x24, 0, 0xF8, 0xE7, 0x0A, static_cast<uint8_t>(7 + body_size),
-                           0, static_cast<uint8_t>(type >> 8), static_cast<uint8_t>(type), version,
-                           0, 0, static_cast<uint8_t>(body_size)};
+  std::vector<uint8_t> f = {
+      0x24, 0, 0xF8, 0xE7, 0x0A, static_cast<uint8_t>(7 + body_size),
+      0, static_cast<uint8_t>(type >> 8), static_cast<uint8_t>(type), version,
+      0, 0, static_cast<uint8_t>(body_size)};
   f.insert(f.end(), body_size + 2, 0);
   f[1] = static_cast<uint8_t>(f.size() - 4);
   return with_crc(f);
 }
 
-static size_t energy_requests(const Rig& r) {
-  return std::count_if(r.sent.begin(), r.sent.end(), [](const std::vector<uint8_t>& f) {
+static size_t energy_requests(const Rig &r) {
+  return std::count_if(r.sent.begin(), r.sent.end(), [](const std::vector<uint8_t> &f) {
     return f.size() == 11 && f[6] == 87 && f[7] == 0 && f[8] == 1;
   });
 }
@@ -289,9 +289,11 @@ void test_energy_counter() {
   r.telemetry.start();
   r.telemetry.poll();
   r.drain(5);
-  TEST_ASSERT(r.sent.size() == 1, "Awaited energy request holds the queue before this poll's legacy reads");
+  TEST_ASSERT(r.sent.size() == 1,
+              "Awaited energy request holds the queue before this poll's legacy reads");
   const std::vector<uint8_t> request = {0x27, 7, 0xE7, 0xF8, 0x0A, 3, 87, 0, 1, 0, 0};
-  TEST_ASSERT(r.sent.front() == with_crc(request), "Energy request uses Object 87/1 and correct CRC");
+  TEST_ASSERT(r.sent.front() == with_crc(request),
+              "Energy request uses Object 87/1 and correct CRC");
   auto frame = captured_energy_frame();
   auto bad_crc = frame;
   bad_crc.back() ^= 1;
@@ -301,7 +303,7 @@ void test_energy_counter() {
   wrong_version = with_crc(wrong_version);
   r.transport.on_notification(wrong_version.data(), wrong_version.size());
   auto wrong_type = frame;
-  wrong_type[7] = 3; // Type 1000 shares E801 with type 232.
+  wrong_type[7] = 3;  // Type 1000 shares E801 with type 232.
   wrong_type = with_crc(wrong_type);
   r.transport.on_notification(wrong_type.data(), wrong_type.size());
   TEST_ASSERT(!energy.has_state(), "CRC, full type and version are checked before energy decoding");
@@ -312,12 +314,13 @@ void test_energy_counter() {
   TEST_ASSERT(energy.publish_count == 1 && std::fabs(energy.state - 49.119374f) < 0.00001f,
               "Captured binary64 counter is published in kWh through the awaited callback");
   TEST_ASSERT(r.sent.size() == 6, "Legacy telemetry resumes after energy completes");
-  TEST_ASSERT(power.state == 17 && power.publish_count == 1, "Motor power remains the only published power source");
+  TEST_ASSERT(power.state == 17 && power.publish_count == 1,
+              "Motor power remains the only published power source");
   r.telemetry.on_packet(frame.data(), frame.size());
   TEST_ASSERT(energy.publish_count == 1, "There is no passive energy publication path");
   r.publisher.publish_energy(energy_sample(energy.raw_state));
   TEST_ASSERT(energy.publish_count == 1, "Unchanged raw counter is gated");
-  energy.state *= 1000; // Simulate a multiply filter after raw_state was recorded.
+  energy.state *= 1000;  // Simulate a multiply filter after raw_state was recorded.
   r.publisher.publish_energy(energy_sample(energy.raw_state));
   TEST_ASSERT(energy.publish_count == 1, "Filtered state cannot defeat the raw-state gate");
   energy.set_force_update(true);
@@ -340,16 +343,18 @@ void test_energy_cadence_and_generation() {
   auto frame = captured_energy_frame();
   r.transport.on_notification(frame.data(), frame.size());
   r.drain(40);
-  TEST_ASSERT(energy_requests(r) == 1, "A queued/outstanding read is not duplicated by another poll");
+  TEST_ASSERT(energy_requests(r) == 1,
+              "A queued/outstanding read is not duplicated by another poll");
   r.telemetry.poll();
   r.drain(20);
-  TEST_ASSERT(energy_requests(r) == 1, "Default 60-second cadence does not follow every telemetry poll");
+  TEST_ASSERT(energy_requests(r) == 1,
+              "Default 60-second cadence does not follow every telemetry poll");
   mock_millis += 60000;
   r.telemetry.poll();
   r.drain(2);
   TEST_ASSERT(energy_requests(r) == 2, "Energy becomes due after the interval");
   r.telemetry.stop();
-  r.transport.reset(); // Retires callback belonging to the previous connection.
+  r.transport.reset();  // Retires callback belonging to the previous connection.
   r.transport.on_notification(frame.data(), frame.size());
   TEST_ASSERT(energy.publish_count == 1, "A stale reply after disconnect cannot publish");
   r.telemetry.set_energy_update_interval(1000);
@@ -380,8 +385,8 @@ void test_energy_short_refusals() {
     r.drain(2);
     // Unknown Class has no payload; other errors carry an item ID or status.
     const uint8_t byte = statuses[i];
-    auto refusal = head == 0x40 ? with_crc({0x24,4,0xF8,0xE7,0x0A,0x40,0,0}) :
-                                with_crc({0x24,5,0xF8,0xE7,0x0A,head,byte,0,0});
+    auto refusal = head == 0x40 ? with_crc({0x24, 4, 0xF8, 0xE7, 0x0A, 0x40, 0, 0})
+                                : with_crc({0x24, 5, 0xF8, 0xE7, 0x0A, head, byte, 0, 0});
     r.transport.on_notification(refusal.data(), refusal.size());
     r.drain(20);
     TEST_ASSERT(r.sent.size() == 6 && energy.state == 12.5f && energy.publish_count == 1,
@@ -390,8 +395,9 @@ void test_energy_short_refusals() {
     r.telemetry.poll();
     r.drain(20);
     const bool unsupported = head == 0x40 || head == 0x81;
-    TEST_ASSERT(energy_requests(r) == (unsupported ? 1 : 2),
-                "Unsupported counter is suppressed; busy/operation failure/illegal operation can retry");
+    TEST_ASSERT(
+        energy_requests(r) == (unsupported ? 1 : 2),
+        "Unsupported counter is suppressed; busy/operation failure/illegal operation can retry");
     r.telemetry.stop();
     r.transport.reset();
     r.telemetry.start();
@@ -416,9 +422,15 @@ void test_energy_object_validation() {
     if (kind == 2) bad[6] = 4;
     if (kind == 3) bad[12] = 27;
     if (kind == 4) bad[5]++;
-    if (kind == 5) { bad.insert(bad.end() - 2, {7,0}); bad[1] += 2; }
+    if (kind == 5) {
+      bad.insert(bad.end() - 2, {7, 0});
+      bad[1] += 2;
+    }
     if (kind == 6) bad[0] = 0x27;
-    if (kind == 7) { bad[13] = 0x7F; bad[14] = 0xF8; } // NaN energy, valid power.
+    if (kind == 7) {
+      bad[13] = 0x7F;
+      bad[14] = 0xF8;
+    }  // NaN energy, valid power.
     bad = with_crc(bad);
     r.transport.on_notification(bad.data(), bad.size());
     TEST_ASSERT(!energy.has_state(), "Malformed/refused object cannot become an energy sample");
@@ -430,25 +442,31 @@ void test_owned_replies_do_not_answer_other_commands() {
     mock_millis = 0;
     Rig r;
     int energy_callbacks = 0, other_callbacks = 0;
-    r.transport.send_class10_object_read(87, 1, 232, 1,
-        [&](bool ok, const uint8_t*, size_t) { if (ok) energy_callbacks++; });
-    const uint8_t other[] = {0x0A,3,94,0,102};
+    r.transport.send_class10_object_read(87, 1, 232, 1, [&](bool ok, const uint8_t *, size_t) {
+      if (ok) energy_callbacks++;
+    });
+    const uint8_t other[] = {0x0A, 3, 94, 0, 102};
     r.transport.send_apdu_command(other, sizeof(other), wildcard ? 0 : 0xE801, wildcard ? 0 : 3,
-        [&](bool ok, const uint8_t*, size_t) { if (ok) other_callbacks++; });
+                                  [&](bool ok, const uint8_t *, size_t) {
+                                    if (ok) other_callbacks++;
+                                  });
     r.drain(2);
-    TEST_ASSERT(r.sent.size() == 1, "Awaited energy owns the transaction before later DST/history reads");
+    TEST_ASSERT(r.sent.size() == 1,
+                "Awaited energy owns the transaction before later DST/history reads");
     auto energy = captured_energy_frame();
     r.transport.on_notification(energy.data(), energy.size());
     r.drain(2);
     r.transport.on_notification(energy.data(), energy.size());
-    TEST_ASSERT(energy_callbacks == 1 && other_callbacks == 0,
-                "Duplicate/late type-232 reply cannot answer wildcard DST or typed cycle timestamps");
+    TEST_ASSERT(
+        energy_callbacks == 1 && other_callbacks == 0,
+        "Duplicate/late type-232 reply cannot answer wildcard DST or typed cycle timestamps");
     auto real = object_frame(wildcard ? 999 : 1000, 1);
     r.transport.on_notification(real.data(), real.size());
     TEST_ASSERT(other_callbacks == 1, "Other command still accepts its actual response");
-    r.transport.send_class10_object_read(87, 1, 232, 1,
-        [&](bool ok, const uint8_t* payload, size_t len) {
-          if (ok && len == 41 && esphome::alpha_hwr::protocol::decode_energy_payload(payload, len).has_energy) {
+    r.transport.send_class10_object_read(
+        87, 1, 232, 1, [&](bool ok, const uint8_t *payload, size_t len) {
+          if (ok && len == 41 &&
+              esphome::alpha_hwr::protocol::decode_energy_payload(payload, len).has_energy) {
             energy_callbacks++;
           }
         });
@@ -461,15 +479,17 @@ void test_owned_replies_do_not_answer_other_commands() {
     two_pumps[26] = 2;
     two_pumps = with_crc(two_pumps);
     r.transport.on_notification(two_pumps.data(), two_pumps.size());
-    TEST_ASSERT(energy_callbacks == 2, "Typed read accepts variable object length, including 0x2D telemetry-filter collision");
+    TEST_ASSERT(
+        energy_callbacks == 2,
+        "Typed read accepts variable object length, including 0x2D telemetry-filter collision");
   }
   // Strict full-type matching also applies without an owned-type registration.
   mock_millis = 0;
   Rig r;
   bool history = false;
-  const uint8_t other[] = {0x0A,3,88,0,1};
+  const uint8_t other[] = {0x0A, 3, 88, 0, 1};
   r.transport.send_apdu_command(other, sizeof(other), 0xE801, 3,
-      [&](bool ok, const uint8_t*, size_t) { history = ok; });
+                                [&](bool ok, const uint8_t *, size_t) { history = ok; });
   r.drain(2);
   auto energy = captured_energy_frame();
   r.transport.on_notification(energy.data(), energy.size());
@@ -484,12 +504,15 @@ void test_energy_timeout_and_late_reply_guards() {
     mock_millis = 0;
     Rig r;
     int energy_callbacks = 0, other_callbacks = 0;
-    r.transport.send_class10_object_read(87, 1, 232, 1,
-        [&](bool ok, const uint8_t* p, size_t) { if (!ok && p == nullptr) energy_callbacks++; });
-    r.drain(52); // Read sent at 60 ms, timed out at 3120 ms.
-    const uint8_t other[] = {0x0A,3,94,0,102};
+    r.transport.send_class10_object_read(87, 1, 232, 1, [&](bool ok, const uint8_t *p, size_t) {
+      if (!ok && p == nullptr) energy_callbacks++;
+    });
+    r.drain(52);  // Read sent at 60 ms, timed out at 3120 ms.
+    const uint8_t other[] = {0x0A, 3, 94, 0, 102};
     r.transport.send_apdu_command(other, sizeof(other), wildcard ? 0 : 0xE801, wildcard ? 0 : 3,
-        [&](bool ok, const uint8_t*, size_t) { if (ok) other_callbacks++; });
+                                  [&](bool ok, const uint8_t *, size_t) {
+                                    if (ok) other_callbacks++;
+                                  });
     r.drain(1);
     auto late = captured_energy_frame();
     r.transport.on_notification(late.data(), late.size());
@@ -503,21 +526,28 @@ void test_energy_timeout_and_late_reply_guards() {
     mock_millis = 0;
     Rig r;
     bool set_completed = false, set_ok = false;
-    r.transport.send_class10_object_read(87, 1, 232, 1, [](bool, const uint8_t*, size_t) {});
+    r.transport.send_class10_object_read(87, 1, 232, 1, [](bool, const uint8_t *, size_t) {});
     r.drain(52);
     if (guard_expired) mock_millis += 501;
-    const uint8_t set[] = {0x0A,0x80};
-    r.transport.send_apdu_command(set, sizeof(set), 0, 0,
-        [&](bool ok, const uint8_t*, size_t) { set_completed = true; set_ok = ok; }, 3000, false, true);
+    const uint8_t set[] = {0x0A, 0x80};
+    r.transport.send_apdu_command(
+        set, sizeof(set), 0, 0,
+        [&](bool ok, const uint8_t *, size_t) {
+          set_completed = true;
+          set_ok = ok;
+        },
+        3000, false, true);
     r.drain(1);
     if (!guard_expired) {
-      auto late_error = with_crc({0x24,5,0xF8,0xE7,0x0A,1,4,0,0});
+      auto late_error = with_crc({0x24, 5, 0xF8, 0xE7, 0x0A, 1, 4, 0, 0});
       r.transport.on_notification(late_error.data(), late_error.size());
-      TEST_ASSERT(!set_completed, "Owed-reply guard consumes a late refusal instead of failing the SET");
+      TEST_ASSERT(!set_completed,
+                  "Owed-reply guard consumes a late refusal instead of failing the SET");
     }
-    auto ack = with_crc({0x24,5,0xF8,0xE7,0x0A,1,0,0,0});
+    auto ack = with_crc({0x24, 5, 0xF8, 0xE7, 0x0A, 1, 0, 0, 0});
     r.transport.on_notification(ack.data(), ack.size());
-    TEST_ASSERT(set_completed && set_ok, "A real SET ACK succeeds after debt consumption or guard expiry");
+    TEST_ASSERT(set_completed && set_ok,
+                "A real SET ACK succeeds after debt consumption or guard expiry");
   }
 }
 
@@ -535,20 +565,23 @@ void test_energy_timeout_retries_on_cadence() {
   mock_millis += 60000;
   r.telemetry.poll();
   r.drain(2);
-  TEST_ASSERT(energy_requests(r) == 2, "Timeout retries on the normal cadence without reconnecting");
+  TEST_ASSERT(energy_requests(r) == 2,
+              "Timeout retries on the normal cadence without reconnecting");
 }
 
 void test_energy_codec_vectors() {
   using namespace esphome::alpha_hwr::protocol;
-  const uint8_t bytes[] = {0xAA,0x3F,0xF8,0,0,0,0,0,0};
+  const uint8_t bytes[] = {0xAA, 0x3F, 0xF8, 0, 0, 0, 0, 0, 0};
   TEST_ASSERT(decode_double_be(bytes, 1) == 1.5, "Codec decodes binary64 with an offset");
-  const uint8_t neg[] = {0xBF,0xF8,0,0,0,0,0,0};
-  const uint8_t inf[] = {0x7F,0xF0,0,0,0,0,0,0};
-  const uint8_t nan[] = {0x7F,0xF8,0,0,0,0,0,0};
+  const uint8_t neg[] = {0xBF, 0xF8, 0, 0, 0, 0, 0, 0};
+  const uint8_t inf[] = {0x7F, 0xF0, 0, 0, 0, 0, 0, 0};
+  const uint8_t nan[] = {0x7F, 0xF8, 0, 0, 0, 0, 0, 0};
   const uint8_t zero[8] = {};
-  TEST_ASSERT(decode_double_be(neg) == -1.5 && decode_double_be(zero) == 0, "Codec preserves signed and zero values");
-  TEST_ASSERT(std::isinf(decode_double_be(inf)) && std::isnan(decode_double_be(nan)), "Codec preserves IEEE special values for validation");
-  const uint8_t u24[] = {0xAA,0x12,0x34,0x56};
+  TEST_ASSERT(decode_double_be(neg) == -1.5 && decode_double_be(zero) == 0,
+              "Codec preserves signed and zero values");
+  TEST_ASSERT(std::isinf(decode_double_be(inf)) && std::isnan(decode_double_be(nan)),
+              "Codec preserves IEEE special values for validation");
+  const uint8_t u24[] = {0xAA, 0x12, 0x34, 0x56};
   TEST_ASSERT(decode_uint24_be(u24, 1) == 0x123456, "Codec decodes uint24 with an offset");
 }
 
@@ -559,7 +592,8 @@ void test_energy_payload_validation() {
   auto decoded = decode_energy_payload(payload.data(), payload.size());
   TEST_ASSERT(decoded.has_energy && std::fabs(decoded.energy_kwh - 49.119374f) < 0.00001f,
               "Captured energy is decoded in kWh");
-  TEST_ASSERT(decoded.has_power && decoded.power_w == 0, "Captured system power is decoded in watts");
+  TEST_ASSERT(decoded.has_power && decoded.power_w == 0,
+              "Captured system power is decoded in watts");
   for (size_t len = 0; len < payload.size(); len++) {
     auto truncated = decode_energy_payload(payload.data(), len);
     TEST_ASSERT(!truncated.has_energy && !truncated.has_power, "Truncated object rejected");
@@ -569,12 +603,15 @@ void test_energy_payload_validation() {
   auto short_size = payload;
   short_size[2] = 7;
   auto short_result = decode_energy_payload(short_size.data(), short_size.size());
-  TEST_ASSERT(!short_result.has_energy && !short_result.has_power, "Object too small for either field rejected");
+  TEST_ASSERT(!short_result.has_energy && !short_result.has_power,
+              "Object too small for either field rejected");
   short_size[2] = 8;
   auto energy_only = decode_energy_payload(short_size.data(), short_size.size());
-  TEST_ASSERT(energy_only.has_energy && !energy_only.has_power, "Object size bounds power independently of trailing bytes");
-  for (double invalid : {-1.0, std::numeric_limits<double>::infinity(),
-                         std::numeric_limits<double>::quiet_NaN(), std::numeric_limits<double>::max()}) {
+  TEST_ASSERT(energy_only.has_energy && !energy_only.has_power,
+              "Object size bounds power independently of trailing bytes");
+  for (double invalid :
+       {-1.0, std::numeric_limits<double>::infinity(), std::numeric_limits<double>::quiet_NaN(),
+        std::numeric_limits<double>::max()}) {
     uint64_t bits;
     std::memcpy(&bits, &invalid, sizeof(bits));
     auto bad = payload;
@@ -588,12 +625,14 @@ void test_energy_payload_validation() {
     auto bad = payload;
     esphome::alpha_hwr::protocol::encode_float_be(invalid, bad.data() + 11);
     auto result = decode_energy_payload(bad.data(), bad.size());
-    TEST_ASSERT(result.has_energy && !result.has_power && std::fabs(result.energy_kwh - 49.119374f) < 0.00001f,
+    TEST_ASSERT(result.has_energy && !result.has_power &&
+                    std::fabs(result.energy_kwh - 49.119374f) < 0.00001f,
                 "Invalid system power does not discard valid energy");
   }
   esphome::alpha_hwr::protocol::encode_float_be(12.5f, payload.data() + 11);
   auto powered = decode_energy_payload(payload.data(), payload.size());
-  TEST_ASSERT(powered.has_power && powered.power_w == 12.5f, "System power is a big-endian float in watts");
+  TEST_ASSERT(powered.has_power && powered.power_w == 12.5f,
+              "System power is a big-endian float in watts");
   std::fill(payload.begin() + 3, payload.begin() + 11, 0);
   auto zero = decode_energy_payload(payload.data(), payload.size());
   TEST_ASSERT(zero.has_energy && zero.energy_kwh == 0 && zero.has_power,

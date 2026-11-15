@@ -98,6 +98,7 @@ double decode_double_be(const uint8_t *data, size_t offset) {
   return value;
 }
 
+// Uint24 decoding (big-endian)
 uint32_t decode_uint24_be(const uint8_t *data, size_t offset) {
   return (static_cast<uint32_t>(data[offset]) << 16) |
          (static_cast<uint32_t>(data[offset + 1]) << 8) |

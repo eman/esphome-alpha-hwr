@@ -43,7 +43,7 @@ inline bool float_state_differs(bool has_state, float published, float candidate
   return published != candidate;
 }
 
-// Preserve the number-gate predicate's existing API.
+/// Number-entity predicate using the shared float comparison.
 inline bool number_state_differs(bool has_state, float published, float candidate) {
   return float_state_differs(has_state, published, candidate);
 }

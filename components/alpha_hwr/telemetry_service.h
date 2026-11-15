@@ -67,7 +67,11 @@ class TelemetryService {
    */
   void set_control_service(ControlService* control_service);
 
-  /** Set minimum elapsed time between energy attempts (default 60 seconds). */
+  /**
+   * Set the minimum interval between energy read attempts.
+   *
+   * @param interval_ms Minimum interval in milliseconds (default 60000)
+   */
   void set_energy_update_interval(uint32_t interval_ms) { energy_update_interval_ms_ = interval_ms; }
 
   /**
@@ -134,16 +138,20 @@ class TelemetryService {
   // State
   bool running_ = false;
 
-  // Handler methods for different telemetry types
+  // Energy polling state
   enum class EnergyReadState : uint8_t { UNKNOWN, AVAILABLE, FAILED, UNSUPPORTED };
-  void poll_energy_();
-  void set_energy_read_state_(EnergyReadState state, const char* reason = "no valid response");
   EnergyReadState energy_read_state_{EnergyReadState::UNKNOWN};
   uint32_t energy_update_interval_ms_{60000};
   uint32_t last_energy_attempt_ms_{0};
   uint32_t energy_generation_{0};
   bool energy_attempted_{false};
   bool energy_read_pending_{false};
+
+  // Energy polling helpers
+  void poll_energy_();
+  void set_energy_read_state_(EnergyReadState state, const char* reason = "no valid response");
+
+  // Handler methods for different telemetry types
   void handle_motor_state_response(const uint8_t* data, size_t len);
   void handle_flow_pressure_response(const uint8_t* data, size_t len);
   void handle_temperature_response(const uint8_t* data, size_t len);

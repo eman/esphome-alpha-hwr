@@ -198,9 +198,11 @@ void TelemetryService::set_energy_read_state_(EnergyReadState state, const char*
   }
   energy_read_state_ = state;
   if (state == EnergyReadState::UNSUPPORTED) {
-    ESP_LOGW(TAG, "Energy counter unsupported (%s); disabling energy reads until reconnect", reason);
+    ESP_LOGW(TAG, "Energy counter unsupported (%s); disabling energy reads until reconnect",
+             reason);
   } else if (state == EnergyReadState::FAILED) {
-    ESP_LOGW(TAG, "Energy read failed (%s); preserving the last value and retrying on its normal cadence", reason);
+    ESP_LOGW(TAG, "Energy read failed (%s); preserving the last value and retrying "
+                  "on its normal cadence", reason);
   } else if (state == EnergyReadState::AVAILABLE) {
     ESP_LOGI(TAG, "Energy counter available");
   }
@@ -236,8 +238,9 @@ void TelemetryService::poll_energy_() {
               set_energy_read_state_(EnergyReadState::UNSUPPORTED, protocol::apdu_ack_name(ack));
               return;
             }
-            const char* reason = protocol::apdu_ack_is_ok(payload[5]) ?
-                protocol::class10_ack_name(payload[6]) : protocol::apdu_ack_name(ack);
+            const char* reason = protocol::apdu_ack_is_ok(payload[5])
+                                     ? protocol::class10_ack_name(payload[6])
+                                     : protocol::apdu_ack_name(ack);
             set_energy_read_state_(EnergyReadState::FAILED, reason);
             return;
           }

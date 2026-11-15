@@ -279,7 +279,7 @@ void Transport::send_class10_object_read(uint8_t object_id, uint16_t sub_id, uin
     owned_object_types_.push_back(type);
   }
   const uint8_t apdu[] = {0x0A, 0x03, object_id, static_cast<uint8_t>(sub_id >> 8),
-                         static_cast<uint8_t>(sub_id)};
+                          static_cast<uint8_t>(sub_id)};
   const uint16_t low_ver = static_cast<uint16_t>(((type & 0xFF) << 8) | version);
   send_apdu_command(apdu, sizeof(apdu), low_ver, type >> 8, std::move(callback), timeout_ms,
                     false, false, false, /*expect_short_read_refusal=*/true, /*require_object_reply=*/true);
