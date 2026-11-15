@@ -14,7 +14,7 @@ namespace esphome {
 namespace alpha_hwr {
 namespace protocol {
 
-bool decode_energy_payload(const uint8_t *payload, size_t len, float &energy_kwh) {
+bool decode_energy_payload(const uint8_t* payload, size_t len, float& energy_kwh) {
   // GENI Class 10 type 232 v1: [object size u24 BE][system_energy f64 BE]...
   // power_and_energy_info_obj (87/1), unitIndex 87 = Ws (joules).
   if (payload == nullptr || len < 11) {

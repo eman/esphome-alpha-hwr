@@ -20,13 +20,17 @@
  * 4. **Alarms/Warnings** (OpSpec 0x09 and 0x13 responses)
  *    - Active alarm codes and warning codes
  * 
- * 5. **Passive Notifications** (OpSpec 0x0E)
+ * 5. **Cumulative Energy** (Object 87, Sub 1; type 232, version 1)
+ *    - Pump energy counter in kWh, converted from joules
+ *
+ * 6. **Passive Notifications** (OpSpec 0x0E)
  *    - Streaming telemetry in legacy format
  * 
  * Payload Format
  * --------------
  * All telemetry payloads use big-endian encoding:
  * - Floats: IEEE 754 single-precision (4 bytes)
+ * - Energy counter: IEEE 754 double-precision (8 bytes)
  * - Integers: Big-endian uint16 (2 bytes)
  * 
  * Values are validated against reasonable ranges to detect corruption.
@@ -44,11 +48,6 @@
 namespace esphome {
 namespace alpha_hwr {
 namespace protocol {
-
-// Decode the size-prefixed payload of type 232 v1 (OverallEnergyConsumption).
-// The first field is the pump's cumulative binary64 joule counter (Obj 87/1).
-// Invalid/truncated values leave energy_kwh untouched.
-bool decode_energy_payload(const uint8_t *payload, size_t len, float &energy_kwh);
 
 /**
  * Decoded motor state telemetry.
@@ -133,6 +132,25 @@ struct AlarmWarningTelemetry {
   
   AlarmWarningTelemetry() : codes() {}
 };
+
+/**
+ * Decode cumulative energy from an OverallEnergyConsumption payload (type 232, version 1).
+ *
+ * Class 10 Object 87, Sub 1 payload format, after the transport strips the header and CRC:
+ * - Bytes 0-2: Object size (big-endian uint24)
+ * - Bytes 3-10: System energy (big-endian IEEE 754 double, joules)
+ *
+ * Converts the pump's cumulative counter from joules to kWh (divide by 3600000).
+ * Invalid or truncated payloads leave energy_kwh unchanged.
+ *
+ * @param payload Size-prefixed object payload (not the full packet)
+ * @param len Length of payload
+ * @param energy_kwh Output cumulative energy in kWh
+ * @return True if the object contains a finite, non-negative counter representable as a float
+ *
+ * Reference: power_and_energy_info_obj.system_energy, GENI unitIndex 87 (Ws)
+ */
+bool decode_energy_payload(const uint8_t* payload, size_t len, float& energy_kwh);
 
 /**
  * Decode motor state from register-read response (OpSpec 0x30).

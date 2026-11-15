@@ -81,7 +81,6 @@ class SensorPublisher {
   void set_power_sensor(sensor::Sensor *sensor) { power_sensor_ = sensor; }
   void set_energy_sensor(sensor::Sensor *sensor) { energy_sensor_ = sensor; }
   bool has_energy_sensor() const { return energy_sensor_ != nullptr; }
-  void publish_energy(float energy_kwh);
   void set_rpm_sensor(sensor::Sensor *sensor) { rpm_sensor_ = sensor; }
   void set_temp_media_sensor(sensor::Sensor *sensor) { temp_media_sensor_ = sensor; }
   void set_temp_pcb_sensor(sensor::Sensor *sensor) { temp_pcb_sensor_ = sensor; }
@@ -102,6 +101,15 @@ class SensorPublisher {
   // ============================================================================
   // Publishing Methods (called from TelemetryService handlers)
   // ============================================================================
+
+  /**
+   * Publish cumulative energy from the pump's counter.
+   *
+   * Skips invalid and unchanged values unless the sensor requests force_update.
+   *
+   * @param energy_kwh Cumulative energy in kWh
+   */
+  void publish_energy(float energy_kwh);
 
   /**
    * Publish motor state telemetry.
