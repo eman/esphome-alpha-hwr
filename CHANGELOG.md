@@ -5,7 +5,11 @@
 ### Added
 
 - Optional `energy` sensor in kWh, read from the pump's cumulative Object 87/1
-  counter. Included in the pump package.
+  counter. Included in the pump package. Reads await an exact typed response
+  on a configurable 60-second cadence, with per-connection unsupported-counter
+  handling. Shared codec and raw-state publication helpers keep decoding and
+  filtering consistent. Exact type matching and owned-reply routing prevent
+  energy replies from satisfying unrelated DST or cycle-history commands.
 
 - **`link_last_disconnect` and `link_disconnects`: the unheld record of link
   drops.** Pump Link Fault holds the cause of an outage over the routine

@@ -86,7 +86,8 @@ struct MotorStateTelemetry {
  * Decoded cumulative energy and system power telemetry.
  *
  * Contains system totals from OverallEnergyConsumption (type 232, version 1).
- * Energy and power are validated independently.
+ * Energy and power are validated independently. The power field models the
+ * documented system totals but is not wired to a separate ESPHome entity.
  */
 struct EnergyTelemetry {
   bool has_energy;

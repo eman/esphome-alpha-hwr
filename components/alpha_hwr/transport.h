@@ -231,6 +231,8 @@ class Transport {
     // no effect beyond the log level. In particular the reply debt is recorded
     // either way (issue #248).
     bool quiet_timeout{false};
+    /// Validate a complete successful object before delivering the payload.
+    bool require_object_reply{false};
     // This command had an ambiguous frame withheld from it because an earlier
     // command was still owed one (issue #248). It must therefore NOT record a
     // fresh debt when it times out: the reply it was waiting for is the frame
@@ -310,7 +312,7 @@ class Transport {
                     uint16_t expect_type_high = 0, CommandCallback callback = nullptr,
                     uint32_t timeout_ms = 3000, bool allow_register_read = false,
                     bool expect_short_ack = false, bool quiet_timeout = false,
-                    bool expect_short_read_refusal = false);
+                    bool expect_short_read_refusal = false, bool require_object_reply = false);
 
   /**
    * Helper to build and queue a command directly from an APDU.
@@ -326,7 +328,25 @@ class Transport {
                          CommandCallback callback = nullptr,
                          uint32_t timeout_ms = 3000, bool allow_register_read = false,
                          bool expect_short_ack = false, bool quiet_timeout = false,
-                         bool expect_short_read_refusal = false);
+                         bool expect_short_read_refusal = false, bool require_object_reply = false);
+
+  /**
+   * Queue an awaited Class 10 GET with an exact object type/version expectation.
+   *
+   * Successful callbacks receive the size-prefixed object payload. A short
+   * refusal supplies its full frame with success=false; timeout/reset supplies
+   * nullptr. Uses the existing bounded late-short-reply safeguard.
+   * Replies of an owned type cannot satisfy an unrelated wildcard command.
+   *
+   * @param object_id Request object ID
+   * @param sub_id Request sub-ID
+   * @param type Expected response object type
+   * @param version Expected response version
+   * @param callback Required completion callback
+   * @param timeout_ms Response timeout (default 3000 ms)
+   */
+  void send_class10_object_read(uint8_t object_id, uint16_t sub_id, uint16_t type,
+                                uint8_t version, CommandCallback callback, uint32_t timeout_ms = 3000);
 
   /**
    * Set callback for complete packets.
@@ -624,6 +644,10 @@ class Transport {
   State state_{State::IDLE};
   std::deque<Command> command_queue_;
   uint32_t last_send_time_{0};
+  // Knowledge of reply ownership survives reset(); each configured type is
+  // remembered once, so late/unsolicited versions cannot leak into wildcards.
+  std::vector<uint16_t> owned_object_types_;
+
   uint32_t send_pacing_ms_{50}; // Delay between fragments or commands
 
   // Reassembly state

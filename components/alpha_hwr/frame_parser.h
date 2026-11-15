@@ -136,6 +136,32 @@ struct ParsedFrame {
 };
 
 /**
+ * Validated Class 10 object reply, independent of APDU payload length.
+ *
+ * The body excludes the Class 10 status, type/version and three-byte size.
+ * Pointers borrow the caller's frame buffer.
+ */
+struct Class10ObjectView {
+  uint16_t type{0};
+  uint8_t version{0};
+  const uint8_t* body{nullptr};
+  size_t body_len{0};
+};
+
+/**
+ * Parse a single successful Class 10 object reply.
+ *
+ * Checks frame kind, CRC, both acknowledgements, APDU boundaries and object size.
+ * Multi-APDU telegrams and truncated objects are rejected.
+ *
+ * @param data Full packet bytes
+ * @param len Length of packet
+ * @param object Output object view, cleared on failure
+ * @return True if the frame contains a complete successful object reply
+ */
+bool parse_class10_object(const uint8_t* data, size_t len, Class10ObjectView& object);
+
+/**
  * Parse raw GENI frame into structured data.
  * 
  * This function validates the frame structure and extracts all fields.

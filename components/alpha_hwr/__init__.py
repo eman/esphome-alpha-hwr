@@ -73,6 +73,7 @@ CONF_FLOW = "flow"
 CONF_HEAD = "head"
 CONF_POWER = "power"
 CONF_ENERGY = "energy"
+CONF_ENERGY_UPDATE_INTERVAL = "energy_update_interval"
 CONF_RPM = "rpm"
 CONF_TEMP_MEDIA = "temp_media"
 CONF_TEMP_PCB = "temp_pcb"
@@ -326,6 +327,7 @@ CONFIG_SCHEMA = (
                 device_class=DEVICE_CLASS_POWER,
                 state_class=STATE_CLASS_MEASUREMENT,
             ),
+            cv.Optional(CONF_ENERGY_UPDATE_INTERVAL, default="60s"): cv.positive_time_period_milliseconds,
             cv.Optional(CONF_ENERGY): sensor.sensor_schema(
                 unit_of_measurement="kWh",
                 accuracy_decimals=3,
@@ -703,6 +705,7 @@ async def to_code(config):
         sens = await sensor.new_sensor(config[CONF_HEAD])
         cg.add(var.set_head_sensor(sens))
 
+    cg.add(var.set_energy_update_interval(config[CONF_ENERGY_UPDATE_INTERVAL]))
     if CONF_ENERGY in config:
         sens = await sensor.new_sensor(config[CONF_ENERGY])
         cg.add(var.set_energy_sensor(sens))

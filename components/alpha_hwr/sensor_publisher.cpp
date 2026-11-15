@@ -8,6 +8,7 @@
  */
 
 #include "sensor_publisher.h"
+#include "publish_gate.h"
 #include "esphome/core/hal.h"
 #include <cmath>
 
@@ -49,9 +50,8 @@ void SensorPublisher::setup_head_rate_callback() {
 
 void SensorPublisher::publish_energy(const protocol::EnergyTelemetry& energy) {
   const float energy_kwh = energy.energy_kwh;
-  if (energy.has_energy && energy_sensor_ != nullptr && std::isfinite(energy_kwh) && energy_kwh >= 0 &&
-      (!energy_sensor_->has_state() || energy_sensor_->state != energy_kwh || energy_sensor_->get_force_update())) {
-    energy_sensor_->publish_state(energy_kwh);
+  if (energy.has_energy && energy_sensor_ != nullptr && std::isfinite(energy_kwh) && energy_kwh >= 0) {
+    publish_sensor_if_changed(energy_sensor_, energy_kwh);
   }
 }
 

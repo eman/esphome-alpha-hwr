@@ -32,15 +32,20 @@
 namespace esphome {
 namespace alpha_hwr {
 
-/// NaN-aware change test for `number` entities. NaN is a meaningful state here
+/// NaN-aware change test for float entities. NaN is a meaningful state here
 /// ("this setpoint does not apply in the active control mode"), and NaN != NaN,
 /// so NaN is compared by identity: the first NaN publishes, later ones don't.
-inline bool number_state_differs(bool has_state, float published, float candidate) {
+inline bool float_state_differs(bool has_state, float published, float candidate) {
   if (!has_state)
     return true;
   if (std::isnan(published) || std::isnan(candidate))
     return std::isnan(published) != std::isnan(candidate);
   return published != candidate;
+}
+
+// Preserve the number-gate predicate's existing API.
+inline bool number_state_differs(bool has_state, float published, float candidate) {
+  return float_state_differs(has_state, published, candidate);
 }
 
 /// Gate for a polled template `number` lambda: returns `value` only when it
@@ -61,6 +66,18 @@ optional<std::string> publish_option_if_changed(SelectT *entity, const std::stri
   if (entity->has_state() && entity->current_option() == option)
     return {};
   return option;
+}
+
+/// Publish numeric sensor input only when its raw (pre-filter) value changes.
+/// Mirrors dhw_demand's sensor gate; filters must never affect comparison.
+template<typename SensorT>
+bool publish_sensor_if_changed(SensorT *entity, float value) {
+  if (!entity->get_force_update() &&
+      !float_state_differs(entity->has_state(), entity->get_raw_state(), value)) {
+    return false;
+  }
+  entity->publish_state(value);
+  return true;
 }
 
 /// Publish `value` to a `text_sensor` only when it would change the entity.

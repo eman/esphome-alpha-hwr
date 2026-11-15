@@ -1,4 +1,5 @@
 #include "codec.h"
+#include <limits>
 
 namespace esphome {
 namespace alpha_hwr {
@@ -78,6 +79,23 @@ float decode_float_be(const uint8_t *data, size_t offset) {
   float value;
   memcpy(&value, &temp, 4);
   return value;
+}
+
+// Double decoding (big-endian), used by cumulative energy counters.
+double decode_double_be(const uint8_t *data, size_t offset) {
+  uint64_t bits = 0;
+  for (size_t i = 0; i < 8; i++) {
+    bits = (bits << 8) | data[offset + i];
+  }
+  double value;
+  static_assert(sizeof(value) == sizeof(bits) && std::numeric_limits<double>::is_iec559,
+                "GENI double values require IEEE-754 binary64");
+  memcpy(&value, &bits, sizeof(value));
+  return value;
+}
+
+uint32_t decode_uint24_be(const uint8_t *data, size_t offset) {
+  return (uint32_t(data[offset]) << 16) | (uint32_t(data[offset + 1]) << 8) | data[offset + 2];
 }
 
 // Uint16 encoding (big-endian)

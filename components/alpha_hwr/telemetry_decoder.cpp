@@ -7,7 +7,6 @@
 #include "telemetry_decoder.h"
 #include "codec.h"
 #include <cmath>
-#include <cstring>
 #include <limits>
 
 namespace esphome {
@@ -22,22 +21,14 @@ EnergyTelemetry decode_energy_payload(const uint8_t* payload, size_t len) {
   if (payload == nullptr || len < 3) {
     return result;
   }
-  const uint32_t object_size = (uint32_t(payload[0]) << 16) |
-                              (uint32_t(payload[1]) << 8) | payload[2];
+  const uint32_t object_size = decode_uint24_be(payload);
   if (object_size > len - 3) {
     return result;
   }
 
   // System energy (offset 3, double): convert joules to kWh.
   if (object_size >= 8) {
-    uint64_t bits = 0;
-    for (size_t i = 3; i < 11; i++) {
-      bits = (bits << 8) | payload[i];
-    }
-    double joules;
-    static_assert(sizeof(joules) == sizeof(bits) && std::numeric_limits<double>::is_iec559,
-                  "Energy requires IEEE-754 binary64");
-    std::memcpy(&joules, &bits, sizeof(joules));
+    const double joules = decode_double_be(payload, 3);
     const double kwh = joules / 3600000.0;
     if (std::isfinite(kwh) && kwh >= 0 && kwh <= std::numeric_limits<float>::max()) {
       result.has_energy = true;
