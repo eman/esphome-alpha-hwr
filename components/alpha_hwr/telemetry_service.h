@@ -107,7 +107,7 @@ class TelemetryService {
   /**
    * Process incoming packet.
    * 
-   * Routes the packet to the appropriate handler based on OpSpec:
+   * Routes energy replies by object type 232/version 1, then other telemetry by OpSpec:
    * - 0x30: Motor state response
    * - 0x2B: Flow/pressure response
    * - 0x14: Temperature response
@@ -132,6 +132,7 @@ class TelemetryService {
   bool running_ = false;
 
   // Handler methods for different telemetry types
+  void handle_energy_response(const uint8_t* payload, size_t len);
   void handle_motor_state_response(const uint8_t* data, size_t len);
   void handle_flow_pressure_response(const uint8_t* data, size_t len);
   void handle_temperature_response(const uint8_t* data, size_t len);

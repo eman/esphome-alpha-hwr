@@ -11,6 +11,7 @@
 #include "codec.h"
 #include "frame_builder.h"
 #include "frame_parser.h"
+#include "response_match.h"
 #include "telemetry_decoder.h"
 #include "sensor_publisher.h"
 #include "control_service.h"
@@ -86,17 +87,7 @@ void TelemetryService::poll() {
   send_read_request(0x58000B); // Warnings
 
   if (sensor_publisher_ != nullptr && sensor_publisher_->has_energy_sensor()) {
-    // Object 87/1 replies as type 232 v1 rather than an echoed register address.
-    // Match its type so a late reply to another read cannot become an energy
-    // sample. Transport validates CRC/ACK and strips the first 10 bytes + CRC.
-    const uint8_t apdu[] = {0x0A, 0x03, 87, 0x00, 0x01};
-    transport_.send_apdu_command(apdu, sizeof(apdu), 0xE801, 0,
-        [this](bool success, const uint8_t* payload, size_t len) {
-          if (running_ && success) {
-            protocol::EnergyTelemetry energy = protocol::decode_energy_payload(payload, len);
-            sensor_publisher_->publish_energy(energy);
-          }
-        });
+    send_read_request(0x570001); // Cumulative energy
   }
 }
 
@@ -126,6 +117,19 @@ void TelemetryService::on_packet(const uint8_t* data, size_t len) {
   ESP_LOGV(TAG, "Class 10 packet, OpSpec: 0x%02X, Sub=0x%04X, Obj=0x%04X", 
            opspec, frame.sub_id, frame.obj_id);
   
+  // Energy replies identify OverallEnergyConsumption (type 232, version 1).
+  // Route by type before the legacy OpSpec cases: the reply's OpSpec contains
+  // the APDU length, which changes with the number of per-pump records.
+  if (protocol::apdu_object_type(frame.sub_id, frame.obj_id) == 232) {
+    const size_t apdu_end = 6 + (opspec & 0x3F);
+    const size_t frame_end = static_cast<size_t>(data[1]) + 2;  // Before CRC
+    if (protocol::apdu_object_version(frame.obj_id) == 1 && (opspec >> 6) == 0 &&
+        !frame.multi_apdu && apdu_end >= 13 && apdu_end <= frame_end) {
+      handle_energy_response(data + 10, apdu_end - 10);
+    }
+    return;
+  }
+
   // Route to appropriate handler based on OpSpec
   switch (opspec) {
     case 0x30:  // Motor state response
@@ -194,6 +198,14 @@ void TelemetryService::on_packet(const uint8_t* data, size_t len) {
     default:
       ESP_LOGD(TAG, "Unhandled OpSpec: 0x%02X", opspec);
       break;
+  }
+}
+
+void TelemetryService::handle_energy_response(const uint8_t* payload, size_t len) {
+  protocol::EnergyTelemetry energy = protocol::decode_energy_payload(payload, len);
+
+  if (sensor_publisher_) {
+    sensor_publisher_->publish_energy(energy);
   }
 }
 

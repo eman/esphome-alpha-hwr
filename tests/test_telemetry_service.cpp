@@ -67,6 +67,9 @@ struct Rig {
     publisher.set_alarms_text_sensor(&alarms);
     publisher.set_warnings_text_sensor(&warnings);
     telemetry.set_sensor_publisher(&publisher);
+    transport.set_packet_callback([this](const uint8_t *data, size_t len) {
+      this->telemetry.on_packet(data, len);
+    });
     transport.set_write_callback([this](const uint8_t *data, size_t len) {
       this->sent.push_back(std::vector<uint8_t>(data, data + len));
       return true;
@@ -313,7 +316,7 @@ void test_energy_counter() {
   TEST_ASSERT(energy.state == 0, "A pump counter reset is passed through for total_increasing handling");
 }
 
-void test_energy_unsupported_and_timeout_preserve_state() {
+void test_energy_unsupported_and_silence_preserve_state() {
   mock_millis = 0;
   Rig r;
   esphome::sensor::Sensor energy;
@@ -322,11 +325,71 @@ void test_energy_unsupported_and_timeout_preserve_state() {
   r.telemetry.start();
   r.telemetry.poll();
   r.drain(40);
+  r.telemetry.poll();
+  r.drain(40);
+  TEST_ASSERT(r.sent.size() == 12, "A missing energy reply does not hold the next telemetry poll");
   auto unsupported = with_crc({0x24, 0x05, 0xF8, 0xE7, 0x0A, 0x01, 0x04, 0, 0});
   r.transport.on_notification(unsupported.data(), unsupported.size());
   r.drain(60);
   TEST_ASSERT(energy.state == 12.5f && energy.publish_count == 1,
-              "An unsupported read or timeout preserves the last counter without inventing zero");
+              "An unsupported read or missing reply preserves the last counter without inventing zero");
+}
+
+void test_energy_on_packet_validation() {
+  Rig r;
+  esphome::sensor::Sensor energy;
+  r.publisher.set_energy_sensor(&energy);
+  const auto captured = captured_energy_frame();
+
+  auto bad = captured;
+  bad.back() ^= 1;
+  r.telemetry.on_packet(bad.data(), bad.size());
+  TEST_ASSERT(!energy.has_state(), "on_packet rejects energy with bad CRC directly");
+  for (size_t index : {size_t(0), size_t(4), size_t(7), size_t(8), size_t(9)}) {
+    bad = captured;
+    bad[index] ^= 1;
+    bad = with_crc(bad);
+    r.telemetry.on_packet(bad.data(), bad.size());
+    TEST_ASSERT(!energy.has_state(), "on_packet rejects wrong frame kind, class, type, or version");
+  }
+  bad = captured;
+  bad[0] = 0x27;
+  bad = with_crc(bad);
+  r.telemetry.on_packet(bad.data(), bad.size());
+  TEST_ASSERT(!energy.has_state(), "on_packet rejects a request frame containing energy-shaped data");
+  for (uint8_t head : {uint8_t(0x61), uint8_t(0xA1), uint8_t(0xE1), uint8_t(0x22)}) {
+    bad = captured;
+    bad[5] = head;
+    bad = with_crc(bad);
+    r.telemetry.on_packet(bad.data(), bad.size());
+    TEST_ASSERT(!energy.has_state(), "on_packet rejects negative ACKs and an overstated APDU length");
+  }
+  bad = captured;
+  bad[5] = 0x20;
+  bad = with_crc(bad);
+  r.telemetry.on_packet(bad.data(), bad.size());
+  TEST_ASSERT(!energy.has_state(), "on_packet rejects trailing APDUs instead of decoding beyond APDU one");
+  r.telemetry.on_packet(captured.data(), captured.size() - 1);
+  TEST_ASSERT(!energy.has_state(), "on_packet rejects a truncated energy frame");
+  r.telemetry.on_packet(captured.data(), captured.size());
+  TEST_ASSERT(energy.publish_count == 1, "A valid energy reply is routed without a pending request");
+
+  // Two per-pump records give an APDU length of 0x2D, which the legacy parser
+  // treats as a register-read response. The type-routed energy path must still
+  // decode the size-prefixed object from offset 10.
+  auto two_pumps = captured;
+  two_pumps.insert(two_pumps.end() - 2, 12, 0);
+  two_pumps[1] = static_cast<uint8_t>(two_pumps.size() - 4);
+  two_pumps[5] = 0x2D;
+  two_pumps[12] = 38;
+  two_pumps[26] = 2;
+  esphome::alpha_hwr::protocol::encode_float_be(12.5f, two_pumps.data() + 21);
+  two_pumps[13] = 0x41;
+  two_pumps[14] = 0xB5;  // Double the captured counter, keeping the remaining bits
+  two_pumps = with_crc(two_pumps);
+  r.telemetry.on_packet(two_pumps.data(), two_pumps.size());
+  TEST_ASSERT(energy.publish_count == 2 && std::fabs(energy.state - 98.238748f) < 0.00002f,
+              "Energy routing uses object type across different APDU lengths");
 }
 
 void test_energy_payload_validation() {
@@ -379,8 +442,9 @@ void test_energy_payload_validation() {
 
 int main() {
   test_energy_counter();
+  test_energy_on_packet_validation();
   test_energy_payload_validation();
-  test_energy_unsupported_and_timeout_preserve_state();
+  test_energy_unsupported_and_silence_preserve_state();
   std::cout << "==========================================" << std::endl;
   std::cout << "Telemetry Service Tests" << std::endl;
   std::cout << "==========================================" << std::endl;
