@@ -296,7 +296,7 @@ void test_energy_counter() {
               "Energy request uses Object 87/1 and correct CRC");
   auto frame = captured_energy_frame();
   auto bad_crc = frame;
-  bad_crc.back() ^= 1;
+  bad_crc.at(bad_crc.size() - 1) ^= 1;
   r.transport.on_notification(bad_crc.data(), bad_crc.size());
   auto wrong_version = frame;
   wrong_version[9] = 2;
