@@ -83,10 +83,14 @@ float decode_float_be(const uint8_t *data, size_t offset) {
 
 // Double decoding (big-endian), used by cumulative energy counters.
 double decode_double_be(const uint8_t *data, size_t offset) {
-  uint64_t bits = 0;
-  for (size_t i = 0; i < 8; i++) {
-    bits = (bits << 8) | data[offset + i];
-  }
+  uint64_t bits = (static_cast<uint64_t>(data[offset]) << 56) |
+                  (static_cast<uint64_t>(data[offset + 1]) << 48) |
+                  (static_cast<uint64_t>(data[offset + 2]) << 40) |
+                  (static_cast<uint64_t>(data[offset + 3]) << 32) |
+                  (static_cast<uint64_t>(data[offset + 4]) << 24) |
+                  (static_cast<uint64_t>(data[offset + 5]) << 16) |
+                  (static_cast<uint64_t>(data[offset + 6]) << 8) |
+                  static_cast<uint64_t>(data[offset + 7]);
   double value;
   static_assert(sizeof(value) == sizeof(bits) && std::numeric_limits<double>::is_iec559,
                 "GENI double values require IEEE-754 binary64");
@@ -95,7 +99,9 @@ double decode_double_be(const uint8_t *data, size_t offset) {
 }
 
 uint32_t decode_uint24_be(const uint8_t *data, size_t offset) {
-  return (uint32_t(data[offset]) << 16) | (uint32_t(data[offset + 1]) << 8) | data[offset + 2];
+  return (static_cast<uint32_t>(data[offset]) << 16) |
+         (static_cast<uint32_t>(data[offset + 1]) << 8) |
+         static_cast<uint32_t>(data[offset + 2]);
 }
 
 // Uint16 encoding (big-endian)
