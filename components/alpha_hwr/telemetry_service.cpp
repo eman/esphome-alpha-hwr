@@ -92,9 +92,9 @@ void TelemetryService::poll() {
     const uint8_t apdu[] = {0x0A, 0x03, 87, 0x00, 0x01};
     transport_.send_apdu_command(apdu, sizeof(apdu), 0xE801, 0,
         [this](bool success, const uint8_t* payload, size_t len) {
-          float energy_kwh;
-          if (running_ && success && protocol::decode_energy_payload(payload, len, energy_kwh)) {
-            sensor_publisher_->publish_energy(energy_kwh);
+          if (running_ && success) {
+            protocol::EnergyTelemetry energy = protocol::decode_energy_payload(payload, len);
+            sensor_publisher_->publish_energy(energy);
           }
         });
   }

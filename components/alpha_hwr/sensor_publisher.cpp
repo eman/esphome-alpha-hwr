@@ -47,8 +47,9 @@ void SensorPublisher::setup_head_rate_callback() {
   });
 }
 
-void SensorPublisher::publish_energy(float energy_kwh) {
-  if (energy_sensor_ != nullptr && std::isfinite(energy_kwh) && energy_kwh >= 0 &&
+void SensorPublisher::publish_energy(const protocol::EnergyTelemetry& energy) {
+  const float energy_kwh = energy.energy_kwh;
+  if (energy.has_energy && energy_sensor_ != nullptr && std::isfinite(energy_kwh) && energy_kwh >= 0 &&
       (!energy_sensor_->has_state() || energy_sensor_->state != energy_kwh || energy_sensor_->get_force_update())) {
     energy_sensor_->publish_state(energy_kwh);
   }

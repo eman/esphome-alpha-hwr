@@ -27,6 +27,7 @@
 
 #include "fixture_crc.h"
 #include "../components/alpha_hwr/sensor_publisher.h"
+#include "../components/alpha_hwr/codec.h"
 #include "../components/alpha_hwr/telemetry_service.h"
 #include "../components/alpha_hwr/transport.h"
 
@@ -253,10 +254,19 @@ static std::vector<uint8_t> captured_energy_frame() {
           0x41, 0xA5, 0x14, 0x6A, 0x65, 0xA3, 0x02, 0xD0, 0x9C, 0x9E};
 }
 
+static esphome::alpha_hwr::protocol::EnergyTelemetry energy_sample(float kwh) {
+  esphome::alpha_hwr::protocol::EnergyTelemetry energy;
+  energy.has_energy = true;
+  energy.energy_kwh = kwh;
+  return energy;
+}
+
 void test_energy_counter() {
   mock_millis = 0;
   Rig r;
-  esphome::sensor::Sensor energy;
+  esphome::sensor::Sensor energy, power;
+  r.publisher.set_power_sensor(&power);
+  power.publish_state(17.0f);
   r.publisher.set_energy_sensor(&energy);
   r.telemetry.start();
   r.telemetry.poll();
@@ -285,12 +295,21 @@ void test_energy_counter() {
   r.transport.on_notification(frame.data() + 20, frame.size() - 20);
   TEST_ASSERT(energy.publish_count == 1 && std::fabs(energy.state - 49.119374f) < 0.00001f,
               "Captured binary64 joule counter is published in kWh through the transport");
-  r.publisher.publish_energy(energy.state);
+  TEST_ASSERT(power.state == 17.0f && power.publish_count == 1,
+              "Energy-object power does not overwrite the motor-state power sensor");
+  esphome::alpha_hwr::protocol::EnergyTelemetry unavailable;
+  unavailable.energy_kwh = 123.0f;
+  unavailable.has_power = true;
+  unavailable.power_w = 12.5f;
+  r.publisher.publish_energy(unavailable);
+  TEST_ASSERT(energy.publish_count == 1 && std::fabs(energy.state - 49.119374f) < 0.00001f,
+              "The publisher honors has_energy independently of has_power");
+  r.publisher.publish_energy(energy_sample(energy.state));
   TEST_ASSERT(energy.publish_count == 1, "An unchanged counter does not republish");
   energy.set_force_update(true);
-  r.publisher.publish_energy(energy.state);
+  r.publisher.publish_energy(energy_sample(energy.state));
   TEST_ASSERT(energy.publish_count == 2, "force_update requests repeated counter publications");
-  r.publisher.publish_energy(0);
+  r.publisher.publish_energy(energy_sample(0));
   TEST_ASSERT(energy.state == 0, "A pump counter reset is passed through for total_increasing handling");
 }
 
@@ -299,7 +318,7 @@ void test_energy_unsupported_and_timeout_preserve_state() {
   Rig r;
   esphome::sensor::Sensor energy;
   r.publisher.set_energy_sensor(&energy);
-  r.publisher.publish_energy(12.5f);
+  r.publisher.publish_energy(energy_sample(12.5f));
   r.telemetry.start();
   r.telemetry.poll();
   r.drain(40);
@@ -314,25 +333,47 @@ void test_energy_payload_validation() {
   using esphome::alpha_hwr::protocol::decode_energy_payload;
   auto frame = captured_energy_frame();
   std::vector<uint8_t> payload(frame.begin() + 10, frame.end() - 2);
-  float value = -1;
+  auto decoded = decode_energy_payload(payload.data(), payload.size());
+  TEST_ASSERT(decoded.has_energy && std::fabs(decoded.energy_kwh - 49.119374f) < 0.00001f,
+              "Captured energy is decoded in kWh");
+  TEST_ASSERT(decoded.has_power && decoded.power_w == 0, "Captured system power is decoded in watts");
   for (size_t len = 0; len < payload.size(); len++) {
-    TEST_ASSERT(!decode_energy_payload(payload.data(), len, value), "Truncated object rejected");
+    auto truncated = decode_energy_payload(payload.data(), len);
+    TEST_ASSERT(!truncated.has_energy && !truncated.has_power, "Truncated object rejected");
   }
-  TEST_ASSERT(!decode_energy_payload(nullptr, 11, value), "Null payload rejected");
+  auto absent = decode_energy_payload(nullptr, 11);
+  TEST_ASSERT(!absent.has_energy && !absent.has_power, "Null payload rejected");
   auto short_size = payload;
   short_size[2] = 7;
-  TEST_ASSERT(!decode_energy_payload(short_size.data(), short_size.size(), value), "Object too small for binary64 rejected");
+  auto short_result = decode_energy_payload(short_size.data(), short_size.size());
+  TEST_ASSERT(!short_result.has_energy && !short_result.has_power, "Object too small for either field rejected");
+  short_size[2] = 8;
+  auto energy_only = decode_energy_payload(short_size.data(), short_size.size());
+  TEST_ASSERT(energy_only.has_energy && !energy_only.has_power, "Object size bounds power independently of trailing bytes");
   for (double invalid : {-1.0, std::numeric_limits<double>::infinity(),
                          std::numeric_limits<double>::quiet_NaN(), std::numeric_limits<double>::max()}) {
     uint64_t bits;
     std::memcpy(&bits, &invalid, sizeof(bits));
     auto bad = payload;
     for (size_t i = 0; i < 8; i++) bad[3 + i] = static_cast<uint8_t>(bits >> (56 - 8 * i));
-    TEST_ASSERT(!decode_energy_payload(bad.data(), bad.size(), value) && value == -1,
-                "Invalid counter rejected without replacing the last reading");
+    auto result = decode_energy_payload(bad.data(), bad.size());
+    TEST_ASSERT(!result.has_energy && result.has_power && result.power_w == 0,
+                "Invalid energy does not discard valid system power");
   }
+  for (float invalid : {-1.0f, 1001.0f, std::numeric_limits<float>::infinity(),
+                        std::numeric_limits<float>::quiet_NaN()}) {
+    auto bad = payload;
+    esphome::alpha_hwr::protocol::encode_float_be(invalid, bad.data() + 11);
+    auto result = decode_energy_payload(bad.data(), bad.size());
+    TEST_ASSERT(result.has_energy && !result.has_power && std::fabs(result.energy_kwh - 49.119374f) < 0.00001f,
+                "Invalid system power does not discard valid energy");
+  }
+  esphome::alpha_hwr::protocol::encode_float_be(12.5f, payload.data() + 11);
+  auto powered = decode_energy_payload(payload.data(), payload.size());
+  TEST_ASSERT(powered.has_power && powered.power_w == 12.5f, "System power is a big-endian float in watts");
   std::fill(payload.begin() + 3, payload.begin() + 11, 0);
-  TEST_ASSERT(decode_energy_payload(payload.data(), payload.size(), value) && value == 0,
+  auto zero = decode_energy_payload(payload.data(), payload.size());
+  TEST_ASSERT(zero.has_energy && zero.energy_kwh == 0 && zero.has_power,
               "Zero is a valid cumulative counter");
 }
 

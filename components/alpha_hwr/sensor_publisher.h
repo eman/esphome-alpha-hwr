@@ -107,9 +107,11 @@ class SensorPublisher {
    *
    * Skips invalid and unchanged values unless the sensor requests force_update.
    *
-   * @param energy_kwh Cumulative energy in kWh
+   * Power continues to come from motor state telemetry.
+   *
+   * @param energy Decoded cumulative energy and system power telemetry
    */
-  void publish_energy(float energy_kwh);
+  void publish_energy(const protocol::EnergyTelemetry& energy);
 
   /**
    * Publish motor state telemetry.
