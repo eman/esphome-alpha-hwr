@@ -557,16 +557,15 @@ static void test_refusal_branch_has_an_upper_length_bound() {
 }
 
 static void test_an_ambiguous_ok_frame_is_not_a_refusal() {
-  // A head-only frame whose acknowledges are BOTH ok is byte-identical to a
-  // legitimate one-byte data reply, and nothing in it separates the two.
-  // Failing a read on that would trade three seconds for a lie, which is the
-  // trade this issue explicitly refuses.
-  ReadRig rig;
-  rig.queue(/*declare_refusal=*/true);
-
-  auto ok_frame = class10_refusal(0x01, 0x00, true);  // Class 10 ack OK
-  rig.transport.on_notification(ok_frame.data(), ok_frame.size());
-  TEST_ASSERT(rig.callbacks == 0, "#283: an all-ok short frame is left alone");
+  // Neither a head-only OK nor a one-byte data reply containing zero declines
+  // a GET. Completing the read on either would invent a result without its data.
+  for (bool has_payload : {false, true}) {
+    ReadRig rig;
+    rig.queue(/*declare_refusal=*/true);
+    auto ok_frame = class10_refusal(has_payload ? 0x01 : 0x00, 0x00, has_payload);
+    rig.transport.on_notification(ok_frame.data(), ok_frame.size());
+    TEST_ASSERT(rig.callbacks == 0, "#283: an all-ok short frame is left alone");
+  }
 }
 
 static void test_head_refusal_is_reported_without_reading_the_status_byte() {
@@ -1769,13 +1768,6 @@ void test_a_refused_class10_write_reports_failure() {
        "and an unknown Class 10 status is not success either -- only 0 is"},
       // No payload, so no Class 10 status byte: the head is the whole answer.
       {0x00, 0x00, false, true, "a zero-length Class 10 reply with ack ok is accepted"},
-      // A head that DECLARES one payload byte on an eight-byte frame -- the byte
-      // it points at is the CRC high byte, not a status. The bound has to be the
-      // real short-ACK length of 9; at `len >= 7` this frame's CRC decides the
-      // write's verdict.
-      {0x01, 0x00, false, true,
-       "an 8-byte frame whose head declares a payload does not have its CRC read "
-       "as the Class 10 status"},
       {0x81, 0x00, true, false,
        "0x81 with a following 0x00 -- the exact frame captured on hardware -- is a "
        "refusal, where the old reading called it accepted"},
@@ -1807,6 +1799,108 @@ void test_a_refused_class10_write_reports_failure() {
 
     TEST_ASSERT(cb_calls == 1, c.what);
     TEST_ASSERT(cb_success == c.expect_success, "  ...with the right verdict");
+  }
+}
+
+// CRC-valid telegrams whose APDU boundaries or refusal payloads do not describe
+// a single short reply. They must neither answer a command nor pay reply debt.
+static std::vector<std::vector<uint8_t>> malformed_short_class10_replies() {
+  auto multi_apdu = [](uint8_t head, const std::vector<uint8_t> &body) {
+    std::vector<uint8_t> frame{0x24, 0, 0xF8, 0xE7, 0x0A, head};
+    frame.insert(frame.end(), body.begin(), body.end());
+    frame.insert(frame.end(), {0, 0});
+    frame[1] = static_cast<uint8_t>(frame.size() - 4);
+    return with_crc(std::move(frame));
+  };
+  return {
+      class10_refusal(0x01, 0, false),  // Declared status overlaps the CRC.
+      class10_refusal(0x00, 2, true),   // Undeclared status byte.
+      class10_refusal(0x41, 0, true),   // Unknown Class cannot carry an item ID.
+      class10_refusal(0x80, 0, false),  // Unknown Data Item needs an item ID.
+      class10_refusal(0xC0, 0, false),  // Illegal Operation needs an item ID.
+      class10_refusal(0x82, 0, true),   // Truncated APDU payload.
+      multi_apdu(0x00, {0x03, 0x00}),  // Head-only ACK followed by another APDU.
+      multi_apdu(0x01, {2, 0x03, 0x00}),  // BUSY followed by another APDU.
+  };
+}
+
+static void test_malformed_short_replies_do_not_complete_or_pay_debt() {
+  for (bool is_set : {false, true}) {
+    for (bool owes_reply : {false, true}) {
+      for (const auto &malformed : malformed_short_class10_replies()) {
+        mock_millis = 0;
+        esphome::alpha_hwr::core::Transport transport;
+        transport.set_write_callback([](const uint8_t *, size_t) { return true; });
+        int calls = 0;
+        bool success = false;
+        size_t response_len = 0;
+        auto queue = [&]() {
+          const uint8_t apdu[] = {0x0A, static_cast<uint8_t>(is_set ? 0x83 : 0x03), 86, 0, 1};
+          transport.send_apdu_command(
+              apdu, sizeof(apdu), is_set ? 0 : 0x7F01, is_set ? 0 : 0x0003,
+              [&](bool ok, const uint8_t *data, size_t len) {
+                calls++;
+                success = ok;
+                response_len = data != nullptr ? len : 0;
+              },
+              /*timeout_ms=*/3000, /*allow_register_read=*/false,
+              /*expect_short_ack=*/is_set, /*quiet_timeout=*/false,
+              /*expect_short_read_refusal=*/!is_set);
+          pump(transport, 3);
+        };
+        if (owes_reply) {
+          queue();
+          mock_millis += 3100;
+          transport.loop();
+          TEST_ASSERT(calls == 1 && !success && response_len == 0,
+                      "Timed-out command leaves one reply owed");
+        }
+        queue();
+        const int before = calls;
+        transport.on_notification(malformed.data(), malformed.size());
+        TEST_ASSERT(calls == before, "Malformed short reply leaves SET or GET waiting");
+
+        const auto valid = class10_refusal(0x01, is_set ? 0 : 2, true);
+        transport.on_notification(valid.data(), valid.size());
+        if (owes_reply) {
+          TEST_ASSERT(calls == before,
+                      "Malformed reply did not pay debt: first valid reply settles it");
+          transport.on_notification(valid.data(), valid.size());
+        }
+        TEST_ASSERT(calls == before + 1 && success == is_set && response_len == valid.size(),
+                    "Valid reply completes SET or GET after any debt is settled");
+      }
+    }
+  }
+}
+
+static void test_malformed_short_reply_does_not_extend_the_debt_window() {
+  for (bool is_set : {false, true}) {
+    mock_millis = 0;
+    ReadRig rig;
+    rig.queue(/*declare_refusal=*/true);
+    mock_millis += 3100;
+    rig.transport.loop();
+    const uint32_t debt_since = mock_millis;
+    TEST_ASSERT(rig.callbacks == 1, "First read timed out and left reply debt");
+
+    int write_calls = 0;
+    bool write_ok = false;
+    if (is_set) {
+      queue_a_class10_temperature_write(rig.transport, &write_calls, &write_ok);
+    } else {
+      rig.queue(/*declare_refusal=*/true);
+    }
+    auto malformed = class10_refusal(0x01, 0, false);
+    rig.transport.on_notification(malformed.data(), malformed.size());
+    TEST_ASSERT(write_calls == 0 && rig.callbacks == 1,
+                "Malformed reply leaves the live command waiting");
+    mock_millis = debt_since + esphome::alpha_hwr::core::Transport::STALE_REPLY_WINDOW_MS + 1;
+    auto valid = class10_refusal(0x01, is_set ? 0 : 4, true);
+    rig.transport.on_notification(valid.data(), valid.size());
+    TEST_ASSERT(is_set ? (write_calls == 1 && write_ok)
+                       : (rig.callbacks == 2 && !rig.success && rig.bytes_handed_back == valid.size()),
+                "Unpaid debt still expires, allowing the current command's reply");
   }
 }
 
@@ -2016,6 +2110,8 @@ int main() {
   test_the_reply_debt_is_paid_down_and_expires();
   test_an_oversize_apdu_is_refused();
   test_a_refused_class10_write_reports_failure();
+  test_malformed_short_replies_do_not_complete_or_pay_debt();
+  test_malformed_short_reply_does_not_extend_the_debt_window();
   test_the_dhw_config_write_shape_also_reports_a_refusal();
   test_a_refused_write_still_frees_the_transport();
   test_every_awaited_class10_set_is_answered();

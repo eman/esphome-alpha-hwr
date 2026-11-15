@@ -390,8 +390,14 @@ void test_energy_short_refusals() {
                        : with_crc({0x24, 5, 0xF8, 0xE7, 0x0A, head, byte, 0, 0});
     r.transport.on_notification(refusal.data(), refusal.size());
     r.drain(20);
+    if (head == 0x41 || head == 0x80) {
+      TEST_ASSERT(r.sent.size() == 1 && energy.state == 12.5f && energy.publish_count == 1,
+                  "Malformed refusal leaves the energy request waiting and preserves its counter");
+      mock_millis += 3000;
+      r.drain(20);
+    }
     TEST_ASSERT(r.sent.size() == 6 && energy.state == 12.5f && energy.publish_count == 1,
-                "Short refusal releases the queue without inventing a zero counter");
+                "Valid refusal or timeout releases the queue without inventing a zero counter");
     mock_millis += 60000;
     r.telemetry.poll();
     r.drain(20);
