@@ -50,8 +50,7 @@ alpha_hwr:
     name: "Pump Cumulative Energy"
 ```
 
-The pump package includes this sensor. For a complete configuration using the
-working tree, see `examples/hwr-pump-energy-example.yaml`.
+The pump package includes this sensor.
 
 ### `time_id`
 

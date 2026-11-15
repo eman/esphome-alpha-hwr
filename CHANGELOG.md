@@ -5,7 +5,7 @@
 ### Added
 
 - Optional `energy` sensor in kWh, read from the pump's cumulative Object 87/1
-  counter. Included in the pump package and a local-source energy example.
+  counter. Included in the pump package.
 
 - **`link_last_disconnect` and `link_disconnects`: the unheld record of link
   drops.** Pump Link Fault holds the cause of an outage over the routine
