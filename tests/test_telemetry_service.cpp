@@ -1,258 +1,258 @@
-// Host tests for TelemetryService (telemetry_service.cpp).
-//
-// Why this file exists: `esphome compile` was the only thing that compiled
-// telemetry_service.cpp. It owns the poll set — which registers get read, and
-// in what order — and the OpSpec routing table that decides which decoder every
-// inbound frame reaches. Neither had a host test.
-//
-// The routing is the interesting half. Alarms and warnings come back under the
-// *same* OpSpec (0x09) and are told apart by a register address echoed inside
-// the response, with a poll-order toggle as the fallback for responses too
-// short to carry one. Getting that backwards publishes the pump's warnings into
-// the alarm entity and vice versa — silently, since both are well-formed
-// strings.
+// Host tests for type/version telemetry routing and serialized fault reads.
+// Fixtures use the GENI profile 52_7 layouts and real CRCs. The motor v3
+// fixture below is taken from an HWR capture; synthetic variants exercise
+// same-length unrelated objects and different-length supported versions.
 
+#include <cmath>
 #include <cstdint>
-#include <cstddef>
 #include <iostream>
-#include <string>
 #include <vector>
 
-#include "esphome/components/sensor/sensor.h"
-#include "esphome/components/text_sensor/text_sensor.h"
-
 #include "fixture_crc.h"
+#include "../components/alpha_hwr/control_service.h"
+#include "../components/alpha_hwr/frame_parser.h"
 #include "../components/alpha_hwr/sensor_publisher.h"
+#include "../components/alpha_hwr/session.h"
 #include "../components/alpha_hwr/telemetry_service.h"
 #include "../components/alpha_hwr/transport.h"
 
 uint32_t mock_millis = 0;
-
-using esphome::alpha_hwr::core::Transport;
-using esphome::alpha_hwr::services::SensorPublisher;
-using esphome::alpha_hwr::services::TelemetryService;
-
+using namespace esphome::alpha_hwr;
 int tests_passed = 0;
 int tests_failed = 0;
+#define TEST_ASSERT(condition, message) \
+  do { \
+    if (condition) { tests_passed++; std::cout << "[PASS] " << message << '\n'; } \
+    else { tests_failed++; std::cout << "[FAIL] " << message << '\n'; } \
+  } while (false)
 
-#define TEST_ASSERT(condition, message)                                        \
-  if (condition) {                                                             \
-    tests_passed++;                                                            \
-    std::cout << "[PASS] " << message << std::endl;                            \
-  } else {                                                                     \
-    tests_failed++;                                                            \
-    std::cout << "[FAIL] " << message << std::endl;                            \
-  }
-
-// Anonymous namespace: several test files in this suite define their own
-// Rig, and cppcheck's whole-program pass reports same-named structs across
-// translation units as an ODR violation even though each test is its own
-// binary. Same treatment as test_read_chain_lifetime.cpp.
 namespace {
-
 struct Rig {
-  Transport transport;
-  SensorPublisher publisher;
-  TelemetryService telemetry{transport};
-
+  core::Transport transport;
+  core::Session session;
+  services::SensorPublisher publisher;
+  services::ControlService control{transport, session};
+  services::TelemetryService telemetry{transport};
+  esphome::sensor::Sensor power, rpm, flow, head, media, pcb, box;
   esphome::text_sensor::TextSensor alarms, warnings;
   std::vector<std::vector<uint8_t>> sent;
 
   Rig() {
+    mock_millis = 0;
+    publisher.set_power_sensor(&power);
+    publisher.set_rpm_sensor(&rpm);
+    publisher.set_flow_sensor(&flow);
+    publisher.set_head_sensor(&head);
+    publisher.set_temp_media_sensor(&media);
+    publisher.set_temp_pcb_sensor(&pcb);
+    publisher.set_temp_control_box_sensor(&box);
     publisher.set_alarms_text_sensor(&alarms);
     publisher.set_warnings_text_sensor(&warnings);
     telemetry.set_sensor_publisher(&publisher);
-    transport.set_write_callback([this](const uint8_t *data, size_t len) {
-      this->sent.push_back(std::vector<uint8_t>(data, data + len));
+    telemetry.set_control_service(&control);
+    transport.set_packet_callback([this](const uint8_t* data, size_t len) {
+      telemetry.on_packet(data, len);
+    });
+    transport.set_write_callback([this](const uint8_t* data, size_t len) {
+      sent.emplace_back(data, data + len);
       return true;
     });
   }
-
-  void drain(int rounds = 12) {
+  void drain(int rounds = 10) {
     for (int i = 0; i < rounds; i++) {
       mock_millis += 60;
       transport.loop();
     }
   }
-};
-
-}  // namespace
-
-
-// Build a Class 10 register-read response (OpSpec 0x09) that echoes `reg_addr`
-// at bytes 10-12, which is how the service tells an alarm response from a
-// warning one. Padded past 15 bytes so the echo path is the one exercised.
-static std::vector<uint8_t> make_09_response(uint32_t reg_addr,
-                                             const std::vector<uint8_t> &codes) {
-  std::vector<uint8_t> f = {
-      0x24, 0x00,              // RESPONSE_START (0x24, not the 0x27 of a request)
-      0xE7, 0xF8,              // service id
-      0x0A,                    // class 10
-      0x09,                    // opspec: register-read response
-      0x00, 0x01,              // sub id (sequence number for 0x09)
-      0x00, 0x58,              // obj id (register 0x58)
-      static_cast<uint8_t>((reg_addr >> 16) & 0xFF),
-      static_cast<uint8_t>((reg_addr >> 8) & 0xFF),
-      static_cast<uint8_t>(reg_addr & 0xFF),
-      0x00, 0x00,              // padding to reach the len >= 15 echo path
-  };
-  for (uint8_t c : codes)
-    f.push_back(c);
-  f.push_back(0x00);  // CRC placeholder
-  f.push_back(0x00);
-  f[1] = static_cast<uint8_t>(f.size() - 4);  // length covers bytes 2..n-3
-  return with_crc(f);
-}
-
-// ── 1. The poll set ──────────────────────────────────────────────────────────
-void test_poll_reads_the_documented_register_set() {
-  std::cout << "\n=== poll() reads the five documented registers ==="
-            << std::endl;
-  mock_millis = 0;
-  Rig r;
-
-  r.telemetry.poll();
-  r.drain();
-  TEST_ASSERT(r.sent.empty(),
-              "A poll before start() sends nothing — telemetry must not go out "
-              "on an unauthenticated link");
-
-  r.telemetry.start();
-  TEST_ASSERT(r.telemetry.is_running(), "Running after start()");
-  r.telemetry.poll();
-  r.drain(40);
-
-  TEST_ASSERT(r.sent.size() == 5,
-              "Five read requests queued: motor, flow, temperature, alarms, "
-              "warnings");
-
-  // Every request carries its 3-byte register address; check the set and the
-  // order, since the 0x09 fallback routing depends on alarms preceding
-  // warnings.
-  // build_class10_read lays the 3-byte register out at offsets 6-8:
-  // [27][07][E7][F8][0A][03][Reg-H][Reg-M][Reg-L][CRC-H][CRC-L]
-  std::vector<uint32_t> addrs;
-  for (const auto &p : r.sent) {
-    if (p.size() >= 9)
-      addrs.push_back((static_cast<uint32_t>(p[6]) << 16) |
-                      (static_cast<uint32_t>(p[7]) << 8) |
-                      static_cast<uint32_t>(p[8]));
+  void receive(const std::vector<uint8_t>& frame) {
+    transport.on_notification(frame.data(), frame.size());
   }
-  const std::vector<uint32_t> expected = {0x570045, 0x5D0122, 0x5D012C,
-                                          0x580000, 0x58000B};
-  TEST_ASSERT(addrs == expected,
-              "In the documented order, with alarms (0x580000) before warnings "
-              "(0x58000B)");
-
-  r.telemetry.stop();
-  TEST_ASSERT(!r.telemetry.is_running(), "Not running after stop()");
-  r.sent.clear();
-  r.telemetry.poll();
-  r.drain();
-  TEST_ASSERT(r.sent.empty(), "A poll after stop() sends nothing");
+};
 }
 
-// ── 2. Alarm vs warning routing by echoed register ───────────────────────────
-void test_09_responses_route_by_echoed_register() {
-  std::cout << "\n=== 0x09 responses route by the register they echo ==="
-            << std::endl;
-  mock_millis = 0;
+static std::vector<uint8_t> object_frame(uint16_t type, uint8_t version, const std::vector<uint8_t>& body) {
+  std::vector<uint8_t> frame = {0x24, 0, 0xF8, 0xE7, 0x0A, static_cast<uint8_t>(7 + body.size()),
+                              0, static_cast<uint8_t>(type >> 8), static_cast<uint8_t>(type), version,
+                              0, 0, static_cast<uint8_t>(body.size())};
+  frame.insert(frame.end(), body.begin(), body.end());
+  frame.insert(frame.end(), {0, 0});
+  frame[1] = static_cast<uint8_t>(frame.size() - 4);
+  return with_crc(frame);
+}
+
+static std::vector<uint8_t> motor_frame(uint8_t version, size_t size) {
+  std::vector<uint8_t> body(size, 0);
+  protocol::encode_float_be(12.5f, body.data() + 12);
+  protocol::encode_float_be(2400, body.data() + 20);
+  return object_frame(256, version, body);
+}
+
+static std::vector<uint8_t> fault_frame(const std::vector<uint16_t>& codes) {
+  std::vector<uint8_t> body = {0, static_cast<uint8_t>(codes.size())};
+  for (uint16_t code : codes) {
+    body.insert(body.end(), {static_cast<uint8_t>(code >> 8), static_cast<uint8_t>(code), 0, 99});
+  }
+  return object_frame(570, 1, body);
+}
+
+void test_poll_and_fault_identity() {
   Rig r;
-  r.telemetry.start();
-  r.telemetry.poll();
-  r.drain(40);
-
-  // Deliberately out of poll order: the warning response arrives first. The
-  // echoed register must decide, not arrival order.
-  auto warn = make_09_response(0x58000B, {0x00, 0x4D});
-  r.telemetry.on_packet(warn.data(), warn.size());
-
-  auto alarm = make_09_response(0x580000, {0x00, 0x33});
-  r.telemetry.on_packet(alarm.data(), alarm.size());
-
-  TEST_ASSERT(r.warnings.has_state(),
-              "The response echoing 0x58000B reached the warnings entity");
-  TEST_ASSERT(r.alarms.has_state(),
-              "The response echoing 0x580000 reached the alarms entity");
-  TEST_ASSERT(r.warnings.state != r.alarms.state,
-              "The two carried different payloads, so they were not both "
-              "routed to the same handler");
+  r.telemetry.poll(); r.drain();
+  TEST_ASSERT(r.sent.empty(), "No polling before start");
+  r.telemetry.start(); r.telemetry.poll(); r.drain();
+  TEST_ASSERT(r.sent.size() == 4, "Motor/flow/temperature and alarm read sent; warning waits for alarm reply");
+  r.receive(fault_frame({51})); r.drain();
+  TEST_ASSERT(r.alarms.has_state() && !r.warnings.has_state(), "First type-570 reply belongs to alarm request");
+  TEST_ASSERT(r.sent.size() == 5, "Warning request sent only after successful alarm reply");
+  r.receive(fault_frame({77}));
+  TEST_ASSERT(r.warnings.has_state() && r.warnings.state != r.alarms.state,
+              "Identically typed warning reply is published into the correct entity");
+  const std::vector<uint32_t> expected = {0x570045, 0x5D0122, 0x5D012C, 0x580000, 0x58000B};
+  std::vector<uint32_t> actual;
+  for (const auto& frame : r.sent) {
+    actual.push_back((uint32_t(frame[6]) << 16) | (uint32_t(frame[7]) << 8) | frame[8]);
+  }
+  TEST_ASSERT(actual == expected, "Documented request set is preserved");
+  r.telemetry.poll(); r.drain(); r.receive(fault_frame({})); r.drain(); r.receive(fault_frame({}));
+  TEST_ASSERT(r.alarms.state == "None" && r.warnings.state == "None", "Valid empty arrays clear faults");
+  r.telemetry.stop(); r.sent.clear(); r.telemetry.poll(); r.drain();
+  TEST_ASSERT(r.sent.empty(), "No polling after stop");
 }
 
-// ── 3. Frame rejection ───────────────────────────────────────────────────────
-// on_packet is fed straight from the BLE notification path, so a corrupt or
-// unrelated frame reaching a decoder is a real possibility rather than a
-// theoretical one.
-void test_malformed_frames_are_rejected() {
-  std::cout << "\n=== Malformed and unrelated frames are dropped ==="
-            << std::endl;
-  mock_millis = 0;
+void test_object_types_and_versions() {
   Rig r;
-  r.telemetry.start();
+  for (uint8_t version : {1, 2, 3}) {
+    auto frame = motor_frame(version, version == 1 ? 37 : 41);
+    r.receive(frame);
+    TEST_ASSERT(r.power.state == 12.5f && r.rpm.state == 2400, "Known motor version decodes");
+  }
+  TEST_ASSERT(r.power.publish_count == 3, "Motor v1's different APDU length is accepted");
+  auto extended = motor_frame(3, 45);
+  r.receive(extended);
+  TEST_ASSERT(r.power.publish_count == 4, "Appended fields of a known motor version do not change routing");
+  for (uint8_t version : {0, 4}) r.receive(motor_frame(version, 41));
+  auto unrelated = motor_frame(3, 41); unrelated[7] = 2; unrelated = with_crc(unrelated); r.receive(unrelated);
+  TEST_ASSERT(r.power.publish_count == 4, "Unknown versions and same-length unrelated types cannot publish motor data");
 
-  auto good = make_09_response(0x580000, {0x00, 0x33});
+  std::vector<uint8_t> flow(36, 0);
+  protocol::encode_float_be(2.5f, flow.data() + 24);
+  protocol::encode_float_be(3.2f, flow.data() + 28);
+  r.receive(object_frame(565, 2, flow));
+  TEST_ASSERT(r.flow.state == 2.5f && r.head.state == 3.2f, "Flow/head type 565 v2 decodes in existing units");
+  r.receive(object_frame(565, 1, flow));
+  TEST_ASSERT(r.flow.publish_count == 1, "Unknown flow version rejected");
+  r.receive(object_frame(565, 2, std::vector<uint8_t>(35, 0)));
+  TEST_ASSERT(r.flow.publish_count == 1, "Short flow object does not publish a partial reading");
+  for (uint8_t version : {1, 2}) {
+    std::vector<uint8_t> body(version == 1 ? 12 : 13, 0);
+    protocol::encode_float_be(45, body.data());
+    protocol::encode_float_be(50, body.data() + 4);
+    protocol::encode_float_be(55, body.data() + 8);
+    r.receive(object_frame(534, version, body));
+    TEST_ASSERT(r.media.state == 45 && r.pcb.state == 50 && r.box.state == 55,
+                "Temperature versions decode despite differing response lengths");
+  }
+  r.receive(object_frame(534, 3, std::vector<uint8_t>(13, 0)));
+  TEST_ASSERT(r.media.publish_count == 2, "Unknown temperature version rejected");
 
-  // Bad CRC: same frame with the checksum left wrong.
-  auto bad_crc = good;
-  bad_crc[bad_crc.size() - 1] ^= 0xFF;
-  r.telemetry.on_packet(bad_crc.data(), bad_crc.size());
-  TEST_ASSERT(!r.alarms.has_state(),
-              "A frame with a bad CRC never reaches a decoder");
-
-  // Wrong class: Class 2 rather than Class 10.
-  auto wrong_class = good;
-  wrong_class[4] = 0x02;
-  wrong_class = with_crc(wrong_class);
-  r.telemetry.on_packet(wrong_class.data(), wrong_class.size());
-  TEST_ASSERT(!r.alarms.has_state(), "A non-Class-10 frame is ignored");
-
-  // Unhandled OpSpec.
-  auto unknown_op = good;
-  unknown_op[5] = 0x77;
-  unknown_op = with_crc(unknown_op);
-  r.telemetry.on_packet(unknown_op.data(), unknown_op.size());
-  TEST_ASSERT(!r.alarms.has_state(), "An unhandled OpSpec is ignored");
-
-  // A runt frame, which must not index past its end.
-  const uint8_t runt[] = {0x27, 0x02, 0xE7};
-  r.telemetry.on_packet(runt, sizeof(runt));
-  TEST_ASSERT(!r.alarms.has_state(), "A runt frame is ignored, not indexed");
-
-  // The same frame, intact, still works — otherwise the four assertions above
-  // would pass with the routing removed entirely.
-  r.telemetry.on_packet(good.data(), good.size());
-  TEST_ASSERT(r.alarms.has_state(),
-              "...and the intact frame does reach the alarms decoder");
+  r.receive(object_frame(534, 1, std::vector<uint8_t>(11, 0)));
+  TEST_ASSERT(r.media.publish_count == 2, "Short temperature object does not publish a partial reading");
+  std::vector<uint8_t> status = {2, 0, 2, 0, 0, 0, 0};
+  protocol::encode_float_be(2400, status.data() + 3);
+  r.receive(object_frame(303, 1, status));
+  TEST_ASSERT(r.control.get_current_mode() == services::ControlMode::CONSTANT_SPEED &&
+              r.control.get_remote_enabled(), "Type 303 v1 updates control state and remote source");
+  r.receive(object_frame(303, 1, {1, 1, 8, 0, 0, 0}));
+  TEST_ASSERT(r.control.get_current_mode() == services::ControlMode::CONSTANT_SPEED,
+              "Short control object does not update state");
+  status[2] = 8;
+  r.receive(object_frame(303, 2, status));
+  TEST_ASSERT(r.control.get_current_mode() == services::ControlMode::CONSTANT_SPEED,
+              "Unknown control-status version cannot update state");
 }
 
-// ── 4. No publisher wired ────────────────────────────────────────────────────
-void test_service_without_a_publisher_is_inert() {
-  std::cout << "\n=== A service with no publisher does not crash ==="
-            << std::endl;
-  mock_millis = 0;
-  Transport transport;
-  TelemetryService telemetry(transport);
-  telemetry.start();
-  telemetry.poll();
+void test_validation_before_decoding() {
+  Rig r;
+  const auto good = motor_frame(3, 41);
+  auto bad = good; bad.back() ^= 1; r.receive(bad);
+  TEST_ASSERT(!r.power.has_state(), "Bad CRC rejected");
+  for (uint8_t head : {uint8_t(0x70), uint8_t(0xB0), uint8_t(0xF0), uint8_t(0x31), uint8_t(0x2F)}) {
+    bad = good; bad[5] = head; bad = with_crc(bad); r.receive(bad);
+    TEST_ASSERT(!r.power.has_state(), "Negative ACK or mismatched APDU length rejected");
+  }
+  for (uint8_t status : {2, 4}) {
+    bad = good; bad[6] = status; bad = with_crc(bad); r.receive(bad);
+    TEST_ASSERT(!r.power.has_state(), "Class 10 busy/operation-failed status rejected");
+  }
+  bad = good; bad[4] = 2; bad = with_crc(bad); r.receive(bad);
+  TEST_ASSERT(!r.power.has_state(), "Wrong GENI class rejected");
+  bad = good; bad[0] = 0x27; bad = with_crc(bad); r.receive(bad);
+  TEST_ASSERT(!r.power.has_state(), "Request frame rejected");
+  bad = good; bad[12] = 42; bad = with_crc(bad); r.receive(bad);
+  TEST_ASSERT(!r.power.has_state(), "Object size cannot extend into CRC");
+  r.receive(motor_frame(3, 37));
+  TEST_ASSERT(!r.power.has_state(), "Version-specific minimum body size checked separately");
+  bad = good; bad[12] = 23; bad = with_crc(bad); r.receive(bad);
+  TEST_ASSERT(!r.power.has_state(), "Plausible trailing bytes outside the object cannot become sensor fields");
+  bad = good; bad.insert(bad.end() - 2, {7, 0}); bad[1] += 2; bad = with_crc(bad); r.receive(bad);
+  TEST_ASSERT(!r.power.has_state(), "Multiple APDUs are rejected, not decoded as one body");
+  r.telemetry.on_packet(good.data(), good.size() - 1);
+  TEST_ASSERT(!r.power.has_state(), "Truncated telegram rejected");
+  const uint8_t runt[] = {0x24, 3, 0}; r.telemetry.on_packet(runt, sizeof(runt));
+  TEST_ASSERT(!r.power.has_state(), "Runt telegram rejected safely");
+  r.receive(good);
+  TEST_ASSERT(r.power.state == 12.5f, "Valid frame still decodes after rejection tests");
+  protocol::Class10ObjectView view;
+  TEST_ASSERT(!protocol::parse_class10_object(nullptr, 50, view), "Null object frame rejected");
+}
 
-  auto frame = make_09_response(0x580000, {0x00, 0x33});
-  telemetry.on_packet(frame.data(), frame.size());
-  TEST_ASSERT(true, "Routing a response with no publisher wired is safe");
+void test_captured_motor_and_fragmentation() {
+  Rig r;
+  const std::vector<uint8_t> captured = {
+    0x24,0x34,0xF8,0xE7,0x0A,0x30,0x00,0x01,0x00,0x03,0x00,0x00,0x29,
+    0x42,0xE2,0x91,0x24,0x43,0x20,0x35,0x00,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,
+    0x7F,0xFF,0xFF,0xFF,0x7F,0xFF,0xFF,0xFF,0,0,0,0,0,0,0,0,0,0x39,0x4F};
+  r.transport.on_notification(captured.data(), 20);
+  TEST_ASSERT(!r.power.has_state(), "Fragment does not publish");
+  r.transport.on_notification(captured.data() + 20, captured.size() - 20);
+  TEST_ASSERT(r.power.has_state() && r.power.state == 0 && r.rpm.state == 0,
+              "Captured motor v3 frame decodes through reassembly and type routing");
+}
+
+void test_fault_failures_do_not_cross_route() {
+  for (int kind = 0; kind < 10; kind++) {
+    Rig r;
+    r.telemetry.start(); r.telemetry.poll(); r.drain();
+    auto bad = fault_frame({51});
+    if (kind == 0) bad[5] |= 0x80;
+    if (kind == 1) bad[6] = 2;
+    if (kind == 2) bad[6] = 4;
+    if (kind == 3) bad[12] = 7;
+    if (kind == 4) bad[14] = 2;
+    if (kind == 5) bad[5]++;
+    if (kind == 7) bad[9] = 2;
+    if (kind == 8) bad[4] = 2;
+    if (kind == 9) bad[7] = 0;
+    if (kind != 6) { bad = with_crc(bad); r.receive(bad); }
+    r.drain(70);  // Includes the no-response timeout case.
+    TEST_ASSERT(!r.alarms.has_state() && !r.warnings.has_state(), "Fault failure cannot clear or fabricate an entity");
+    TEST_ASSERT(r.sent.size() == 4, "Warning request is not sent after ambiguous alarm failure");
+    r.receive(fault_frame({51}));
+    r.telemetry.poll(); r.drain();
+    TEST_ASSERT(!r.warnings.has_state() && r.sent.size() == 7,
+                "Late fault reply is ignored; live telemetry continues without another ambiguous fault read");
+    r.telemetry.stop(); r.transport.reset(); r.telemetry.start(); r.telemetry.poll(); r.drain();
+    r.receive(fault_frame({})); r.drain(); r.receive(fault_frame({77}));
+    TEST_ASSERT(r.warnings.has_state(), "Fresh session resumes fault reads");
+  }
 }
 
 int main() {
-  std::cout << "==========================================" << std::endl;
-  std::cout << "Telemetry Service Tests" << std::endl;
-  std::cout << "==========================================" << std::endl;
-
-  test_poll_reads_the_documented_register_set();
-  test_09_responses_route_by_echoed_register();
-  test_malformed_frames_are_rejected();
-  test_service_without_a_publisher_is_inert();
-
-  std::cout << "\n==========================================" << std::endl;
-  std::cout << "Results: " << tests_passed << " passed, " << tests_failed
-            << " failed" << std::endl;
-  std::cout << "==========================================" << std::endl;
-  return tests_failed == 0 ? 0 : 1;
+  test_poll_and_fault_identity();
+  test_object_types_and_versions();
+  test_validation_before_decoding();
+  test_captured_motor_and_fragmentation();
+  test_fault_failures_do_not_cross_route();
+  std::cout << "Results: " << tests_passed << " passed, " << tests_failed << " failed\n";
+  return tests_failed ? 1 : 0;
 }

@@ -231,6 +231,9 @@ class Transport {
     // no effect beyond the log level. In particular the reply debt is recorded
     // either way (issue #248).
     bool quiet_timeout{false};
+    /// Require a complete successful Class 10 object, including its second ACK.
+    /// Opt-in so existing write/short-ACK and legacy read contracts stay intact.
+    bool require_object_reply{false};
     // This command had an ambiguous frame withheld from it because an earlier
     // command was still owed one (issue #248). It must therefore NOT record a
     // fresh debt when it times out: the reply it was waiting for is the frame
@@ -310,7 +313,7 @@ class Transport {
                     uint16_t expect_type_high = 0, CommandCallback callback = nullptr,
                     uint32_t timeout_ms = 3000, bool allow_register_read = false,
                     bool expect_short_ack = false, bool quiet_timeout = false,
-                    bool expect_short_read_refusal = false);
+                    bool expect_short_read_refusal = false, bool require_object_reply = false);
 
   /**
    * Helper to build and queue a command directly from an APDU.
@@ -326,7 +329,7 @@ class Transport {
                          CommandCallback callback = nullptr,
                          uint32_t timeout_ms = 3000, bool allow_register_read = false,
                          bool expect_short_ack = false, bool quiet_timeout = false,
-                         bool expect_short_read_refusal = false);
+                         bool expect_short_read_refusal = false, bool require_object_reply = false);
 
   /**
    * Set callback for complete packets.

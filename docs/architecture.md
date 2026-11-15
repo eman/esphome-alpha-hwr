@@ -200,3 +200,21 @@ anywhere. The votes were replaced rather than retuned.
 4. If the feature *writes* to the pump, add it as a `WriteCommand` in the
    operation layer (wire steps + confirm comparator + host test) rather than
    as a standalone write path — see AGENTS.md §9.
+
+## Telemetry reply routing
+
+`TelemetryService` routes Class 10 replies by object type and supported version:
+256 v1/v2/v3 (motor), 565 v2 (flow/head), 534 v1/v2 (temperature), and 303 v1
+(control status). `parse_class10_object()` validates CRC, both acknowledgements,
+APDU boundaries and declared object size before returning a body view. The APDU
+head's low six bits are a byte count, not a telemetry identifier.
+
+Alarms and warnings both return type 570 v1 (`FaultsByArrayExtended`). They are
+read sequentially with request context; their shared type cannot identify which
+entity a reply belongs to. Each counted record contains an error code and a
+subcode; only the primary codes feed the existing text sensors. After a failed
+fault read, fault polling pauses until the BLE session is restarted, so late
+same-type replies cannot be attributed to the wrong entity. Other telemetry
+continues. The transport's opt-in `require_object_reply` guard applies the same
+object validation to these matched reads without changing existing write/ACK
+contracts.

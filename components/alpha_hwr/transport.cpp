@@ -216,7 +216,7 @@ void Transport::loop() {
 void Transport::send_command(const std::vector<uint8_t>& packet, uint16_t expect_type_low_ver,
                              uint16_t expect_type_high, CommandCallback callback, uint32_t timeout_ms,
                              bool allow_register_read, bool expect_short_ack, bool quiet_timeout,
-                             bool expect_short_read_refusal) {
+                             bool expect_short_read_refusal, bool require_object_reply) {
   Command cmd;
   cmd.packet = packet;
   cmd.expect_type_low_ver = expect_type_low_ver;
@@ -227,6 +227,7 @@ void Transport::send_command(const std::vector<uint8_t>& packet, uint16_t expect
   cmd.expect_short_ack = expect_short_ack;
   cmd.quiet_timeout = quiet_timeout;
   cmd.expect_short_read_refusal = expect_short_read_refusal;
+  cmd.require_object_reply = require_object_reply;
 
   this->command_queue_.push_back(cmd);
   ESP_LOGV(TAG, "Command queued (queue size: %zu)", this->command_queue_.size());
@@ -236,7 +237,7 @@ void Transport::send_apdu_command(const uint8_t* apdu, size_t apdu_len,
                                   uint16_t expect_type_low_ver, uint16_t expect_type_high,
                                   CommandCallback callback, uint32_t timeout_ms,
                                   bool allow_register_read, bool expect_short_ack,
-                                  bool quiet_timeout, bool expect_short_read_refusal) {
+                                  bool quiet_timeout, bool expect_short_read_refusal, bool require_object_reply) {
   // Sized to the protocol's maximum telegram, not to a round number. A GENIbus
   // telegram is at most 259 bytes (App. Prog. Manual, "Short form technical
   // specification"): start delimiter, length, DA, SA, up to MAX_PDU_LEN of PDU,
@@ -265,7 +266,7 @@ void Transport::send_apdu_command(const uint8_t* apdu, size_t apdu_len,
   
   this->send_command(packet, expect_type_low_ver, expect_type_high, callback, timeout_ms,
                      allow_register_read, expect_short_ack, quiet_timeout,
-                     expect_short_read_refusal);
+                     expect_short_read_refusal, require_object_reply);
 }
 
 void Transport::note_reply_owed_(bool already_suppressed) {
@@ -1280,6 +1281,17 @@ bool Transport::try_dispatch_response(const uint8_t* data, size_t len) {
       payload_len = len - 12; // len - 10(header) - 2(CRC)
       ESP_LOGV(TAG, "Matched Object 91 Sub %d using OpSpec 0x%02X workaround",
                cmd.expect_type_high, opspec);
+    }
+
+    if (matched && cmd.require_object_reply) {
+      protocol::Class10ObjectView object;
+      if (!protocol::parse_class10_object(data, len, object) ||
+          object.type != protocol::apdu_object_type(cmd.expect_type_high, cmd.expect_type_low_ver) ||
+          object.version != protocol::apdu_object_version(cmd.expect_type_low_ver)) {
+        this->fail_front_command_();
+        this->state_ = State::IDLE;
+        return true;
+      }
     }
 
     if (matched) {
