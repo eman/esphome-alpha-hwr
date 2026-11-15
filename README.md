@@ -317,6 +317,7 @@ switch to hand it over, and off again after; see
 
 The examples live in [`examples/`](examples/):
 
+- `hwr-pump-energy-example.yaml` — local-source telemetry example including the pump's cumulative energy counter in kWh.
 - `hwr-pump-example.yaml` — the pump package on its own: telemetry and
   diagnostics, no control UI
 - `hwr-pump-controls-example.yaml` — pump plus the control UI

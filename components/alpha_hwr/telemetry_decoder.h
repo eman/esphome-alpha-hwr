@@ -45,6 +45,11 @@ namespace esphome {
 namespace alpha_hwr {
 namespace protocol {
 
+// Decode the size-prefixed payload of type 232 v1 (OverallEnergyConsumption).
+// The first field is the pump's cumulative binary64 joule counter (Obj 87/1).
+// Invalid/truncated values leave energy_kwh untouched.
+bool decode_energy_payload(const uint8_t *payload, size_t len, float &energy_kwh);
+
 /**
  * Decoded motor state telemetry.
  * 

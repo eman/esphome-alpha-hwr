@@ -35,6 +35,24 @@ events fire.
 | `frame_logging` | boolean | `false` | Log every GENI frame sent and received, whole, at INFO. Diagnostic capture only, and it reaches every API subscriber — see below before turning it on. |
 | `connect_after_boot_delay` | time | `0s` | Hold the **first** BLE connection this long after boot, so a log client is attached before the link opens. Troubleshooting only — see below. |
 
+### `energy`
+
+Optional numeric sensor for the pump's cumulative energy counter, in kWh
+(`device_class: energy`, `state_class: total_increasing`, three decimals).
+Reads Object 87/1 on the telemetry cadence only when configured. The pump
+supplies the counter; this is not an integration of sampled power. Invalid or
+unsupported replies leave the last reading unchanged. ESPHome sensor states
+use float precision, so very large totals may have less than 0.001 kWh resolution.
+
+```yaml
+alpha_hwr:
+  energy:
+    name: "Pump Cumulative Energy"
+```
+
+The pump package includes this sensor. For a complete configuration using the
+working tree, see `examples/hwr-pump-energy-example.yaml`.
+
 ### `time_id`
 
 Optional in the schema, and the thing most worth checking if pump schedules fire

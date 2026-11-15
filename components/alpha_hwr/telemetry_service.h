@@ -97,6 +97,7 @@ class TelemetryService {
    * - Temperature (0x5D012C)
    * - Alarms (0x580000)
    * - Warnings (0x58000B)
+   * - Cumulative energy (0x570001), only when an energy sensor is configured
    * 
    * This should be called periodically (e.g., every 10 seconds) by the
    * main component's update() method.

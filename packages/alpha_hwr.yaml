@@ -323,6 +323,8 @@ alpha_hwr:
    # Basic Telemetry
    power:
      name: "Power Consumption"
+   energy:
+     name: "Cumulative Energy"
    rpm:
      id: motor_speed
      name: "Motor Speed"

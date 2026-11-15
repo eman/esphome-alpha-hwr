@@ -47,6 +47,13 @@ void SensorPublisher::setup_head_rate_callback() {
   });
 }
 
+void SensorPublisher::publish_energy(float energy_kwh) {
+  if (energy_sensor_ != nullptr && std::isfinite(energy_kwh) && energy_kwh >= 0 &&
+      (!energy_sensor_->has_state() || energy_sensor_->state != energy_kwh || energy_sensor_->get_force_update())) {
+    energy_sensor_->publish_state(energy_kwh);
+  }
+}
+
 void SensorPublisher::publish_motor_state(const protocol::MotorStateTelemetry& motor) {
   // Validate that we have at least some valid data
   if (!motor.has_power && !motor.has_speed) {

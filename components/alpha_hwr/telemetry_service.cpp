@@ -84,6 +84,20 @@ void TelemetryService::poll() {
   send_read_request(0x5D012C); // Temperature
   send_read_request(0x580000); // Alarms
   send_read_request(0x58000B); // Warnings
+
+  if (sensor_publisher_ != nullptr && sensor_publisher_->has_energy_sensor()) {
+    // Object 87/1 replies as type 232 v1, NOT as an echoed register address.
+    // Match its type so a late reply to another read cannot become an energy
+    // sample. Transport validates CRC/ACK and strips the first 10 bytes + CRC.
+    const uint8_t apdu[] = {0x0A, 0x03, 87, 0x00, 0x01};
+    transport_.send_apdu_command(apdu, sizeof(apdu), 0xE801, 0,
+        [this](bool success, const uint8_t *payload, size_t len) {
+          float energy_kwh;
+          if (running_ && success && protocol::decode_energy_payload(payload, len, energy_kwh)) {
+            sensor_publisher_->publish_energy(energy_kwh);
+          }
+        });
+  }
 }
 
 void TelemetryService::on_packet(const uint8_t* data, size_t len) {

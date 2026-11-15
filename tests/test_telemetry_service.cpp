@@ -12,6 +12,10 @@
 // the alarm entity and vice versa — silently, since both are well-formed
 // strings.
 
+#include <algorithm>
+#include <cmath>
+#include <cstring>
+#include <limits>
 #include <cstdint>
 #include <cstddef>
 #include <iostream>
@@ -240,7 +244,102 @@ void test_service_without_a_publisher_is_inert() {
   TEST_ASSERT(true, "Routing a response with no publisher wired is safe");
 }
 
+// Captured HWR 15-55 Object 87/1 reply: OverallEnergyConsumption, type 232 v1.
+// system_energy = 176829746.81838083 J = 49.1193741162 kWh.
+static std::vector<uint8_t> captured_energy_frame() {
+  return {0x24, 0x25, 0xF8, 0xE7, 0x0A, 0x21, 0x00, 0x00, 0xE8, 0x01,
+          0x00, 0x00, 0x1A, 0x41, 0xA5, 0x14, 0x6A, 0x65, 0xA3, 0x02, 0xD0,
+          0x00, 0x00, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x00,
+          0x41, 0xA5, 0x14, 0x6A, 0x65, 0xA3, 0x02, 0xD0, 0x9C, 0x9E};
+}
+
+void test_energy_counter() {
+  mock_millis = 0;
+  Rig r;
+  esphome::sensor::Sensor energy;
+  r.publisher.set_energy_sensor(&energy);
+  r.telemetry.start();
+  r.telemetry.poll();
+  r.drain(40);
+  TEST_ASSERT(r.sent.size() == 6, "Energy adds one read only when configured");
+  const std::vector<uint8_t> request = {0x27, 0x07, 0xE7, 0xF8, 0x0A, 0x03, 87, 0, 1, 0, 0};
+  TEST_ASSERT(r.sent.back() == with_crc(request), "Energy request reads Object 87/1 with correct CRC");
+
+  auto frame = captured_energy_frame();
+  auto wrong_type = frame;
+  wrong_type[8] = 0xE9;
+  wrong_type = with_crc(wrong_type);
+  r.transport.on_notification(wrong_type.data(), wrong_type.size());
+  TEST_ASSERT(!energy.has_state(), "A different object type cannot become an energy sample");
+  auto wrong_version = frame;
+  wrong_version[9] = 2;
+  wrong_version = with_crc(wrong_version);
+  r.transport.on_notification(wrong_version.data(), wrong_version.size());
+  TEST_ASSERT(!energy.has_state(), "An unknown energy object version is not decoded");
+  auto bad_crc = frame;
+  bad_crc.back() ^= 1;
+  r.transport.on_notification(bad_crc.data(), bad_crc.size());
+  TEST_ASSERT(!energy.has_state(), "Bad CRC does not publish energy");
+  r.transport.on_notification(frame.data(), 20);
+  TEST_ASSERT(!energy.has_state(), "A partial BLE notification does not publish energy");
+  r.transport.on_notification(frame.data() + 20, frame.size() - 20);
+  TEST_ASSERT(energy.publish_count == 1 && std::fabs(energy.state - 49.119374f) < 0.00001f,
+              "Captured binary64 joule counter is published in kWh through the transport");
+  r.publisher.publish_energy(energy.state);
+  TEST_ASSERT(energy.publish_count == 1, "An unchanged counter does not republish");
+  energy.set_force_update(true);
+  r.publisher.publish_energy(energy.state);
+  TEST_ASSERT(energy.publish_count == 2, "force_update requests repeated counter publications");
+  r.publisher.publish_energy(0);
+  TEST_ASSERT(energy.state == 0, "A pump counter reset is passed through for total_increasing handling");
+}
+
+void test_energy_unsupported_and_timeout_preserve_state() {
+  mock_millis = 0;
+  Rig r;
+  esphome::sensor::Sensor energy;
+  r.publisher.set_energy_sensor(&energy);
+  r.publisher.publish_energy(12.5f);
+  r.telemetry.start();
+  r.telemetry.poll();
+  r.drain(40);
+  auto unsupported = with_crc({0x24, 0x05, 0xF8, 0xE7, 0x0A, 0x01, 0x04, 0, 0});
+  r.transport.on_notification(unsupported.data(), unsupported.size());
+  r.drain(60);
+  TEST_ASSERT(energy.state == 12.5f && energy.publish_count == 1,
+              "An unsupported read or timeout preserves the last counter without inventing zero");
+}
+
+void test_energy_payload_validation() {
+  using esphome::alpha_hwr::protocol::decode_energy_payload;
+  auto frame = captured_energy_frame();
+  std::vector<uint8_t> payload(frame.begin() + 10, frame.end() - 2);
+  float value = -1;
+  for (size_t len = 0; len < payload.size(); len++) {
+    TEST_ASSERT(!decode_energy_payload(payload.data(), len, value), "Truncated object rejected");
+  }
+  TEST_ASSERT(!decode_energy_payload(nullptr, 11, value), "Null payload rejected");
+  auto short_size = payload;
+  short_size[2] = 7;
+  TEST_ASSERT(!decode_energy_payload(short_size.data(), short_size.size(), value), "Object too small for binary64 rejected");
+  for (double invalid : {-1.0, std::numeric_limits<double>::infinity(),
+                         std::numeric_limits<double>::quiet_NaN(), std::numeric_limits<double>::max()}) {
+    uint64_t bits;
+    std::memcpy(&bits, &invalid, sizeof(bits));
+    auto bad = payload;
+    for (size_t i = 0; i < 8; i++) bad[3 + i] = static_cast<uint8_t>(bits >> (56 - 8 * i));
+    TEST_ASSERT(!decode_energy_payload(bad.data(), bad.size(), value) && value == -1,
+                "Invalid counter rejected without replacing the last reading");
+  }
+  std::fill(payload.begin() + 3, payload.begin() + 11, 0);
+  TEST_ASSERT(decode_energy_payload(payload.data(), payload.size(), value) && value == 0,
+              "Zero is a valid cumulative counter");
+}
+
 int main() {
+  test_energy_counter();
+  test_energy_payload_validation();
+  test_energy_unsupported_and_timeout_preserve_state();
   std::cout << "==========================================" << std::endl;
   std::cout << "Telemetry Service Tests" << std::endl;
   std::cout << "==========================================" << std::endl;
