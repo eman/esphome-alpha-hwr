@@ -10,6 +10,7 @@
 #include <cstdint>
 #include <cstdio>
 #include <iostream>
+#include <string>
 #include <vector>
 
 #include "../components/alpha_hwr/codec.h"
@@ -248,6 +249,86 @@ static void test_class10_id_extraction() {
               "Class 10 payload_len excludes header and CRC");
 }
 
+static void test_short_class10_reply_status() {
+  using namespace esphome::alpha_hwr::protocol;
+  struct Case {
+    uint8_t head;
+    std::vector<uint8_t> body;
+    ApduAck ack;
+    bool has_status;
+    uint8_t status;
+    bool ok;
+    const char *name;
+  };
+  const Case cases[] = {
+      {0x00, {}, ApduAck::OK, false, 0, true, "ok"},
+      {0x01, {0}, ApduAck::OK, true, 0, true, "ok"},
+      {0x01, {2}, ApduAck::OK, true, 2, false, "busy"},
+      {0x01, {4}, ApduAck::OK, true, 4, false, "operation failed"},
+      {0x01, {7}, ApduAck::OK, true, 7, false, "unknown"},
+      {0x40, {}, ApduAck::UNKNOWN_CLASS, false, 0, false, "Unknown Class"},
+      {0x81, {0}, ApduAck::UNKNOWN_DATA_ITEM, false, 0, false, "Unknown Data Item"},
+      {0x81, {2}, ApduAck::UNKNOWN_DATA_ITEM, false, 0, false, "Unknown Data Item"},
+      {0xC1, {4}, ApduAck::ILLEGAL_OPERATION, false, 0, false, "Illegal Operation"},
+  };
+  for (const auto &c : cases) {
+    auto frame = build_frame(0x0A, c.head, c.body);
+    ShortClass10Reply reply;
+    TEST_ASSERT(parse_short_class10_reply(frame.data(), frame.size(), reply),
+                "Complete short reply has a valid shape");
+    TEST_ASSERT(reply.ack == c.ack && reply.head_ok == (c.ack == ApduAck::OK),
+                "APDU acknowledge is preserved independently of Class 10 status");
+    TEST_ASSERT((reply.head_ok && reply.has_payload) == c.has_status &&
+                    reply.class10_ack == c.status && reply.ok == c.ok,
+                "Item IDs are never decoded as Class 10 status");
+    TEST_ASSERT(std::string(short_class10_reply_name(reply)) == c.name,
+                "Reply name follows the appropriate acknowledge layer");
+  }
+
+  auto head_only = build_frame(0x0A, 0x00, {});
+  head_only[6] = 2;  // CRC already belongs to Transport; this byte is never status.
+  ShortClass10Reply reply;
+  TEST_ASSERT(parse_short_class10_reply(head_only.data(), head_only.size(), reply) &&
+                  reply.ok && !reply.has_payload && reply.class10_ack == 0,
+              "Head-only response cannot interpret CRC as a BUSY status");
+}
+
+static void test_short_class10_reply_rejects_malformed_shapes() {
+  using namespace esphome::alpha_hwr::protocol;
+  auto good = build_frame(0x0A, 0x01, {2});
+  std::vector<std::vector<uint8_t>> bad = {
+      build_frame(0x03, 0x01, {2}),  // Wrong class.
+      build_frame(0x0A, 0x41, {0}),  // Unknown Class cannot carry an item ID.
+      build_frame(0x0A, 0x80, {}),   // Unknown Data Item must carry an item ID.
+      build_frame(0x0A, 0xC0, {}),   // Illegal Operation must carry an item ID.
+      build_frame(0x0A, 0x01, {}),   // Declared status would overlap the CRC.
+      build_frame(0x0A, 0x00, {2}),  // Undeclared byte after the head.
+      build_frame(0x0A, 0x02, {2}),  // Truncated APDU payload.
+      build_frame(0x0A, 0x02, {0, 0}),  // More than a short reply.
+  };
+  auto request = good;
+  request[0] = 0x27;
+  bad.push_back(request);
+  auto wrong_length = good;
+  wrong_length[1]--;
+  bad.push_back(wrong_length);
+  wrong_length[1] += 2;
+  bad.push_back(wrong_length);
+  for (size_t len = 0; len < good.size(); len++) {
+    bad.emplace_back(good.begin(), good.begin() + len);
+  }
+  ShortClass10Reply reply = decode_short_class10_reply(0x01, 2, 9);
+  TEST_ASSERT(!parse_short_class10_reply(nullptr, good.size(), reply),
+              "Null frame is rejected before any read");
+  for (const auto &frame : bad) {
+    reply = decode_short_class10_reply(0x01, 2, 9);
+    TEST_ASSERT(!parse_short_class10_reply(frame.data(), frame.size(), reply),
+                "Malformed short response is rejected");
+    TEST_ASSERT(!reply.head_ok && !reply.has_payload && !reply.ok && reply.class10_ack == 0,
+                "Rejected parse clears the previous result");
+  }
+}
+
 int main() {
   std::cout << "==========================================" << std::endl;
   std::cout << "Frame Parser Tests (malformed input)" << std::endl;
@@ -263,6 +344,8 @@ int main() {
   test_trailing_bytes_are_clamped_for_crc();
   test_crc_detection();
   test_class10_id_extraction();
+  test_short_class10_reply_status();
+  test_short_class10_reply_rejects_malformed_shapes();
 
   std::cout << "\n==========================================" << std::endl;
   std::cout << "Results: " << tests_passed << " passed, " << tests_failed

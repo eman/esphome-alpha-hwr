@@ -371,9 +371,9 @@ void test_energy_cadence_and_generation() {
 }
 
 void test_energy_short_refusals() {
-  const uint8_t heads[] = {0x40, 0x81, 0xC1, 1, 1};
-  const uint8_t statuses[] = {0, 0, 0, 2, 4};
-  for (size_t i = 0; i < 5; i++) {
+  const uint8_t heads[] = {0x40, 0x81, 0xC1, 1, 1, 1, 0x41, 0x80};
+  const uint8_t statuses[] = {0, 0, 0, 2, 4, 7, 0, 0};
+  for (size_t i = 0; i < sizeof(heads) / sizeof(heads[0]); i++) {
     const uint8_t head = heads[i];
     mock_millis = 0;
     Rig r;
@@ -385,8 +385,9 @@ void test_energy_short_refusals() {
     r.drain(2);
     // Unknown Class has no payload; other errors carry an item ID or status.
     const uint8_t byte = statuses[i];
-    auto refusal = head == 0x40 ? with_crc({0x24, 4, 0xF8, 0xE7, 0x0A, 0x40, 0, 0})
-                                : with_crc({0x24, 5, 0xF8, 0xE7, 0x0A, head, byte, 0, 0});
+    auto refusal = (head == 0x40 || head == 0x80)
+                       ? with_crc({0x24, 4, 0xF8, 0xE7, 0x0A, head, 0, 0})
+                       : with_crc({0x24, 5, 0xF8, 0xE7, 0x0A, head, byte, 0, 0});
     r.transport.on_notification(refusal.data(), refusal.size());
     r.drain(20);
     TEST_ASSERT(r.sent.size() == 6 && energy.state == 12.5f && energy.publish_count == 1,
@@ -397,7 +398,7 @@ void test_energy_short_refusals() {
     const bool unsupported = head == 0x40 || head == 0x81;
     TEST_ASSERT(
         energy_requests(r) == (unsupported ? 1 : 2),
-        "Unsupported counter is suppressed; busy/operation failure/illegal operation can retry");
+        "Unsupported counter is suppressed; transient or malformed refusals can retry");
     r.telemetry.stop();
     r.transport.reset();
     r.telemetry.start();

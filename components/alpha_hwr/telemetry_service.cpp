@@ -230,18 +230,15 @@ void TelemetryService::poll_energy_() {
         }
         energy_read_pending_ = false;
         if (!success) {
-          if (payload != nullptr && len >= 8 && len <= 9 && payload[0] == protocol::RESPONSE_START) {
-            const auto ack = protocol::apdu_ack(payload[5]);
-            const uint8_t count = protocol::apdu_payload_len(payload[5]);
-            if ((ack == protocol::ApduAck::UNKNOWN_CLASS && count == 0 && len == 8) ||
-                (ack == protocol::ApduAck::UNKNOWN_DATA_ITEM && count == 1 && len == 9)) {
-              set_energy_read_state_(EnergyReadState::UNSUPPORTED, protocol::apdu_ack_name(ack));
+          protocol::ShortClass10Reply reply;
+          if (protocol::parse_short_class10_reply(payload, len, reply)) {
+            if (reply.ack == protocol::ApduAck::UNKNOWN_CLASS ||
+                reply.ack == protocol::ApduAck::UNKNOWN_DATA_ITEM) {
+              set_energy_read_state_(EnergyReadState::UNSUPPORTED,
+                                     protocol::short_class10_reply_name(reply));
               return;
             }
-            const char* reason = protocol::apdu_ack_is_ok(payload[5])
-                                     ? protocol::class10_ack_name(payload[6])
-                                     : protocol::apdu_ack_name(ack);
-            set_energy_read_state_(EnergyReadState::FAILED, reason);
+            set_energy_read_state_(EnergyReadState::FAILED, protocol::short_class10_reply_name(reply));
             return;
           }
           set_energy_read_state_(EnergyReadState::FAILED);
