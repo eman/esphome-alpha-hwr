@@ -14,6 +14,7 @@
 #include <cmath>
 #include <cstdint>
 #include <iostream>
+#include <limits>
 #include <string>
 #include <vector>
 
@@ -28,6 +29,7 @@ uint32_t mock_millis = 0;
 
 using esphome::alpha_hwr::services::SensorPublisher;
 using esphome::alpha_hwr::protocol::FlowPressureTelemetry;
+using esphome::alpha_hwr::protocol::EnergyTelemetry;
 using esphome::alpha_hwr::protocol::MotorStateTelemetry;
 using esphome::alpha_hwr::protocol::TemperatureTelemetry;
 
@@ -79,6 +81,43 @@ struct Rig {
 
 }  // namespace
 
+
+// Energy retains the pump's counter while rejecting absent or invalid fields.
+void test_energy_validation_and_publishing() {
+  std::cout << "\n=== Energy presence, range validation and publication gating ===" << std::endl;
+  esphome::sensor::Sensor energy;
+  SensorPublisher pub;
+  pub.set_energy_sensor(&energy);
+  EnergyTelemetry sample;
+  sample.has_power = true;
+  sample.power_w = 12.5f;
+  pub.publish_energy(sample);
+  TEST_ASSERT(!energy.has_state(), "Absent counter stays unknown even when system power is present");
+
+  sample.has_energy = true;
+  sample.energy_kwh = 49.125f;
+  pub.publish_energy(sample);
+  TEST_ASSERT(near(energy.state, 49.125f) && energy.publish_count == 1, "Valid counter is published");
+  for (float invalid : {-1.0f, std::numeric_limits<float>::quiet_NaN(),
+                        std::numeric_limits<float>::infinity(), -std::numeric_limits<float>::infinity()}) {
+    sample.energy_kwh = invalid;
+    pub.publish_energy(sample);
+    TEST_ASSERT(near(energy.state, 49.125f) && energy.publish_count == 1,
+                "Invalid flagged energy cannot replace the last valid counter");
+  }
+  sample.has_energy = false;
+  sample.energy_kwh = 0;
+  pub.publish_energy(sample);
+  TEST_ASSERT(energy.publish_count == 1, "An absent field cannot fabricate a counter reset");
+  sample.has_energy = true;
+  pub.publish_energy(sample);
+  TEST_ASSERT(energy.state == 0 && energy.publish_count == 2, "A valid zero counter is accepted");
+  pub.publish_energy(sample);
+  TEST_ASSERT(energy.publish_count == 2, "Unchanged counter is still gated");
+  energy.set_force_update(true);
+  pub.publish_energy(sample);
+  TEST_ASSERT(energy.publish_count == 3, "force_update is preserved");
+}
 
 // ── 1. Presence gating on motor state ────────────────────────────────────────
 // Every field carries its own has_* flag because the pump does not always
@@ -354,6 +393,10 @@ void test_unwired_publisher_is_inert() {
   t.has_media_temp = true;
   t.media_temperature_c = 20.0f;
 
+  EnergyTelemetry e;
+  e.has_energy = true;
+  e.energy_kwh = 49.125f;
+  pub.publish_energy(e);
   pub.publish_motor_state(m);
   pub.publish_flow_pressure(f);
   pub.publish_temperature(t);
@@ -369,6 +412,7 @@ int main() {
   std::cout << "Sensor Publisher Tests" << std::endl;
   std::cout << "==========================================" << std::endl;
 
+  test_energy_validation_and_publishing();
   test_motor_state_publishes_only_present_fields();
   test_motor_state_with_no_data_publishes_nothing();
   test_temperature_range_validation();

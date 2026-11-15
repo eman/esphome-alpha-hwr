@@ -105,9 +105,11 @@ class SensorPublisher {
   /**
    * Publish cumulative energy from the pump's counter.
    *
-   * Skips invalid and unchanged values unless the sensor requests force_update.
+   * Rejects absent, non-finite and negative counters. Unchanged raw values are
+   * suppressed unless the sensor requests force_update.
    *
-   * Power continues to come from motor state telemetry.
+   * Logs system power for diagnostics. The power sensor continues to use motor
+   * state telemetry.
    *
    * @param energy Decoded cumulative energy and system power telemetry
    */
