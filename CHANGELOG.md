@@ -18,6 +18,18 @@
   table moved out of `ble_connection_manager.cpp` into `link_disconnect.h`,
   where it is host-tested.
 
+### Fixed
+
+- **`-Wempty-body` warning in the firmware build.** When a log level is
+  compiled out, its `ESP_LOGx` macro expands to nothing. An unbraced `if`
+  whose only statement is such a macro then compiles to `if (...);` and GCC
+  warns. At the package's default `INFO` level this hit the `ESP_LOGD` in
+  `dhw_demand.cpp`'s subtraction-stamp switch on every build. Three more sites
+  had the same shape and would warn for anyone who sets `logger: level` to
+  `WARN` or `ERROR`: the two session start/end `ESP_LOGI`s in `dhw_demand.cpp`
+  and the failed-layers `ESP_LOGW` in `schedule_service.cpp`. All four are
+  braced now. Behaviour and binary size are unchanged.
+
 ## [0.17.0] - 2026-10-28
 
 ### Migration

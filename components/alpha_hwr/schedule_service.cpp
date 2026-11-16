@@ -390,10 +390,11 @@ bool ScheduleService::read_entries_async(
                  "Read %zu total schedule entries from all layers "
                  "(%u/5 layers OK)",
                  st->all_entries.size(), st->layers_ok);
-        if (!all_ok)
+        if (!all_ok) {
           ESP_LOGW(TAG, "%u of 5 schedule layers failed to read; "
                         "reporting the read as failed",
                    st->layers_failed);
+        }
         if (st->on_complete && !st->terminated) {
           st->terminated = true;
           st->on_complete(all_ok, st->all_entries);
