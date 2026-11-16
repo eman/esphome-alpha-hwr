@@ -330,10 +330,12 @@ void DhwDemandComponent::update_session_(bool demand, uint32_t now) {
   // the held value — so they must agree on the clock too (issue #125 item 2).
   SessionTracker::Tick tick = session_.update(demand, now);
 
-  if (tick.just_started)
+  if (tick.just_started) {
     ESP_LOGI(TAG, "DHW session started");
-  if (tick.just_ended)
+  }
+  if (tick.just_ended) {
     ESP_LOGI(TAG, "DHW session ended: %.0f s", tick.ended_duration_s);
+  }
 
   // Publish live session duration (0 when inactive). Gated on change: while a
   // session runs the value moves every tick so the gate costs nothing, and it
@@ -596,10 +598,11 @@ void DhwDemandComponent::update() {
         last_measured_no_draw_ms_ = now;
         break;
       case SubtractionStamp::NONE:
-        if (!std::isnan(result.demand_gpm))
+        if (!std::isnan(result.demand_gpm)) {
           ESP_LOGD(TAG, "Subtraction read %.2f GPM against a meter reading "
                         "from another speed; not carried as a metered draw",
                    result.demand_gpm);
+        }
         break;
     }
 
