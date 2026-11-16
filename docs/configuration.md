@@ -28,12 +28,60 @@ events fire.
 | `time_id` | ID | none | A `time:` component to sync the pump's clock from. Optional in the schema, but see below — without it the pump's clock is never set. |
 | `initiate_pairing` | boolean | `true` | Whether **this node** initiates BLE pairing and configures security parameters. Leave it on; `false` does *not* prevent bonding — see below. (Formerly `enable_pairing`, still accepted.) |
 | `reconnect_settle_time` | time | `2s` | Delay after disconnect before reconnecting |
+| `energy_update_interval` | time | `60s` | Minimum interval between awaited energy reads; see `energy` below. |
 | `control_state_poll_interval` | time | `30s` | Interval for periodic control state polling. Set to `0s` to disable. |
 | `data_timeout` | time | `60s` | Tear the BLE link down after this long with no data from the pump, so the normal reconnect runs. Set to `0s` to disable. |
 | `ready_timeout` | time | `300s` | Report a fault if the pump has not become usable this long after connecting. Naming only; see `ready_recycle`. `0s` disables. |
 | `ready_recycle` | count (0–100) | `0` | How many times to also tear the link down when `ready_timeout` expires, so the normal reconnect runs; `0` never does. A boolean is still accepted: `true` means without limit, `false` means `0`. **Opt-in** — see below. |
 | `frame_logging` | boolean | `false` | Log every GENI frame sent and received, whole, at INFO. Diagnostic capture only, and it reaches every API subscriber — see below before turning it on. |
 | `connect_after_boot_delay` | time | `0s` | Hold the **first** BLE connection this long after boot, so a log client is attached before the link opens. Troubleshooting only — see below. |
+
+### `energy`
+
+Optional numeric sensor for the pump's cumulative energy counter, in kWh
+(`device_class: energy`, `state_class: total_increasing`, three decimals).
+Reads Object 87/1 using an awaited type-232/version-1 request only when configured. The pump
+supplies the counter; this is not an integration of sampled power. Invalid or
+unsupported replies leave the last reading unchanged. ESPHome sensor states
+use float precision, so very large totals may have less than 0.001 kWh resolution.
+
+```yaml
+alpha_hwr:
+  energy:
+    name: "Pump Cumulative Energy"
+```
+
+The pump package includes this sensor. `energy_update_interval` defaults to `60s`;
+reads are initiated from the telemetry poll and cannot run faster than that poll.
+The first eligible poll after connection reads immediately, and only one energy
+request can be queued or outstanding.
+
+```yaml
+alpha_hwr:
+  energy_update_interval: 60s
+  energy:
+    name: "Pump Cumulative Energy"
+```
+
+An Unknown Class/Unknown Data Item refusal disables energy polling for the
+current connection and logs one unsupported-counter warning. Reconnect probes
+again. BUSY, generic operation failure, malformed data and no response preserve
+the last value and allow another attempt on the configured cadence. No failed
+read publishes zero or changes the counter. Valid zero/decreased values from a
+validated counter reply are trusted; no speculative reset filter is applied.
+The decoded system-power field remains in `EnergyTelemetry`, while the exposed
+`power` sensor continues to use motor telemetry.
+
+Transport handling uses exact type/version matching and rejects unowned replies
+of awaited object types before wildcard dispatch. Short refusals use the existing
+reply-debt safeguard, whose window is 500 ms after timeout. This is a bounded
+safeguard: old fire-and-forget telemetry can still produce unidentified errors,
+and errors outside the window cannot be attributed with certainty. Energy reads
+do not introduce automatic reconnects or a separate recovery policy.
+
+Publication compares pre-filter raw values and honors `force_update`.
+`accuracy_decimals: 3` affects display precision, not rounding of the counter
+used by the change gate.
 
 ### `time_id`
 

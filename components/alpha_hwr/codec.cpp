@@ -1,4 +1,5 @@
 #include "codec.h"
+#include <limits>
 
 namespace esphome {
 namespace alpha_hwr {
@@ -78,6 +79,30 @@ float decode_float_be(const uint8_t *data, size_t offset) {
   float value;
   memcpy(&value, &temp, 4);
   return value;
+}
+
+// Double decoding (big-endian), used by cumulative energy counters.
+double decode_double_be(const uint8_t *data, size_t offset) {
+  uint64_t bits = (static_cast<uint64_t>(data[offset]) << 56) |
+                  (static_cast<uint64_t>(data[offset + 1]) << 48) |
+                  (static_cast<uint64_t>(data[offset + 2]) << 40) |
+                  (static_cast<uint64_t>(data[offset + 3]) << 32) |
+                  (static_cast<uint64_t>(data[offset + 4]) << 24) |
+                  (static_cast<uint64_t>(data[offset + 5]) << 16) |
+                  (static_cast<uint64_t>(data[offset + 6]) << 8) |
+                  static_cast<uint64_t>(data[offset + 7]);
+  double value;
+  static_assert(sizeof(value) == sizeof(bits) && std::numeric_limits<double>::is_iec559,
+                "GENI double values require IEEE-754 binary64");
+  memcpy(&value, &bits, sizeof(value));
+  return value;
+}
+
+// Uint24 decoding (big-endian)
+uint32_t decode_uint24_be(const uint8_t *data, size_t offset) {
+  return (static_cast<uint32_t>(data[offset]) << 16) |
+         (static_cast<uint32_t>(data[offset + 1]) << 8) |
+         static_cast<uint32_t>(data[offset + 2]);
 }
 
 // Uint16 encoding (big-endian)

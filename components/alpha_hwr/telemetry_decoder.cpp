@@ -7,10 +7,46 @@
 #include "telemetry_decoder.h"
 #include "codec.h"
 #include <cmath>
+#include <limits>
 
 namespace esphome {
 namespace alpha_hwr {
 namespace protocol {
+
+EnergyTelemetry decode_energy_payload(const uint8_t* payload, size_t len) {
+  EnergyTelemetry result;
+
+  // GENI Class 10 type 232 v1: [object size u24 BE][system_energy f64 BE][system_power f32 BE]...
+  // power_and_energy_info_obj (87/1), unitIndex 87 = Ws (joules).
+  if (payload == nullptr || len < 3) {
+    return result;
+  }
+  const uint32_t object_size = decode_uint24_be(payload);
+  if (object_size > len - 3) {
+    return result;
+  }
+
+  // System energy (offset 3, double): convert joules to kWh.
+  if (object_size >= 8) {
+    const double joules = decode_double_be(payload, 3);
+    const double kwh = joules / 3600000.0;
+    if (std::isfinite(kwh) && kwh >= 0 && kwh <= std::numeric_limits<float>::max()) {
+      result.has_energy = true;
+      result.energy_kwh = static_cast<float>(kwh);
+    }
+  }
+
+  // System power (offset 11, float): use the same bounds as motor-state power.
+  if (object_size >= 12) {
+    float power = decode_float_be(payload, 11);
+    if (std::isfinite(power) && power >= 0 && power <= 1000) {
+      result.has_power = true;
+      result.power_w = power;
+    }
+  }
+
+  return result;
+}
 
 MotorStateTelemetry decode_motor_state_response(const uint8_t* data, size_t len) {
   MotorStateTelemetry result;

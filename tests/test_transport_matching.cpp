@@ -325,6 +325,21 @@ void test_every_acknowledge_kind_has_a_name() {
               "Illegal Operation");
 }
 
+void test_short_reply_decoder_does_not_read_crc_as_status() {
+  using esphome::alpha_hwr::protocol::decode_short_class10_reply;
+
+  // The checked parser rejects this shape, but the shared ACK decoder must
+  // still avoid interpreting CRC bytes as payload when called on its own.
+  for (size_t len : {7, 8}) {
+    const auto reply = decode_short_class10_reply(0x01, 0x02, len);
+    TEST_ASSERT(!reply.has_payload && reply.class10_ack == 0,
+                "A declared byte absent from the frame is not read as BUSY");
+  }
+  const auto reply = decode_short_class10_reply(0x01, 0x02, 9);
+  TEST_ASSERT(reply.has_payload && reply.class10_ack == 2 && !reply.ok,
+              "A complete nine-byte response carries a real BUSY status");
+}
+
 // ============================================================================
 // Test: the reply's type and version decode at the REAL byte boundary (#281)
 // ============================================================================
@@ -421,6 +436,7 @@ int main() {
   test_the_length_is_the_low_six_bits_and_is_independent_of_the_ack();
   test_only_ack_ok_counts_as_success();
   test_every_acknowledge_kind_has_a_name();
+  test_short_reply_decoder_does_not_read_crc_as_status();
   test_wildcard_matched_set_is_exactly_these_five();
   test_new_classes_match_their_own_queued_command();
   test_class10_notification_cannot_answer_any_new_class();

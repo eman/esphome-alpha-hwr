@@ -20,13 +20,17 @@
  * 4. **Alarms/Warnings** (OpSpec 0x09 and 0x13 responses)
  *    - Active alarm codes and warning codes
  * 
- * 5. **Passive Notifications** (OpSpec 0x0E)
+ * 5. **Cumulative Energy** (Object 87, Sub 1; type 232, version 1)
+ *    - Pump energy counter in kWh, converted from joules, and system power
+ *
+ * 6. **Passive Notifications** (OpSpec 0x0E)
  *    - Streaming telemetry in legacy format
  * 
  * Payload Format
  * --------------
  * All telemetry payloads use big-endian encoding:
  * - Floats: IEEE 754 single-precision (4 bytes)
+ * - Energy counter: IEEE 754 double-precision (8 bytes)
  * - Integers: Big-endian uint16 (2 bytes)
  * 
  * Values are validated against reasonable ranges to detect corruption.
@@ -79,6 +83,25 @@ struct MotorStateTelemetry {
 };
 
 /**
+ * Decoded cumulative energy and system power telemetry.
+ *
+ * Contains system totals from OverallEnergyConsumption (type 232, version 1).
+ * Energy and power are validated independently. The power field models the
+ * documented system totals but is not wired to a separate ESPHome entity.
+ */
+struct EnergyTelemetry {
+  bool has_energy;
+  float energy_kwh;
+
+  bool has_power;
+  float power_w;
+
+  EnergyTelemetry()
+    : has_energy(false), energy_kwh(0),
+      has_power(false), power_w(0) {}
+};
+
+/**
  * Decoded flow and pressure telemetry.
  */
 struct FlowPressureTelemetry {
@@ -128,6 +151,26 @@ struct AlarmWarningTelemetry {
   
   AlarmWarningTelemetry() : codes() {}
 };
+
+/**
+ * Decode energy and power from OverallEnergyConsumption (type 232, version 1).
+ *
+ * Class 10 Object 87, Sub 1 payload format, after removing the frame header and CRC:
+ * - Bytes 0-2: Object size (big-endian uint24)
+ * - Bytes 3-10: System energy (big-endian IEEE 754 double, joules)
+ * - Bytes 11-14: System power (big-endian IEEE 754 float, watts)
+ *
+ * Converts the pump's cumulative counter from joules to kWh (divide by 3600000).
+ * Invalid or truncated objects return no valid fields. Energy and power are
+ * validated independently; unavailable energy does not discard valid power.
+ *
+ * @param payload Size-prefixed object payload (not the full packet)
+ * @param len Length of payload
+ * @return Decoded energy and power with validation flags
+ *
+ * Reference: power_and_energy_info_obj.system_energy, GENI unitIndex 87 (Ws)
+ */
+EnergyTelemetry decode_energy_payload(const uint8_t* payload, size_t len);
 
 /**
  * Decode motor state from register-read response (OpSpec 0x30).

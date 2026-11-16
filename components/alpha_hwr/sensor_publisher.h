@@ -79,6 +79,8 @@ class SensorPublisher {
   void set_flow_sensor(sensor::Sensor *sensor) { flow_sensor_ = sensor; }
   void set_head_sensor(sensor::Sensor *sensor) { head_sensor_ = sensor; }
   void set_power_sensor(sensor::Sensor *sensor) { power_sensor_ = sensor; }
+  void set_energy_sensor(sensor::Sensor *sensor) { energy_sensor_ = sensor; }
+  bool has_energy_sensor() const { return energy_sensor_ != nullptr; }
   void set_rpm_sensor(sensor::Sensor *sensor) { rpm_sensor_ = sensor; }
   void set_temp_media_sensor(sensor::Sensor *sensor) { temp_media_sensor_ = sensor; }
   void set_temp_pcb_sensor(sensor::Sensor *sensor) { temp_pcb_sensor_ = sensor; }
@@ -99,6 +101,19 @@ class SensorPublisher {
   // ============================================================================
   // Publishing Methods (called from TelemetryService handlers)
   // ============================================================================
+
+  /**
+   * Publish cumulative energy from the pump's counter.
+   *
+   * Rejects absent, non-finite and negative counters. Unchanged raw values are
+   * suppressed unless the sensor requests force_update.
+   *
+   * Logs system power for diagnostics. The power sensor continues to use motor
+   * state telemetry.
+   *
+   * @param energy Decoded cumulative energy and system power telemetry
+   */
+  void publish_energy(const protocol::EnergyTelemetry& energy);
 
   /**
    * Publish motor state telemetry.
@@ -152,6 +167,7 @@ class SensorPublisher {
   sensor::Sensor *flow_sensor_{nullptr};
   sensor::Sensor *head_sensor_{nullptr};
   sensor::Sensor *power_sensor_{nullptr};
+  sensor::Sensor *energy_sensor_{nullptr};
   sensor::Sensor *rpm_sensor_{nullptr};
   sensor::Sensor *temp_media_sensor_{nullptr};
   sensor::Sensor *temp_pcb_sensor_{nullptr};

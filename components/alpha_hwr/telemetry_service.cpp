@@ -11,6 +11,7 @@
 #include "codec.h"
 #include "frame_builder.h"
 #include "frame_parser.h"
+#include "response_match.h"
 #include "telemetry_decoder.h"
 #include "sensor_publisher.h"
 #include "control_service.h"
@@ -48,6 +49,10 @@ void TelemetryService::stop() {
   
   ESP_LOGI(TAG, "Stopping telemetry service");
   running_ = false;
+  energy_generation_++;
+  energy_read_pending_ = false;
+  energy_attempted_ = false;
+  energy_read_state_ = EnergyReadState::UNKNOWN;
 }
 
 bool TelemetryService::is_running() const {
@@ -78,6 +83,10 @@ void TelemetryService::poll() {
   // Reset alarm/warning response toggle (alarms queued first, then warnings)
   next_09_is_warnings_ = false;
   
+  // Queue energy first when due, so this poll's legacy reads cannot leave
+  // unidentified refusals ahead of its awaited request.
+  poll_energy_();
+
   // Queue all read requests. The transport layer will pace them.
   send_read_request(0x570045); // Motor state
   send_read_request(0x5D0122); // Flow/pressure
@@ -181,6 +190,68 @@ void TelemetryService::on_packet(const uint8_t* data, size_t len) {
       ESP_LOGD(TAG, "Unhandled OpSpec: 0x%02X", opspec);
       break;
   }
+}
+
+void TelemetryService::set_energy_read_state_(EnergyReadState state, const char* reason) {
+  if (energy_read_state_ == state) {
+    return;
+  }
+  energy_read_state_ = state;
+  if (state == EnergyReadState::UNSUPPORTED) {
+    ESP_LOGW(TAG, "Energy counter unsupported (%s); disabling energy reads until reconnect",
+             reason);
+  } else if (state == EnergyReadState::FAILED) {
+    ESP_LOGW(TAG, "Energy read failed (%s); preserving the last value and retrying "
+                  "on its normal cadence", reason);
+  } else if (state == EnergyReadState::AVAILABLE) {
+    ESP_LOGI(TAG, "Energy counter available");
+  }
+}
+
+void TelemetryService::poll_energy_() {
+  if (sensor_publisher_ == nullptr || !sensor_publisher_->has_energy_sensor() ||
+      energy_read_pending_ || energy_read_state_ == EnergyReadState::UNSUPPORTED) {
+    return;
+  }
+  const uint32_t now = millis();
+  if (energy_attempted_ && now - last_energy_attempt_ms_ < energy_update_interval_ms_) {
+    return;
+  }
+  energy_attempted_ = true;
+  last_energy_attempt_ms_ = now;
+  energy_read_pending_ = true;
+  const uint32_t generation = energy_generation_;
+  // OverallEnergyConsumption (type 232 v1); successful payloads are validated
+  // by Transport before reaching the decoder. No passive energy publication.
+  transport_.send_class10_object_read(87, 1, 232, 1,
+      [this, generation](bool success, const uint8_t* payload, size_t len) {
+        if (generation != energy_generation_ || !running_) {
+          return;
+        }
+        energy_read_pending_ = false;
+        if (!success) {
+          protocol::ShortClass10Reply reply;
+          if (protocol::parse_short_class10_reply(payload, len, reply)) {
+            if (reply.ack == protocol::ApduAck::UNKNOWN_CLASS ||
+                reply.ack == protocol::ApduAck::UNKNOWN_DATA_ITEM) {
+              set_energy_read_state_(EnergyReadState::UNSUPPORTED,
+                                     protocol::short_class10_reply_name(reply));
+              return;
+            }
+            set_energy_read_state_(EnergyReadState::FAILED, protocol::short_class10_reply_name(reply));
+            return;
+          }
+          set_energy_read_state_(EnergyReadState::FAILED);
+          return;
+        }
+        protocol::EnergyTelemetry energy = protocol::decode_energy_payload(payload, len);
+        if (energy.has_energy) {
+          set_energy_read_state_(EnergyReadState::AVAILABLE);
+          sensor_publisher_->publish_energy(energy);
+        } else {
+          set_energy_read_state_(EnergyReadState::FAILED);
+        }
+      });
 }
 
 void TelemetryService::handle_motor_state_response(const uint8_t* data, size_t len) {

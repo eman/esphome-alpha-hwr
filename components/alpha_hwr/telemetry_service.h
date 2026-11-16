@@ -68,6 +68,13 @@ class TelemetryService {
   void set_control_service(ControlService* control_service);
 
   /**
+   * Set the minimum interval between energy read attempts.
+   *
+   * @param interval_ms Minimum interval in milliseconds (default 60000)
+   */
+  void set_energy_update_interval(uint32_t interval_ms) { energy_update_interval_ms_ = interval_ms; }
+
+  /**
    * Start telemetry service.
    * 
    * Call this when the session is ready for telemetry.
@@ -97,6 +104,7 @@ class TelemetryService {
    * - Temperature (0x5D012C)
    * - Alarms (0x580000)
    * - Warnings (0x58000B)
+   * - Cumulative energy (0x570001), awaited on its separate configured cadence
    * 
    * This should be called periodically (e.g., every 10 seconds) by the
    * main component's update() method.
@@ -106,7 +114,7 @@ class TelemetryService {
   /**
    * Process incoming packet.
    * 
-   * Routes the packet to the appropriate handler based on OpSpec:
+   * Routes legacy telemetry by OpSpec; energy uses its awaited read callback:
    * - 0x30: Motor state response
    * - 0x2B: Flow/pressure response
    * - 0x14: Temperature response
@@ -129,6 +137,19 @@ class TelemetryService {
 
   // State
   bool running_ = false;
+
+  // Energy polling state
+  enum class EnergyReadState : uint8_t { UNKNOWN, AVAILABLE, FAILED, UNSUPPORTED };
+  EnergyReadState energy_read_state_{EnergyReadState::UNKNOWN};
+  uint32_t energy_update_interval_ms_{60000};
+  uint32_t last_energy_attempt_ms_{0};
+  uint32_t energy_generation_{0};
+  bool energy_attempted_{false};
+  bool energy_read_pending_{false};
+
+  // Energy polling helpers
+  void poll_energy_();
+  void set_energy_read_state_(EnergyReadState state, const char* reason = "no valid response");
 
   // Handler methods for different telemetry types
   void handle_motor_state_response(const uint8_t* data, size_t len);

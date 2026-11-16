@@ -1258,12 +1258,14 @@ MUTATIONS=(
 # TelemetryService's callback-less reads completes an innocent read as a
 # failure -- and does so most on the pumps the branch was written for, since a
 # pump that refuses reads is a pump that generates these orphans.
-"read-refusal-needs-no-declaration|components/alpha_hwr/transport.cpp|        cmd.expect_short_read_refusal && cmd.packet.size() > 5 &&|        cmd.packet.size() > 5 &&"
+"read-refusal-needs-no-declaration|components/alpha_hwr/transport.cpp|        class10_command && cmd.expect_short_read_refusal &&|        class10_command &&"
 # The upper length bound. Byte 5 is the FIRST APDU's length on a multi-APDU
 # telegram (#226), so without a ceiling any Class 10 telegram of any size whose
 # first APDU declared 0 or 1 payload bytes reads as a refusal -- and App C.17
 # makes "first APDU errored, second carries the answer" a documented case.
-"read-refusal-has-no-upper-length-bound|components/alpha_hwr/transport.cpp|        queued_class == 0x0A && data[4] == 0x0A && len >= 8 && len <= 9 &&|        queued_class == 0x0A && data[4] == 0x0A && len >= 8 &&"
+# The ceiling now lives in the shared parser. Bypass that check with the old
+# minimum-length-only decode so the long-telegram regression still proves it.
+"read-refusal-has-no-upper-length-bound|components/alpha_hwr/transport.cpp|    const bool short_read_refusal_shape = awaiting_short_read_refusal && valid_short_reply;|    const bool short_read_refusal_shape = awaiting_short_read_refusal && len >= 8 && ((reply = protocol::decode_short_class10_reply(data[5], data[6], len)), true);"
 # GET, not "not a SET". There are three operations, and the negation also
 # catches INFO -- the log then says "read declined" about one.
 "read-refusal-admits-info|components/alpha_hwr/transport.cpp|        protocol::apdu_op(cmd.packet[5]) == protocol::ApduOp::GET;|        !protocol::apdu_is_set(cmd.packet[5]);"
@@ -1436,13 +1438,13 @@ MUTATIONS=(
 "builder-cap-is-the-length-byte-not-the-pdu|components/alpha_hwr/frame_builder.cpp|  if (length > protocol::MAX_PDU_LEN) {|  if (length > 255) {"
 # The pre-#208 match condition. A 0xC1 or 0x41 refusal fails this test, falls
 # past the len >= 11 floor, and dies by 3 s timeout instead of being reported.
-"short-ack-matches-only-the-two-known-heads|components/alpha_hwr/transport.cpp|protocol::apdu_payload_len(data[5]) <= 1 &&|(data[5] == 0x01 || data[5] == 0x81) &&"
+"short-ack-matches-only-the-two-known-heads|components/alpha_hwr/transport.cpp|    const bool short_ack_shape = awaiting_short_ack && valid_short_reply;|    const bool short_ack_shape = awaiting_short_ack && valid_short_reply && (data[5] == 0x01 || data[5] == 0x81);"
 # Unknown Class declares a ZERO-length payload, so its head is 0x40 and its
 # frame is 8 bytes. `== 1` admits 0x41 -- which App C.17's format table says
 # cannot occur -- while rejecting the 0x40 that does, leaving it to die by 3 s
 # timeout. The first cut of #208 shipped exactly that; an adversarial review
 # caught it, not the suite. This entry is what makes the suite catch it.
-"short-ack-misses-the-zero-length-refusal|components/alpha_hwr/transport.cpp|protocol::apdu_payload_len(data[5]) <= 1 &&|protocol::apdu_payload_len(data[5]) == 1 &&"
+"short-ack-misses-the-zero-length-refusal|components/alpha_hwr/transport.cpp|    const bool short_ack_shape = awaiting_short_ack && valid_short_reply;|    const bool short_ack_shape = awaiting_short_ack && valid_short_reply && reply.has_payload;"
 # A refusal must be reported as ANSWERED to the config-write callers.
 #
 # It originally guarded their no-readback short-circuit, which would have turned

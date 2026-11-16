@@ -16,6 +16,7 @@ NVS.
 **Sensors included:**
 - Flow Rate (m³/h), Head (m), Head Rate, Motor Speed (RPM), Power (W)
 - AC Voltage (V), DC Voltage (V), Motor Current (A)
+- Cumulative Energy (kWh), read from the pump's persistent counter
 - Inlet Pressure (bar)
 - Water, PCB and Control Box Temperature (°C)
 - Active Alarms and Warnings, Pump Run State, Control Mode, Pump Flow Limiter

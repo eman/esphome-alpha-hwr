@@ -5,6 +5,7 @@
  */
 
 #include "frame_parser.h"
+#include "response_match.h"
 #include "frame_builder.h"  // For FRAME_START and CLASS_10 constants
 #include "codec.h"
 #include "esphome/core/log.h"
@@ -175,6 +176,56 @@ ParsedFrame parse_frame(const uint8_t* data, size_t len) {
   }
 
   return result;
+}
+
+bool parse_short_class10_reply(const uint8_t* data, size_t len, ShortClass10Reply& reply) {
+  reply = {};
+  if (data == nullptr || len < 8 || len > 9 || data[0] != RESPONSE_START ||
+      data[4] != CLASS_10 || static_cast<size_t>(data[1]) + 4 != len) {
+    return false;
+  }
+  const uint8_t count = apdu_payload_len(data[5]);
+  if (static_cast<size_t>(count) + 8 != len) {
+    return false;
+  }
+  const ApduAck ack = apdu_ack(data[5]);
+  if ((ack == ApduAck::UNKNOWN_CLASS && count != 0) ||
+      ((ack == ApduAck::UNKNOWN_DATA_ITEM || ack == ApduAck::ILLEGAL_OPERATION) && count != 1)) {
+    return false;
+  }
+  reply = decode_short_class10_reply(data[5], count == 1 ? data[6] : 0, len);
+  return true;
+}
+
+bool parse_class10_object(const uint8_t* data, size_t len, Class10ObjectView& object) {
+  object = {};
+  if (data == nullptr) {
+    return false;
+  }
+  ParsedFrame frame = parse_frame(data, len);
+  if (!validate_frame_integrity(frame) || frame.frame_type != FrameType::RESPONSE ||
+      frame.class_byte != CLASS_10 || frame.multi_apdu) {
+    return false;
+  }
+
+  const size_t payload_len = apdu_payload_len(frame.opspec);
+  const size_t apdu_end = 6 + payload_len;
+  const size_t frame_end = static_cast<size_t>(data[1]) + 2;  // Excludes CRC
+  if (payload_len < 7 || apdu_end != frame_end ||
+      !class10_reply_is_ok(frame.opspec, true, data[6])) {
+    return false;
+  }
+
+  // A reply names its object TYPE, not the object/sub-id from the request.
+  const uint32_t object_size = decode_uint24_be(data, 10);
+  if (object_size > apdu_end - 13) {
+    return false;
+  }
+  object.type = apdu_object_type(frame.sub_id, frame.obj_id);
+  object.version = apdu_object_version(frame.obj_id);
+  object.body = data + 13;
+  object.body_len = object_size;
+  return true;
 }
 
 bool validate_frame_integrity(const ParsedFrame& frame) {

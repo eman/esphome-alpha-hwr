@@ -16,6 +16,7 @@ from esphome.const import (
     CONF_ID,
     DEVICE_CLASS_CONNECTIVITY,
     DEVICE_CLASS_CURRENT,
+    DEVICE_CLASS_ENERGY,
     DEVICE_CLASS_POWER,
     DEVICE_CLASS_TEMPERATURE,
     DEVICE_CLASS_VOLTAGE,
@@ -71,6 +72,8 @@ AlphaHwrComponent = alpha_hwr_ns.class_("AlphaHwrComponent", cg.PollingComponent
 CONF_FLOW = "flow"
 CONF_HEAD = "head"
 CONF_POWER = "power"
+CONF_ENERGY = "energy"
+CONF_ENERGY_UPDATE_INTERVAL = "energy_update_interval"
 CONF_RPM = "rpm"
 CONF_TEMP_MEDIA = "temp_media"
 CONF_TEMP_PCB = "temp_pcb"
@@ -323,6 +326,13 @@ CONFIG_SCHEMA = (
                 accuracy_decimals=1,
                 device_class=DEVICE_CLASS_POWER,
                 state_class=STATE_CLASS_MEASUREMENT,
+            ),
+            cv.Optional(CONF_ENERGY_UPDATE_INTERVAL, default="60s"): cv.positive_time_period_milliseconds,
+            cv.Optional(CONF_ENERGY): sensor.sensor_schema(
+                unit_of_measurement="kWh",
+                accuracy_decimals=3,
+                device_class=DEVICE_CLASS_ENERGY,
+                state_class=STATE_CLASS_TOTAL_INCREASING,
             ),
             cv.Optional(CONF_RPM): sensor.sensor_schema(
                 unit_of_measurement="RPM",
@@ -694,6 +704,11 @@ async def to_code(config):
     if CONF_HEAD in config:
         sens = await sensor.new_sensor(config[CONF_HEAD])
         cg.add(var.set_head_sensor(sens))
+
+    cg.add(var.set_energy_update_interval(config[CONF_ENERGY_UPDATE_INTERVAL]))
+    if CONF_ENERGY in config:
+        sens = await sensor.new_sensor(config[CONF_ENERGY])
+        cg.add(var.set_energy_sensor(sens))
 
     if CONF_POWER in config:
         sens = await sensor.new_sensor(config[CONF_POWER])

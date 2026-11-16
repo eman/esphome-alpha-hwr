@@ -36,6 +36,7 @@
 #pragma once
 
 #include "esphome/core/component.h"
+#include "response_match.h"
 #include <cstdint>
 #include <vector>
 
@@ -134,6 +135,53 @@ struct ParsedFrame {
       crc_valid(false),
       multi_apdu(false) {}
 };
+
+/**
+ * Validated Class 10 object reply, independent of APDU payload length.
+ *
+ * The body excludes the Class 10 status, type/version and three-byte size.
+ * Pointers borrow the caller's frame buffer.
+ */
+struct Class10ObjectView {
+  uint16_t type;
+  uint8_t version;
+  const uint8_t* body;
+  size_t body_len;
+
+  // Default constructor
+  Class10ObjectView()
+    : type(0),
+      version(0),
+      body(nullptr),
+      body_len(0) {}
+};
+
+/**
+ * Parse a single successful Class 10 object reply.
+ *
+ * Checks frame kind, CRC, both acknowledgements, APDU boundaries and object size.
+ * Multi-APDU telegrams and truncated objects are rejected.
+ *
+ * @param data Full packet bytes
+ * @param len Length of packet
+ * @param object Output object view, cleared on failure
+ * @return True if the frame contains a complete successful object reply
+ */
+bool parse_class10_object(const uint8_t* data, size_t len, Class10ObjectView& object);
+
+/**
+ * Parse a single short Class 10 reply after Transport has validated its CRC.
+ *
+ * Checks the frame and APDU lengths before decoding either acknowledge. Unknown
+ * Class has no payload; item errors carry an item ID (GENIbus App. C.17).
+ * Does not correlate replies or decide whether a GET can complete on an ACK.
+ *
+ * @param data Complete, CRC-validated response frame
+ * @param len Frame length, including CRC
+ * @param reply Decoded acknowledges; cleared on failure
+ * @return true when the short response shape is valid, including refusals
+ */
+bool parse_short_class10_reply(const uint8_t* data, size_t len, ShortClass10Reply& reply);
 
 /**
  * Parse raw GENI frame into structured data.

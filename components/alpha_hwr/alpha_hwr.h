@@ -119,6 +119,12 @@ public:
   void set_power_sensor(sensor::Sensor *sensor) {
     sensor_publisher_.set_power_sensor(sensor);
   }
+  void set_energy_update_interval(uint32_t interval_ms) {
+    telemetry_service_.set_energy_update_interval(interval_ms);
+  }
+  void set_energy_sensor(sensor::Sensor *sensor) {
+    sensor_publisher_.set_energy_sensor(sensor);
+  }
   void set_rpm_sensor(sensor::Sensor *sensor) {
     sensor_publisher_.set_rpm_sensor(sensor);
   }

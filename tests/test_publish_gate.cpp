@@ -141,7 +141,45 @@ void test_steady_state_frame_floor() {
   TEST_ASSERT(total == 10, "One minute of unchanged state costs 10 frames, not 401");
 }
 
+namespace {
+struct RawGateSensor {
+  bool has_state() const { return published; }
+  bool get_force_update() const { return force; }
+  float get_raw_state() const { return raw; }
+  void publish_state(float value) {
+    raw = value;
+    state = value * 1000;  // Simulate a user-supplied conversion filter.
+    published = true;
+    count++;
+  }
+  bool published{false};
+  bool force{false};
+  float raw{NAN};
+  float state{NAN};
+  int count{0};
+};
+}  // namespace
+
+void test_sensor_raw_gate() {
+  RawGateSensor sensor;
+  TEST_ASSERT(esphome::alpha_hwr::publish_sensor_if_changed(&sensor, NAN),
+              "First unknown sensor input publishes");
+  TEST_ASSERT(!esphome::alpha_hwr::publish_sensor_if_changed(&sensor, NAN),
+              "Repeated NaN input is gated");
+  TEST_ASSERT(esphome::alpha_hwr::publish_sensor_if_changed(&sensor, 1),
+              "Finite input replaces NaN");
+  TEST_ASSERT(!esphome::alpha_hwr::publish_sensor_if_changed(&sensor, 1) && sensor.state == 1000,
+              "Gate compares raw input rather than converted filter output");
+  sensor.state = 2;  // A filter can also make output equal to the next different raw input.
+  TEST_ASSERT(esphome::alpha_hwr::publish_sensor_if_changed(&sensor, 2),
+              "Changed input is not suppressed by filtered output");
+  sensor.force = true;
+  TEST_ASSERT(esphome::alpha_hwr::publish_sensor_if_changed(&sensor, 2),
+              "Sensor force_update is honored");
+}
+
 int main() {
+  test_sensor_raw_gate();
   std::cout << "==========================================" << std::endl;
   std::cout << "Publish Gate Tests (issue #127)" << std::endl;
   std::cout << "==========================================" << std::endl;
