@@ -1555,7 +1555,8 @@ void AlphaHwrComponent::update() {
 #endif
 
     // Reuse the statistics read for the power-on counter and existing counters.
-    if (power_on_hours_sensor_ != nullptr && statistics_update_interval_ms_ > 0 &&
+    if ((operating_hours_sensor_ != nullptr || power_on_hours_sensor_ != nullptr) &&
+        statistics_update_interval_ms_ > 0 &&
         millis() - last_statistics_read_ms_ >= statistics_update_interval_ms_) {
       read_statistics();
     }

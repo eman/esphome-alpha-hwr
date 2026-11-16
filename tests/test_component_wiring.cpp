@@ -304,6 +304,8 @@ struct Rig {
   bool prevent_display_sleep{true};
   bool unsupported_panel_settings{false};
   uint32_t power_on_seconds{3600};
+  uint32_t operating_seconds{3600};
+  uint32_t start_count{3};
   int statistics_reads{0};
   int panel_reads{0};
   bool answer_writes{true};
@@ -401,10 +403,11 @@ void Rig::answer_outstanding_writes() {
       } else if (answer_extended_settings && obj == 93 && sub == 1) {
         statistics_reads++;
         uint8_t body[28] = {};
-        body[3] = 3;
-        body[10] = 0x0E;
-        body[11] = 0x10;  // 3600 operating seconds.
-        for (int i = 0; i < 4; i++) body[24 + i] = static_cast<uint8_t>(power_on_seconds >> (24 - 8 * i));
+        for (int i = 0; i < 4; i++) {
+          body[i] = static_cast<uint8_t>(start_count >> (24 - 8 * i));
+          body[8 + i] = static_cast<uint8_t>(operating_seconds >> (24 - 8 * i));
+          body[24 + i] = static_cast<uint8_t>(power_on_seconds >> (24 - 8 * i));
+        }
         notify(data_object_frame(0xF8, 2, body, sizeof(body), 0, 35));
       } else if (obj == 0x56 && sub >= 600 && sub <= 660) {
         // The limiter family (issue #274). Every byte below is from a real
@@ -3160,7 +3163,56 @@ static void test_optional_panel_and_power_on_polling() {
               "Zero intervals disable optional background reads");
 }
 
+static void test_statistics_polling_with_either_hours_sensor() {
+  // No hours sensor, operating only, power-on only, and both together.
+  for (int sensors = 0; sensors < 4; sensors++) {
+    Rig r;
+    esphome::sensor::Sensor operating, powered, starts;
+    const bool has_operating = (sensors & 1) != 0;
+    const bool has_power_on = (sensors & 2) != 0;
+    r.answer_extended_settings = true;
+    r.operation_mode = 0;
+    r.component.set_start_count_sensor(&starts);
+    if (has_operating) r.component.set_operating_hours_sensor(&operating);
+    if (has_power_on) r.component.set_power_on_hours_sensor(&powered);
+    r.component.set_statistics_update_interval(10000);
+    r.setup();
+    r.connect_and_subscribe();
+    TEST_ASSERT(r.run_until_ready(), "Statistics polling test reaches a ready connection");
+    r.advance(60000, 1200);
+    TEST_ASSERT(starts.has_state() && starts.state == 3 && starts.publish_count == 1,
+                "Initial statistics are read and unchanged counters are not republished");
+    const int reads = r.statistics_reads;
+    r.operating_seconds = 7200;
+    r.power_on_seconds = 10800;
+    r.start_count = 4;
+    r.advance(25000, 500);
+    if (has_operating || has_power_on) {
+      TEST_ASSERT(r.statistics_reads > reads && starts.state == 4 && starts.publish_count == 2,
+                  "Either hours sensor enables polling and refreshes the shared start counter");
+      if (has_operating) {
+        TEST_ASSERT(operating.state == 2 && operating.publish_count == 2,
+                    "Operating hours refresh independently of the power-on sensor");
+      }
+      if (has_power_on) {
+        TEST_ASSERT(powered.state == 3 && powered.publish_count == 2,
+                    "Power-on hours refresh independently of the operating sensor");
+      }
+    } else {
+      TEST_ASSERT(r.statistics_reads == reads && starts.state == 3,
+                  "Start Count alone does not enable periodic statistics reads");
+    }
+    r.component.set_statistics_update_interval(0);
+    r.advance(10000, 200);
+    const int disabled_reads = r.statistics_reads;
+    r.advance(25000, 500);
+    TEST_ASSERT(r.statistics_reads == disabled_reads,
+                "Zero statistics interval disables polling for either hours sensor");
+  }
+}
+
 int main() {
+  test_statistics_polling_with_either_hours_sensor();
   test_optional_panel_and_power_on_polling();
   // Pinned so the local<->UTC mapping in the clock fixtures is the same on
   // every CI machine (issue #270's tests are the first here to have one). The

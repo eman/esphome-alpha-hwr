@@ -500,7 +500,7 @@ CONFIG_SCHEMA = (
                 accuracy_decimals=0,
                 icon="mdi:counter",
                 entity_category=ENTITY_CATEGORY_DIAGNOSTIC,
-                state_class=STATE_CLASS_MEASUREMENT,
+                state_class=STATE_CLASS_TOTAL_INCREASING,
             ),
             cv.Optional(CONF_OPERATING_HOURS): sensor.sensor_schema(
                 unit_of_measurement="h",
@@ -508,7 +508,7 @@ CONFIG_SCHEMA = (
                 icon="mdi:timer-sand",
                 device_class="duration",
                 entity_category=ENTITY_CATEGORY_DIAGNOSTIC,
-                state_class=STATE_CLASS_MEASUREMENT,
+                state_class=STATE_CLASS_TOTAL_INCREASING,
             ),
             cv.Optional(CONF_CLOCK_DIFF): sensor.sensor_schema(
                 unit_of_measurement="s",

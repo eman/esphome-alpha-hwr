@@ -28,7 +28,7 @@ events fire.
 | `time_id` | ID | none | A `time:` component to sync the pump's clock from. Optional in the schema, but see below — without it the pump's clock is never set. |
 | `initiate_pairing` | boolean | `true` | Whether **this node** initiates BLE pairing and configures security parameters. Leave it on; `false` does *not* prevent bonding — see below. (Formerly `enable_pairing`, still accepted.) |
 | `reconnect_settle_time` | time | `2s` | Delay after disconnect before reconnecting |
-| `statistics_update_interval` | time | `60s` | Refresh operating statistics while `power_on_hours` is configured. `0s` keeps only the initial read. |
+| `statistics_update_interval` | time | `60s` | Refresh operating statistics while either `operating_hours` or `power_on_hours` is configured. `0s` keeps only the initial read. |
 | `panel_settings_poll_interval` | time | `0s` | Optional HMI settings readback. The controls package sets `60s`; `0s` disables background panel reads. |
 | `energy_update_interval` | time | `60s` | Minimum interval between awaited energy reads; see `energy` below. |
 | `control_state_poll_interval` | time | `30s` | Interval for periodic control state polling. Set to `0s` to disable. |
@@ -66,7 +66,8 @@ is limited by the component's update cadence, and only one statistics read can
 be pending. The statistics read uses the same awaited object helper as energy,
 including complete object validation and ownership of late replies. A short older
 statistics record leaves power-on hours unavailable.
-Both measurements use raw-state change gating.
+DC power and all statistics counters use raw-state change gating. Start Count, Operating Hours,
+and Power-on Hours use `state_class: total_increasing` for their cumulative totals.
 
 ### `energy`
 
