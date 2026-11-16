@@ -203,6 +203,14 @@ void Transport::loop() {
         // open from 1.1 s to 4 s. `quiet_timeout` means "do not log this at
         // warning" and nothing else.
         this->note_reply_owed_(cmd.suppressed_a_frame);
+        // An owned object read's late reply is the one late reply this
+        // transport can recognise for certain (the owned-type guard in
+        // try_dispatch_response() discards it), so record which part of the
+        // debt it can pay. Not when suppressed: then no debt was added.
+        if (cmd.require_object_reply && !cmd.suppressed_a_frame &&
+            this->owed_object_replies_ < this->owed_replies_) {
+          this->owed_object_replies_++;
+        }
         this->fail_front_command_();
         this->state_ = State::IDLE;
       }
@@ -303,6 +311,9 @@ void Transport::consume_owed_reply_(Command &cmd) {
   // one of either is unattributable in exactly the same way.
   if (this->owed_replies_ > 0) this->owed_replies_--;
   if (this->owed_replies_ == 0) this->owed_pending_ = false;
+  // A short frame can pay an owned read's debt too (its late refusal), so the
+  // attributed share can never exceed what is still owed.
+  if (this->owed_object_replies_ > this->owed_replies_) this->owed_object_replies_ = this->owed_replies_;
   cmd.suppressed_a_frame = true;
 }
 
@@ -315,6 +326,7 @@ bool Transport::stale_reply_possible_() {
              (unsigned) this->owed_replies_);
     this->owed_pending_ = false;
     this->owed_replies_ = 0;
+    this->owed_object_replies_ = 0;
     return false;
   }
   return this->owed_replies_ > 0;
@@ -618,6 +630,7 @@ void Transport::reset() {
   // would spend the next connection's first acknowledgement paying it off.
   owed_pending_ = false;
   owed_replies_ = 0;
+  owed_object_replies_ = 0;
   state_ = State::IDLE;
   // Last, because the callbacks it invokes run service code, and that code must
   // see a transport that is already down rather than one still holding the
@@ -1118,6 +1131,20 @@ bool Transport::try_dispatch_response(const uint8_t* data, size_t len) {
           this->command_queue_.front().expect_type_high == packet_type_high &&
           this->command_queue_.front().expect_type_low_ver == packet_type_low_ver;
       if (!has_owner) {
+        // This is an abandoned owned read's answer, so it settles that read's
+        // debt (issue #248). Left standing, the debt would make the next short
+        // frame -- a SET's real acknowledgement -- pay for a reply that has
+        // already arrived, and the write would stall to its timeout. Paid only
+        // from debt an owned read recorded: a stray duplicate must not cancel a
+        // SET's own debt. Not consume_owed_reply_(): nothing was withheld from
+        // the live command, so its suppressed_a_frame must stay clear.
+        if (this->stale_reply_possible_() && this->owed_object_replies_ > 0) {
+          this->owed_object_replies_--;
+          this->owed_replies_--;
+          if (this->owed_replies_ == 0) this->owed_pending_ = false;
+          ESP_LOGV(TAG, "Late owned object reply paid one owed reply (%u still owed)",
+                   (unsigned) this->owed_replies_);
+        }
         ESP_LOGV(TAG, "Discarding unowned object reply type %u v%u", type,
                  protocol::apdu_object_version(packet_type_low_ver));
         return true;

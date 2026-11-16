@@ -69,15 +69,14 @@ again. BUSY, generic operation failure, malformed data and no response preserve
 the last value and allow another attempt on the configured cadence. No failed
 read publishes zero or changes the counter. Valid zero/decreased values from a
 validated counter reply are trusted; no speculative reset filter is applied.
+Home Assistant reads any decrease of a `total_increasing` sensor as a meter
+reset, so if the pump ever reported a transient low value and then recovered,
+the Energy dashboard would count the recovery as new consumption. No such
+reading has been observed: on the bench the counter came back unchanged across
+a node reboot.
 The decoded system-power field remains in `EnergyTelemetry`, while the exposed
-`power` sensor continues to use motor telemetry.
-
-Transport handling uses exact type/version matching and rejects unowned replies
-of awaited object types before wildcard dispatch. Short refusals use the existing
-reply-debt safeguard, whose window is 500 ms after timeout. This is a bounded
-safeguard: old fire-and-forget telemetry can still produce unidentified errors,
-and errors outside the window cannot be attributed with certainty. Energy reads
-do not introduce automatic reconnects or a separate recovery policy.
+`power` sensor continues to use motor telemetry. How the read is matched to its
+reply is in [Architecture](architecture.md#key-design-notes).
 
 Publication compares pre-filter raw values and honors `force_update`.
 `accuracy_decimals: 3` affects display precision, not rounding of the counter
