@@ -18,8 +18,6 @@ NVS.
 - AC Voltage (V), DC Voltage (V), Motor Current (A)
 - Cumulative Energy (kWh), read from the pump's persistent counter
 - DC Power and Power-on Hours
-- Converter, Inverter, Auxiliary and Differential Temperature diagnostics
-  (disabled by default; the sampled HWR reports unavailable or placeholder values)
 - Inlet Pressure (bar)
 - Water, PCB and Control Box Temperature (°C)
 - Active Alarms and Warnings, Pump Run State, Control Mode, Pump Flow Limiter

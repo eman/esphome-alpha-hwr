@@ -126,63 +126,37 @@ static void test_temperature_units() {
   TEST_ASSERT_FLOAT_EQ(t.control_box_temperature_c, 42.0f, 0.01f, "control-box temp is raw °C");
 }
 
-static void test_additional_diagnostics_from_captured_frames() {
-  // CRC-valid HWR motor and process replies reassembled from Android snoops.
+static void test_dc_power_from_captured_frame() {
   const uint8_t motor[] = {0x24, 0x34, 0xf8, 0xe7, 0x0a, 0x30, 0x00, 0x01, 0x00, 0x03, 0x00, 0x00,
                            0x29, 0x42, 0xe5, 0xa6, 0x46, 0x43, 0x21, 0x4c, 0x00, 0x3e, 0x00, 0x32,
                            0x3e, 0x41, 0x1f, 0xda, 0xc0, 0x41, 0x21, 0x36, 0xa0, 0x45, 0x52, 0x51,
                            0xcc, 0x7f, 0xff, 0xff, 0xff, 0x7f, 0xff, 0xff, 0xff, 0x00, 0x00, 0x00,
                            0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x8a, 0xb0};
-  const uint8_t process[] = {0x24, 0x2f, 0xf8, 0xe7, 0x0a, 0x2b, 0x00, 0x02, 0x35, 0x02, 0x00,
-                             0x00, 0x24, 0x38, 0xc6, 0xc4, 0x24, 0x46, 0xc7, 0x70, 0xdd, 0x7f,
-                             0xff, 0xff, 0xff, 0x7f, 0xff, 0xff, 0xff, 0x7f, 0xff, 0xff, 0xff,
-                             0x7f, 0xff, 0xff, 0xff, 0x3e, 0xae, 0xb2, 0x64, 0x40, 0x26, 0xa5,
-                             0xf5, 0x3f, 0x2c, 0xe3, 0xad, 0xd4, 0xa8};
-  auto m = decode_motor_state_response(motor, sizeof(motor));
-  TEST_ASSERT(m.has_dc_power, "Captured motor reply includes DC power");
-  TEST_ASSERT_FLOAT_EQ(m.dc_power_w, 10.075836f, 0.0001f, "DC power remains raw watts");
-  TEST_ASSERT(m.has_converter_temp && std::isnan(m.converter_temperature_c),
-              "Captured converter temperature is unavailable, not zero");
-  TEST_ASSERT(m.has_inverter_temp && std::isnan(m.inverter_temperature_c),
-              "Captured inverter temperature is unavailable");
-  TEST_ASSERT(m.has_aux_temp && m.aux_temperature_c == 0,
-              "Captured auxiliary temperature is exactly zero");
-  auto f = decode_flow_pressure_response(process, sizeof(process));
-  TEST_ASSERT(f.has_differential_temp && std::isnan(f.differential_temperature_c),
-              "Captured differential temperature is unavailable");
+  auto motor_state = decode_motor_state_response(motor, sizeof(motor));
+  TEST_ASSERT(motor_state.has_dc_power, "Captured motor reply includes DC power");
+  TEST_ASSERT_FLOAT_EQ(motor_state.dc_power_w, 10.075836f, 0.0001f, "DC power remains raw watts");
 
   uint8_t synthetic[56] = {};
   put_float(synthetic, 29, 18.5f);
-  put_float(synthetic, 37, 42.5f);
-  put_float(synthetic, 41, 43.5f);
-  put_float(synthetic, 45, -5.5f);
-  m = decode_motor_state_response(synthetic, sizeof(synthetic));
-  TEST_ASSERT(m.has_dc_power && m.dc_power_w == 18.5f && m.converter_temperature_c == 42.5f &&
-                  m.inverter_temperature_c == 43.5f && m.aux_temperature_c == -5.5f,
-              "Available motor temperatures retain independent raw Celsius values");
-  put_float(synthetic, 33, -4.25f);
-  f = decode_flow_pressure_response(synthetic, sizeof(synthetic));
-  TEST_ASSERT(f.has_differential_temp && f.differential_temperature_c == -4.25f,
-              "Differential temperature is signed degrees, with no absolute-temperature offset");
-  TEST_ASSERT(!decode_motor_state_response(synthetic, 34).has_dc_power &&
-                  !decode_motor_state_response(synthetic, 42).has_converter_temp &&
-                  !decode_motor_state_response(synthetic, 46).has_inverter_temp &&
-                  !decode_motor_state_response(synthetic, 50).has_aux_temp &&
-                  !decode_flow_pressure_response(synthetic, 38).has_differential_temp,
-              "Truncated fields cannot overlap trailing CRC bytes");
-  put_float(synthetic, 29, INFINITY);
-  put_float(synthetic, 41, 999.0f);
-  put_float(synthetic, 33, -999.0f);
-  m = decode_motor_state_response(synthetic, sizeof(synthetic));
-  f = decode_flow_pressure_response(synthetic, sizeof(synthetic));
-  TEST_ASSERT(!m.has_dc_power && !m.has_inverter_temp && m.has_aux_temp && !f.has_differential_temp,
-              "Invalid diagnostics are rejected independently");
+  motor_state = decode_motor_state_response(synthetic, sizeof(synthetic));
+  TEST_ASSERT(motor_state.has_dc_power && motor_state.dc_power_w == 18.5f,
+              "DC power is decoded independently of motor power");
+  TEST_ASSERT(!decode_motor_state_response(synthetic, 34).has_dc_power,
+              "Truncated DC power cannot overlap trailing CRC bytes");
+  TEST_ASSERT(decode_motor_state_response(synthetic, 35).has_dc_power,
+              "Complete DC power is accepted before later motor fields");
+  for (float invalid : {INFINITY, NAN, -1.0f, 1001.0f}) {
+    put_float(synthetic, 29, invalid);
+    motor_state = decode_motor_state_response(synthetic, sizeof(synthetic));
+    TEST_ASSERT(!motor_state.has_dc_power && motor_state.has_power,
+                "Invalid DC power does not invalidate motor power");
+  }
 }
 
 int main() {
   std::cout << "Running Telemetry Units Tests..." << std::endl;
   test_motor_state_units();
-  test_additional_diagnostics_from_captured_frames();
+  test_dc_power_from_captured_frame();
   test_flow_head_units();
   test_inlet_pressure_units();
   test_temperature_units();

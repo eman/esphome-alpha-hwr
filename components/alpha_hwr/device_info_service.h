@@ -124,8 +124,10 @@ class DeviceInfoService {
    * Reads Object 93, Sub-ID 1 (Type 248: operation_history_pump_obj):
    *   - start_count: Total number of pump starts (uint32 BE, offset 0)
    *   - operating_time: Total operating seconds (uint32 BE, offset 8) → hours
+   *   - power_on_time: Total powered seconds (uint32 BE, offset 24) → hours
    *
-   * @param on_complete Callback(bool success, uint32_t start_count, float operating_hours, float power_on_hours).
+   * @param on_complete Callback(bool success, uint32_t start_count,
+   *                             float operating_hours, float power_on_hours).
    * Power-on hours is NaN when the record omits that field.
    *
    * Reference: device_info.py::read_statistics() lines 302-367

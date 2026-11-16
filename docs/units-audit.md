@@ -39,14 +39,11 @@ CRC-valid HWR captures; offsets below are from the full response frame):
 | Entity | Unit | Decode | Evidence |
 | --- | --- | --- | --- |
 | DC Power | W | Motor-state float at 29 | ProtectedMotorStateDetails.dc_power_consumption, unitIndex 7 (W); running samples 10.075836 and 10.469604 W |
-| Converter / Inverter / Auxiliary Temperature | °C | Motor-state floats at 37 / 41 / 45 | Profile fields converter_temperature / inverter_temperature / aux_temperature; no Kelvin offset |
-| Differential Temperature | °C difference | Process float at 33 | PumpedMediaRelatedProcessValuesExtended.differential_temperature, unitIndex 20; signed difference, no absolute-temperature offset |
 | Power-on Hours | h | Statistics uint32 at body 24 ÷ 3600 | OperationHistoryPump.power_on_time; includes stopped periods |
 
-NaN temperature fields remain unavailable. The auxiliary zero in these captures
-is retained without inferring the presence of a real sensor. The captured and
-synthetic diagnostic vectors are tested by `test_telemetry_units.cpp`; counter
-conversion and older short records by `test_device_info_service.cpp`.
+Captured and synthetic DC power vectors are tested by
+`test_telemetry_units.cpp`; counter conversion and older short records by
+`test_device_info_service.cpp`.
 
 All of the above are pinned by `tests/test_telemetry_units.cpp`.
 

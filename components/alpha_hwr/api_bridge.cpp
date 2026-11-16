@@ -40,8 +40,8 @@ void AlphaHwrApiBridge::setup(AlphaHwrComponent *component) {
   //
   // Every command string that is registered below is therefore public API on
   // two counts, and test_write_operations.cpp::test_command_strings() pins the
-  // command strings: editing one of those strings in write_command_to_string() renames
-  // a Home Assistant service along with the event field. Two commands have no
+  // command strings: editing one in write_command_to_string() renames a Home
+  // Assistant service along with the event field. Two commands have no
   // service here — SET_REMOTE_MODE (the Remote Mode switch is entity-only) and
   // SET_CLOCK (the RTC sync is autonomous, submitted by the periodic check with
   // origin INTERNAL) — so their strings move the event field alone.

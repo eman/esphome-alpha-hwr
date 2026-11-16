@@ -704,15 +704,7 @@ void WriteOperationService::confirm_enabled_(uint32_t seq) {
 // SET_MODE
 // ---------------------------------------------------------------------------
 
-// ---------------------------------------------------------------------------
-// SET_REMOTE_MODE: Class 3 command -> control_source readback (issue #46).
-//
-// Structurally identical to SET_PUMP_ENABLED: an unfused Class 3 SET that
-// asserts nothing but its own command id, produces no unsolicited
-// notification, and is therefore confirmed by a readback rather than by its
-// ACK. Object 86 Sub 7 carries control_source in the same payload as the mode
-// and run state, so get_mode_async() is the readback for all three.
-// ---------------------------------------------------------------------------
+// Panel settings: preserve neighboring fields and confirm the observed state.
 void WriteOperationService::run_panel_setting_(uint32_t seq) {
   Operation *op = find_(seq);
   if (op == nullptr || op->phase == Phase::DONE) return;
@@ -762,6 +754,15 @@ void WriteOperationService::run_panel_setting_(uint32_t seq) {
   });
 }
 
+// ---------------------------------------------------------------------------
+// SET_REMOTE_MODE: Class 3 command -> control_source readback (issue #46).
+//
+// Structurally identical to SET_PUMP_ENABLED: an unfused Class 3 SET that
+// asserts nothing but its own command id, produces no unsolicited
+// notification, and is therefore confirmed by a readback rather than by its
+// ACK. Object 86 Sub 7 carries control_source in the same payload as the mode
+// and run state, so get_mode_async() is the readback for all three.
+// ---------------------------------------------------------------------------
 void WriteOperationService::run_remote_mode_(uint32_t seq) {
   Operation *op = find_(seq);
   if (op == nullptr || op->phase == Phase::DONE) return;

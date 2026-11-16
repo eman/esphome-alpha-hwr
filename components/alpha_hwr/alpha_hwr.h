@@ -125,22 +125,12 @@ public:
   void set_power_dc_sensor(sensor::Sensor *sensor) {
     sensor_publisher_.set_power_dc_sensor(sensor);
   }
-  void set_temp_converter_sensor(sensor::Sensor *sensor) {
-    sensor_publisher_.set_temp_converter_sensor(sensor);
-  }
-  void set_temp_inverter_sensor(sensor::Sensor *sensor) {
-    sensor_publisher_.set_temp_inverter_sensor(sensor);
-  }
-  void set_temp_aux_sensor(sensor::Sensor *sensor) {
-    sensor_publisher_.set_temp_aux_sensor(sensor);
-  }
-  void set_differential_temperature_sensor(sensor::Sensor *sensor) {
-    sensor_publisher_.set_differential_temperature_sensor(sensor);
-  }
   void set_statistics_update_interval(uint32_t interval_ms) {
     statistics_update_interval_ms_ = interval_ms;
   }
-  void set_power_on_hours_sensor(sensor::Sensor *sensor) { power_on_hours_sensor_ = sensor; }
+  void set_power_on_hours_sensor(sensor::Sensor *sensor) {
+    power_on_hours_sensor_ = sensor;
+  }
   void set_energy_sensor(sensor::Sensor *sensor) {
     sensor_publisher_.set_energy_sensor(sensor);
   }
@@ -1071,6 +1061,12 @@ private:
   /// has already been warned about, and whether the "not ready" poll skip has.
   uint32_t control_sync_warned_gen_{UINT32_MAX};
   bool not_ready_warned_{false};
+  uint32_t statistics_update_interval_ms_{60000};
+  uint32_t last_statistics_read_ms_{0};
+  bool statistics_read_pending_{false};
+  uint32_t panel_settings_poll_interval_ms_{0};
+  uint32_t last_panel_settings_poll_ms_{0};
+
   /// Diagnostic suspend (issue #243): the link is down because someone asked for
   /// it, not because anything failed.
   ///
@@ -1090,11 +1086,6 @@ private:
   ///
   /// Neither needs the bond cleared, which is the trap this replaces: clearing
   /// the ESP's bond strands the pump until someone re-pairs at the pump itself.
-  uint32_t statistics_update_interval_ms_{60000};
-  uint32_t last_statistics_read_ms_{0};
-  bool statistics_read_pending_{false};
-  uint32_t panel_settings_poll_interval_ms_{0};
-  uint32_t last_panel_settings_poll_ms_{0};
   bool suspended_{false};
 
   bool link_ever_opened_{false};

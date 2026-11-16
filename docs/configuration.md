@@ -59,26 +59,14 @@ Additional optional sensors:
 | --- | --- | --- |
 | `power_dc` | DC-link power consumption, W | Motor-state reply, 87/69 |
 | `power_on_hours` | Time powered, including periods with the motor stopped, h | Statistics reply, 93/1 |
-| `temp_converter` | Converter power-electronics temperature, °C | Motor-state reply |
-| `temp_inverter` | Inverter/drive temperature, °C | Motor-state reply |
-| `temp_aux` | Generic auxiliary temperature, °C; physical sensor unspecified | Motor-state reply |
-| `differential_temperature` | Pump-reported temperature difference, °C difference | Process reply, 93/290 |
 
-Motor/process diagnostics reuse the existing telemetry replies. Power-on hours
+DC power reuses the existing telemetry replies. Power-on hours
 shares the statistics read with Start Count and Operating Hours; its interval
 is limited by the component's update cadence, and only one statistics read can
 be pending. The statistics read uses the same awaited object helper as energy,
 including complete object validation and ownership of late replies. A short older
 statistics record leaves power-on hours unavailable.
-All new measurements use raw-state change gating, including repeated NaN values.
-
-The package disables the four temperature diagnostics by default. Captured HWR
-replies report converter/inverter temperatures as NaN, auxiliary temperature as
-zero, and differential temperature as NaN. Zero is preserved as a raw value,
-not treated as proof of an installed sensor. No temperature pair is identified
-for the differential field in the inspected HWR profile, so the component does
-not calculate a substitute from PCB, water, or external temperatures.
-See [the trace audit](extended-telemetry-audit.md) for the evidence.
+Both measurements use raw-state change gating.
 
 ### `energy`
 

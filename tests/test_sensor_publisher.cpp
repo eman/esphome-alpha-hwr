@@ -409,38 +409,23 @@ void test_unwired_publisher_is_inert() {
   TEST_ASSERT(true, "Every publish path survives null sensors");
 }
 
-static void test_optional_diagnostics_publish_independently_and_gate_nan() {
+static void test_dc_power_publishes_independently_and_on_change() {
   SensorPublisher publisher;
-  esphome::sensor::Sensor dc, converter, inverter, aux, delta;
+  esphome::sensor::Sensor dc;
   publisher.set_power_dc_sensor(&dc);
-  publisher.set_temp_converter_sensor(&converter);
-  publisher.set_temp_inverter_sensor(&inverter);
-  publisher.set_temp_aux_sensor(&aux);
-  publisher.set_differential_temperature_sensor(&delta);
   MotorStateTelemetry motor;
-  motor.has_dc_power = motor.has_converter_temp = motor.has_inverter_temp = motor.has_aux_temp =
-      true;
+  motor.has_dc_power = true;
   motor.dc_power_w = 10.5f;
-  motor.converter_temperature_c = motor.inverter_temperature_c = NAN;
-  motor.aux_temperature_c = 0;
   publisher.publish_motor_state(motor);
   publisher.publish_motor_state(motor);
   TEST_ASSERT(dc.state == 10.5f && dc.publish_count == 1,
-              "DC diagnostics publish without requiring the separate motor power field");
-  TEST_ASSERT(std::isnan(converter.state) && converter.publish_count == 1 &&
-                  std::isnan(inverter.state) && inverter.publish_count == 1,
-              "Repeated unavailable temperatures do not fan out extra states");
-  TEST_ASSERT(aux.state == 0 && aux.publish_count == 1,
-              "Auxiliary raw zero is preserved and gated");
-  FlowPressureTelemetry flow;
-  flow.has_differential_temp = true;
-  flow.differential_temperature_c = 3.5f;
-  publisher.publish_flow_pressure(flow);
-  flow.differential_temperature_c = NAN;
-  publisher.publish_flow_pressure(flow);
-  publisher.publish_flow_pressure(flow);
-  TEST_ASSERT(std::isnan(delta.state) && delta.publish_count == 2,
-              "Unavailable differential temperature clears a previous reading exactly once");
+              "DC power publishes independently and unchanged values are gated");
+  motor.dc_power_w = 11.0f;
+  publisher.publish_motor_state(motor);
+  TEST_ASSERT(dc.state == 11.0f && dc.publish_count == 2, "Changed DC power publishes once");
+  motor.has_dc_power = false;
+  publisher.publish_motor_state(motor);
+  TEST_ASSERT(dc.publish_count == 2, "Absent DC power leaves the last reading unchanged");
 }
 
 int main() {
@@ -449,7 +434,7 @@ int main() {
   std::cout << "==========================================" << std::endl;
 
   test_energy_validation_and_publishing();
-  test_optional_diagnostics_publish_independently_and_gate_nan();
+  test_dc_power_publishes_independently_and_on_change();
   test_motor_state_publishes_only_present_fields();
   test_motor_state_with_no_data_publishes_nothing();
   test_temperature_range_validation();

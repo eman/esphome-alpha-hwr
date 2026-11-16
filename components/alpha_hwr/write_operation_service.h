@@ -295,14 +295,15 @@ class WriteOperationService {
                           std::function<void(bool)> done = nullptr,
                           WriteOrigin origin = WriteOrigin::SERVICE,
                           std::function<void(WriteStatus)> on_status = nullptr);
+  // Read-modify-write the panel setting and confirm it from the pump.
+  void submit_set_panel_setting(bool panel_lock, bool enabled, const std::string &op_id,
+                                std::function<void(bool)> done = nullptr,
+                                WriteOrigin origin = WriteOrigin::SERVICE);
   /**
    * Remote/Digital vs Local/Panel control source (issue #46). Confirmed from
    * the control_source byte of an Object 86 Sub 7 readback, not from the
    * command ACK -- see ControlService::send_remote_mode_command().
    */
-  void submit_set_panel_setting(bool panel_lock, bool enabled, const std::string &op_id,
-                                std::function<void(bool)> done = nullptr,
-                                WriteOrigin origin = WriteOrigin::SERVICE);
   void submit_set_remote_mode(bool enabled, const std::string &op_id,
                               std::function<void(bool)> done = nullptr,
                               WriteOrigin origin = WriteOrigin::SERVICE);
