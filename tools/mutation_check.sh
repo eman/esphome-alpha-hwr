@@ -1284,6 +1284,21 @@ MUTATIONS=(
 # And the window, which bounds how long an unpaid debt lingers.
 "stale-reply-window-never-expires|components/alpha_hwr/transport.cpp|  if (millis() - this->owed_since_ms_ >= STALE_REPLY_WINDOW_MS) {|  if (false) {"
 "stale-reply-window-too-short-for-the-tail|components/alpha_hwr/transport.h|  static constexpr uint32_t STALE_REPLY_WINDOW_MS = 500;|  static constexpr uint32_t STALE_REPLY_WINDOW_MS = 60;"
+# An owned object read's late reply is the one late reply recognisable by type,
+# and the owned-type guard discards it. It must pay the debt its timeout
+# recorded, or the next SET's real ACK is consumed in its place and that write
+# stalls to its timeout. Each of the four rules below has its own failure.
+# Never paid:
+"owned-late-reply-never-pays|components/alpha_hwr/transport.cpp|        if (this->stale_reply_possible_() && this->owed_object_replies_ > 0) {|        if (false) {"
+# Pays any debt, so a stray owned-type frame cancels a SET's own debt and that
+# SET's late ACK answers the next write:
+"owned-late-reply-pays-set-debt|components/alpha_hwr/transport.cpp|        if (this->stale_reply_possible_() && this->owed_object_replies_ > 0) {|        if (this->stale_reply_possible_()) {"
+# The timeout never attributes the debt to the owned read, so there is nothing
+# to pay from:
+"owned-timeout-not-attributed|components/alpha_hwr/transport.cpp|        if (cmd.require_object_reply && !cmd.suppressed_a_frame &&|        if (false &&"
+# A short frame (the owned read's late refusal) pays the debt, but the
+# attributed share outlives it and later pays a SET's debt:
+"owned-share-outlives-short-payment|components/alpha_hwr/transport.cpp|  if (this->owed_object_replies_ > this->owed_replies_) this->owed_object_replies_ = this->owed_replies_;|  // mutated: no clamp"
 # Issue #259: what happens to a command nobody will ever answer.
 #
 # reset() used to clear the queue in silence, so a service with a read in flight

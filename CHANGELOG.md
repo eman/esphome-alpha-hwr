@@ -27,6 +27,16 @@
 
 ### Fixed
 
+- **A late energy reply no longer costs the next write its acknowledgement.**
+  When an energy read times out, the transport records that a reply is still
+  owed (issue #248). The next short frame within 500 ms pays that debt instead
+  of answering whatever is now waiting. The energy reply's own late arrival
+  was discarded without paying it, so a write sent in that window had its real
+  ACK consumed in the reply's place and stalled for 3 s. The verdict was still
+  correct, because writes settle by readback. A discarded late reply of an
+  owned type now pays the debt its own read recorded, and only that debt: a
+  stray frame cannot cancel a write's debt.
+
 - **`-Wempty-body` warning in the firmware build.** When a log level is
   compiled out, its `ESP_LOGx` macro expands to nothing. An unbraced `if`
   whose only statement is such a macro then compiles to `if (...);` and GCC

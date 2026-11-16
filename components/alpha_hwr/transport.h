@@ -521,6 +521,12 @@ class Transport {
   /// per genuinely late reply, and the sequence always converges.
   uint8_t owed_replies_{0};
 
+  /// The part of owed_replies_ recorded by owned object reads that timed out
+  /// (send_class10_object_read()). Their late reply is recognisable by type, so
+  /// the owned-type guard can pay it exactly; no other late reply can be told
+  /// from a fresh one. Never exceeds owed_replies_, and clears with it.
+  uint8_t owed_object_replies_{0};
+
   /// Whether that debt is still live, and since when. The flag is what makes the
   /// timestamp safe to read: a bare millis() deadline compared with a signed
   /// difference goes positive again 24.9 days after it was set and would then

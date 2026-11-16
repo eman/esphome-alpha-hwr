@@ -646,6 +646,72 @@ void test_energy_payload_validation() {
               "Zero is a valid cumulative counter");
 }
 
+
+// A timed-out owned read records reply debt (issue #248). When its late reply
+// then arrives, the owned-type guard discards it -- and must pay that debt, or
+// the next SET's real acknowledgement is consumed in its place and the write
+// stalls to its timeout. It must pay ONLY debt an owned read recorded: a stray
+// owned-type frame must not cancel a SET's own debt.
+void test_late_owned_reply_pays_its_own_debt() {
+  const uint8_t set[] = {0x0A, 0x80};
+  const auto ack = with_crc({0x24, 5, 0xF8, 0xE7, 0x0A, 1, 0, 0, 0});
+  {
+    mock_millis = 0;
+    Rig r;
+    bool done = false, ok = false;
+    r.transport.send_class10_object_read(87, 1, 232, 1, [](bool, const uint8_t *, size_t) {});
+    r.drain(52);  // Energy read times out: one owed reply, recorded by an owned read.
+    r.transport.send_apdu_command(
+        set, sizeof(set), 0, 0,
+        [&](bool k, const uint8_t *, size_t) {
+          done = true;
+          ok = k;
+        },
+        3000, false, true);
+    r.drain(1);
+    auto late = captured_energy_frame();
+    r.transport.on_notification(late.data(), late.size());
+    r.transport.on_notification(ack.data(), ack.size());
+    TEST_ASSERT(done && ok, "A late owned reply pays its own debt; the SET keeps its ACK");
+  }
+  {
+    mock_millis = 0;
+    Rig r;
+    bool a_done = false, b_done = false, c_done = false, c_ok = false;
+    r.transport.send_class10_object_read(87, 1, 232, 1, [](bool, const uint8_t *, size_t) {});
+    r.drain(52);
+    r.transport.send_apdu_command(
+        set, sizeof(set), 0, 0, [&](bool, const uint8_t *, size_t) { a_done = true; }, 3000,
+        false, true);
+    r.drain(1);
+    // The energy read's late REFUSAL pays its debt through the short-frame path.
+    auto refusal = with_crc({0x24, 5, 0xF8, 0xE7, 0x0A, 1, 4, 0, 0});
+    r.transport.on_notification(refusal.data(), refusal.size());
+    r.transport.on_notification(ack.data(), ack.size());
+    TEST_ASSERT(a_done, "Late owned refusal settles the owned debt; the SET then completes");
+    // Now a SET times out: debt an owned read did NOT record.
+    r.transport.send_apdu_command(
+        set, sizeof(set), 0, 0, [&](bool, const uint8_t *, size_t) { b_done = true; }, 3000,
+        false, true);
+    r.drain(52);
+    TEST_ASSERT(b_done, "Second SET timed out and left a SET-owned debt");
+    r.transport.send_apdu_command(
+        set, sizeof(set), 0, 0,
+        [&](bool k, const uint8_t *, size_t) {
+          c_done = true;
+          c_ok = k;
+        },
+        3000, false, true);
+    r.drain(1);
+    auto stray = captured_energy_frame();
+    r.transport.on_notification(stray.data(), stray.size());
+    r.transport.on_notification(ack.data(), ack.size());  // The timed-out SET's late ACK.
+    TEST_ASSERT(!c_done, "A stray owned reply cannot pay a SET's debt; the late ACK is absorbed");
+    r.transport.on_notification(ack.data(), ack.size());
+    TEST_ASSERT(c_done && c_ok, "The next SET still receives its own ACK");
+  }
+}
+
 int main() {
   test_energy_counter();
   test_energy_cadence_and_generation();
@@ -653,6 +719,7 @@ int main() {
   test_energy_object_validation();
   test_owned_replies_do_not_answer_other_commands();
   test_energy_timeout_and_late_reply_guards();
+  test_late_owned_reply_pays_its_own_debt();
   test_energy_timeout_retries_on_cadence();
   test_energy_codec_vectors();
   test_energy_payload_validation();
