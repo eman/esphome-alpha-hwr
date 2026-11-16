@@ -73,7 +73,8 @@ void SensorPublisher::publish_energy(const protocol::EnergyTelemetry& energy) {
 
 void SensorPublisher::publish_motor_state(const protocol::MotorStateTelemetry& motor) {
   // Validate that we have at least some valid data
-  if (!motor.has_power && !motor.has_speed) {
+  if (!motor.has_power && !motor.has_speed && !motor.has_dc_power &&
+      !motor.has_converter_temp && !motor.has_inverter_temp && !motor.has_aux_temp) {
     ESP_LOGD(TAG, "Motor state has no valid data, skipping publish");
     return;
   }
@@ -109,11 +110,25 @@ void SensorPublisher::publish_motor_state(const protocol::MotorStateTelemetry& m
   if (motor.has_speed && rpm_sensor_ != nullptr) {
     rpm_sensor_->publish_state(motor.speed_rpm);
   }
+  // Optional diagnostics use raw-state change gating, including unavailable (NaN) values.
+  if (motor.has_dc_power && power_dc_sensor_ != nullptr) {
+    publish_sensor_if_changed(power_dc_sensor_, motor.dc_power_w);
+  }
+  if (motor.has_converter_temp && temp_converter_sensor_ != nullptr) {
+    publish_sensor_if_changed(temp_converter_sensor_, motor.converter_temperature_c);
+  }
+  if (motor.has_inverter_temp && temp_inverter_sensor_ != nullptr) {
+    publish_sensor_if_changed(temp_inverter_sensor_, motor.inverter_temperature_c);
+  }
+  if (motor.has_aux_temp && temp_aux_sensor_ != nullptr) {
+    publish_sensor_if_changed(temp_aux_sensor_, motor.aux_temperature_c);
+  }
+
 }
 
 void SensorPublisher::publish_flow_pressure(const protocol::FlowPressureTelemetry& flow) {
   // Validate that we have at least some valid data
-  if (!flow.has_flow && !flow.has_head) {
+  if (!flow.has_flow && !flow.has_head && !flow.has_differential_temp) {
     ESP_LOGD(TAG, "Flow/pressure has no valid data, skipping publish");
     return;
   }
@@ -143,6 +158,11 @@ void SensorPublisher::publish_flow_pressure(const protocol::FlowPressureTelemetr
       inlet_pressure_sensor_->publish_state(flow.inlet_pressure_bar);
     }
   }
+  // Optional diagnostics use raw-state change gating, including unavailable (NaN) values.
+  if (flow.has_differential_temp && differential_temperature_sensor_ != nullptr) {
+    publish_sensor_if_changed(differential_temperature_sensor_, flow.differential_temperature_c);
+  }
+
 }
 
 void SensorPublisher::publish_temperature(const protocol::TemperatureTelemetry& temp) {

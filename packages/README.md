@@ -17,6 +17,9 @@ NVS.
 - Flow Rate (m³/h), Head (m), Head Rate, Motor Speed (RPM), Power (W)
 - AC Voltage (V), DC Voltage (V), Motor Current (A)
 - Cumulative Energy (kWh), read from the pump's persistent counter
+- DC Power and Power-on Hours
+- Converter, Inverter, Auxiliary and Differential Temperature diagnostics
+  (disabled by default; the sampled HWR reports unavailable or placeholder values)
 - Inlet Pressure (bar)
 - Water, PCB and Control Box Temperature (°C)
 - Active Alarms and Warnings, Pump Run State, Control Mode, Pump Flow Limiter
@@ -58,6 +61,7 @@ this release and is removed in the next one.
 
 ### `alpha_hwr_controls.yaml` - Everything you drive from Home Assistant
 Layers on `alpha_hwr.yaml`:
+- Panel Lock and Prevent Display Sleep, confirmed by pump readback
 - Engage Pump, Remote Mode, Schedule Enabled, Temperature AutoAdapt and the
   flow-limit switches
 - Control mode select

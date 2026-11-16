@@ -166,6 +166,17 @@ class ControlService {
     * Reference: control.py::get_mode() lines 224-294
     */
    bool get_mode_async(std::function<void(bool, ControlMode)> on_complete);
+
+  // Optional HMI controls: validated Class 10 reads and bounded wire writes.
+  void read_panel_setting(uint16_t sub, core::Transport::CommandCallback callback);
+  bool write_panel_setting(uint16_t sub, const uint8_t *body, size_t len,
+                           core::Transport::CommandCallback callback);
+  int8_t get_panel_setting(uint16_t sub) const {
+    if (sub == 2) return panel_lock_;
+    if (sub == 114) return display_sleep_;
+    return -1;
+  }
+
    
    /**
     * Set callback for scheduling delayed operations.
@@ -400,6 +411,7 @@ class ControlService {
     * Invalidate all cached control data.
     */
    void invalidate_cache() {
+     panel_lock_ = display_sleep_ = -1;
      mode_valid_ = false;
      pump_enabled_valid_ = false;
      remote_state_valid_ = false;
@@ -484,6 +496,8 @@ class ControlService {
     // whatever the pump reports (recovers from a command the pump never applied).
     static constexpr uint8_t MAX_MODE_CONFIRM_ATTEMPTS = 4;
 
+    int8_t panel_lock_{-1};
+    int8_t display_sleep_{-1};
     bool is_remote_mode_enabled_{false};  // Track remote mode state
     // Has a recognized control_source (1 or 2) ever been seen? Mirrors
     // pump_enabled_valid_. Without it the {false} default above is

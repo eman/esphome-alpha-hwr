@@ -29,7 +29,41 @@ globals:
     initial_value: '0'
 
 
+alpha_hwr:
+  # Two optional HMI readbacks per minute, including pump-side changes.
+  panel_settings_poll_interval: 60s
+
 switch:
+  - platform: template
+    name: "Panel Lock"
+    icon: "mdi:lock"
+    entity_category: config
+    restore_mode: DISABLED  # Read pump state; never write a setting at boot.
+    optimistic: false
+    lambda: |-
+      int8_t value = id(pump).get_panel_locked();
+      if (value < 0) return {};
+      return value != 0;
+    turn_on_action:
+      - lambda: 'id(pump).set_panel_setting(true, true);'
+    turn_off_action:
+      - lambda: 'id(pump).set_panel_setting(true, false);'
+
+  - platform: template
+    name: "Prevent Display Sleep"
+    icon: "mdi:monitor"
+    entity_category: config
+    restore_mode: DISABLED  # Read pump state; never write a setting at boot.
+    optimistic: false
+    lambda: |-
+      int8_t value = id(pump).get_prevent_display_sleep();
+      if (value < 0) return {};
+      return value != 0;
+    turn_on_action:
+      - lambda: 'id(pump).set_panel_setting(false, true);'
+    turn_off_action:
+      - lambda: 'id(pump).set_panel_setting(false, false);'
+
   # ── Flow limiter enables (issue #299) ────────────────────────────────────
   #
   # The other half of the Max/Min Flow Limit numbers. Each turns its limiter on

@@ -232,6 +232,7 @@ void AlphaHwrComponent::setup() {
     
     // Invalidate caches so old values don't falsely satisfy ready gating
     this->control_service_.invalidate_cache();
+    last_panel_settings_poll_ms_ = 0;
     this->schedule_service_.invalidate_cache();
     // Terminal-event every pending write operation (issue #92): a client
     // waiting on a settle event must never be left hanging across a BLE drop.
@@ -1553,6 +1554,20 @@ void AlphaHwrComponent::update() {
     }
 #endif
 
+    // Reuse the statistics read for the power-on counter and existing counters.
+    if (power_on_hours_sensor_ != nullptr && statistics_update_interval_ms_ > 0 &&
+        millis() - last_statistics_read_ms_ >= statistics_update_interval_ms_) {
+      read_statistics();
+    }
+
+    if (panel_settings_poll_interval_ms_ > 0 &&
+        (last_panel_settings_poll_ms_ == 0 ||
+         millis() - last_panel_settings_poll_ms_ >= panel_settings_poll_interval_ms_)) {
+      last_panel_settings_poll_ms_ = millis();
+      control_service_.read_panel_setting(2, nullptr);
+      control_service_.read_panel_setting(114, nullptr);
+    }
+
     // Periodic control state polling (fixes #54): detect out-of-band pump state
     // changes (e.g., internal schedule execution, manual button press, external
     // app control). Scheduled via set_timeout() with 1000ms delay after telemetry
@@ -1787,17 +1802,24 @@ void AlphaHwrComponent::read_device_info() {
 }
 
 void AlphaHwrComponent::read_statistics() {
+  if (statistics_read_pending_) return;
+  statistics_read_pending_ = true;
+  last_statistics_read_ms_ = millis();
   device_info_service_.read_statistics_async(
-      [this](bool success, uint32_t start_count, float operating_hours) {
+      [this](bool success, uint32_t start_count, float operating_hours, float power_on_hours) {
+        statistics_read_pending_ = false;
         if (success) {
-          ESP_LOGI(TAG, "Statistics read successful: %" PRIu32 " starts, %.1f hours",
+          ESP_LOGD(TAG, "Statistics read successful: %" PRIu32 " starts, %.1f hours",
                    start_count, operating_hours);
           this->statistics_read_ok_ = true;
           if (this->start_count_sensor_) {
-            this->start_count_sensor_->publish_state(start_count);
+            publish_sensor_if_changed(this->start_count_sensor_, start_count);
+          }
+          if (this->power_on_hours_sensor_ != nullptr) {
+            publish_sensor_if_changed(this->power_on_hours_sensor_, power_on_hours);
           }
           if (this->operating_hours_sensor_) {
-            this->operating_hours_sensor_->publish_state(operating_hours);
+            publish_sensor_if_changed(this->operating_hours_sensor_, operating_hours);
           }
         } else {
           ESP_LOGW(TAG, "Statistics read failed");

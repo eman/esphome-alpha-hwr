@@ -27,6 +27,8 @@ const char *write_command_to_string(WriteCommand cmd) {
     case WriteCommand::CLEAR_SCHEDULE_ENTRY:  return "clear_schedule_entry";
     case WriteCommand::SET_SCHEDULE_ENABLED:  return "set_schedule_enabled";
     case WriteCommand::SET_REMOTE_MODE:       return "set_remote_mode";
+    case WriteCommand::SET_PANEL_LOCK:        return "set_panel_lock";
+    case WriteCommand::SET_PREVENT_DISPLAY_SLEEP: return "set_prevent_display_sleep";
     case WriteCommand::SET_CLOCK:             return "set_clock";
     case WriteCommand::SET_SINGLE_EVENT:      return "set_single_event";
     case WriteCommand::CLEAR_SINGLE_EVENT:    return "clear_single_event";
@@ -136,6 +138,10 @@ std::vector<std::string> WriteOperationService::resource_keys_(const Operation &
       return {format_detail("sched_entry:%u:%u", op.layer, op.day_index)};
     case WriteCommand::SET_SCHEDULE_ENABLED:
       return {"sched_enabled"};
+    case WriteCommand::SET_PANEL_LOCK:
+      return {"panel_lock"};
+    case WriteCommand::SET_PREVENT_DISPLAY_SLEEP:
+      return {"display_sleep"};
     case WriteCommand::SET_REMOTE_MODE:
       // Its own resource: the control source is orthogonal to run state, mode
       // and the schedule, so a queued remote-mode write must not supersede --
@@ -229,6 +235,8 @@ void WriteOperationService::start_front_() {
     case WriteCommand::SET_SCHEDULE_ENTRY:
     case WriteCommand::CLEAR_SCHEDULE_ENTRY:  budget = WATCHDOG_SCHED_ENTRY_MS; break;
     case WriteCommand::SET_SCHEDULE_ENABLED:  budget = WATCHDOG_SCHED_ENABLED_MS; break;
+    case WriteCommand::SET_PANEL_LOCK:
+    case WriteCommand::SET_PREVENT_DISPLAY_SLEEP:
     case WriteCommand::SET_REMOTE_MODE:       budget = WATCHDOG_REMOTE_MODE_MS; break;
     case WriteCommand::SET_CLOCK:             budget = WATCHDOG_SET_CLOCK_MS; break;
     case WriteCommand::SET_FLOW_LIMITER:      budget = WATCHDOG_FLOW_LIMITER_MS; break;
@@ -256,6 +264,8 @@ void WriteOperationService::start_front_() {
     case WriteCommand::SET_SCHEDULE_ENTRY:
     case WriteCommand::CLEAR_SCHEDULE_ENTRY:  run_schedule_entry_(seq); break;
     case WriteCommand::SET_SCHEDULE_ENABLED:  run_schedule_enabled_(seq); break;
+    case WriteCommand::SET_PANEL_LOCK:
+    case WriteCommand::SET_PREVENT_DISPLAY_SLEEP: run_panel_setting_(seq); break;
     case WriteCommand::SET_REMOTE_MODE:       run_remote_mode_(seq); break;
     case WriteCommand::SET_CLOCK:             run_set_clock_(seq); break;
     case WriteCommand::SET_SINGLE_EVENT:
@@ -404,6 +414,11 @@ void WriteOperationService::finish_(uint32_t seq, WriteStatus status, const std:
       break;
     case WriteCommand::SET_SCHEDULE_ENABLED:
       result.sched_enabled = op.enabled ? 1 : 0;
+      break;
+    case WriteCommand::SET_PANEL_LOCK:
+    case WriteCommand::SET_PREVENT_DISPLAY_SLEEP:
+      // Report only an observed state, including a refused pre-write read.
+      result.enabled = std::isnan(op.pre_value) ? -1 : static_cast<int8_t>(op.pre_value);
       break;
     case WriteCommand::SET_REMOTE_MODE:
       // `enabled` (not sched_enabled): this is a pump control-source state,
@@ -698,6 +713,55 @@ void WriteOperationService::confirm_enabled_(uint32_t seq) {
 // ACK. Object 86 Sub 7 carries control_source in the same payload as the mode
 // and run state, so get_mode_async() is the readback for all three.
 // ---------------------------------------------------------------------------
+void WriteOperationService::run_panel_setting_(uint32_t seq) {
+  Operation *op = find_(seq);
+  if (op == nullptr || op->phase == Phase::DONE) return;
+  const uint16_t sub = op->command == WriteCommand::SET_PANEL_LOCK ? 2 : 114;
+  op->phase = Phase::RESOLVING;
+  control_.read_panel_setting(sub, [this, seq, sub](bool ok, const uint8_t *payload, size_t len) {
+    Operation *op = find_(seq);
+    if (op == nullptr || op->phase == Phase::DONE) return;
+    if (!ok) {
+      finish_(seq, WriteStatus::REJECTED, "panel settings unavailable before write");
+      return;
+    }
+    op->pre_value = payload[3] != 0 ? 1 : 0;
+    uint8_t body[32];
+    const size_t size = len - 3;  // read_panel_setting() validates and bounds this.
+    memcpy(body, payload + 3, size);
+    // Preserve a stronger existing lock; unlock changes only the lock level.
+    body[0] = op->enabled ? (body[0] != 0 ? body[0] : 1) : 0;
+    op->phase = Phase::WRITING;
+    if (!control_.write_panel_setting(
+            sub, body, size, [this, seq, sub](bool acked, const uint8_t *reply, size_t /*len*/) {
+              Operation *op = find_(seq);
+              if (op == nullptr || op->phase == Phase::DONE) return;
+              if (!acked && reply != nullptr) {
+                finish_(seq, WriteStatus::REJECTED, "pump refused panel setting");
+                return;
+              }
+              op->phase = Phase::CONFIRMING;
+              control_.read_panel_setting(
+                  sub, [this, seq](bool ok, const uint8_t *payload, size_t /*len*/) {
+                    Operation *op = find_(seq);
+                    if (op == nullptr || op->phase == Phase::DONE) return;
+                    if (!ok) {
+                      finish_(seq, WriteStatus::TIMEOUT, "panel setting readback unavailable");
+                      return;
+                    }
+                    const bool matches = (payload[3] != 0) == op->enabled;
+                    op->enabled = payload[3] != 0;
+                    op->pre_value = op->enabled ? 1 : 0;
+                    finish_(seq, matches ? WriteStatus::ACCEPTED : WriteStatus::REJECTED,
+                            matches ? "panel setting confirmed"
+                                    : "pump kept a different panel setting");
+                  });
+            })) {
+      finish_(seq, WriteStatus::REJECTED, "panel setting could not be queued");
+    }
+  });
+}
+
 void WriteOperationService::run_remote_mode_(uint32_t seq) {
   Operation *op = find_(seq);
   if (op == nullptr || op->phase == Phase::DONE) return;
@@ -1693,6 +1757,19 @@ void WriteOperationService::submit_clear_schedule_entry(uint8_t layer, uint8_t d
   op.layer = layer;
   op.day_index = day_index;
   op.enabled = false;
+  op.done = std::move(done);
+  submit_(std::move(op));
+}
+
+void WriteOperationService::submit_set_panel_setting(bool panel_lock, bool enabled,
+                                                     const std::string &op_id,
+                                                     std::function<void(bool)> done,
+                                                     WriteOrigin origin) {
+  Operation op;
+  op.command = panel_lock ? WriteCommand::SET_PANEL_LOCK : WriteCommand::SET_PREVENT_DISPLAY_SLEEP;
+  op.op_id = op_id;
+  op.origin = origin;
+  op.enabled = enabled;
   op.done = std::move(done);
   submit_(std::move(op));
 }

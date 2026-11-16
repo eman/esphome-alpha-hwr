@@ -57,7 +57,7 @@ MotorStateTelemetry decode_motor_state_response(const uint8_t* data, size_t len)
   // [1] = Voltage DC (V) at offset 17
   // [2] = Current (A) at offset 21
   // [3] = Power (W) at offset 25
-  // [4] = Unknown/reserved at offset 29
+  // [4] = DC power (W) at offset 29
   // [5] = Speed (RPM) at offset 33
   // [6] = Converter temp (°C) at offset 37
   
@@ -106,8 +106,8 @@ MotorStateTelemetry decode_motor_state_response(const uint8_t* data, size_t len)
     }
   }
   
-  // Converter temperature (offset 37, float[6])
-  if (len >= 41) {
+  // Converter temperature (offset 37, float[6]); exclude the CRC.
+  if (len >= 43) {
     float temp = decode_float_be(data, 37);
     // Allow NaN for temperature - it means sensor not available
     if (std::isnan(temp) || (temp >= -20 && temp <= 120)) {
@@ -116,6 +116,29 @@ MotorStateTelemetry decode_motor_state_response(const uint8_t* data, size_t len)
     }
   }
   
+  // Additional ProtectedMotorStateDetails fields; exclude the trailing CRC.
+  if (len >= 35) {
+    const float power = decode_float_be(data, 29);
+    if (std::isfinite(power) && power >= 0 && power <= 1000) {
+      result.has_dc_power = true;
+      result.dc_power_w = power;
+    }
+  }
+  if (len >= 47) {
+    const float temp = decode_float_be(data, 41);
+    if (std::isnan(temp) || (temp >= -20 && temp <= 150)) {
+      result.has_inverter_temp = true;
+      result.inverter_temperature_c = temp;
+    }
+  }
+  if (len >= 51) {
+    const float temp = decode_float_be(data, 45);
+    if (std::isnan(temp) || (temp >= -20 && temp <= 150)) {
+      result.has_aux_temp = true;
+      result.aux_temperature_c = temp;
+    }
+  }
+
   return result;
 }
 
@@ -124,7 +147,8 @@ FlowPressureTelemetry decode_flow_pressure_response(const uint8_t* data, size_t 
   
   // Flow/pressure response: floats start at offset 13
   // Float array layout:
-  // [0-5] = Reserved/unknown
+  // [0-4] = Other process values
+  // [5] = Differential temperature (°C difference) at offset 33
   // [6] = Flow rate (m³/h) at offset 37
   // [7] = Head pressure (m) at offset 41
   // [8] = Inlet pressure (bar) at offset 45 - often NaN
@@ -168,6 +192,15 @@ FlowPressureTelemetry decode_flow_pressure_response(const uint8_t* data, size_t 
     }
   }
   
+  // Pump-reported differential temperature (float[5]), not a derived PCB/media difference.
+  if (len >= 39) {
+    const float temp = decode_float_be(data, 33);
+    if (std::isnan(temp) || (temp >= -150 && temp <= 150)) {
+      result.has_differential_temp = true;
+      result.differential_temperature_c = temp;
+    }
+  }
+
   return result;
 }
 

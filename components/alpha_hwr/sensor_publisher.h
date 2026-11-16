@@ -80,6 +80,11 @@ class SensorPublisher {
   void set_head_sensor(sensor::Sensor *sensor) { head_sensor_ = sensor; }
   void set_power_sensor(sensor::Sensor *sensor) { power_sensor_ = sensor; }
   void set_energy_sensor(sensor::Sensor *sensor) { energy_sensor_ = sensor; }
+  void set_power_dc_sensor(sensor::Sensor *sensor) { power_dc_sensor_ = sensor; }
+  void set_temp_converter_sensor(sensor::Sensor *sensor) { temp_converter_sensor_ = sensor; }
+  void set_temp_inverter_sensor(sensor::Sensor *sensor) { temp_inverter_sensor_ = sensor; }
+  void set_temp_aux_sensor(sensor::Sensor *sensor) { temp_aux_sensor_ = sensor; }
+  void set_differential_temperature_sensor(sensor::Sensor *sensor) { differential_temperature_sensor_ = sensor; }
   bool has_energy_sensor() const { return energy_sensor_ != nullptr; }
   void set_rpm_sensor(sensor::Sensor *sensor) { rpm_sensor_ = sensor; }
   void set_temp_media_sensor(sensor::Sensor *sensor) { temp_media_sensor_ = sensor; }
@@ -168,6 +173,12 @@ class SensorPublisher {
   sensor::Sensor *head_sensor_{nullptr};
   sensor::Sensor *power_sensor_{nullptr};
   sensor::Sensor *energy_sensor_{nullptr};
+  sensor::Sensor *power_dc_sensor_{nullptr};
+  sensor::Sensor *temp_converter_sensor_{nullptr};
+  sensor::Sensor *temp_inverter_sensor_{nullptr};
+  sensor::Sensor *temp_aux_sensor_{nullptr};
+  sensor::Sensor *differential_temperature_sensor_{nullptr};
+
   sensor::Sensor *rpm_sensor_{nullptr};
   sensor::Sensor *temp_media_sensor_{nullptr};
   sensor::Sensor *temp_pcb_sensor_{nullptr};

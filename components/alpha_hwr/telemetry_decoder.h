@@ -9,10 +9,10 @@
  * The Alpha HWR pump sends telemetry using Class 10 DataObjects:
  * 
  * 1. **Motor State** (OpSpec 0x30 responses)
- *    - AC voltage, current, power, speed, converter temperature
+ *    - AC/DC voltage, current, AC/DC power, speed, and motor-electronics temperatures
  * 
  * 2. **Flow/Pressure** (OpSpec 0x2B responses)
- *    - Flow rate, head, inlet pressure, outlet pressure
+ *    - Flow rate, head, pressure, and differential temperature
  * 
  * 3. **Temperature** (OpSpec 0x14 responses)
  *    - Media temperature, PCB temperature, control box temperature
@@ -67,19 +67,31 @@ struct MotorStateTelemetry {
   bool has_power;
   float power_w;
   
+  bool has_dc_power;
+  float dc_power_w;
+
   bool has_speed;
   float speed_rpm;
   
   bool has_converter_temp;
   float converter_temperature_c;
 
+  bool has_inverter_temp;
+  float inverter_temperature_c;
+
+  bool has_aux_temp;
+  float aux_temperature_c;
+
   MotorStateTelemetry() 
     : has_voltage_ac(false), voltage_ac_v(0),
       has_voltage_dc(false), voltage_dc_v(0),
       has_current(false), current_a(0),
       has_power(false), power_w(0),
+      has_dc_power(false), dc_power_w(0),
       has_speed(false), speed_rpm(0),
-      has_converter_temp(false), converter_temperature_c(0) {}
+      has_converter_temp(false), converter_temperature_c(0),
+      has_inverter_temp(false), inverter_temperature_c(0),
+      has_aux_temp(false), aux_temperature_c(0) {}
 };
 
 /**
@@ -111,6 +123,9 @@ struct FlowPressureTelemetry {
   bool has_head;
   float head_m;
   
+  bool has_differential_temp;
+  float differential_temperature_c;
+
   bool has_inlet_pressure;
   float inlet_pressure_bar;
   
@@ -120,6 +135,7 @@ struct FlowPressureTelemetry {
   FlowPressureTelemetry()
     : has_flow(false), flow_m3h(0),
       has_head(false), head_m(0),
+      has_differential_temp(false), differential_temperature_c(0),
       has_inlet_pressure(false), inlet_pressure_bar(0),
       has_outlet_pressure(false), outlet_pressure_bar(0) {}
 };

@@ -125,11 +125,12 @@ class DeviceInfoService {
    *   - start_count: Total number of pump starts (uint32 BE, offset 0)
    *   - operating_time: Total operating seconds (uint32 BE, offset 8) → hours
    *
-   * @param on_complete Callback(bool success, uint32_t start_count, float operating_hours)
+   * @param on_complete Callback(bool success, uint32_t start_count, float operating_hours, float power_on_hours).
+   * Power-on hours is NaN when the record omits that field.
    *
    * Reference: device_info.py::read_statistics() lines 302-367
    */
-  void read_statistics_async(std::function<void(bool, uint32_t, float)> on_complete);
+  void read_statistics_async(std::function<void(bool, uint32_t, float, float)> on_complete);
 
  private:
   core::Transport &transport_;

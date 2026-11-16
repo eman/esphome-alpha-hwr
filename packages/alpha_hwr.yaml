@@ -321,6 +321,23 @@ alpha_hwr:
      name: "Motor Current"
    
    # Basic Telemetry
+   power_dc:
+     name: "DC Power"
+   power_on_hours:
+     name: "Power-on Hours"
+   # Optional diagnostics: the sampled HWR reports NaN or placeholder values.
+   temp_converter:
+     name: "Converter Temperature"
+     disabled_by_default: true
+   temp_inverter:
+     name: "Inverter Temperature"
+     disabled_by_default: true
+   temp_aux:
+     name: "Auxiliary Temperature"
+     disabled_by_default: true
+   differential_temperature:
+     name: "Differential Temperature"
+     disabled_by_default: true
    power:
      name: "Power Consumption"
    energy:

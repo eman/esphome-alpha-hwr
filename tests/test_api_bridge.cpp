@@ -155,6 +155,8 @@ static void test_the_registered_service_surface() {
   const std::vector<Expected> expected = {
       {"set_pump_enabled", {"enabled", "op_id"}},
       {"set_mode", {"mode", "op_id"}},
+      {"set_panel_lock", {"enabled", "op_id"}},
+      {"set_prevent_display_sleep", {"enabled", "op_id"}},
       {"set_setpoint", {"mode", "value", "op_id"}},
       {"set_temperature_range", {"min_c", "max_c", "autoadapt", "op_id"}},
       {"set_cycle_times", {"on_minutes", "off_minutes", "flow", "op_id"}},
@@ -173,7 +175,7 @@ static void test_the_registered_service_surface() {
   };
 
   TEST_ASSERT(mock_registered_services().size() == expected.size(),
-              "exactly 17 services are registered");
+              "exactly 19 services are registered");
 
   for (const auto &want : expected) {
     const esphome::api::MockServiceRegistration *got = nullptr;
@@ -574,6 +576,17 @@ static void test_enabled_carries_two_different_meanings() {
   TEST_ASSERT(b && BridgeHarness::field(*b, "enabled") == "true",
               "a schedule command reports the SCHEDULE flag in `enabled`, not the run state");
   TEST_ASSERT(b && BridgeHarness::field(*b, "day_name") == "Thursday", "day_name resolves from day");
+
+  for (bool lock : {false, true}) {
+    WriteResult panel;
+    panel.command = lock ? WriteCommand::SET_PANEL_LOCK : WriteCommand::SET_PREVENT_DISPLAY_SLEEP;
+    panel.status = WriteStatus::ACCEPTED;
+    panel.enabled = 1;
+    const auto *event = fire(bridge, panel);
+    TEST_ASSERT(event && BridgeHarness::field(*event, lock ? "panel_locked" : "prevent_display_sleep") == "true",
+                "Panel events expose the confirmed setting under an unambiguous key");
+    TEST_ASSERT(event && !BridgeHarness::has(*event, "enabled"), "Panel events do not overload pump enabled");
+  }
 
   // And remote mode uses a third key rather than overloading `enabled` again.
   WriteResult remote;
