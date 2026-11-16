@@ -41,9 +41,11 @@ switch:
     restore_mode: DISABLED  # Read pump state; never write a setting at boot.
     optimistic: false
     lambda: |-
-      int8_t value = id(pump).get_panel_locked();
-      if (value < 0) return {};
-      return value != 0;
+      bool enabled = false;
+      if (id(pump).get_panel_lock_state(&enabled)) {
+        return enabled;
+      }
+      return {};  // Return unknown if state not cached yet
     turn_on_action:
       - lambda: 'id(pump).set_panel_setting(true, true);'
     turn_off_action:
@@ -56,9 +58,11 @@ switch:
     restore_mode: DISABLED  # Read pump state; never write a setting at boot.
     optimistic: false
     lambda: |-
-      int8_t value = id(pump).get_prevent_display_sleep();
-      if (value < 0) return {};
-      return value != 0;
+      bool enabled = false;
+      if (id(pump).get_prevent_display_sleep_state(&enabled)) {
+        return enabled;
+      }
+      return {};  // Return unknown if state not cached yet
     turn_on_action:
       - lambda: 'id(pump).set_panel_setting(false, true);'
     turn_off_action:

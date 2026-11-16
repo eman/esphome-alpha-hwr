@@ -725,32 +725,37 @@ void WriteOperationService::run_panel_setting_(uint32_t seq) {
     body[0] = op->enabled ? (body[0] != 0 ? body[0] : 1) : 0;
     op->phase = Phase::WRITING;
     if (!control_.write_panel_setting(
-            sub, body, size, [this, seq, sub](bool acked, const uint8_t *reply, size_t /*len*/) {
+            sub, body, size, [this, seq](bool acked, const uint8_t *reply, size_t /*len*/) {
               Operation *op = find_(seq);
               if (op == nullptr || op->phase == Phase::DONE) return;
               if (!acked && reply != nullptr) {
                 finish_(seq, WriteStatus::REJECTED, "pump refused panel setting");
                 return;
               }
-              op->phase = Phase::CONFIRMING;
-              control_.read_panel_setting(
-                  sub, [this, seq](bool ok, const uint8_t *payload, size_t /*len*/) {
-                    Operation *op = find_(seq);
-                    if (op == nullptr || op->phase == Phase::DONE) return;
-                    if (!ok) {
-                      finish_(seq, WriteStatus::TIMEOUT, "panel setting readback unavailable");
-                      return;
-                    }
-                    const bool matches = (payload[3] != 0) == op->enabled;
-                    op->enabled = payload[3] != 0;
-                    op->pre_value = op->enabled ? 1 : 0;
-                    finish_(seq, matches ? WriteStatus::ACCEPTED : WriteStatus::REJECTED,
-                            matches ? "panel setting confirmed"
-                                    : "pump kept a different panel setting");
-                  });
+              confirm_panel_setting_(seq);
             })) {
       finish_(seq, WriteStatus::REJECTED, "panel setting could not be queued");
     }
+  });
+}
+
+void WriteOperationService::confirm_panel_setting_(uint32_t seq) {
+  Operation *op = find_(seq);
+  if (op == nullptr || op->phase == Phase::DONE) return;
+  const uint16_t sub = op->command == WriteCommand::SET_PANEL_LOCK ? 2 : 114;
+  op->phase = Phase::CONFIRMING;
+  control_.read_panel_setting(sub, [this, seq](bool ok, const uint8_t *payload, size_t /*len*/) {
+    Operation *op = find_(seq);
+    if (op == nullptr || op->phase == Phase::DONE) return;
+    if (!ok) {
+      finish_(seq, WriteStatus::TIMEOUT, "panel setting readback unavailable");
+      return;
+    }
+    const bool matches = (payload[3] != 0) == op->enabled;
+    op->enabled = payload[3] != 0;
+    op->pre_value = op->enabled ? 1 : 0;
+    finish_(seq, matches ? WriteStatus::ACCEPTED : WriteStatus::REJECTED,
+            matches ? "panel setting confirmed" : "pump kept a different panel setting");
   });
 }
 

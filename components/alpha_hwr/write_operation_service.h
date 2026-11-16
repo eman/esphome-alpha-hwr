@@ -615,6 +615,7 @@ class WriteOperationService {
   void confirm_schedule_entry_(uint32_t seq);
   void run_remote_mode_(uint32_t seq);
   void run_panel_setting_(uint32_t seq);
+  void confirm_panel_setting_(uint32_t seq);
   void confirm_remote_mode_(uint32_t seq);
   void run_set_clock_(uint32_t seq);
   void confirm_set_clock_(uint32_t seq);

@@ -300,6 +300,9 @@ struct Rig {
   /// how a quiet interval is produced against the real notification path rather
   /// than by poking the sampler directly.
   bool answer_extended_settings{false};
+  uint8_t panel_lock_level{1};
+  bool prevent_display_sleep{true};
+  bool unsupported_panel_settings{false};
   uint32_t power_on_seconds{3600};
   int statistics_reads{0};
   int panel_reads{0};
@@ -387,8 +390,12 @@ void Rig::answer_outstanding_writes() {
       const uint16_t sub = static_cast<uint16_t>((req[7] << 8) | req[8]);
       if (answer_extended_settings && obj == 94 && (sub == 2 || sub == 114)) {
         panel_reads++;
-        const uint8_t lock[3] = {1, 0, 0};
-        const uint8_t display[2] = {1, 120};
+        if (unsupported_panel_settings) {
+          notify(with_crc({0x24, 5, 0xF8, 0xE7, 10, 0x81, 94, 0, 0}));
+          continue;
+        }
+        const uint8_t lock[3] = {panel_lock_level, 0, 0};
+        const uint8_t display[2] = {static_cast<uint8_t>(prevent_display_sleep), 120};
         notify(data_object_frame(sub == 2 ? 0x0D : 0x97, 1, sub == 2 ? lock : display,
                                  sub == 2 ? 3 : 2, sub == 2 ? 1 : 3, sub == 2 ? 10 : 9));
       } else if (answer_extended_settings && obj == 93 && sub == 1) {
@@ -3096,7 +3103,15 @@ void test_an_open_during_a_suspension_is_torn_down_not_adopted() {
 static void test_optional_panel_and_power_on_polling() {
   Rig r;
   esphome::sensor::Sensor powered;
+  bool locked = true, prevent_sleep = true;
+  TEST_ASSERT(!r.component.get_panel_lock_state(&locked) && locked &&
+                  !r.component.get_prevent_display_sleep_state(&prevent_sleep) && prevent_sleep,
+              "Unread panel settings return invalid without changing the output");
+  TEST_ASSERT(!r.component.get_panel_lock_state(nullptr) &&
+                  !r.component.get_prevent_display_sleep_state(nullptr),
+              "Panel settings allow validity checks without an output pointer");
   r.answer_extended_settings = true;
+  r.panel_lock_level = 2;
   r.operation_mode = 0;
   r.component.set_power_on_hours_sensor(&powered);
   r.component.set_statistics_update_interval(10000);
@@ -3106,20 +3121,36 @@ static void test_optional_panel_and_power_on_polling() {
   TEST_ASSERT(r.run_until_ready(), "Extended telemetry test reaches a ready connection");
   const uint32_t deadline = mock_millis + 60000;
   while (mock_millis < deadline &&
-         (!powered.has_state() || r.component.get_panel_locked() < 0 ||
-          r.component.get_prevent_display_sleep() < 0)) {
+         (!powered.has_state() || !r.component.get_panel_lock_state(&locked) ||
+          !r.component.get_prevent_display_sleep_state(&prevent_sleep))) {
     r.advance(1000, 20);
   }
   TEST_ASSERT(powered.has_state() && powered.state == 1 && r.statistics_reads > 0,
               "Power-on sensor is wired to the statistics read");
-  TEST_ASSERT(r.component.get_panel_locked() == 1 && r.component.get_prevent_display_sleep() == 1,
-              "Optional HMI polling supplies the two switch states");
+  TEST_ASSERT(r.component.get_panel_lock_state(&locked) && locked &&
+                  r.component.get_prevent_display_sleep_state(&prevent_sleep) && prevent_sleep,
+              "Optional HMI polling exposes a stronger lock and display setting as booleans");
+  TEST_ASSERT(r.component.get_panel_lock_state(nullptr) &&
+                  r.component.get_prevent_display_sleep_state(nullptr),
+              "Valid panel settings can be checked without an output pointer");
   const int before = r.statistics_reads;
   r.power_on_seconds = 7200;
   r.advance(25000, 500);
   TEST_ASSERT(r.statistics_reads > before && powered.state == 2,
               "Power-on hours refresh without reconnecting");
   TEST_ASSERT(powered.publish_count == 2, "Unchanged statistics do not republish the power-on sensor");
+  r.panel_lock_level = 0;
+  r.prevent_display_sleep = false;
+  r.advance(20000, 400);
+  TEST_ASSERT(r.component.get_panel_lock_state(&locked) && !locked &&
+                  r.component.get_prevent_display_sleep_state(&prevent_sleep) && !prevent_sleep,
+              "Observed off settings remain valid boolean states");
+  r.unsupported_panel_settings = true;
+  r.advance(20000, 400);
+  locked = prevent_sleep = true;
+  TEST_ASSERT(!r.component.get_panel_lock_state(&locked) && locked &&
+                  !r.component.get_prevent_display_sleep_state(&prevent_sleep) && prevent_sleep,
+              "Unsupported settings return invalid without fabricating an off state");
   r.component.set_statistics_update_interval(0);
   r.component.set_panel_settings_poll_interval(0);
   r.advance(10000, 200);

@@ -1114,8 +1114,18 @@ public:
   void set_panel_settings_poll_interval(uint32_t interval_ms) {
     panel_settings_poll_interval_ms_ = interval_ms;
   }
-  int8_t get_panel_locked() const { return control_service_.get_panel_setting(2); }
-  int8_t get_prevent_display_sleep() const { return control_service_.get_panel_setting(114); }
+  bool get_panel_lock_state(bool *result) const {
+    const int8_t value = control_service_.get_panel_setting(2);
+    if (value < 0) return false;
+    if (result) *result = value != 0;
+    return true;
+  }
+  bool get_prevent_display_sleep_state(bool *result) const {
+    const int8_t value = control_service_.get_panel_setting(114);
+    if (value < 0) return false;
+    if (result) *result = value != 0;
+    return true;
+  }
   void submit_set_panel_lock(bool enabled, const std::string &op_id) {
     write_op_service_.submit_set_panel_setting(true, enabled, op_id);
   }
