@@ -417,7 +417,7 @@ void WriteOperationService::finish_(uint32_t seq, WriteStatus status, const std:
       break;
     case WriteCommand::SET_PANEL_LOCK:
     case WriteCommand::SET_PREVENT_DISPLAY_SLEEP:
-      // Report only an observed state, including a refused pre-write read.
+      // Report state only while a read still establishes it; a sent write clears it.
       result.enabled = std::isnan(op.pre_value) ? -1 : static_cast<int8_t>(op.pre_value);
       break;
     case WriteCommand::SET_REMOTE_MODE:
@@ -717,12 +717,19 @@ void WriteOperationService::run_panel_setting_(uint32_t seq) {
       finish_(seq, WriteStatus::REJECTED, "panel settings unavailable before write");
       return;
     }
-    op->pre_value = payload[3] != 0 ? 1 : 0;
+    op->pre_value = (sub == 2 ? payload[3] != 0 : payload[3] == 0) ? 1 : 0;
     uint8_t body[32];
     const size_t size = len - 3;  // read_panel_setting() validates and bounds this.
     memcpy(body, payload + 3, size);
-    // Preserve a stronger existing lock; unlock changes only the lock level.
-    body[0] = op->enabled ? (body[0] != 0 ? body[0] : 1) : 0;
+    if (sub == 2) {
+      // Preserve a stronger existing lock; unlock changes only the lock level.
+      body[0] = op->enabled ? (body[0] != 0 ? body[0] : 1) : 0;
+    } else {
+      // GO's prevent_display_sleep toggle reverses hmi_hidden_mode_config.enabled.
+      body[0] = op->enabled ? 0 : 1;
+    }
+    // Once the write may land, only a post-write observation can describe its state.
+    op->pre_value = NAN;
     op->phase = Phase::WRITING;
     if (!control_.write_panel_setting(
             sub, body, size, [this, seq](bool acked, const uint8_t *reply, size_t /*len*/) {
@@ -751,8 +758,10 @@ void WriteOperationService::confirm_panel_setting_(uint32_t seq) {
       finish_(seq, WriteStatus::TIMEOUT, "panel setting readback unavailable");
       return;
     }
-    const bool matches = (payload[3] != 0) == op->enabled;
-    op->enabled = payload[3] != 0;
+    const bool enabled =
+        op->command == WriteCommand::SET_PANEL_LOCK ? payload[3] != 0 : payload[3] == 0;
+    const bool matches = enabled == op->enabled;
+    op->enabled = enabled;
     op->pre_value = op->enabled ? 1 : 0;
     finish_(seq, matches ? WriteStatus::ACCEPTED : WriteStatus::REJECTED,
             matches ? "panel setting confirmed" : "pump kept a different panel setting");

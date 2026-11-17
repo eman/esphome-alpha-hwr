@@ -723,8 +723,9 @@ interleave mid-sequence, and each client matches its own results by `op_id`.
 
 `set_panel_lock` reports `panel_locked`, and `set_prevent_display_sleep` reports
 `prevent_display_sleep`. These boolean fields describe an observed pump value;
-they are absent if the initial read could not establish one. They do not reuse
-`enabled`, which already represents pump or schedule state for other commands.
+they are absent if no read established one, or a sent write has not been confirmed
+by a subsequent read. They do not reuse `enabled`, which already represents pump
+or schedule state for other commands.
 A missing ACK is followed by readback; an ACK alone never establishes success.
 An ignored write settles `rejected`; an unavailable confirm settles `timeout`.
 The Panel Lock and Prevent Display Sleep entity switches use these same queued

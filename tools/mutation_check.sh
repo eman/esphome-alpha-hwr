@@ -1839,6 +1839,22 @@ MUTATIONS=(
 "suspend-counted-as-a-failed-attempt|components/alpha_hwr/alpha_hwr.cpp|    } else if (!this->suspended_) {|    } else {"
 "suspend-recorded-as-a-truncated-gap|components/alpha_hwr/alpha_hwr.cpp|    this->link_gap_.disarm();|    // mutated: sample it as an outage"
 "bridge-parse-failure-settles-rejected|components/alpha_hwr/api_bridge.cpp|  result.status = WriteStatus::INVALID;|  result.status = WriteStatus::REJECTED;"
+
+# Panel settings and shared statistics: exercise the wire semantics, bounded
+# read-modify-write, missing-confirm state, and optional background polling.
+"review-panel-body-bound|components/alpha_hwr/control_service.cpp|len > 35|false"
+"review-panel-level-bound|components/alpha_hwr/control_service.cpp|payload[3] > (sub == 2 ? 2 : 1)|false"
+"review-panel-pin-size|components/alpha_hwr/control_service.cpp|protocol::decode_uint16_be(payload, 4) != len - 6|false"
+"review-panel-display-size|components/alpha_hwr/control_service.cpp|(sub == 114 && len != 5)|false"
+"review-panel-unsupported-latch|components/alpha_hwr/control_service.cpp|get_panel_setting(sub) == -2|false"
+"review-panel-display-write-inversion|components/alpha_hwr/write_operation_service.cpp|      body[0] = op->enabled ? 0 : 1;|      body[0] = op->enabled ? 1 : 0;"
+"review-panel-display-confirm-inversion|components/alpha_hwr/write_operation_service.cpp|op->command == WriteCommand::SET_PANEL_LOCK ? payload[3] != 0 : payload[3] == 0|payload[3] != 0"
+"review-panel-stale-result|components/alpha_hwr/write_operation_service.cpp|    op->pre_value = NAN;\n    op->phase = Phase::WRITING;|    op->phase = Phase::WRITING;"
+"review-panel-display-getter-inversion|components/alpha_hwr/alpha_hwr.h|    if (result) *result = value == 0;|    if (result) *result = value != 0;"
+"review-statistics-start-count-poll|components/alpha_hwr/alpha_hwr.cpp|start_count_sensor_ != nullptr|false"
+"review-polls-before-statistics-ready|components/alpha_hwr/alpha_hwr.cpp|    if (chain_products_complete_() && is_state_synchronized()) {\n      // Reuse one statistics read|    if (is_state_synchronized()) {\n      // Reuse one statistics read"
+"review-polls-before-cache-ready|components/alpha_hwr/alpha_hwr.cpp|    if (chain_products_complete_() && is_state_synchronized()) {\n      // Reuse one statistics read|    if (chain_products_complete_()) {\n      // Reuse one statistics read"
+"review-motor-fields-consume-crc|components/alpha_hwr/telemetry_decoder.cpp|  len -= 2;|  // mutated: include the CRC in motor fields"
 )
 
 if [[ "${1:-}" == "--list" ]]; then

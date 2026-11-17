@@ -50,6 +50,9 @@ EnergyTelemetry decode_energy_payload(const uint8_t* payload, size_t len) {
 
 MotorStateTelemetry decode_motor_state_response(const uint8_t* data, size_t len) {
   MotorStateTelemetry result;
+  // Callers pass the complete response frame; fields must not consume its CRC.
+  if (len < 2) return result;
+  len -= 2;
   
   // Motor state response: floats start at offset 13
   // Float array layout:
@@ -98,8 +101,8 @@ MotorStateTelemetry decode_motor_state_response(const uint8_t* data, size_t len)
     }
   }
   
-  // DC power (offset 29, float[4]); exclude the trailing CRC.
-  if (len >= 35) {
+  // DC power (offset 29, float[4])
+  if (len >= 33) {
     float power = decode_float_be(data, 29);
     if (std::isfinite(power) && power >= 0 && power <= 1000) {
       result.has_dc_power = true;

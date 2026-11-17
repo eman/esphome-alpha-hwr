@@ -1554,19 +1554,23 @@ void AlphaHwrComponent::update() {
     }
 #endif
 
-    // Reuse the statistics read for the power-on counter and existing counters.
-    if ((operating_hours_sensor_ != nullptr || power_on_hours_sensor_ != nullptr) &&
-        statistics_update_interval_ms_ > 0 &&
-        millis() - last_statistics_read_ms_ >= statistics_update_interval_ms_) {
-      read_statistics();
-    }
+    // Let the initial read chain and cache sync finish before adding periodic work.
+    if (chain_products_complete_() && is_state_synchronized()) {
+      // Reuse one statistics read for all configured cumulative counters.
+      if ((start_count_sensor_ != nullptr || operating_hours_sensor_ != nullptr ||
+           power_on_hours_sensor_ != nullptr) &&
+          statistics_update_interval_ms_ > 0 &&
+          millis() - last_statistics_read_ms_ >= statistics_update_interval_ms_) {
+        read_statistics();
+      }
 
-    if (panel_settings_poll_interval_ms_ > 0 &&
-        (last_panel_settings_poll_ms_ == 0 ||
-         millis() - last_panel_settings_poll_ms_ >= panel_settings_poll_interval_ms_)) {
-      last_panel_settings_poll_ms_ = millis();
-      control_service_.read_panel_setting(2, nullptr);
-      control_service_.read_panel_setting(114, nullptr);
+      if (panel_settings_poll_interval_ms_ > 0 &&
+          (last_panel_settings_poll_ms_ == 0 ||
+           millis() - last_panel_settings_poll_ms_ >= panel_settings_poll_interval_ms_)) {
+        last_panel_settings_poll_ms_ = millis();
+        control_service_.read_panel_setting(2, nullptr);
+        control_service_.read_panel_setting(114, nullptr);
+      }
     }
 
     // Periodic control state polling (fixes #54): detect out-of-band pump state

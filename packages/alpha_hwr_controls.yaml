@@ -47,9 +47,9 @@ switch:
       }
       return {};  // Return unknown if state not cached yet
     turn_on_action:
-      - lambda: 'id(pump).set_panel_setting(true, true);'
+      - lambda: 'id(pump).set_panel_lock(true);'
     turn_off_action:
-      - lambda: 'id(pump).set_panel_setting(true, false);'
+      - lambda: 'id(pump).set_panel_lock(false);'
 
   - platform: template
     name: "Prevent Display Sleep"
@@ -64,9 +64,9 @@ switch:
       }
       return {};  // Return unknown if state not cached yet
     turn_on_action:
-      - lambda: 'id(pump).set_panel_setting(false, true);'
+      - lambda: 'id(pump).set_prevent_display_sleep(true);'
     turn_off_action:
-      - lambda: 'id(pump).set_panel_setting(false, false);'
+      - lambda: 'id(pump).set_prevent_display_sleep(false);'
 
   # ── Flow limiter enables (issue #299) ────────────────────────────────────
   #

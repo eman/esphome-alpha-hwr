@@ -153,9 +153,34 @@ static void test_dc_power_from_captured_frame() {
   }
 }
 
+static void test_motor_fields_exclude_the_crc() {
+  struct Field {
+    size_t offset;
+    bool MotorStateTelemetry::*present;
+  };
+  const Field fields[] = {
+      {13, &MotorStateTelemetry::has_voltage_ac},    {17, &MotorStateTelemetry::has_voltage_dc},
+      {21, &MotorStateTelemetry::has_current},       {25, &MotorStateTelemetry::has_power},
+      {29, &MotorStateTelemetry::has_dc_power},      {33, &MotorStateTelemetry::has_speed},
+      {37, &MotorStateTelemetry::has_converter_temp}};
+  const uint8_t frame[43] = {};
+  for (const auto &field : fields) {
+    for (size_t missing = 1; missing <= 2; missing++) {
+      auto motor = decode_motor_state_response(frame, field.offset + 6 - missing);
+      TEST_ASSERT(!(motor.*field.present), "A motor field cannot consume one or two CRC bytes");
+    }
+    auto motor = decode_motor_state_response(frame, field.offset + 6);
+    TEST_ASSERT(motor.*field.present, "A complete motor field before the CRC is accepted");
+  }
+  TEST_ASSERT(!decode_motor_state_response(frame, 0).has_voltage_ac &&
+                  !decode_motor_state_response(frame, 1).has_voltage_ac,
+              "Runt motor frames cannot underflow the CRC subtraction");
+}
+
 int main() {
   std::cout << "Running Telemetry Units Tests..." << std::endl;
   test_motor_state_units();
+  test_motor_fields_exclude_the_crc();
   test_dc_power_from_captured_frame();
   test_flow_head_units();
   test_inlet_pressure_units();

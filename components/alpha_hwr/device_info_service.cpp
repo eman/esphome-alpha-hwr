@@ -202,20 +202,10 @@ void DeviceInfoService::read_statistics_async(std::function<void(bool, uint32_t,
       // data is already the payload (transport strips the 10-byte frame header and 2-byte CRC)
       // Skip 3-byte Class 10 header [00 00 XX]
       const uint8_t *stats = data + 3;
-      size_t stats_len = protocol::decode_uint24_be(data);
-      if (stats_len > len - 3) {
-        if (on_complete) on_complete(false, 0, 0.0f, NAN);
-        return;
-      }
+      // The object helper supplies exactly the declared body, with its size prefix.
+      const size_t stats_len = len - 3;
 
-      // Need at least 12 bytes: starts(4) + starts_1h(2) + starts_24h(2) + operating_time(4)
-      if (stats_len < 12) {
-        ESP_LOGW(TAG, "Statistics data too short: %zu bytes", stats_len);
-        if (on_complete) on_complete(false, 0, 0.0f, NAN);
-        return;
-      }
-
-      // Bytes 0-3: start_count (uint32 BE)
+      // Bytes 0-3: motor starts (uint32 BE); power_up_counter is separate at offset 20.
       uint32_t start_count = (uint32_t(stats[0]) << 24) | (uint32_t(stats[1]) << 16) |
                              (uint32_t(stats[2]) << 8) | uint32_t(stats[3]);
 

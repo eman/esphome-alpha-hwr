@@ -1123,7 +1123,7 @@ public:
   bool get_prevent_display_sleep_state(bool *result) const {
     const int8_t value = control_service_.get_panel_setting(114);
     if (value < 0) return false;
-    if (result) *result = value != 0;
+    if (result) *result = value == 0;
     return true;
   }
   void submit_set_panel_lock(bool enabled, const std::string &op_id) {
@@ -1132,8 +1132,11 @@ public:
   void submit_set_prevent_display_sleep(bool enabled, const std::string &op_id) {
     write_op_service_.submit_set_panel_setting(false, enabled, op_id);
   }
-  void set_panel_setting(bool panel_lock, bool enabled) {
-    write_op_service_.submit_set_panel_setting(panel_lock, enabled, "", nullptr, services::WriteOrigin::ENTITY);
+  void set_panel_lock(bool enabled) {
+    write_op_service_.submit_set_panel_setting(true, enabled, "", nullptr, services::WriteOrigin::ENTITY);
+  }
+  void set_prevent_display_sleep(bool enabled) {
+    write_op_service_.submit_set_panel_setting(false, enabled, "", nullptr, services::WriteOrigin::ENTITY);
   }
   void submit_set_enabled(bool enabled, const std::string &op_id) {
     write_op_service_.submit_set_enabled(enabled, op_id);

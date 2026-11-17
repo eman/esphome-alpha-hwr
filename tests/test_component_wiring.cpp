@@ -299,16 +299,18 @@ struct Rig {
   /// so that setting it back to true delivers everything the pump owed. This is
   /// how a quiet interval is produced against the real notification path rather
   /// than by poking the sampler directly.
+  bool answer_writes{true};
+
   bool answer_extended_settings{false};
   uint8_t panel_lock_level{1};
-  bool prevent_display_sleep{true};
+  bool hidden_mode_enabled{true};  // Captured 94/114 body: 01 78.
   bool unsupported_panel_settings{false};
   uint32_t power_on_seconds{3600};
   uint32_t operating_seconds{3600};
   uint32_t start_count{3};
+  bool answer_statistics{true};
   int statistics_reads{0};
   int panel_reads{0};
-  bool answer_writes{true};
 
   /// Answer anything the component has written that we know a reply for.
   /// Deliberately answers only the frames a test has taught it about: an
@@ -397,11 +399,12 @@ void Rig::answer_outstanding_writes() {
           continue;
         }
         const uint8_t lock[3] = {panel_lock_level, 0, 0};
-        const uint8_t display[2] = {static_cast<uint8_t>(prevent_display_sleep), 120};
+        const uint8_t display[2] = {static_cast<uint8_t>(hidden_mode_enabled), 120};
         notify(data_object_frame(sub == 2 ? 0x0D : 0x97, 1, sub == 2 ? lock : display,
                                  sub == 2 ? 3 : 2, sub == 2 ? 1 : 3, sub == 2 ? 10 : 9));
       } else if (answer_extended_settings && obj == 93 && sub == 1) {
         statistics_reads++;
+        if (!answer_statistics) continue;
         uint8_t body[28] = {};
         for (int i = 0; i < 4; i++) {
           body[i] = static_cast<uint8_t>(start_count >> (24 - 8 * i));
@@ -3131,7 +3134,7 @@ static void test_optional_panel_and_power_on_polling() {
   TEST_ASSERT(powered.has_state() && powered.state == 1 && r.statistics_reads > 0,
               "Power-on sensor is wired to the statistics read");
   TEST_ASSERT(r.component.get_panel_lock_state(&locked) && locked &&
-                  r.component.get_prevent_display_sleep_state(&prevent_sleep) && prevent_sleep,
+                  r.component.get_prevent_display_sleep_state(&prevent_sleep) && !prevent_sleep,
               "Optional HMI polling exposes a stronger lock and display setting as booleans");
   TEST_ASSERT(r.component.get_panel_lock_state(nullptr) &&
                   r.component.get_prevent_display_sleep_state(nullptr),
@@ -3141,13 +3144,14 @@ static void test_optional_panel_and_power_on_polling() {
   r.advance(25000, 500);
   TEST_ASSERT(r.statistics_reads > before && powered.state == 2,
               "Power-on hours refresh without reconnecting");
-  TEST_ASSERT(powered.publish_count == 2, "Unchanged statistics do not republish the power-on sensor");
+  TEST_ASSERT(powered.publish_count == 2,
+              "Unchanged statistics do not republish the power-on sensor");
   r.panel_lock_level = 0;
-  r.prevent_display_sleep = false;
+  r.hidden_mode_enabled = false;
   r.advance(20000, 400);
   TEST_ASSERT(r.component.get_panel_lock_state(&locked) && !locked &&
-                  r.component.get_prevent_display_sleep_state(&prevent_sleep) && !prevent_sleep,
-              "Observed off settings remain valid boolean states");
+                  r.component.get_prevent_display_sleep_state(&prevent_sleep) && prevent_sleep,
+              "Unlocked and hidden-mode-disabled settings expose the correct boolean states");
   r.unsupported_panel_settings = true;
   r.advance(20000, 400);
   locked = prevent_sleep = true;
@@ -3163,16 +3167,17 @@ static void test_optional_panel_and_power_on_polling() {
               "Zero intervals disable optional background reads");
 }
 
-static void test_statistics_polling_with_either_hours_sensor() {
-  // No hours sensor, operating only, power-on only, and both together.
-  for (int sensors = 0; sensors < 4; sensors++) {
+static void test_statistics_polling_with_any_counter() {
+  // Every combination of operating hours, power-on hours and motor starts.
+  for (int sensors = 0; sensors < 8; sensors++) {
     Rig r;
     esphome::sensor::Sensor operating, powered, starts;
     const bool has_operating = (sensors & 1) != 0;
     const bool has_power_on = (sensors & 2) != 0;
+    const bool has_starts = (sensors & 4) != 0;
     r.answer_extended_settings = true;
     r.operation_mode = 0;
-    r.component.set_start_count_sensor(&starts);
+    if (has_starts) r.component.set_start_count_sensor(&starts);
     if (has_operating) r.component.set_operating_hours_sensor(&operating);
     if (has_power_on) r.component.set_power_on_hours_sensor(&powered);
     r.component.set_statistics_update_interval(10000);
@@ -3180,16 +3185,18 @@ static void test_statistics_polling_with_either_hours_sensor() {
     r.connect_and_subscribe();
     TEST_ASSERT(r.run_until_ready(), "Statistics polling test reaches a ready connection");
     r.advance(60000, 1200);
-    TEST_ASSERT(starts.has_state() && starts.state == 3 && starts.publish_count == 1,
-                "Initial statistics are read and unchanged counters are not republished");
+    TEST_ASSERT(
+        r.statistics_reads > 0 && (!has_starts || (starts.state == 3 && starts.publish_count == 1)),
+        "Initial statistics are read and unchanged counters are not republished");
     const int reads = r.statistics_reads;
     r.operating_seconds = 7200;
     r.power_on_seconds = 10800;
     r.start_count = 4;
     r.advance(25000, 500);
-    if (has_operating || has_power_on) {
-      TEST_ASSERT(r.statistics_reads > reads && starts.state == 4 && starts.publish_count == 2,
-                  "Either hours sensor enables polling and refreshes the shared start counter");
+    if (sensors != 0) {
+      TEST_ASSERT(r.statistics_reads > reads &&
+                      (!has_starts || (starts.state == 4 && starts.publish_count == 2)),
+                  "Any configured counter enables polling and refreshes motor starts");
       if (has_operating) {
         TEST_ASSERT(operating.state == 2 && operating.publish_count == 2,
                     "Operating hours refresh independently of the power-on sensor");
@@ -3199,27 +3206,76 @@ static void test_statistics_polling_with_either_hours_sensor() {
                     "Power-on hours refresh independently of the operating sensor");
       }
     } else {
-      TEST_ASSERT(r.statistics_reads == reads && starts.state == 3,
-                  "Start Count alone does not enable periodic statistics reads");
+      TEST_ASSERT(r.statistics_reads == reads,
+                  "No configured counter means no periodic statistics reads");
     }
     r.component.set_statistics_update_interval(0);
     r.advance(10000, 200);
     const int disabled_reads = r.statistics_reads;
     r.advance(25000, 500);
     TEST_ASSERT(r.statistics_reads == disabled_reads,
-                "Zero statistics interval disables polling for either hours sensor");
+                "Zero statistics interval disables polling for any counter");
+  }
+}
+
+static void test_periodic_reads_wait_for_initialization() {
+  for (bool hold_statistics : {false, true}) {
+    Rig r;
+    esphome::sensor::Sensor starts;
+    r.answer_extended_settings = true;
+    r.answer_statistics = !hold_statistics;
+    r.answer_overview = hold_statistics;
+    r.operation_mode = 0;
+    r.component.set_start_count_sensor(&starts);
+    r.component.set_statistics_update_interval(10000);
+    r.component.set_panel_settings_poll_interval(10000);
+    r.setup();
+    // Simulate a connect after the default statistics interval is already due.
+    mock_millis += 120000;
+    r.connect_and_subscribe();
+    r.advance(40000, 800);
+    TEST_ASSERT(r.statistics_reads == 1,
+                "Only the initial statistics read runs while initialization is incomplete");
+    TEST_ASSERT(r.panel_reads == 0,
+                "Panel polling waits for both initial products and synchronized caches");
+  }
+}
+
+static void test_reconnect_does_not_duplicate_statistics() {
+  Rig r;
+  esphome::sensor::Sensor starts;
+  r.answer_extended_settings = true;
+  r.operation_mode = 0;
+  r.component.set_start_count_sensor(&starts);
+  r.component.set_panel_settings_poll_interval(60000);
+  r.setup();
+  for (int connection = 0; connection < 2; connection++) {
+    const int before = r.statistics_reads;
+    mock_millis += 120000;
+    r.connect_and_subscribe();
+    TEST_ASSERT(r.run_until_ready(), "Statistics reconnect test reaches Ready");
+    r.advance(5000, 100);
+    TEST_ASSERT(r.statistics_reads == before + 1,
+                "The initial read chain supplies statistics once per connection");
+    r.disconnect(ESP_GATT_CONN_TIMEOUT);
+    r.advance(5000, 100);
+    esp_gattc_mock().writes.clear();
+    r.answered_writes = 0;
   }
 }
 
 int main() {
-  test_statistics_polling_with_either_hours_sensor();
-  test_optional_panel_and_power_on_polling();
   // Pinned so the local<->UTC mapping in the clock fixtures is the same on
   // every CI machine (issue #270's tests are the first here to have one). The
   // conversion itself is covered at non-zero offsets in
   // tests/test_schedule_service.cpp; nothing else in this file reads a zone.
   setenv("TZ", "UTC", 1);
   tzset();
+
+  test_statistics_polling_with_any_counter();
+  test_optional_panel_and_power_on_polling();
+  test_periodic_reads_wait_for_initialization();
+  test_reconnect_does_not_duplicate_statistics();
 
   std::cout << "===========================================================" << std::endl;
   std::cout << "  Component BLE Wiring Test Suite" << std::endl;
