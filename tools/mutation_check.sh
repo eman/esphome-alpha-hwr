@@ -1854,7 +1854,7 @@ MUTATIONS=(
 "review-statistics-start-count-poll|components/alpha_hwr/alpha_hwr.cpp|start_count_sensor_ != nullptr|false"
 "review-polls-before-statistics-ready|components/alpha_hwr/alpha_hwr.cpp|    if (chain_products_complete_() && is_state_synchronized()) {\n      // Reuse one statistics read|    if (is_state_synchronized()) {\n      // Reuse one statistics read"
 "review-polls-before-cache-ready|components/alpha_hwr/alpha_hwr.cpp|    if (chain_products_complete_() && is_state_synchronized()) {\n      // Reuse one statistics read|    if (chain_products_complete_()) {\n      // Reuse one statistics read"
-"review-motor-fields-consume-crc|components/alpha_hwr/telemetry_decoder.cpp|  len -= 2;|  // mutated: include the CRC in motor fields"
+"review-motor-field-object-window|components/alpha_hwr/telemetry_decoder.cpp|  // DC power (offset 29, float[4])\n  if (len >= 33) {|  // DC power (offset 29, float[4])\n  if (len >= 31) {"
 )
 
 if [[ "${1:-}" == "--list" ]]; then

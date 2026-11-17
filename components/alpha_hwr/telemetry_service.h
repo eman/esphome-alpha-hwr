@@ -114,12 +114,15 @@ class TelemetryService {
   /**
    * Process incoming packet.
    * 
-   * Routes legacy telemetry by OpSpec; energy uses its awaited read callback:
-   * - 0x30: Motor state response
-   * - 0x2B: Flow/pressure response
-   * - 0x14: Temperature response
-   * - 0x13: Alarms/warnings response
-   * - 0x0E: Passive notification
+   * Routes validated object types and versions:
+   * - 256 v1/v2/v3: Motor state
+   * - 565 v2: Flow/pressure
+   * - 534 v1/v2: Temperature
+   * - 303 v1: Control status
+   *
+   * Fault arrays (570 v1) use request callbacks because alarms and warnings
+   * share a type and their replies do not identify the requested instance.
+   * Energy uses its awaited type-232/version-1 read callback.
    * 
    * @param data Packet data
    * @param len Length of packet data
@@ -155,15 +158,16 @@ class TelemetryService {
   void handle_motor_state_response(const uint8_t* data, size_t len);
   void handle_flow_pressure_response(const uint8_t* data, size_t len);
   void handle_temperature_response(const uint8_t* data, size_t len);
-  void handle_alarms_response(const uint8_t* data, size_t len, uint8_t opspec);
-  void handle_warnings_response(const uint8_t* data, size_t len, uint8_t opspec);
-  void handle_passive_notification(const uint8_t* data, size_t len);
+  void handle_control_status(const uint8_t* body, size_t len);
+  void send_fault_read_request(bool warnings);
 
   // Helper to send read requests
   void send_read_request(uint32_t register_addr);
 
-  // Track 0x09 alarm/warning response ordering (alarms polled before warnings)
-  bool next_09_is_warnings_{false};
+  // Prevent overlapping fault polls; generation retires callbacks after stop().
+  bool fault_poll_pending_{false};
+  bool fault_poll_failed_{false};
+  uint32_t fault_generation_{0};
 
   // Logging tag
   static constexpr const char* TAG = "alpha_hwr.telemetry";

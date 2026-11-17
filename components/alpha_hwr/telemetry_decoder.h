@@ -8,24 +8,21 @@
  * -----------------
  * The Alpha HWR pump sends telemetry using Class 10 DataObjects:
  * 
- * 1. **Motor State** (OpSpec 0x30 responses)
+ * 1. **Motor State** (type 256, versions 1-3)
  *    - AC/DC voltage, current, AC/DC power, speed, converter temperature
  * 
- * 2. **Flow/Pressure** (OpSpec 0x2B responses)
+ * 2. **Flow/Pressure** (type 565, version 2)
  *    - Flow rate, head, inlet pressure, outlet pressure
  * 
- * 3. **Temperature** (OpSpec 0x14 responses)
+ * 3. **Temperature** (type 534, versions 1-2)
  *    - Media temperature, PCB temperature, control box temperature
  * 
- * 4. **Alarms/Warnings** (OpSpec 0x09 and 0x13 responses)
+ * 4. **Alarms/Warnings** (type 570, version 1)
  *    - Active alarm codes and warning codes
  * 
  * 5. **Cumulative Energy** (Object 87, Sub 1; type 232, version 1)
  *    - Pump energy counter in kWh, converted from joules, and system power
  *
- * 6. **Passive Notifications** (OpSpec 0x0E)
- *    - Streaming telemetry in legacy format
- * 
  * Payload Format
  * --------------
  * All telemetry payloads use big-endian encoding:
@@ -177,11 +174,30 @@ struct AlarmWarningTelemetry {
 EnergyTelemetry decode_energy_payload(const uint8_t* payload, size_t len);
 
 /**
- * Decode motor state from register-read response (OpSpec 0x30).
+ * Decode FaultsByArrayExtended (type 570, version 1).
+ *
+ * Payload format after the transport strips the frame/type header and CRC:
+ * - Bytes 0-2: Object size (big-endian uint24)
+ * - Bytes 3-4: Number of ExtendedErrorCode records (big-endian uint16)
+ * - Bytes 5+: Records containing error code and subcode (two uint16 each)
+ *
+ * Only primary error codes are published; malformed arrays leave faults unchanged.
+ *
+ * @param payload Size-prefixed object payload
+ * @param len Length of payload
+ * @param faults Output decoded primary fault codes
+ * @return True if the complete fault array is valid, including an empty array
+ *
+ * Reference: GENI profile 52_7, FaultsByArrayExtended and ExtendedErrorCode
+ */
+bool decode_faults_payload(const uint8_t* payload, size_t len, AlarmWarningTelemetry& faults);
+
+/**
+ * Decode motor state from a validated type-256 object reply.
  * 
- * Register-read responses have this format:
+ * Class 10 object replies have this format:
  * - Bytes 0-12: Packet header
- * - Byte 12: DataLen
+ * - Bytes 10-12: Object size (big-endian uint24)
  * - Bytes 13+: Array of IEEE 754 floats (big-endian)
  * 
  * Float array layout for motor state:
@@ -194,7 +210,7 @@ EnergyTelemetry decode_energy_payload(const uint8_t* payload, size_t len);
  * [6] = Converter temp (°C) at offset 37
  * 
  * @param data Full packet bytes (not just payload)
- * @param len Length of full packet, including the two-byte CRC
+ * @param len End of the validated object body (excluding CRC and trailing bytes)
  * @return Decoded motor state with validation flags
  * 
  * Reference: TelemetryDecoder.decode_register_read_response() with opspec=0x30
@@ -202,7 +218,7 @@ EnergyTelemetry decode_energy_payload(const uint8_t* payload, size_t len);
 MotorStateTelemetry decode_motor_state_response(const uint8_t* data, size_t len);
 
 /**
- * Decode flow/pressure from register-read response (OpSpec 0x2B).
+ * Decode flow/pressure from a validated type-565 object reply.
  * 
  * Float array layout for flow/pressure:
  * [0-5] = Reserved/unknown
@@ -212,7 +228,7 @@ MotorStateTelemetry decode_motor_state_response(const uint8_t* data, size_t len)
  * [9] = Outlet pressure (bar) at offset 49 - often NaN
  * 
  * @param data Full packet bytes
- * @param len Length of packet
+ * @param len End of the validated object body (excluding CRC and trailing bytes)
  * @return Decoded flow/pressure with validation flags
  * 
  * Reference: TelemetryDecoder.decode_register_read_response() with opspec=0x2B
@@ -220,7 +236,7 @@ MotorStateTelemetry decode_motor_state_response(const uint8_t* data, size_t len)
 FlowPressureTelemetry decode_flow_pressure_response(const uint8_t* data, size_t len);
 
 /**
- * Decode temperature from register-read response (OpSpec 0x14).
+ * Decode temperature from a validated type-534 object reply.
  * 
  * Float array layout for temperature:
  * [0] = Media temperature (°C) at offset 13
@@ -228,75 +244,12 @@ FlowPressureTelemetry decode_flow_pressure_response(const uint8_t* data, size_t 
  * [2] = Control box temperature (°C) at offset 21
  * 
  * @param data Full packet bytes
- * @param len Length of packet
+ * @param len End of the validated object body (excluding CRC and trailing bytes)
  * @return Decoded temperature with validation flags
  * 
  * Reference: TelemetryDecoder.decode_register_read_response() with opspec=0x14
  */
 TemperatureTelemetry decode_temperature_response(const uint8_t* data, size_t len);
-
-/**
- * Decode alarms/warnings from response (OpSpec 0x09 or 0x13).
- * 
- * OpSpec 0x09 format (Active Query Response):
- * - Bytes 13+: Array of uint16 codes (big-endian)
- * 
- * OpSpec 0x13 format (Read Response):
- * - Bytes 10+: Array of uint16 codes (big-endian)
- * 
- * @param data Full packet bytes
- * @param len Length of packet
- * @param opspec OpSpec byte (0x09 or 0x13)
- * @return List of active alarm/warning codes (non-zero only)
- * 
- * Reference: TelemetryDecoder.decode_alarms_warnings()
- */
-AlarmWarningTelemetry decode_alarms_warnings_response(const uint8_t* data, size_t len, uint8_t opspec);
-
-/**
- * Decode passive notification motor state (OpSpec 0x0E, Obj 87, Sub 69).
- * 
- * Legacy streaming format:
- * - Offset 10: Voltage (float)
- * - Offset 18: Current (float)
- * - Offset 26: Power (float)
- * - Offset 30: RPM (float)
- * - Offset 34: Converter temp (float)
- * 
- * @param data Full packet bytes
- * @param len Length of packet
- * @return Decoded motor state
- * 
- * Reference: Python decode_legacy_packet() for passive notifications
- */
-MotorStateTelemetry decode_passive_motor_state(const uint8_t* data, size_t len);
-
-/**
- * Decode passive notification flow/pressure (OpSpec 0x0E, Obj 93, Sub 290).
- * 
- * Legacy streaming format:
- * - Offset 10: Flow (float)
- * - Offset 14: Head (float)
- * 
- * @param data Full packet bytes
- * @param len Length of packet
- * @return Decoded flow/pressure
- */
-FlowPressureTelemetry decode_passive_flow_pressure(const uint8_t* data, size_t len);
-
-/**
- * Decode passive notification temperature (OpSpec 0x0E, Obj 93, Sub 300).
- * 
- * Legacy streaming format:
- * - Offset 10: Media temp (float)
- * - Offset 14: PCB temp (float)
- * - Offset 18: Control box temp (float)
- * 
- * @param data Full packet bytes
- * @param len Length of packet
- * @return Decoded temperature
- */
-TemperatureTelemetry decode_passive_temperature(const uint8_t* data, size_t len);
 
 }  // namespace protocol
 }  // namespace alpha_hwr

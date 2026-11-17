@@ -48,6 +48,12 @@
 
 ### Fixed
 
+- Route telemetry by Class 10 object type/version rather than reply length.
+  Validate both acknowledgements, APDU boundaries and declared object sizes.
+  Serialize alarm/warning reads and decode their counted extended-error arrays;
+  after a failed fault read, defer further fault polling until reconnect to
+  prevent a late alarm reply being published as a warning.
+
 - Motor-state fields no longer decode the trailing CRC as part of a truncated
   float. All fields use the same payload bounds.
 
