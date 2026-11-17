@@ -57,11 +57,15 @@
   lines out, and the host mocks discard log arguments.
 
   The CI firmware job now compiles twice, once at `VERY_VERBOSE` and once at
-  `NONE`, and fails on any warning from this repo's components. Each level hides
-  something the other shows. `VERY_VERBOSE` compiles every log line in, so its
-  format string is type-checked. `NONE` compiles every log line out, which is
-  the only way the unbraced `if` bodies fixed above produce a `-Wempty-body`
-  warning.
+  `NONE`. It fails on any warning from this repo's components or from the
+  packages' YAML lambdas. Each level hides something the other shows.
+  `VERY_VERBOSE` compiles every log line in, so its format string is
+  type-checked. `NONE` compiles every log line out, so an unbraced log-only `if`
+  at any level, `ESP_LOGE` included, produces the `-Wempty-body` warning fixed
+  above. `format_detail()`, the printf-style helper behind write settle
+  details, now carries a `format` attribute, so its call sites are checked too.
+  The job also caches the ESP-IDF framework, which it was downloading and
+  installing on every run.
 
 ## [0.17.0] - 2026-10-28
 

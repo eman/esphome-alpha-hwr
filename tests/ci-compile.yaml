@@ -27,7 +27,7 @@ substitutions:
   # not do it: the tag's entry survives the merge, gets cloned, and only loses
   # the component by an ordering accident in ESPHome's loader.
   component_source: ../components
-  # Overridden on the command line for the second CI build; see `logger:`.
+  # Overridden on the command line for the first CI build; see `logger:`.
   log_level: VERY_VERBOSE
 
 packages:

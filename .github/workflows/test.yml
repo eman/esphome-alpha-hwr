@@ -306,6 +306,10 @@ jobs:
             ~/.platformio
             ~/.esphome
             ~/.cache/pip
+            # ESP-IDF framework, toolchains and its Python env. ESPHome 2026.10
+            # keeps them here (platformdirs' user cache dir), not under
+            # ~/.esphome; without it every run downloads and installs IDF.
+            ~/.cache/esphome
           key: esp-idf-${{ runner.os }}-${{ hashFiles('tests/ci-compile.yaml') }}
           restore-keys: |
             esp-idf-${{ runner.os }}-
@@ -327,11 +331,13 @@ jobs:
           set -o pipefail
           esphome compile tests/ci-compile.yaml 2>&1 | tee -a firmware-build.log
 
-      # Our components only: ESPHome core and ESP-IDF are not ours to fix.
-      # Both builds above append to the log this reads.
+      # Our code only: the two components, and the packages' YAML lambdas,
+      # which ESPHome compiles into main.cpp with #line pointing back at the
+      # YAML file. ESPHome core and ESP-IDF are not ours to fix. Both builds
+      # above append to the log this reads.
       - name: Fail on compiler warnings in our components
         run: |
-          if tr '\r' '\n' < firmware-build.log | grep -E "components/(alpha_hwr|dhw_demand)/.*warning:"; then
+          if tr '\r' '\n' < firmware-build.log | grep -E "(components/(alpha_hwr|dhw_demand)/|packages/)[^ ]*: warning:"; then
             echo "::error::Firmware build produced warnings in this repo's components"
             exit 1
           fi
