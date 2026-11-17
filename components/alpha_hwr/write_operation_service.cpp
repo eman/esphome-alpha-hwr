@@ -56,6 +56,9 @@ const char *write_status_to_string(WriteStatus status) {
 static const char *WRITE_OP_DAY_NAMES[7] = {"Monday",   "Tuesday", "Wednesday", "Thursday",
                                             "Friday",   "Saturday", "Sunday"};
 
+// The format attribute makes -Wformat check every call site against the
+// device's integer widths, as it does for ESP_LOGx.
+static std::string format_detail(const char *fmt, ...) __attribute__((format(printf, 1, 2)));
 static std::string format_detail(const char *fmt, ...) {
   char buf[96];
   va_list args;

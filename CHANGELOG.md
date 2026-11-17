@@ -71,6 +71,26 @@
   and the failed-layers `ESP_LOGW` in `schedule_service.cpp`. All four are
   braced now. Behaviour and binary size are unchanged.
 
+- **`-Wformat` warnings at `DEBUG` and `VERBOSE` log levels.** On the
+  ESP32-C3 `uint32_t` is `long unsigned int`, so `%u` / `%X` are the wrong
+  conversions for it. Two `ESP_LOGD` pump-edge lines in `dhw_demand.cpp` and an
+  `ESP_LOGV` in `telemetry_service.cpp` used them. Anyone raising
+  `logger: level` got the warnings, and the arguments were formally undefined.
+  They now use `PRIu32` / `PRIX32`. Before this, no CI build type-checked a
+  `DEBUG` or `VERBOSE` format string: the default `INFO` level compiles those
+  lines out, and the host mocks discard log arguments.
+
+  The CI firmware job now compiles twice, once at `VERY_VERBOSE` and once at
+  `NONE`. It fails on any warning from this repo's components or from the
+  packages' YAML lambdas. Each level hides something the other shows.
+  `VERY_VERBOSE` compiles every log line in, so its format string is
+  type-checked. `NONE` compiles every log line out, so an unbraced log-only `if`
+  at any level, `ESP_LOGE` included, produces the `-Wempty-body` warning fixed
+  above. `format_detail()`, the printf-style helper behind write settle
+  details, now carries a `format` attribute, so its call sites are checked too.
+  The job also caches the ESP-IDF framework, which it was downloading and
+  installing on every run.
+
 ## [0.17.0] - 2026-10-28
 
 ### Migration

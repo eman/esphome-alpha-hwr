@@ -7,6 +7,9 @@
  */
 
 #include "telemetry_service.h"
+
+#include <cinttypes>
+
 #include "transport.h"
 #include "codec.h"
 #include "frame_builder.h"
@@ -66,7 +69,7 @@ void TelemetryService::send_read_request(uint32_t register_addr) {
   
   std::vector<uint8_t> packet(packet_raw, packet_raw + 11);
   
-  ESP_LOGV(TAG, "Queueing READ request for register 0x%06X", register_addr);
+  ESP_LOGV(TAG, "Queueing READ request for register 0x%06" PRIX32, register_addr);
   
   // Send via transport queue (no response matching here as telemetry uses various OpSpecs)
   this->transport_.send_command(packet);
