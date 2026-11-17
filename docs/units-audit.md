@@ -33,6 +33,18 @@ statistics** apply explicit conversion factors, all hardcoded and listed below.
 | Motor Current | A | same, off 21 | reference |
 | Water / PCB / Control-box Temp | °C | `decode_temperature_response` off 13 / 17 / 21 | `telemetry_decoder.py:283-295` (float °C, no deci-K/offset) |
 
+Additional diagnostics (GENI profile 52/7, checked against reassembled,
+CRC-valid HWR captures; offsets below are from the full response frame):
+
+| Entity | Unit | Decode | Evidence |
+| --- | --- | --- | --- |
+| DC Power | W | Motor-state float at 29 | ProtectedMotorStateDetails.dc_power_consumption, unitIndex 7 (W); running samples 10.075836 and 10.469604 W |
+| Power-on Hours | h | Statistics uint32 at body 24 ÷ 3600 | OperationHistoryPump.power_on_time; includes stopped periods |
+
+Captured and synthetic DC power vectors are tested by
+`test_telemetry_units.cpp`; counter conversion and older short records by
+`test_device_info_service.cpp`.
+
 All of the above are pinned by `tests/test_telemetry_units.cpp`.
 
 ## Derived / converted (explicit factors)

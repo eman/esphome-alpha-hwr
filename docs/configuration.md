@@ -28,6 +28,8 @@ events fire.
 | `time_id` | ID | none | A `time:` component to sync the pump's clock from. Optional in the schema, but see below — without it the pump's clock is never set. |
 | `initiate_pairing` | boolean | `true` | Whether **this node** initiates BLE pairing and configures security parameters. Leave it on; `false` does *not* prevent bonding — see below. (Formerly `enable_pairing`, still accepted.) |
 | `reconnect_settle_time` | time | `2s` | Delay after disconnect before reconnecting |
+| `statistics_update_interval` | time | `60s` | Refresh operating statistics while any of `start_count`, `operating_hours`, or `power_on_hours` is configured. `0s` keeps only the initial read. |
+| `panel_settings_poll_interval` | time | `0s` | Optional HMI settings readback. The controls package sets `60s`; `0s` disables background panel reads. |
 | `energy_update_interval` | time | `60s` | Minimum interval between awaited energy reads; see `energy` below. |
 | `control_state_poll_interval` | time | `30s` | Interval for periodic control state polling. Set to `0s` to disable. |
 | `data_timeout` | time | `60s` | Tear the BLE link down after this long with no data from the pump, so the normal reconnect runs. Set to `0s` to disable. |
@@ -35,6 +37,42 @@ events fire.
 | `ready_recycle` | count (0–100) | `0` | How many times to also tear the link down when `ready_timeout` expires, so the normal reconnect runs; `0` never does. A boolean is still accepted: `true` means without limit, `false` means `0`. **Opt-in** — see below. |
 | `frame_logging` | boolean | `false` | Log every GENI frame sent and received, whole, at INFO. Diagnostic capture only, and it reaches every API subscriber — see below before turning it on. |
 | `connect_after_boot_delay` | time | `0s` | Hold the **first** BLE connection this long after boot, so a log client is attached before the link opens. Troubleshooting only — see below. |
+
+### Panel settings and additional diagnostics
+
+The controls package exposes **Panel Lock** and **Prevent Display Sleep**.
+Writes use a fresh read, change only the requested field, and confirm the
+result with a second read. Panel Lock locks settings (level 1), preserves a
+stronger existing settings-and-operation lock (level 2), and unlocks to level 0.
+PIN fields are preserved. Prevent Display Sleep preserves the display timeout
+and reverses the pump's hidden-mode flag: hidden mode enabled means the display
+sleeps.
+Neither switch publishes a requested value optimistically or writes a setting
+at boot; both explicitly disable ESPHome switch restore actions.
+
+The background panel read interval defaults to zero without the controls
+package. Unsupported Class/Data Item replies disable that setting's background
+reads until reconnect; transient failures retain the last observed state.
+Unknown versions and malformed records are not written.
+
+Additional optional sensors:
+
+| Key | Meaning | Source |
+| --- | --- | --- |
+| `power_dc` | DC-link power consumption, W | Motor-state reply, 87/69 |
+| `power_on_hours` | Time powered, including periods with the motor stopped, h | Statistics reply, 93/1 |
+
+DC power reuses the existing telemetry replies. Power-on hours
+shares the statistics read with Start Count and Operating Hours; its interval
+is limited by the component's update cadence, and only one statistics read can
+be pending. Any of the three counters enables periodic reads; both statistics
+and panel polling wait for the initial reads and cache synchronization to complete.
+The statistics read uses the same awaited object helper as energy,
+including complete object validation and ownership of late replies. A short older
+statistics record leaves power-on hours unavailable.
+DC power and all statistics counters use raw-state change gating. Start Count,
+Operating Hours,
+and Power-on Hours use `state_class: total_increasing` for their cumulative totals.
 
 ### `energy`
 

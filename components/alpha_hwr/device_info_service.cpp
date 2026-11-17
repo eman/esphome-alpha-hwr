@@ -9,11 +9,13 @@
 #include "device_info_service.h"
 
 #include "class7_string.h"
+#include "codec.h"
 #include "transport.h"
 #include "session.h"
 #include "frame_builder.h"
 #include "esphome/core/log.h"
 #include <cinttypes>
+#include <cmath>
 #include <cstring>
 
 namespace esphome {
@@ -184,41 +186,26 @@ void DeviceInfoService::on_string_read_complete() {
   }
 }
 
-void DeviceInfoService::read_statistics_async(std::function<void(bool, uint32_t, float)> on_complete) {
-  ESP_LOGI(TAG, "Reading operating statistics (Object 93, Sub 1)...");
+void DeviceInfoService::read_statistics_async(std::function<void(bool, uint32_t, float, float)> on_complete) {
+  ESP_LOGD(TAG, "Reading operating statistics (Object 93, Sub 1)...");
 
-  // Build Class 10 read for Object 93, Sub-ID 1 (operation_history_pump_obj)
-  // APDU: [Class=0x0A][OpSpec=0x03][ObjID=0x5D][SubH=0x00][SubL=0x01]
-  uint8_t apdu[] = {0x0A, 0x03, 0x5D, 0x00, 0x01};  // Object 93 = 0x5D, Sub 1
-  // The reply carries type 248 v2: header bytes `00 00 F8 02`, measured on the
-  // reference pump (alpha-hwr matcher.py RESPONSE_TYPES, 2026-08-04). Matched
-  // on that rather than on "any Class 10 frame": with a wildcard, the late
-  // reply to a timed-out read of a different object -- the clock, say -- was
-  // accepted here and parsed as a start count and operating hours.
-  transport_.send_apdu_command(
-    apdu, sizeof(apdu),
-    0xF802,  // (TypeL << 8) | Version
-    0x0000,  // TypeH
+  // OperationHistoryPump (248 v2). The shared helper validates the complete
+  // object and owns late replies, so periodic counters cannot answer a wildcard.
+  transport_.send_class10_object_read(93, 1, 248, 2,
     [on_complete](bool success, const uint8_t *data, size_t len) {
       if (!success || !data || len < 15) {
         ESP_LOGW(TAG, "Statistics read failed or no data (len=%zu)", len);
-        if (on_complete) on_complete(false, 0, 0.0f);
+        if (on_complete) on_complete(false, 0, 0.0f, NAN);
         return;
       }
 
       // data is already the payload (transport strips the 10-byte frame header and 2-byte CRC)
       // Skip 3-byte Class 10 header [00 00 XX]
       const uint8_t *stats = data + 3;
-      size_t stats_len = len - 3;
+      // The object helper supplies exactly the declared body, with its size prefix.
+      const size_t stats_len = len - 3;
 
-      // Need at least 12 bytes: starts(4) + starts_1h(2) + starts_24h(2) + operating_time(4)
-      if (stats_len < 12) {
-        ESP_LOGW(TAG, "Statistics data too short: %zu bytes", stats_len);
-        if (on_complete) on_complete(false, 0, 0.0f);
-        return;
-      }
-
-      // Bytes 0-3: start_count (uint32 BE)
+      // Bytes 0-3: motor starts (uint32 BE); power_up_counter is separate at offset 20.
       uint32_t start_count = (uint32_t(stats[0]) << 24) | (uint32_t(stats[1]) << 16) |
                              (uint32_t(stats[2]) << 8) | uint32_t(stats[3]);
 
@@ -227,8 +214,10 @@ void DeviceInfoService::read_statistics_async(std::function<void(bool, uint32_t,
                              (uint32_t(stats[10]) << 8) | uint32_t(stats[11]);
       float operating_hours = op_time_sec / 3600.0f;
 
-      ESP_LOGI(TAG, "Statistics: starts=%" PRIu32 ", hours=%.1f", start_count, operating_hours);
-      if (on_complete) on_complete(true, start_count, operating_hours);
+      ESP_LOGD(TAG, "Statistics: starts=%" PRIu32 ", hours=%.1f", start_count, operating_hours);
+      // Power-on time includes stopped periods; older short records may omit it.
+      const float power_on_hours = stats_len >= 28 ? protocol::decode_uint32_be(stats, 24) / 3600.0f : NAN;
+      if (on_complete) on_complete(true, start_count, operating_hours, power_on_hours);
     },
     5000  // 5 second timeout
   );

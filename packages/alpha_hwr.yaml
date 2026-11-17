@@ -321,6 +321,10 @@ alpha_hwr:
      name: "Motor Current"
    
    # Basic Telemetry
+   power_dc:
+     name: "DC Power"
+   power_on_hours:
+     name: "Power-on Hours"
    power:
      name: "Power Consumption"
    energy:

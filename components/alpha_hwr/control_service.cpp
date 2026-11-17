@@ -1,4 +1,5 @@
 #include "control_service.h"
+#include "frame_parser.h"
 #include "transport.h"
 #include "frame_builder.h"
 #include "esphome/core/log.h"
@@ -663,6 +664,74 @@ void ControlService::read_setpoint_ranges(std::function<void(bool)> callback) {
       });
     });
   });
+}
+
+void ControlService::read_panel_setting(uint16_t sub, core::Transport::CommandCallback callback) {
+  if (sub != 2 && sub != 114) {
+    if (callback) callback(false, nullptr, 0);
+    return;
+  }
+  if (get_panel_setting(sub) == -2) {
+    if (callback) callback(false, nullptr, 0);
+    return;
+  }
+  // GENI profile 52/7: PinLockOnSettings (269 v1), HMIHiddenModeConfiguration (919 v1).
+  transport_.send_class10_object_read(
+      94, sub, sub == 2 ? 269 : 919, 1,
+      [this, sub, callback](bool ok, const uint8_t* payload, size_t len) {
+        if (!ok) {
+          protocol::ShortClass10Reply reply;
+          if (protocol::parse_short_class10_reply(payload, len, reply) &&
+              (reply.ack == protocol::ApduAck::UNKNOWN_CLASS ||
+               reply.ack == protocol::ApduAck::UNKNOWN_DATA_ITEM)) {
+            if (sub == 2)
+              panel_lock_ = -2;
+            else
+              display_sleep_ = -2;
+            ESP_LOGW(TAG, "Panel setting %u unsupported until reconnect", sub);
+          }
+        }
+        const size_t minimum = sub == 2 ? 6 : 5;  // Three-byte size prefix included.
+        if (ok && (payload == nullptr || len < minimum || len > 35 || (sub == 114 && len != 5) ||
+                   payload[3] > (sub == 2 ? 2 : 1))) {
+          ok = false;
+        }
+        if (ok && sub == 2 && protocol::decode_uint16_be(payload, 4) != len - 6) {
+          ok = false;
+        }
+        if (ok) {
+          if (sub == 2)
+            panel_lock_ = payload[3];
+          else
+            display_sleep_ = payload[3];
+          ESP_LOGD(TAG, "Panel setting %u: %u", sub, payload[3]);
+        }
+        if (callback) callback(ok, ok ? payload : nullptr, ok ? len : 0);
+      });
+}
+
+bool ControlService::write_panel_setting(uint16_t sub, const uint8_t* body, size_t len,
+                                         core::Transport::CommandCallback callback) {
+  if ((sub != 2 && sub != 114) || body == nullptr || len > 32 || len < (sub == 2 ? 3 : 2)) {
+    return false;
+  }
+  const uint16_t type = sub == 2 ? 269 : 919;
+  uint8_t apdu[43] = {0x0A,
+                      static_cast<uint8_t>(9 + len),
+                      94,
+                      static_cast<uint8_t>(sub >> 8),
+                      static_cast<uint8_t>(sub),
+                      static_cast<uint8_t>(type >> 8),
+                      static_cast<uint8_t>(type),
+                      1,
+                      0,
+                      0,
+                      static_cast<uint8_t>(len)};
+  apdu[1] |= 0x80;  // Class 10 SET; echo every other field from the fresh read.
+  memcpy(apdu + 11, body, len);
+  transport_.send_apdu_command(apdu, len + 11, 0, 0, std::move(callback),
+                               core::Transport::SET_ACK_TIMEOUT_MS, false, true);
+  return true;
 }
 
 bool ControlService::get_mode_async(std::function<void(bool, ControlMode)> on_complete) {

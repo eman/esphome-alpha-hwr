@@ -66,6 +66,17 @@ namespace protocol = esphome::alpha_hwr::protocol;
 
 struct PumpSim {
   uint8_t mode_byte{0x02};  // CONSTANT_SPEED
+  std::vector<uint8_t> panel_lock{0, 0, 0};
+  std::vector<uint8_t> display_sleep{1, 120};  // Captured hidden-mode enabled, 120 s.
+  bool drop_panel_confirm{false};
+  bool ack_panel_writes{true};
+  bool honor_panel_writes{true};
+  bool refuse_panel_writes{false};
+  bool respond_panel_reads{true};
+  bool unsupported_panel_reads{false};
+  int panel_reads{0};
+  uint8_t panel_type_version{1};
+  int panel_writes{0};
   bool enabled{true};
   // Native-unit setpoints per register sub-id (13 speed, 15 pressure, 39 flow)
   std::map<int, float> setpoints{{13, NAN}, {15, NAN}, {39, NAN}};
@@ -540,6 +551,8 @@ struct Harness {
         if (sub == 430) return 23;                   // temperature range, 14
         return -1;
       case 94:
+        if (sub == 2) return 9 + static_cast<int>(sim.panel_lock.size());
+        if (sub == 114) return 11;
         if (sub == 100) return 20;                   // DateTimeConfig, 11
         return -1;
       default:
@@ -618,6 +631,39 @@ struct Harness {
     if (apdu_len < 2 || apdu[0] != 0x0A) return;
 
     uint8_t opspec = apdu[1];
+    if (apdu_len >= 5 && apdu[2] == 94 && apdu[3] == 0 && (apdu[4] == 2 || apdu[4] == 114)) {
+      const bool lock = apdu[4] == 2;
+      auto &body = lock ? sim.panel_lock : sim.display_sleep;
+      const uint16_t type = lock ? 269 : 919;
+      if (opspec == 3) {
+        sim.panel_reads++;
+        if (sim.unsupported_panel_reads) {
+          inject({0x24, 5, 0xF8, 0xE7, 10, 0x81, 94, 0, 0});
+          return;
+        }
+        if (!sim.respond_panel_reads || (sim.drop_panel_confirm && sim.panel_writes > 0)) return;
+        std::vector<uint8_t> frame{0x24, 0, 0xF8, 0xE7, 10,
+            static_cast<uint8_t>(7 + body.size()), 0, static_cast<uint8_t>(type >> 8),
+            static_cast<uint8_t>(type), sim.panel_type_version, 0, 0, static_cast<uint8_t>(body.size())};
+        frame.insert(frame.end(), body.begin(), body.end());
+        frame.insert(frame.end(), {0, 0});
+        frame[1] = static_cast<uint8_t>(frame.size() - 4);
+        inject(frame);
+      } else if ((opspec & 0xC0) == 0x80 && apdu_len >= 11) {
+        sim.panel_writes++;
+        if (apdu[5] != static_cast<uint8_t>(type >> 8) || apdu[6] != static_cast<uint8_t>(type) ||
+            apdu[7] != 1 || protocol::decode_uint24_be(apdu + 8) != apdu_len - 11) {
+          inject({0x24, 5, 0xF8, 0xE7, 10, 0x81, 94, 0, 0});
+          return;
+        }
+        if (sim.honor_panel_writes && !sim.refuse_panel_writes) body.assign(apdu + 11, apdu + apdu_len);
+        if (sim.ack_panel_writes) {
+          inject({0x24, 5, 0xF8, 0xE7, 10, static_cast<uint8_t>(sim.refuse_panel_writes ? 0x81 : 1), 0, 0, 0});
+        }
+      }
+      return;
+    }
+
     if (opspec == 0x03 && apdu_len >= 5 && apdu[2] == 0x56 && apdu[3] == 0x00 && apdu[4] == 0x07) {
       // Mode read (Obj 86 Sub 7)
       if (sim.respond_mode_reads) inject_mode_notification();
@@ -5307,6 +5353,8 @@ static void test_command_strings() {
       {WriteCommand::CLEAR_SCHEDULE_ENTRY, "clear_schedule_entry"},
       {WriteCommand::SET_SCHEDULE_ENABLED, "set_schedule_enabled"},
       {WriteCommand::SET_REMOTE_MODE, "set_remote_mode"},
+      {WriteCommand::SET_PANEL_LOCK, "set_panel_lock"},
+      {WriteCommand::SET_PREVENT_DISPLAY_SLEEP, "set_prevent_display_sleep"},
       {WriteCommand::SET_CLOCK, "set_clock"},
       {WriteCommand::SET_SINGLE_EVENT, "set_single_event"},
       {WriteCommand::CLEAR_SINGLE_EVENT, "clear_single_event"},
@@ -5637,6 +5685,149 @@ static void test_republish_predicate_arms() {
   TEST_ASSERT(result_republishes_schedule(r), "refresh_schedule republishes");
 }
 
+static void test_panel_settings_are_confirmed_and_preserve_other_fields() {
+  for (bool lock : {false, true}) {
+    for (int failure = 0; failure < 5; failure++) {
+      Harness h;
+      if (lock) h.sim.panel_lock = {0, 0, 2, 7, 9};  // Preserve an existing PIN payload.
+      h.sim.honor_panel_writes = failure != 1;
+      h.sim.refuse_panel_writes = failure == 2;
+      h.sim.respond_panel_reads = failure != 3;
+      if (failure == 4) h.sim.panel_type_version = 2;
+      h.write_op.submit_set_panel_setting(lock, true, "panel");
+      h.advance(14000);
+      const WriteResult *r = h.result_for("panel");
+      TEST_ASSERT(h.events_for("panel") == 1, "Panel operation has exactly one terminal event");
+      TEST_ASSERT(
+          r && r->status == (failure == 0 ? WriteStatus::ACCEPTED : WriteStatus::REJECTED),
+          "Panel state is confirmed; ignored/refused/unavailable/version-mismatched requests fail");
+      TEST_ASSERT(h.sim.panel_writes == (failure >= 3 ? 0 : 1),
+                  "No panel write is attempted without a validated fresh read");
+      if (lock) {
+        TEST_ASSERT(h.sim.panel_lock[1] == 0 && h.sim.panel_lock[2] == 2 &&
+                        h.sim.panel_lock[3] == 7 && h.sim.panel_lock[4] == 9,
+                    "Lock write preserves PIN length and PIN bytes");
+      } else {
+        TEST_ASSERT(h.sim.display_sleep[1] == 120, "Display write preserves timeout seconds");
+        TEST_ASSERT(h.sim.display_sleep[0] == (failure == 0 ? 0 : 1),
+                    "Prevent Display Sleep writes the inverse of the hidden-mode flag");
+      }
+      if (failure == 0 || failure == 1) {
+        TEST_ASSERT(r && r->enabled == (failure == 0 ? 1 : 0),
+                    "Settle reports the confirmed user-facing setting, including ignored writes");
+      }
+    }
+    Harness h;
+    if (lock)
+      h.sim.panel_lock[0] = 2;
+    else
+      h.sim.display_sleep[0] = 0;
+    h.write_op.submit_set_panel_setting(lock, false, "unlock");
+    h.advance(14000);
+    const WriteResult *r = h.result_for("unlock");
+    TEST_ASSERT(r && r->status == WriteStatus::ACCEPTED && r->enabled == 0,
+                "Unlock/display sleep enable are confirmed by readback");
+  }
+}
+
+static void test_panel_ack_and_readback_failures_and_stronger_lock() {
+  for (bool lock : {false, true}) {
+    Harness h;
+    h.sim.ack_panel_writes = false;
+    h.write_op.submit_set_panel_setting(lock, true, "unacked");
+    h.advance(14000);
+    const WriteResult *r = h.result_for("unacked");
+    TEST_ASSERT(r && r->status == WriteStatus::ACCEPTED && h.events_for("unacked") == 1,
+                "Panel readback confirms a write even when its ACK was lost");
+    Harness missing;
+    missing.sim.drop_panel_confirm = true;
+    missing.write_op.submit_set_panel_setting(lock, true, "missing");
+    missing.advance(14000);
+    r = missing.result_for("missing");
+    TEST_ASSERT(r && r->status == WriteStatus::TIMEOUT && r->enabled == -1 &&
+                    missing.events_for("missing") == 1,
+                "Missing readback reports no pre-write state as the settled state");
+    for (bool disconnect : {false, true}) {
+      Harness interrupted;
+      interrupted.sim.drop_panel_confirm = true;
+      interrupted.write_op.submit_set_panel_setting(lock, true, "interrupted");
+      interrupted.advance(1000);
+      TEST_ASSERT(interrupted.sim.panel_writes == 1 && interrupted.events_for("interrupted") == 0,
+                  "Panel write reached the pump before confirmation was interrupted");
+      if (disconnect) {
+        interrupted.write_op.on_disconnect();
+      } else {
+        // Run the operation watchdog before servicing the pending transport read.
+        mock_millis += 13000;
+        for (auto &task : interrupted.tasks) {
+          if (task.due <= mock_millis) task.fn();
+        }
+        interrupted.tasks.clear();
+      }
+      r = interrupted.result_for("interrupted");
+      TEST_ASSERT(r && r->status == WriteStatus::TIMEOUT && r->enabled == -1 &&
+                      interrupted.events_for("interrupted") == 1,
+                  "Disconnect and watchdog cannot report pre-write panel state");
+      interrupted.advance(5000);
+      TEST_ASSERT(interrupted.events_for("interrupted") == 1,
+                  "A late failed read cannot settle the panel operation twice");
+    }
+  }
+  Harness h;
+  h.sim.panel_lock[0] = 2;
+  h.write_op.submit_set_panel_setting(true, true, "strong");
+  h.advance(14000);
+  TEST_ASSERT(h.result_for("strong")->status == WriteStatus::ACCEPTED && h.sim.panel_lock[0] == 2,
+              "Locking preserves an existing stronger settings-and-operation lock");
+}
+
+static void test_panel_unsupported_and_malformed_settings() {
+  Harness h;
+  h.sim.unsupported_panel_reads = true;
+  int callbacks = 0;
+  auto callback = [&](bool ok, const uint8_t *, size_t) {
+    callbacks++;
+    TEST_ASSERT(!ok, "Unsupported panel setting never supplies a fabricated state");
+  };
+  h.control.read_panel_setting(2, callback);
+  h.advance(500);
+  h.control.read_panel_setting(2, callback);
+  h.advance(500);
+  TEST_ASSERT(callbacks == 2 && h.sim.panel_reads == 1 && h.control.get_panel_setting(2) < 0,
+              "Unsupported panel setting is not repeatedly read until reconnect");
+  h.control.invalidate_cache();
+  h.sim.unsupported_panel_reads = false;
+  h.control.read_panel_setting(2, nullptr);
+  h.advance(500);
+  TEST_ASSERT(h.sim.panel_reads == 2 && h.control.get_panel_setting(2) == 0,
+              "Cache invalidation permits a new capability probe");
+
+  for (int kind = 0; kind < 6; kind++) {
+    Harness malformed;
+    const bool lock = kind != 3 && kind != 5;
+    if (kind == 0) malformed.sim.panel_lock = {0};
+    if (kind == 1) malformed.sim.panel_lock = {0, 0, 2};
+    if (kind == 2) malformed.sim.panel_lock = {3, 0, 0};
+    if (kind == 3) malformed.sim.display_sleep = {0, 120, 0};
+    if (kind == 4) {
+      malformed.sim.panel_lock.assign(33, 0);
+      malformed.sim.panel_lock[2] = 30;  // Valid PIN count, over the bounded body size.
+    }
+    if (kind == 5) malformed.sim.display_sleep = {2, 120};
+    bool read_ok = true;
+    malformed.control.read_panel_setting(lock ? 2 : 114,
+                                         [&](bool ok, const uint8_t *, size_t) { read_ok = ok; });
+    malformed.advance(500);
+    TEST_ASSERT(!read_ok, "Malformed panel records are rejected by the shared panel read");
+    malformed.write_op.submit_set_panel_setting(lock, true, "malformed");
+    malformed.advance(14000);
+    const WriteResult *r = malformed.result_for("malformed");
+    TEST_ASSERT(r && r->status == WriteStatus::REJECTED && r->enabled == -1 &&
+                    malformed.sim.panel_writes == 0 && malformed.events_for("malformed") == 1,
+                "Malformed HMI lengths, PIN records and lock levels cannot trigger a write");
+  }
+}
+
 int main() {
   // Pin the timezone to UTC so single-event timestamp assertions are
   // deterministic across CI machines: schedule_service shifts single-event
@@ -5645,6 +5836,10 @@ int main() {
   // test_schedule_service (utc_to_local_unix with explicit offsets).
   setenv("TZ", "UTC", 1);
   tzset();
+
+  test_panel_settings_are_confirmed_and_preserve_other_fields();
+  test_panel_unsupported_and_malformed_settings();
+  test_panel_ack_and_readback_failures_and_stronger_lock();
 
   std::cout << "===========================================================" << std::endl;
   std::cout << "  Write Operation Service Test Suite (issue #92)" << std::endl;

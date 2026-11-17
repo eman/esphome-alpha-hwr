@@ -50,6 +50,9 @@ EnergyTelemetry decode_energy_payload(const uint8_t* payload, size_t len) {
 
 MotorStateTelemetry decode_motor_state_response(const uint8_t* data, size_t len) {
   MotorStateTelemetry result;
+  // Callers pass the complete response frame; fields must not consume its CRC.
+  if (len < 2) return result;
+  len -= 2;
   
   // Motor state response: floats start at offset 13
   // Float array layout:
@@ -57,9 +60,10 @@ MotorStateTelemetry decode_motor_state_response(const uint8_t* data, size_t len)
   // [1] = Voltage DC (V) at offset 17
   // [2] = Current (A) at offset 21
   // [3] = Power (W) at offset 25
-  // [4] = Unknown/reserved at offset 29
+  // [4] = DC power (W) at offset 29
   // [5] = Speed (RPM) at offset 33
-  // [6] = Converter temp (°C) at offset 37
+  // [6] = Converter temp (°C) at offset 37; NaN in the captured HWR replies
+  // [7-8] = Inverter/aux temp at offsets 41/45; NaN/zero in all 42 HWR replies, not exposed
   
   // AC voltage (offset 13, float[0])
   if (len >= 17) {
@@ -97,6 +101,15 @@ MotorStateTelemetry decode_motor_state_response(const uint8_t* data, size_t len)
     }
   }
   
+  // DC power (offset 29, float[4])
+  if (len >= 33) {
+    float power = decode_float_be(data, 29);
+    if (std::isfinite(power) && power >= 0 && power <= 1000) {
+      result.has_dc_power = true;
+      result.dc_power_w = power;
+    }
+  }
+
   // Speed/RPM (offset 33, float[5])
   if (len >= 37) {
     float rpm = decode_float_be(data, 33);
@@ -124,7 +137,8 @@ FlowPressureTelemetry decode_flow_pressure_response(const uint8_t* data, size_t 
   
   // Flow/pressure response: floats start at offset 13
   // Float array layout:
-  // [0-5] = Reserved/unknown
+  // [0-4] = Reserved/unknown
+  // [5] = Differential temperature at offset 33; NaN in all 112 HWR replies, not exposed
   // [6] = Flow rate (m³/h) at offset 37
   // [7] = Head pressure (m) at offset 41
   // [8] = Inlet pressure (bar) at offset 45 - often NaN

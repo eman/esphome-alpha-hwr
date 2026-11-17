@@ -9,7 +9,7 @@
  * The Alpha HWR pump sends telemetry using Class 10 DataObjects:
  * 
  * 1. **Motor State** (OpSpec 0x30 responses)
- *    - AC voltage, current, power, speed, converter temperature
+ *    - AC/DC voltage, current, AC/DC power, speed, converter temperature
  * 
  * 2. **Flow/Pressure** (OpSpec 0x2B responses)
  *    - Flow rate, head, inlet pressure, outlet pressure
@@ -67,6 +67,9 @@ struct MotorStateTelemetry {
   bool has_power;
   float power_w;
   
+  bool has_dc_power;
+  float dc_power_w;
+
   bool has_speed;
   float speed_rpm;
   
@@ -78,6 +81,7 @@ struct MotorStateTelemetry {
       has_voltage_dc(false), voltage_dc_v(0),
       has_current(false), current_a(0),
       has_power(false), power_w(0),
+      has_dc_power(false), dc_power_w(0),
       has_speed(false), speed_rpm(0),
       has_converter_temp(false), converter_temperature_c(0) {}
 };
@@ -185,12 +189,12 @@ EnergyTelemetry decode_energy_payload(const uint8_t* payload, size_t len);
  * [1] = Voltage DC (V) at offset 17
  * [2] = Current (A) at offset 21
  * [3] = Power (W) at offset 25
- * [4] = Unknown/reserved at offset 29
+ * [4] = DC power (W) at offset 29
  * [5] = Speed (RPM) at offset 33
  * [6] = Converter temp (°C) at offset 37
  * 
  * @param data Full packet bytes (not just payload)
- * @param len Length of packet
+ * @param len Length of full packet, including the two-byte CRC
  * @return Decoded motor state with validation flags
  * 
  * Reference: TelemetryDecoder.decode_register_read_response() with opspec=0x30

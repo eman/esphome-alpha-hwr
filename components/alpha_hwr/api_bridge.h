@@ -53,6 +53,8 @@ class AlphaHwrApiBridge : public api::CustomAPIDevice {
   void fire_write_settled(const services::WriteResult &result);
 
  private:
+  void on_set_panel_lock(bool enabled, std::string op_id);
+  void on_set_prevent_display_sleep(bool enabled, std::string op_id);
   void on_set_enabled(bool enabled, std::string op_id);
   void on_set_mode(std::string mode, std::string op_id);
   void on_set_setpoint(std::string mode, float value, std::string op_id);

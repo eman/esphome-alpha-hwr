@@ -30,6 +30,8 @@ enum class WriteCommand : uint8_t {
   CLEAR_SCHEDULE_ENTRY,
   SET_SCHEDULE_ENABLED,
   SET_REMOTE_MODE,
+  SET_PANEL_LOCK,
+  SET_PREVENT_DISPLAY_SLEEP,
   SET_CLOCK,        // pump RTC sync; internal-only, no service, event-surface
   SET_SINGLE_EVENT,
   CLEAR_SINGLE_EVENT,
@@ -293,6 +295,10 @@ class WriteOperationService {
                           std::function<void(bool)> done = nullptr,
                           WriteOrigin origin = WriteOrigin::SERVICE,
                           std::function<void(WriteStatus)> on_status = nullptr);
+  // Read-modify-write the panel setting and confirm it from the pump.
+  void submit_set_panel_setting(bool panel_lock, bool enabled, const std::string &op_id,
+                                std::function<void(bool)> done = nullptr,
+                                WriteOrigin origin = WriteOrigin::SERVICE);
   /**
    * Remote/Digital vs Local/Panel control source (issue #46). Confirmed from
    * the control_source byte of an Object 86 Sub 7 readback, not from the
@@ -608,6 +614,8 @@ class WriteOperationService {
   void run_schedule_entry_(uint32_t seq);
   void confirm_schedule_entry_(uint32_t seq);
   void run_remote_mode_(uint32_t seq);
+  void run_panel_setting_(uint32_t seq);
+  void confirm_panel_setting_(uint32_t seq);
   void confirm_remote_mode_(uint32_t seq);
   void run_set_clock_(uint32_t seq);
   void confirm_set_clock_(uint32_t seq);

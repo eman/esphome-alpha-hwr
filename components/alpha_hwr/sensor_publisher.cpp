@@ -73,7 +73,7 @@ void SensorPublisher::publish_energy(const protocol::EnergyTelemetry& energy) {
 
 void SensorPublisher::publish_motor_state(const protocol::MotorStateTelemetry& motor) {
   // Validate that we have at least some valid data
-  if (!motor.has_power && !motor.has_speed) {
+  if (!motor.has_power && !motor.has_speed && !motor.has_dc_power) {
     ESP_LOGD(TAG, "Motor state has no valid data, skipping publish");
     return;
   }
@@ -105,6 +105,11 @@ void SensorPublisher::publish_motor_state(const protocol::MotorStateTelemetry& m
     power_sensor_->publish_state(motor.power_w);
   }
   
+  // Publish DC power with raw-state change gating.
+  if (motor.has_dc_power && power_dc_sensor_ != nullptr) {
+    publish_sensor_if_changed(power_dc_sensor_, motor.dc_power_w);
+  }
+
   // Publish RPM
   if (motor.has_speed && rpm_sensor_ != nullptr) {
     rpm_sensor_->publish_state(motor.speed_rpm);

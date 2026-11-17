@@ -135,6 +135,8 @@ they settle as `set_single_event` / `clear_single_event`.
 
 | Service | Arguments | What it writes |
 | --- | --- | --- |
+| `set_panel_lock` | `enabled: bool`, `op_id: string` | Read-modify-write 94/2, preserving PIN fields and stronger existing lock levels; readback confirms `panel_locked`. |
+| `set_prevent_display_sleep` | `enabled: bool`, `op_id: string` | Read-modify-write 94/114, preserving timeout seconds; readback confirms `prevent_display_sleep`. |
 | `set_pump_enabled` | `enabled: bool`, `op_id: string` | Run state only, via the pump's unfused Class 3 START/STOP commands — carries no mode and no setpoint at all. A pump-rejected command settles `rejected`; the run state is always confirmed by readback (Class 3 produces no notification of its own). |
 | `set_mode` | `mode: string`, `op_id: string` | Control mode only, via the pump's unfused mode-change object — touches neither the run state nor any mode's stored setpoint. |
 | `set_setpoint` | `mode: string`, `value: float`, `op_id: string` | **Switches the pump into `mode` AND sets that mode's setpoint** — `mode` is not merely selecting which stored setpoint to edit; after this call the pump is running (or armed) in that mode. This is exactly the pair the pump fuses in one write. Use `set_mode` to switch modes without touching a setpoint. The pump stores an independent setpoint per mode, so setpoint writes to different modes never supersede each other. The value is validated against the pump's own published range for that mode — see below. |
@@ -716,3 +718,15 @@ interleave mid-sequence, and each client matches its own results by `op_id`.
   confirm readback starts, so an unacknowledged config write settles several
   seconds later than an acknowledged one — and up to 26 s if its first confirm
   readback is dropped too.
+
+### Panel setting settle fields
+
+`set_panel_lock` reports `panel_locked`, and `set_prevent_display_sleep` reports
+`prevent_display_sleep`. These boolean fields describe an observed pump value;
+they are absent if no read established one, or a sent write has not been confirmed
+by a subsequent read. They do not reuse `enabled`, which already represents pump
+or schedule state for other commands.
+A missing ACK is followed by readback; an ACK alone never establishes success.
+An ignored write settles `rejected`; an unavailable confirm settles `timeout`.
+The Panel Lock and Prevent Display Sleep entity switches use these same queued
+operations with `origin: entity`.

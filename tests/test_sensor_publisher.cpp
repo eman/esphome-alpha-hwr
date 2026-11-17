@@ -409,12 +409,32 @@ void test_unwired_publisher_is_inert() {
   TEST_ASSERT(true, "Every publish path survives null sensors");
 }
 
+static void test_dc_power_publishes_independently_and_on_change() {
+  SensorPublisher publisher;
+  esphome::sensor::Sensor dc;
+  publisher.set_power_dc_sensor(&dc);
+  MotorStateTelemetry motor;
+  motor.has_dc_power = true;
+  motor.dc_power_w = 10.5f;
+  publisher.publish_motor_state(motor);
+  publisher.publish_motor_state(motor);
+  TEST_ASSERT(dc.state == 10.5f && dc.publish_count == 1,
+              "DC power publishes independently and unchanged values are gated");
+  motor.dc_power_w = 11.0f;
+  publisher.publish_motor_state(motor);
+  TEST_ASSERT(dc.state == 11.0f && dc.publish_count == 2, "Changed DC power publishes once");
+  motor.has_dc_power = false;
+  publisher.publish_motor_state(motor);
+  TEST_ASSERT(dc.publish_count == 2, "Absent DC power leaves the last reading unchanged");
+}
+
 int main() {
   std::cout << "==========================================" << std::endl;
   std::cout << "Sensor Publisher Tests" << std::endl;
   std::cout << "==========================================" << std::endl;
 
   test_energy_validation_and_publishing();
+  test_dc_power_publishes_independently_and_on_change();
   test_motor_state_publishes_only_present_fields();
   test_motor_state_with_no_data_publishes_nothing();
   test_temperature_range_validation();

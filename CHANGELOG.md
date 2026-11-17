@@ -4,6 +4,19 @@
 
 ### Added
 
+- **Panel Lock and Prevent Display Sleep**, exposed as readback-confirmed switches
+  in the controls package and as `set_panel_lock` / `set_prevent_display_sleep`
+  API services. Panel writes preserve PIN fields, stronger lock levels and the
+  display timeout. Prevent Display Sleep reverses the pump's hidden-mode flag.
+  Unsupported panel settings are not probed again until reconnect. The optional
+  `panel_settings_poll_interval` defaults to `0s`, or `60s` in the controls package.
+- **DC Power and Power-on Hours** diagnostic sensors, included in the pump package.
+  DC power reuses motor telemetry; power-on hours counts powered time, including
+  stopped periods. The shared `statistics_update_interval` defaults to `60s` when
+  any of Start Count, Operating Hours or Power-on Hours is configured; `0s` keeps
+  only the initial read. Periodic statistics and panel reads wait for initialization
+  and cache synchronization, avoiding duplicate statistics reads on reconnect.
+
 - Optional `energy` sensor in kWh, read from the pump's cumulative Object 87/1
   counter. Included in the pump package. Reads await an exact typed response
   on a configurable 60-second cadence, with per-connection unsupported-counter
@@ -25,7 +38,18 @@
   table moved out of `ble_connection_manager.cpp` into `link_disconnect.h`,
   where it is host-tested.
 
+### Changed
+
+- **Start Count and Operating Hours now use `total_increasing`**, matching
+  Power-on Hours and cumulative energy. Existing Home Assistant installations
+  will collect sum statistics instead of mean/min/max for these two entities;
+  their long-term history graphs may change shape. Start Count counts motor
+  starts, not power cycles; the pump has a separate power-up counter.
+
 ### Fixed
+
+- Motor-state fields no longer decode the trailing CRC as part of a truncated
+  float. All fields use the same payload bounds.
 
 - **A late energy reply no longer costs the next write its acknowledgement.**
   When an energy read times out, the transport records that a reply is still
