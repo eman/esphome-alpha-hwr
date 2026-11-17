@@ -306,6 +306,10 @@ jobs:
             ~/.platformio
             ~/.esphome
             ~/.cache/pip
+            # ESP-IDF framework, toolchains and its Python env. ESPHome 2026.10
+            # keeps them here (platformdirs' user cache dir), not under
+            # ~/.esphome; without it every run downloads and installs IDF.
+            ~/.cache/esphome
           key: esp-idf-${{ runner.os }}-${{ hashFiles('tests/ci-compile.yaml') }}
           restore-keys: |
             esp-idf-${{ runner.os }}-
@@ -313,8 +317,30 @@ jobs:
       - name: Install esphome
         run: pip install esphome
 
-      - name: Compile firmware
-        run: esphome compile tests/ci-compile.yaml
+      # Two builds at opposite ends of the log range; tests/ci-compile.yaml
+      # says which warning each one exposes. NONE runs first so the image the
+      # size report lists is the VERY_VERBOSE one -- neither is production's
+      # INFO, so treat that size as an upper bound.
+      - name: Compile firmware (logging compiled out)
+        run: |
+          set -o pipefail
+          esphome -s log_level NONE compile tests/ci-compile.yaml 2>&1 | tee firmware-build.log
+
+      - name: Compile firmware (every log level compiled in)
+        run: |
+          set -o pipefail
+          esphome compile tests/ci-compile.yaml 2>&1 | tee -a firmware-build.log
+
+      # Our code only: the two components, and the packages' YAML lambdas,
+      # which ESPHome compiles into main.cpp with #line pointing back at the
+      # YAML file. ESPHome core and ESP-IDF are not ours to fix. Both builds
+      # above append to the log this reads.
+      - name: Fail on compiler warnings in our components
+        run: |
+          if tr '\r' '\n' < firmware-build.log | grep -E "(components/(alpha_hwr|dhw_demand)/|packages/)[^ ]*: warning:"; then
+            echo "::error::Firmware build produced warnings in this repo's components"
+            exit 1
+          fi
 
       - name: Report image size
         if: always()

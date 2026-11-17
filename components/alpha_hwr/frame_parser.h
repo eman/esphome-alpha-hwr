@@ -36,6 +36,7 @@
 #pragma once
 
 #include "esphome/core/component.h"
+#include "response_match.h"
 #include <cstdint>
 #include <vector>
 
@@ -142,10 +143,17 @@ struct ParsedFrame {
  * Pointers borrow the caller's frame buffer.
  */
 struct Class10ObjectView {
-  uint16_t type{0};
-  uint8_t version{0};
-  const uint8_t* body{nullptr};
-  size_t body_len{0};
+  uint16_t type;
+  uint8_t version;
+  const uint8_t* body;
+  size_t body_len;
+
+  // Default constructor
+  Class10ObjectView()
+    : type(0),
+      version(0),
+      body(nullptr),
+      body_len(0) {}
 };
 
 /**
@@ -160,6 +168,20 @@ struct Class10ObjectView {
  * @return True if the frame contains a complete successful object reply
  */
 bool parse_class10_object(const uint8_t* data, size_t len, Class10ObjectView& object);
+
+/**
+ * Parse a single short Class 10 reply after Transport has validated its CRC.
+ *
+ * Checks the frame and APDU lengths before decoding either acknowledge. Unknown
+ * Class has no payload; item errors carry an item ID (GENIbus App. C.17).
+ * Does not correlate replies or decide whether a GET can complete on an ACK.
+ *
+ * @param data Complete, CRC-validated response frame
+ * @param len Frame length, including CRC
+ * @param reply Decoded acknowledges; cleared on failure
+ * @return true when the short response shape is valid, including refusals
+ */
+bool parse_short_class10_reply(const uint8_t* data, size_t len, ShortClass10Reply& reply);
 
 /**
  * Parse raw GENI frame into structured data.

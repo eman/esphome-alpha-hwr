@@ -231,8 +231,7 @@ class Transport {
     // no effect beyond the log level. In particular the reply debt is recorded
     // either way (issue #248).
     bool quiet_timeout{false};
-    /// Require a complete successful Class 10 object, including its second ACK.
-    /// Opt-in so existing write/short-ACK and legacy read contracts stay intact.
+    /// Validate a complete successful object before delivering the payload.
     bool require_object_reply{false};
     // This command had an ambiguous frame withheld from it because an earlier
     // command was still owed one (issue #248). It must therefore NOT record a
@@ -330,6 +329,24 @@ class Transport {
                          uint32_t timeout_ms = 3000, bool allow_register_read = false,
                          bool expect_short_ack = false, bool quiet_timeout = false,
                          bool expect_short_read_refusal = false, bool require_object_reply = false);
+
+  /**
+   * Queue an awaited Class 10 GET with an exact object type/version expectation.
+   *
+   * Successful callbacks receive the size-prefixed object payload. A short
+   * refusal supplies its full frame with success=false; timeout/reset supplies
+   * nullptr. Uses the existing bounded late-short-reply safeguard.
+   * Replies of an owned type cannot satisfy an unrelated wildcard command.
+   *
+   * @param object_id Request object ID
+   * @param sub_id Request sub-ID
+   * @param type Expected response object type
+   * @param version Expected response version
+   * @param callback Required completion callback
+   * @param timeout_ms Response timeout (default 3000 ms)
+   */
+  void send_class10_object_read(uint8_t object_id, uint16_t sub_id, uint16_t type,
+                                uint8_t version, CommandCallback callback, uint32_t timeout_ms = 3000);
 
   /**
    * Set callback for complete packets.
@@ -504,6 +521,12 @@ class Transport {
   /// per genuinely late reply, and the sequence always converges.
   uint8_t owed_replies_{0};
 
+  /// The part of owed_replies_ recorded by owned object reads that timed out
+  /// (send_class10_object_read()). Their late reply is recognisable by type, so
+  /// the owned-type guard can pay it exactly; no other late reply can be told
+  /// from a fresh one. Never exceeds owed_replies_, and clears with it.
+  uint8_t owed_object_replies_{0};
+
   /// Whether that debt is still live, and since when. The flag is what makes the
   /// timestamp safe to read: a bare millis() deadline compared with a signed
   /// difference goes positive again 24.9 days after it was set and would then
@@ -627,6 +650,10 @@ class Transport {
   State state_{State::IDLE};
   std::deque<Command> command_queue_;
   uint32_t last_send_time_{0};
+  // Knowledge of reply ownership survives reset(); each configured type is
+  // remembered once, so late/unsolicited versions cannot leak into wildcards.
+  std::vector<uint16_t> owned_object_types_;
+
   uint32_t send_pacing_ms_{50}; // Delay between fragments or commands
 
   // Reassembly state

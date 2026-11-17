@@ -217,6 +217,8 @@ inline bool class10_reply_is_ok(uint8_t head, bool has_payload, uint8_t first_pa
  * @param frame_len       the whole frame's length, CRC included
  */
 struct ShortClass10Reply {
+  /// The APDU head's acknowledge, independent of the Class 10 status.
+  ApduAck ack;
   /// Did the APDU head accept the operation?
   bool head_ok;
   /// Does a Class 10 status byte exist to be read?
@@ -230,7 +232,8 @@ struct ShortClass10Reply {
 inline ShortClass10Reply decode_short_class10_reply(uint8_t head, uint8_t byte_after_head,
                                                     size_t frame_len) {
   ShortClass10Reply reply{};
-  reply.head_ok = apdu_ack_is_ok(head);
+  reply.ack = apdu_ack(head);
+  reply.head_ok = reply.ack == ApduAck::OK;
   // frame_len >= 9, not 7. A real short Class 10 reply is
   // `24 05 F8 E7 0A 01 PL CRC CRC` -- nine bytes -- so the payload byte exists
   // only at that length. At `>= 7` an eight-byte CRC-valid frame whose head
@@ -330,6 +333,11 @@ inline const char *apdu_ack_name(ApduAck ack) {
       return "Illegal Operation";
   }
   return "unknown";
+}
+
+/// Describe a decoded short reply without treating a refused item's ID as status.
+inline const char *short_class10_reply_name(const ShortClass10Reply &reply) {
+  return reply.head_ok ? class10_ack_name(reply.class10_ack) : apdu_ack_name(reply.ack);
 }
 
 /**

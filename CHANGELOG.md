@@ -2,15 +2,27 @@
 
 ## [Unreleased]
 
-### Fixed
-
-- Route telemetry by Class 10 object type/version rather than reply length.
-  Validate both acknowledgements, APDU boundaries and declared object sizes.
-  Serialize alarm/warning reads and decode their counted extended-error arrays;
-  after a failed fault read, defer further fault polling until reconnect to
-  prevent a late alarm reply being published as a warning.
-
 ### Added
+
+- **Panel Lock and Prevent Display Sleep**, exposed as readback-confirmed switches
+  in the controls package and as `set_panel_lock` / `set_prevent_display_sleep`
+  API services. Panel writes preserve PIN fields, stronger lock levels and the
+  display timeout. Prevent Display Sleep reverses the pump's hidden-mode flag.
+  Unsupported panel settings are not probed again until reconnect. The optional
+  `panel_settings_poll_interval` defaults to `0s`, or `60s` in the controls package.
+- **DC Power and Power-on Hours** diagnostic sensors, included in the pump package.
+  DC power reuses motor telemetry; power-on hours counts powered time, including
+  stopped periods. The shared `statistics_update_interval` defaults to `60s` when
+  any of Start Count, Operating Hours or Power-on Hours is configured; `0s` keeps
+  only the initial read. Periodic statistics and panel reads wait for initialization
+  and cache synchronization, avoiding duplicate statistics reads on reconnect.
+
+- Optional `energy` sensor in kWh, read from the pump's cumulative Object 87/1
+  counter. Included in the pump package. Reads await an exact typed response
+  on a configurable 60-second cadence, with per-connection unsupported-counter
+  handling. Shared codec and raw-state publication helpers keep decoding and
+  filtering consistent. Exact type matching and owned-reply routing prevent
+  energy replies from satisfying unrelated DST or cycle-history commands.
 
 - **`link_last_disconnect` and `link_disconnects`: the unheld record of link
   drops.** Pump Link Fault holds the cause of an outage over the routine
@@ -25,6 +37,65 @@
   Disconnects**, and documented in `docs/configuration.md`. The reason-name
   table moved out of `ble_connection_manager.cpp` into `link_disconnect.h`,
   where it is host-tested.
+
+### Changed
+
+- **Start Count and Operating Hours now use `total_increasing`**, matching
+  Power-on Hours and cumulative energy. Existing Home Assistant installations
+  will collect sum statistics instead of mean/min/max for these two entities;
+  their long-term history graphs may change shape. Start Count counts motor
+  starts, not power cycles; the pump has a separate power-up counter.
+
+### Fixed
+
+- Route telemetry by Class 10 object type/version rather than reply length.
+  Validate both acknowledgements, APDU boundaries and declared object sizes.
+  Serialize alarm/warning reads and decode their counted extended-error arrays;
+  after a failed fault read, defer further fault polling until reconnect to
+  prevent a late alarm reply being published as a warning.
+
+- Motor-state fields no longer decode the trailing CRC as part of a truncated
+  float. All fields use the same payload bounds.
+
+- **A late energy reply no longer costs the next write its acknowledgement.**
+  When an energy read times out, the transport records that a reply is still
+  owed (issue #248). The next short frame within 500 ms pays that debt instead
+  of answering whatever is now waiting. The energy reply's own late arrival
+  was discarded without paying it, so a write sent in that window had its real
+  ACK consumed in the reply's place and stalled for 3 s. The verdict was still
+  correct, because writes settle by readback. A discarded late reply of an
+  owned type now pays the debt its own read recorded, and only that debt: a
+  stray frame cannot cancel a write's debt.
+
+- **`-Wempty-body` warning in the firmware build.** When a log level is
+  compiled out, its `ESP_LOGx` macro expands to nothing. An unbraced `if`
+  whose only statement is such a macro then compiles to `if (...);` and GCC
+  warns. At the package's default `INFO` level this hit the `ESP_LOGD` in
+  `dhw_demand.cpp`'s subtraction-stamp switch on every build. Three more sites
+  had the same shape and would warn for anyone who sets `logger: level` to
+  `WARN` or `ERROR`: the two session start/end `ESP_LOGI`s in `dhw_demand.cpp`
+  and the failed-layers `ESP_LOGW` in `schedule_service.cpp`. All four are
+  braced now. Behaviour and binary size are unchanged.
+
+- **`-Wformat` warnings at `DEBUG` and `VERBOSE` log levels.** On the
+  ESP32-C3 `uint32_t` is `long unsigned int`, so `%u` / `%X` are the wrong
+  conversions for it. Two `ESP_LOGD` pump-edge lines in `dhw_demand.cpp` and an
+  `ESP_LOGV` in `telemetry_service.cpp` used them. Anyone raising
+  `logger: level` got the warnings, and the arguments were formally undefined.
+  They now use `PRIu32` / `PRIX32`. Before this, no CI build type-checked a
+  `DEBUG` or `VERBOSE` format string: the default `INFO` level compiles those
+  lines out, and the host mocks discard log arguments.
+
+  The CI firmware job now compiles twice, once at `VERY_VERBOSE` and once at
+  `NONE`. It fails on any warning from this repo's components or from the
+  packages' YAML lambdas. Each level hides something the other shows.
+  `VERY_VERBOSE` compiles every log line in, so its format string is
+  type-checked. `NONE` compiles every log line out, so an unbraced log-only `if`
+  at any level, `ESP_LOGE` included, produces the `-Wempty-body` warning fixed
+  above. `format_detail()`, the printf-style helper behind write settle
+  details, now carries a `format` attribute, so its call sites are checked too.
+  The job also caches the ESP-IDF framework, which it was downloading and
+  installing on every run.
 
 ## [0.17.0] - 2026-10-28
 

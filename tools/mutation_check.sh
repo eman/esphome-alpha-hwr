@@ -1258,12 +1258,14 @@ MUTATIONS=(
 # TelemetryService's callback-less reads completes an innocent read as a
 # failure -- and does so most on the pumps the branch was written for, since a
 # pump that refuses reads is a pump that generates these orphans.
-"read-refusal-needs-no-declaration|components/alpha_hwr/transport.cpp|        cmd.expect_short_read_refusal && cmd.packet.size() > 5 &&|        cmd.packet.size() > 5 &&"
+"read-refusal-needs-no-declaration|components/alpha_hwr/transport.cpp|        class10_command && cmd.expect_short_read_refusal &&|        class10_command &&"
 # The upper length bound. Byte 5 is the FIRST APDU's length on a multi-APDU
 # telegram (#226), so without a ceiling any Class 10 telegram of any size whose
 # first APDU declared 0 or 1 payload bytes reads as a refusal -- and App C.17
 # makes "first APDU errored, second carries the answer" a documented case.
-"read-refusal-has-no-upper-length-bound|components/alpha_hwr/transport.cpp|        queued_class == 0x0A && data[4] == 0x0A && len >= 8 && len <= 9 &&|        queued_class == 0x0A && data[4] == 0x0A && len >= 8 &&"
+# The ceiling now lives in the shared parser. Bypass that check with the old
+# minimum-length-only decode so the long-telegram regression still proves it.
+"read-refusal-has-no-upper-length-bound|components/alpha_hwr/transport.cpp|    const bool short_read_refusal_shape = awaiting_short_read_refusal && valid_short_reply;|    const bool short_read_refusal_shape = awaiting_short_read_refusal && len >= 8 && ((reply = protocol::decode_short_class10_reply(data[5], data[6], len)), true);"
 # GET, not "not a SET". There are three operations, and the negation also
 # catches INFO -- the log then says "read declined" about one.
 "read-refusal-admits-info|components/alpha_hwr/transport.cpp|        protocol::apdu_op(cmd.packet[5]) == protocol::ApduOp::GET;|        !protocol::apdu_is_set(cmd.packet[5]);"
@@ -1282,6 +1284,21 @@ MUTATIONS=(
 # And the window, which bounds how long an unpaid debt lingers.
 "stale-reply-window-never-expires|components/alpha_hwr/transport.cpp|  if (millis() - this->owed_since_ms_ >= STALE_REPLY_WINDOW_MS) {|  if (false) {"
 "stale-reply-window-too-short-for-the-tail|components/alpha_hwr/transport.h|  static constexpr uint32_t STALE_REPLY_WINDOW_MS = 500;|  static constexpr uint32_t STALE_REPLY_WINDOW_MS = 60;"
+# An owned object read's late reply is the one late reply recognisable by type,
+# and the owned-type guard discards it. It must pay the debt its timeout
+# recorded, or the next SET's real ACK is consumed in its place and that write
+# stalls to its timeout. Each of the four rules below has its own failure.
+# Never paid:
+"owned-late-reply-never-pays|components/alpha_hwr/transport.cpp|        if (this->stale_reply_possible_() && this->owed_object_replies_ > 0) {|        if (false) {"
+# Pays any debt, so a stray owned-type frame cancels a SET's own debt and that
+# SET's late ACK answers the next write:
+"owned-late-reply-pays-set-debt|components/alpha_hwr/transport.cpp|        if (this->stale_reply_possible_() && this->owed_object_replies_ > 0) {|        if (this->stale_reply_possible_()) {"
+# The timeout never attributes the debt to the owned read, so there is nothing
+# to pay from:
+"owned-timeout-not-attributed|components/alpha_hwr/transport.cpp|        if (cmd.require_object_reply && !cmd.suppressed_a_frame &&|        if (false &&"
+# A short frame (the owned read's late refusal) pays the debt, but the
+# attributed share outlives it and later pays a SET's debt:
+"owned-share-outlives-short-payment|components/alpha_hwr/transport.cpp|  if (this->owed_object_replies_ > this->owed_replies_) this->owed_object_replies_ = this->owed_replies_;|  // mutated: no clamp"
 # Issue #259: what happens to a command nobody will ever answer.
 #
 # reset() used to clear the queue in silence, so a service with a read in flight
@@ -1436,13 +1453,13 @@ MUTATIONS=(
 "builder-cap-is-the-length-byte-not-the-pdu|components/alpha_hwr/frame_builder.cpp|  if (length > protocol::MAX_PDU_LEN) {|  if (length > 255) {"
 # The pre-#208 match condition. A 0xC1 or 0x41 refusal fails this test, falls
 # past the len >= 11 floor, and dies by 3 s timeout instead of being reported.
-"short-ack-matches-only-the-two-known-heads|components/alpha_hwr/transport.cpp|protocol::apdu_payload_len(data[5]) <= 1 &&|(data[5] == 0x01 || data[5] == 0x81) &&"
+"short-ack-matches-only-the-two-known-heads|components/alpha_hwr/transport.cpp|    const bool short_ack_shape = awaiting_short_ack && valid_short_reply;|    const bool short_ack_shape = awaiting_short_ack && valid_short_reply && (data[5] == 0x01 || data[5] == 0x81);"
 # Unknown Class declares a ZERO-length payload, so its head is 0x40 and its
 # frame is 8 bytes. `== 1` admits 0x41 -- which App C.17's format table says
 # cannot occur -- while rejecting the 0x40 that does, leaving it to die by 3 s
 # timeout. The first cut of #208 shipped exactly that; an adversarial review
 # caught it, not the suite. This entry is what makes the suite catch it.
-"short-ack-misses-the-zero-length-refusal|components/alpha_hwr/transport.cpp|protocol::apdu_payload_len(data[5]) <= 1 &&|protocol::apdu_payload_len(data[5]) == 1 &&"
+"short-ack-misses-the-zero-length-refusal|components/alpha_hwr/transport.cpp|    const bool short_ack_shape = awaiting_short_ack && valid_short_reply;|    const bool short_ack_shape = awaiting_short_ack && valid_short_reply && reply.has_payload;"
 # A refusal must be reported as ANSWERED to the config-write callers.
 #
 # It originally guarded their no-readback short-circuit, which would have turned
@@ -1822,6 +1839,22 @@ MUTATIONS=(
 "suspend-counted-as-a-failed-attempt|components/alpha_hwr/alpha_hwr.cpp|    } else if (!this->suspended_) {|    } else {"
 "suspend-recorded-as-a-truncated-gap|components/alpha_hwr/alpha_hwr.cpp|    this->link_gap_.disarm();|    // mutated: sample it as an outage"
 "bridge-parse-failure-settles-rejected|components/alpha_hwr/api_bridge.cpp|  result.status = WriteStatus::INVALID;|  result.status = WriteStatus::REJECTED;"
+
+# Panel settings and shared statistics: exercise the wire semantics, bounded
+# read-modify-write, missing-confirm state, and optional background polling.
+"review-panel-body-bound|components/alpha_hwr/control_service.cpp|len > 35|false"
+"review-panel-level-bound|components/alpha_hwr/control_service.cpp|payload[3] > (sub == 2 ? 2 : 1)|false"
+"review-panel-pin-size|components/alpha_hwr/control_service.cpp|protocol::decode_uint16_be(payload, 4) != len - 6|false"
+"review-panel-display-size|components/alpha_hwr/control_service.cpp|(sub == 114 && len != 5)|false"
+"review-panel-unsupported-latch|components/alpha_hwr/control_service.cpp|get_panel_setting(sub) == -2|false"
+"review-panel-display-write-inversion|components/alpha_hwr/write_operation_service.cpp|      body[0] = op->enabled ? 0 : 1;|      body[0] = op->enabled ? 1 : 0;"
+"review-panel-display-confirm-inversion|components/alpha_hwr/write_operation_service.cpp|op->command == WriteCommand::SET_PANEL_LOCK ? payload[3] != 0 : payload[3] == 0|payload[3] != 0"
+"review-panel-stale-result|components/alpha_hwr/write_operation_service.cpp|    op->pre_value = NAN;\n    op->phase = Phase::WRITING;|    op->phase = Phase::WRITING;"
+"review-panel-display-getter-inversion|components/alpha_hwr/alpha_hwr.h|    if (result) *result = value == 0;|    if (result) *result = value != 0;"
+"review-statistics-start-count-poll|components/alpha_hwr/alpha_hwr.cpp|start_count_sensor_ != nullptr|false"
+"review-polls-before-statistics-ready|components/alpha_hwr/alpha_hwr.cpp|    if (chain_products_complete_() && is_state_synchronized()) {\n      // Reuse one statistics read|    if (is_state_synchronized()) {\n      // Reuse one statistics read"
+"review-polls-before-cache-ready|components/alpha_hwr/alpha_hwr.cpp|    if (chain_products_complete_() && is_state_synchronized()) {\n      // Reuse one statistics read|    if (chain_products_complete_()) {\n      // Reuse one statistics read"
+"review-motor-field-object-window|components/alpha_hwr/telemetry_decoder.cpp|  // DC power (offset 29, float[4])\n  if (len >= 33) {|  // DC power (offset 29, float[4])\n  if (len >= 31) {"
 )
 
 if [[ "${1:-}" == "--list" ]]; then

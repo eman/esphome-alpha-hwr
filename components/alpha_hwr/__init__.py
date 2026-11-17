@@ -16,6 +16,7 @@ from esphome.const import (
     CONF_ID,
     DEVICE_CLASS_CONNECTIVITY,
     DEVICE_CLASS_CURRENT,
+    DEVICE_CLASS_ENERGY,
     DEVICE_CLASS_POWER,
     DEVICE_CLASS_TEMPERATURE,
     DEVICE_CLASS_VOLTAGE,
@@ -71,6 +72,12 @@ AlphaHwrComponent = alpha_hwr_ns.class_("AlphaHwrComponent", cg.PollingComponent
 CONF_FLOW = "flow"
 CONF_HEAD = "head"
 CONF_POWER = "power"
+CONF_POWER_DC = "power_dc"
+CONF_POWER_ON_HOURS = "power_on_hours"
+CONF_ENERGY = "energy"
+CONF_STATISTICS_UPDATE_INTERVAL = "statistics_update_interval"
+CONF_PANEL_SETTINGS_POLL_INTERVAL = "panel_settings_poll_interval"
+CONF_ENERGY_UPDATE_INTERVAL = "energy_update_interval"
 CONF_RPM = "rpm"
 CONF_TEMP_MEDIA = "temp_media"
 CONF_TEMP_PCB = "temp_pcb"
@@ -324,6 +331,29 @@ CONFIG_SCHEMA = (
                 device_class=DEVICE_CLASS_POWER,
                 state_class=STATE_CLASS_MEASUREMENT,
             ),
+            cv.Optional(CONF_STATISTICS_UPDATE_INTERVAL, default="60s"): cv.positive_time_period_milliseconds,
+            cv.Optional(CONF_PANEL_SETTINGS_POLL_INTERVAL, default="0s"): cv.positive_time_period_milliseconds,
+            cv.Optional(CONF_ENERGY_UPDATE_INTERVAL, default="60s"): cv.positive_time_period_milliseconds,
+            cv.Optional(CONF_POWER_DC): sensor.sensor_schema(
+                unit_of_measurement=UNIT_WATT,
+                accuracy_decimals=1,
+                device_class=DEVICE_CLASS_POWER,
+                state_class=STATE_CLASS_MEASUREMENT,
+                entity_category=ENTITY_CATEGORY_DIAGNOSTIC,
+            ),
+            cv.Optional(CONF_POWER_ON_HOURS): sensor.sensor_schema(
+                unit_of_measurement="h",
+                accuracy_decimals=1,
+                device_class="duration",
+                state_class=STATE_CLASS_TOTAL_INCREASING,
+                entity_category=ENTITY_CATEGORY_DIAGNOSTIC,
+            ),
+            cv.Optional(CONF_ENERGY): sensor.sensor_schema(
+                unit_of_measurement="kWh",
+                accuracy_decimals=3,
+                device_class=DEVICE_CLASS_ENERGY,
+                state_class=STATE_CLASS_TOTAL_INCREASING,
+            ),
             cv.Optional(CONF_RPM): sensor.sensor_schema(
                 unit_of_measurement="RPM",
                 accuracy_decimals=0,
@@ -470,7 +500,7 @@ CONFIG_SCHEMA = (
                 accuracy_decimals=0,
                 icon="mdi:counter",
                 entity_category=ENTITY_CATEGORY_DIAGNOSTIC,
-                state_class=STATE_CLASS_MEASUREMENT,
+                state_class=STATE_CLASS_TOTAL_INCREASING,
             ),
             cv.Optional(CONF_OPERATING_HOURS): sensor.sensor_schema(
                 unit_of_measurement="h",
@@ -478,7 +508,7 @@ CONFIG_SCHEMA = (
                 icon="mdi:timer-sand",
                 device_class="duration",
                 entity_category=ENTITY_CATEGORY_DIAGNOSTIC,
-                state_class=STATE_CLASS_MEASUREMENT,
+                state_class=STATE_CLASS_TOTAL_INCREASING,
             ),
             cv.Optional(CONF_CLOCK_DIFF): sensor.sensor_schema(
                 unit_of_measurement="s",
@@ -694,6 +724,21 @@ async def to_code(config):
     if CONF_HEAD in config:
         sens = await sensor.new_sensor(config[CONF_HEAD])
         cg.add(var.set_head_sensor(sens))
+
+    cg.add(var.set_statistics_update_interval(config[CONF_STATISTICS_UPDATE_INTERVAL]))
+    cg.add(var.set_panel_settings_poll_interval(config[CONF_PANEL_SETTINGS_POLL_INTERVAL]))
+    cg.add(var.set_energy_update_interval(config[CONF_ENERGY_UPDATE_INTERVAL]))
+    if CONF_POWER_DC in config:
+        sens = await sensor.new_sensor(config[CONF_POWER_DC])
+        cg.add(var.set_power_dc_sensor(sens))
+
+    if CONF_POWER_ON_HOURS in config:
+        sens = await sensor.new_sensor(config[CONF_POWER_ON_HOURS])
+        cg.add(var.set_power_on_hours_sensor(sens))
+
+    if CONF_ENERGY in config:
+        sens = await sensor.new_sensor(config[CONF_ENERGY])
+        cg.add(var.set_energy_sensor(sens))
 
     if CONF_POWER in config:
         sens = await sensor.new_sensor(config[CONF_POWER])

@@ -77,6 +77,24 @@ void encode_float_be(float value, uint8_t *bytes);
 float decode_float_be(const uint8_t *data, size_t offset = 0);
 
 /**
+ * Decode a big-endian IEEE 754 double from bytes.
+ *
+ * @param data Buffer containing at least eight bytes after offset
+ * @param offset Offset of the double (default 0)
+ * @return Decoded value, including IEEE-754 NaN/infinity when encoded
+ */
+double decode_double_be(const uint8_t *data, size_t offset = 0);
+
+/**
+ * Decode a 24-bit unsigned integer from big-endian bytes.
+ *
+ * @param data Buffer containing at least three bytes after offset
+ * @param offset Offset of the integer (default 0)
+ * @return Decoded value in a uint32_t
+ */
+uint32_t decode_uint24_be(const uint8_t *data, size_t offset = 0);
+
+/**
  * Encode a 16-bit unsigned integer as big-endian bytes.
  * 
  * @param value Integer value to encode (0-65535)

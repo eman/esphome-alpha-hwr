@@ -21,6 +21,7 @@
 // and the callback must fire exactly once, after the last one lands, reporting
 // failure if any of them did.
 
+#include <cmath>
 #include <cstdint>
 #include <cstddef>
 #include <functional>
@@ -501,12 +502,79 @@ void test_the_pure_decode_matches_the_captured_behaviour() {
   TEST_ASSERT(cut.truncated, "#282: ...and the truncation is reported");
 }
 
+static void test_power_on_time_is_independent_of_operating_time() {
+  const std::vector<uint8_t> captured = {
+      0x24, 0x27, 0xf8, 0xe7, 0x0a, 0x23, 0x00, 0x00, 0xf8, 0x02, 0x00, 0x00, 0x1c, 0x00, 0x00,
+      0x0b, 0x73, 0x00, 0x03, 0x00, 0x15, 0x00, 0x5f, 0x10, 0x4f, 0x00, 0x00, 0x0f, 0x37, 0x00,
+      0x00, 0x00, 0x86, 0x00, 0x00, 0x00, 0x18, 0x00, 0xa5, 0x4c, 0x8c, 0x1b, 0x05};
+  for (int kind = 0; kind < 3; kind++) {
+    Rig r;
+    int calls = 0;
+    bool success = false;
+    float operating = NAN, powered = NAN;
+    r.service.read_statistics_async([&](bool ok, uint32_t starts, float hours, float power_on) {
+      calls++;
+      success = ok;
+      operating = hours;
+      powered = power_on;
+      if (ok) {
+        TEST_ASSERT(starts == 2931, "Captured statistics preserve start count");
+      }
+    });
+    r.step();
+    auto frame = captured;
+    if (kind == 1) {
+      frame.resize(27);  // Header + older 12-byte body + CRC, restamped below.
+      frame[1] = static_cast<uint8_t>(frame.size() - 4);
+      frame[5] = 19;
+      frame[12] = 12;
+    }
+    if (kind == 2) frame[12] = 29;
+    frame = with_crc(frame);
+    r.transport.on_notification(frame.data(), frame.size());
+    TEST_ASSERT(calls == 1 && success == (kind != 2), "Statistics callback completes once");
+    if (kind == 0) {
+      TEST_ASSERT(std::fabs(powered - 3009.1766667f) < 0.001f && powered > operating,
+                  "Power-on seconds become hours and include stopped time");
+    }
+    if (kind == 1) {
+      TEST_ASSERT(std::isnan(powered), "Older short records omit power-on hours");
+    }
+  }
+}
+
+static void test_late_statistics_reply_cannot_answer_a_wildcard() {
+  Rig r;
+  int statistics = 0, wildcard = 0;
+  r.service.read_statistics_async([&](bool, uint32_t, float, float) { statistics++; });
+  r.step();
+  mock_millis += 6000;
+  r.step();
+  TEST_ASSERT(statistics == 1, "Timed-out statistics read completes once");
+  mock_millis += 600;
+  const uint8_t request[] = {10, 3, 94, 0, 102};
+  r.transport.send_apdu_command(request, sizeof(request), 0, 0,
+      [&](bool ok, const uint8_t *, size_t) { if (ok) wildcard++; });
+  r.step();
+  auto late = with_crc({0x24, 0x27, 0xF8, 0xE7, 10, 0x23, 0, 0, 0xF8, 2, 0, 0, 28,
+                        0, 0, 11, 115, 0, 3, 0, 21, 0, 95, 16, 79, 0, 0, 15, 55,
+                        0, 0, 0, 134, 0, 0, 0, 24, 0, 165, 76, 140, 0, 0});
+  r.transport.on_notification(late.data(), late.size());
+  TEST_ASSERT(wildcard == 0 && statistics == 1, "Late counter is discarded before wildcard matching");
+  auto own = with_crc({0x24, 21, 0xF8, 0xE7, 10, 17, 0, 1, 0x43, 1, 0, 0, 10,
+                      1, 3, 7, 2, 2, 11, 7, 1, 2, 60, 0, 0});
+  r.transport.on_notification(own.data(), own.size());
+  TEST_ASSERT(wildcard == 1, "Wildcard still accepts its own response");
+}
+
 int main() {
   std::cout << "==========================================" << std::endl;
   std::cout << "Device Info Service Tests" << std::endl;
   std::cout << "==========================================" << std::endl;
 
   test_reads_the_five_documented_string_ids();
+  test_power_on_time_is_independent_of_operating_time();
+  test_late_statistics_reply_cannot_answer_a_wildcard();
   test_captured_frames_decode_to_their_full_strings();
   test_no_string_is_rewritten_after_decoding();
   test_runt_frames_are_rejected_before_the_length_arithmetic();

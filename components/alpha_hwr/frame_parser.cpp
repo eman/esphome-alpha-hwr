@@ -178,6 +178,25 @@ ParsedFrame parse_frame(const uint8_t* data, size_t len) {
   return result;
 }
 
+bool parse_short_class10_reply(const uint8_t* data, size_t len, ShortClass10Reply& reply) {
+  reply = {};
+  if (data == nullptr || len < 8 || len > 9 || data[0] != RESPONSE_START ||
+      data[4] != CLASS_10 || static_cast<size_t>(data[1]) + 4 != len) {
+    return false;
+  }
+  const uint8_t count = apdu_payload_len(data[5]);
+  if (static_cast<size_t>(count) + 8 != len) {
+    return false;
+  }
+  const ApduAck ack = apdu_ack(data[5]);
+  if ((ack == ApduAck::UNKNOWN_CLASS && count != 0) ||
+      ((ack == ApduAck::UNKNOWN_DATA_ITEM || ack == ApduAck::ILLEGAL_OPERATION) && count != 1)) {
+    return false;
+  }
+  reply = decode_short_class10_reply(data[5], count == 1 ? data[6] : 0, len);
+  return true;
+}
+
 bool parse_class10_object(const uint8_t* data, size_t len, Class10ObjectView& object) {
   object = {};
   if (data == nullptr) {
@@ -198,8 +217,7 @@ bool parse_class10_object(const uint8_t* data, size_t len, Class10ObjectView& ob
   }
 
   // A reply names its object TYPE, not the object/sub-id from the request.
-  const uint32_t object_size = (uint32_t(data[10]) << 16) |
-                               (uint32_t(data[11]) << 8) | data[12];
+  const uint32_t object_size = decode_uint24_be(data, 10);
   if (object_size > apdu_end - 13) {
     return false;
   }

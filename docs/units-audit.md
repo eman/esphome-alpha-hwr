@@ -12,7 +12,7 @@ the authoritative resources it cites — before adding it.
 The design bets that **live telemetry** arrives from the pump as raw IEEE-754
 big-endian floats **already in physical units** — no GENI unit-index scaling,
 no offsets. This was verified field-by-field against the reference decoders and
-the captured traffic (see "Re-verify" below). Only **setpoints, trends, and
+the captured traffic (see "Re-verify" below). Only **setpoints, cumulative energy, trends, and
 statistics** apply explicit conversion factors, all hardcoded and listed below.
 
 > GENI can also encode values as scaled integers keyed by a unit-index byte
@@ -33,6 +33,18 @@ statistics** apply explicit conversion factors, all hardcoded and listed below.
 | Motor Current | A | same, off 21 | reference |
 | Water / PCB / Control-box Temp | °C | `decode_temperature_response` off 13 / 17 / 21 | `telemetry_decoder.py:283-295` (float °C, no deci-K/offset) |
 
+Additional diagnostics (GENI profile 52/7, checked against reassembled,
+CRC-valid HWR captures; offsets below are from the full response frame):
+
+| Entity | Unit | Decode | Evidence |
+| --- | --- | --- | --- |
+| DC Power | W | Motor-state float at 29 | ProtectedMotorStateDetails.dc_power_consumption, unitIndex 7 (W); running samples 10.075836 and 10.469604 W |
+| Power-on Hours | h | Statistics uint32 at body 24 ÷ 3600 | OperationHistoryPump.power_on_time; includes stopped periods |
+
+Captured and synthetic DC power vectors are tested by
+`test_telemetry_units.cpp`; counter conversion and older short records by
+`test_device_info_service.cpp`.
+
 All of the above are pinned by `tests/test_telemetry_units.cpp`.
 
 ## Derived / converted (explicit factors)
@@ -45,6 +57,7 @@ All of the above are pinned by `tests/test_telemetry_units.cpp`.
 | Constant Speed setpoint | RPM | none (native) | `write_operation_service.cpp:457` | native |
 | History trend Flow / Head samples | m³/h / m | uint8 × 0.1 | `history_service.cpp` `TREND_CONFIGS` | `history.py:17-20` (identical scales) |
 | History trend Temperature samples | °C | uint8 × 1.0 | same | `history.py:19` |
+| Cumulative Energy | kWh | binary64 joules ÷ 3600000 | `telemetry_decoder.cpp` `decode_energy_payload` (Object 87/1, type 232 v1) | `OverallEnergyConsumption.system_energy`, GENI unitIndex 87 (Ws); captured type-232 reply |
 | Operating Hours | h | seconds ÷ 3600 | `device_info_service.cpp:236` | `device_info.py:349` |
 | DHW Detection Confidence | % | internal 0–1 × 100 | `dhw_demand.cpp` `publish_result_` | ratio → percent |
 

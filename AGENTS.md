@@ -266,7 +266,7 @@ The `Transport::loop()` (called every iteration of `AlphaHwrComponent::loop()`) 
 
 ### 8.3 Firmware Quirks Handled
 The implementation includes specific logic for pump-specific behaviors:
-* **SubID 0 Quirk**: The pump often responds with `SubID 0` even when a specific Sub-ID (like `1000`) was requested. The matching logic now treats `SubID 0` as a wildcard match for the requested Object ID.
+* **No SubID 0 wildcard**: Replies carry the object's type, not the request's Sub-ID, and every captured typed reply carries its full type, high byte included. Matching therefore compares the exact type and version. A zero high type byte used to be accepted as a wildcard, which let an energy reply (type 232) answer a cycle-timestamps read (type 1000); see `docs/architecture.md` (Key Design Notes).
 * **OpSpec 0x01**: Some writes trigger an immediate `OpSpec 0x01` response. The matching logic has been tuned to be flexible while ensuring the transaction window remains open long enough for the commit to finish.
 
 ### 8.4 The Write-Operation Layer (issue #92)

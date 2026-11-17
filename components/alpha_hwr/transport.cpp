@@ -203,6 +203,14 @@ void Transport::loop() {
         // open from 1.1 s to 4 s. `quiet_timeout` means "do not log this at
         // warning" and nothing else.
         this->note_reply_owed_(cmd.suppressed_a_frame);
+        // An owned object read's late reply is the one late reply this
+        // transport can recognise for certain (the owned-type guard in
+        // try_dispatch_response() discards it), so record which part of the
+        // debt it can pay. Not when suppressed: then no debt was added.
+        if (cmd.require_object_reply && !cmd.suppressed_a_frame &&
+            this->owed_object_replies_ < this->owed_replies_) {
+          this->owed_object_replies_++;
+        }
         this->fail_front_command_();
         this->state_ = State::IDLE;
       }
@@ -269,6 +277,22 @@ void Transport::send_apdu_command(const uint8_t* apdu, size_t apdu_len,
                      expect_short_read_refusal, require_object_reply);
 }
 
+void Transport::send_class10_object_read(uint8_t object_id, uint16_t sub_id, uint16_t type,
+                                         uint8_t version, CommandCallback callback, uint32_t timeout_ms) {
+  if (!callback) {
+    ESP_LOGW(TAG, "Object read requires a response callback");
+    return;
+  }
+  if (std::find(owned_object_types_.begin(), owned_object_types_.end(), type) == owned_object_types_.end()) {
+    owned_object_types_.push_back(type);
+  }
+  const uint8_t apdu[] = {0x0A, 0x03, object_id, static_cast<uint8_t>(sub_id >> 8),
+                          static_cast<uint8_t>(sub_id)};
+  const uint16_t low_ver = static_cast<uint16_t>(((type & 0xFF) << 8) | version);
+  send_apdu_command(apdu, sizeof(apdu), low_ver, type >> 8, std::move(callback), timeout_ms,
+                    false, false, false, /*expect_short_read_refusal=*/true, /*require_object_reply=*/true);
+}
+
 void Transport::note_reply_owed_(bool already_suppressed) {
   // A command that had a frame withheld has already been paid what it was owed
   // -- by the suppression itself. Counting it again is what turns one late
@@ -287,6 +311,9 @@ void Transport::consume_owed_reply_(Command &cmd) {
   // one of either is unattributable in exactly the same way.
   if (this->owed_replies_ > 0) this->owed_replies_--;
   if (this->owed_replies_ == 0) this->owed_pending_ = false;
+  // A short frame can pay an owned read's debt too (its late refusal), so the
+  // attributed share can never exceed what is still owed.
+  if (this->owed_object_replies_ > this->owed_replies_) this->owed_object_replies_ = this->owed_replies_;
   cmd.suppressed_a_frame = true;
 }
 
@@ -299,6 +326,7 @@ bool Transport::stale_reply_possible_() {
              (unsigned) this->owed_replies_);
     this->owed_pending_ = false;
     this->owed_replies_ = 0;
+    this->owed_object_replies_ = 0;
     return false;
   }
   return this->owed_replies_ > 0;
@@ -602,6 +630,7 @@ void Transport::reset() {
   // would spend the next connection's first acknowledgement paying it off.
   owed_pending_ = false;
   owed_replies_ = 0;
+  owed_object_replies_ = 0;
   state_ = State::IDLE;
   // Last, because the callbacks it invokes run service code, and that code must
   // see a transport that is already down rather than one still holding the
@@ -834,11 +863,20 @@ bool Transport::try_dispatch_response(const uint8_t* data, size_t len) {
     // for a send that had no callback to use it. Requiring the declaration is
     // strictly narrower for anything that does not opt in, and it puts the
     // decision at the call site that knows the answer.
-    const bool short_ack_shape =
-        queued_class == 0x0A && len >= 6 && data[4] == 0x0A && protocol::apdu_payload_len(data[5]) <= 1 &&
-        cmd.expect_type_low_ver == 0x0000 && cmd.expect_type_high == 0x0000 &&
-        cmd.expect_short_ack &&
-        cmd.packet.size() > 5 && protocol::apdu_is_set(cmd.packet[5]);
+    const bool class10_command = queued_class == 0x0A && data[4] == 0x0A && cmd.packet.size() > 5;
+    const bool awaiting_short_ack =
+        class10_command && cmd.expect_type_low_ver == 0x0000 && cmd.expect_type_high == 0x0000 &&
+        cmd.expect_short_ack && protocol::apdu_is_set(cmd.packet[5]);
+    const bool awaiting_short_read_refusal =
+        class10_command && cmd.expect_short_read_refusal &&
+        protocol::apdu_op(cmd.packet[5]) == protocol::ApduOp::GET;
+    // Validate once before either branch can complete a command or settle reply
+    // debt. A missing status byte or another APDU is not a short acknowledgement.
+    protocol::ShortClass10Reply reply;
+    const bool valid_short_reply =
+        (awaiting_short_ack || awaiting_short_read_refusal) &&
+        protocol::parse_short_class10_reply(data, len, reply);
+    const bool short_ack_shape = awaiting_short_ack && valid_short_reply;
 
     // The frame has the right shape -- but shape is all we can test, so before
     // treating it as THIS command's answer, settle any debt owed to a command
@@ -867,26 +905,12 @@ bool Transport::try_dispatch_response(const uint8_t* data, size_t len) {
       // successful write, and every other ID reported failure for the wrong
       // reason. See response_match.h for the encoding and the two captured
       // frames behind it.
-      const protocol::ApduAck ack = protocol::apdu_ack(data[5]);
-      // BOTH acknowledges, not just the head's. A Class 10 reply carries a
-      // second status byte in its payload -- OK / BUSY / OPERATION_FAILED, named
-      // by the Grundfos GO app's own decoder (GeniAPDU.CLASS10_ACK_*, read from
-      // the byte after the head) and present with exactly those three values in
-      // 459 captured replies. Reading only the head reported success for 39 of
-      // them: every "busy" and every "operation failed" the pump has ever sent
-      // us. Issue #208's defect, one layer further down.
-      //
-      // Both readings, and the length rule that decides whether the status byte
-      // exists at all, live in decode_short_class10_reply(). The read-refusal
-      // branch below needs the identical decode, and a copy of it there is how
-      // the two readings of that byte drift apart.
-      const protocol::ShortClass10Reply reply =
-          protocol::decode_short_class10_reply(data[5], len >= 7 ? data[6] : 0, len);
+      const protocol::ApduAck ack = reply.ack;
       const uint8_t class10_ack = reply.class10_ack;
       const bool success = reply.ok;
       if (success) {
         ESP_LOGI(TAG, "Matched short Class 10 ACK (head 0x%02X, ok) for Class 10 SET write", data[5]);
-      } else if (protocol::apdu_ack_is_ok(data[5])) {
+      } else if (reply.head_ok) {
         // The head said ok and Class 10 did not. Reported at warning for the
         // same reason a refusal is: nothing else surfaces it, and before this it
         // was reported as a successful write.
@@ -901,11 +925,11 @@ bool Transport::try_dispatch_response(const uint8_t* data, size_t len) {
         // Only Unknown Data Item and Illegal Operation carry the offending
         // item's ID. Unknown Class declares a zero-length payload, so there is
         // no byte to report and `len` is 8 rather than 9 -- which is why the
-        // match above is `<= 1` and not `== 1`. Getting that wrong is how the
+        // parser accepts both lengths. Getting that wrong is how the
         // first cut of this shipped: it admitted 0x41, a length-1 Unknown
         // Class that the documented format says cannot occur, while rejecting
         // the 0x40 that does.
-        if (protocol::apdu_payload_len(data[5]) == 1 && len >= 7) {
+        if (reply.has_payload) {
           ESP_LOGW(TAG, "Class 10 SET refused: head 0x%02X (%s), offending item ID 0x%02X",
                    data[5], protocol::apdu_ack_name(ack), data[6]);
         } else {
@@ -940,7 +964,7 @@ bool Transport::try_dispatch_response(const uint8_t* data, size_t len) {
     //
     //   - `cmd.expect_short_read_refusal` -- the caller declares it. See the
     //     field's own note for the failure this closes.
-    //   - `len <= 9` -- an upper bound, which #279 had none of. Byte 5 is the
+    //   - The shared parser's nine-byte ceiling, which #279 had none of. Byte 5 is the
     //     FIRST APDU's length on a multi-APDU telegram (#226), so without a
     //     ceiling any Class 10 telegram of any size whose first APDU declared 0
     //     or 1 payload bytes read as a refusal. App C.17 is explicit that
@@ -961,20 +985,10 @@ bool Transport::try_dispatch_response(const uint8_t* data, size_t len) {
     // nothing in it to tell the two apart. Those fall through to the floor below
     // exactly as they did before, because failing a read on an ambiguous frame
     // is the trade this issue explicitly refuses -- three seconds for a lie.
-    const bool short_read_refusal_shape =
-        queued_class == 0x0A && data[4] == 0x0A && len >= 8 && len <= 9 &&
-        cmd.expect_short_read_refusal && cmd.packet.size() > 5 &&
-        protocol::apdu_op(cmd.packet[5]) == protocol::ApduOp::GET;
+    const bool short_read_refusal_shape = awaiting_short_read_refusal && valid_short_reply;
 
     if (short_read_refusal_shape) {
-      const protocol::ApduAck ack = protocol::apdu_ack(data[5]);
-      // The same decode the SET branch above uses, which is the point of it
-      // being shared: when the head's acknowledge is NOT ok, the byte after it
-      // is the offending Data Item's ID and not a Class 10 status, and
-      // decode_short_class10_reply() is where that rule is stated once. The
-      // withdrawn #279 branch read that byte unconditionally as a status.
-      const protocol::ShortClass10Reply reply =
-          protocol::decode_short_class10_reply(data[5], data[6], len);
+      const protocol::ApduAck ack = reply.ack;
       const bool head_ok = reply.head_ok;
       const uint8_t class10_ack = reply.class10_ack;
       const bool declined = !reply.ok;
@@ -996,7 +1010,7 @@ bool Transport::try_dispatch_response(const uint8_t* data, size_t len) {
         if (head_ok) {
           ESP_LOGW(TAG, "Class 10 read declined: head 0x%02X, %s (code 0x%02X)",
                    data[5], protocol::class10_ack_name(class10_ack), class10_ack);
-        } else if (protocol::apdu_payload_len(data[5]) == 1 && len >= 9) {
+        } else if (reply.has_payload) {
           ESP_LOGW(TAG, "Class 10 read refused: head 0x%02X (%s), offending item ID 0x%02X",
                    data[5], protocol::apdu_ack_name(ack), data[6]);
         } else {
@@ -1104,6 +1118,37 @@ bool Transport::try_dispatch_response(const uint8_t* data, size_t len) {
                (unsigned) protocol::apdu_object_version(packet_type_low_ver),
                (unsigned) protocol::apdu_object_type(cmd.expect_type_high, cmd.expect_type_low_ver),
                (unsigned) protocol::apdu_object_version(cmd.expect_type_low_ver));
+    }
+  }
+
+  // Owned object replies belong only to an exact outstanding read. A late
+  // reply must not answer a wildcard (DST) or a same-low-half type (history).
+  if (data[4] == 0x0A) {
+    const uint16_t type = protocol::apdu_object_type(packet_type_high, packet_type_low_ver);
+    if (std::find(owned_object_types_.begin(), owned_object_types_.end(), type) != owned_object_types_.end()) {
+      const bool has_owner = this->state_ == State::AWAITING_RESPONSE && !this->command_queue_.empty() &&
+          this->command_queue_.front().packet.size() > 4 && this->command_queue_.front().packet[4] == 0x0A &&
+          this->command_queue_.front().expect_type_high == packet_type_high &&
+          this->command_queue_.front().expect_type_low_ver == packet_type_low_ver;
+      if (!has_owner) {
+        // This is an abandoned owned read's answer, so it settles that read's
+        // debt (issue #248). Left standing, the debt would make the next short
+        // frame -- a SET's real acknowledgement -- pay for a reply that has
+        // already arrived, and the write would stall to its timeout. Paid only
+        // from debt an owned read recorded: a stray duplicate must not cancel a
+        // SET's own debt. Not consume_owed_reply_(): nothing was withheld from
+        // the live command, so its suppressed_a_frame must stay clear.
+        if (this->stale_reply_possible_() && this->owed_object_replies_ > 0) {
+          this->owed_object_replies_--;
+          this->owed_replies_--;
+          if (this->owed_replies_ == 0) this->owed_pending_ = false;
+          ESP_LOGV(TAG, "Late owned object reply paid one owed reply (%u still owed)",
+                   (unsigned) this->owed_replies_);
+        }
+        ESP_LOGV(TAG, "Discarding unowned object reply type %u v%u", type,
+                 protocol::apdu_object_version(packet_type_low_ver));
+        return true;
+      }
     }
   }
 
@@ -1231,8 +1276,9 @@ bool Transport::try_dispatch_response(const uint8_t* data, size_t len) {
       ESP_LOGV(TAG, "Wildcard match: accepting any Class 10 packet (OpSpec=0x%02X, Obj=%d, Sub=%d)",
                opspec, packet_type_low_ver, packet_type_high);
     } else {
-      // Exact match: check Object ID and Sub-ID
-      matched = (packet_type_low_ver == cmd.expect_type_low_ver && (packet_type_high == cmd.expect_type_high || packet_type_high == 0));
+      // Exact type/version match. A zero high type byte is part of the
+      // identifier, not a wildcard for another object's high byte.
+      matched = (packet_type_low_ver == cmd.expect_type_low_ver && packet_type_high == cmd.expect_type_high);
       
       // A "BACKUP MATCH" for a supposedly swapped Obj/Sub used to sit here:
       //   if (!matched && expect != 0 && packet_type_high == expect) matched = true;
@@ -1285,13 +1331,13 @@ bool Transport::try_dispatch_response(const uint8_t* data, size_t len) {
 
     if (matched && cmd.require_object_reply) {
       protocol::Class10ObjectView object;
-      if (!protocol::parse_class10_object(data, len, object) ||
-          object.type != protocol::apdu_object_type(cmd.expect_type_high, cmd.expect_type_low_ver) ||
-          object.version != protocol::apdu_object_version(cmd.expect_type_low_ver)) {
+      if (!protocol::parse_class10_object(data, len, object)) {
         this->fail_front_command_();
         this->state_ = State::IDLE;
         return true;
       }
+      payload = object.body - 3;
+      payload_len = object.body_len + 3;
     }
 
     if (matched) {

@@ -2,6 +2,7 @@
 #include "publish_gate.h"
 #include "esphome/core/hal.h"
 #include "esphome/core/log.h"
+#include <cinttypes>
 #include <cstring>
 
 namespace esphome {
@@ -330,10 +331,12 @@ void DhwDemandComponent::update_session_(bool demand, uint32_t now) {
   // the held value — so they must agree on the clock too (issue #125 item 2).
   SessionTracker::Tick tick = session_.update(demand, now);
 
-  if (tick.just_started)
+  if (tick.just_started) {
     ESP_LOGI(TAG, "DHW session started");
-  if (tick.just_ended)
+  }
+  if (tick.just_ended) {
     ESP_LOGI(TAG, "DHW session ended: %.0f s", tick.ended_duration_s);
+  }
 
   // Publish live session duration (0 when inactive). Gated on change: while a
   // session runs the value moves every tick so the gate costs nothing, and it
@@ -465,12 +468,12 @@ void DhwDemandComponent::update() {
   // guaranteed to be read against a loop the meter already saw moving.
   if (prev_known_on && pump_confirmed_off) {
     pump_off_since_ms_ = now;
-    ESP_LOGD(TAG, "Pump off edge at %u ms; flow latch disarmed for %d s", now,
+    ESP_LOGD(TAG, "Pump off edge at %" PRIu32 " ms; flow latch disarmed for %d s", now,
              latch_pump_off_suppression_seconds_);
   }
   if (!prev_known_on && pump_on && pump_state_known) {
     pump_on_since_ms_ = now;
-    ESP_LOGD(TAG, "Pump on edge at %u ms; loop-flow readings before it are "
+    ESP_LOGD(TAG, "Pump on edge at %" PRIu32 " ms; loop-flow readings before it are "
                   "not subtractable",
              now);
   }
@@ -596,10 +599,11 @@ void DhwDemandComponent::update() {
         last_measured_no_draw_ms_ = now;
         break;
       case SubtractionStamp::NONE:
-        if (!std::isnan(result.demand_gpm))
+        if (!std::isnan(result.demand_gpm)) {
           ESP_LOGD(TAG, "Subtraction read %.2f GPM against a meter reading "
                         "from another speed; not carried as a metered draw",
                    result.demand_gpm);
+        }
         break;
     }
 

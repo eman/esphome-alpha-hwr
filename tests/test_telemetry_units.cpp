@@ -62,7 +62,7 @@ static void test_motor_state_units() {
   put_float(f, 25, 12.5f);    // power (W)
   put_float(f, 33, 1650.0f);  // speed (RPM)
 
-  MotorStateTelemetry m = decode_motor_state_response(f, sizeof(f));
+  MotorStateTelemetry m = decode_motor_state_response(f, sizeof(f) - 2);
   TEST_ASSERT(m.has_power && m.has_speed, "motor state decoded");
   TEST_ASSERT_FLOAT_EQ(m.voltage_ac_v, 230.0f, 0.01f, "AC voltage is raw V (no scaling)");
   TEST_ASSERT_FLOAT_EQ(m.voltage_dc_v, 311.0f, 0.01f, "DC voltage is raw V (no scaling)");
@@ -126,9 +126,62 @@ static void test_temperature_units() {
   TEST_ASSERT_FLOAT_EQ(t.control_box_temperature_c, 42.0f, 0.01f, "control-box temp is raw °C");
 }
 
+static void test_dc_power_from_captured_frame() {
+  const uint8_t motor[] = {0x24, 0x34, 0xf8, 0xe7, 0x0a, 0x30, 0x00, 0x01, 0x00, 0x03, 0x00, 0x00,
+                           0x29, 0x42, 0xe5, 0xa6, 0x46, 0x43, 0x21, 0x4c, 0x00, 0x3e, 0x00, 0x32,
+                           0x3e, 0x41, 0x1f, 0xda, 0xc0, 0x41, 0x21, 0x36, 0xa0, 0x45, 0x52, 0x51,
+                           0xcc, 0x7f, 0xff, 0xff, 0xff, 0x7f, 0xff, 0xff, 0xff, 0x00, 0x00, 0x00,
+                           0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x8a, 0xb0};
+  auto motor_state = decode_motor_state_response(motor, sizeof(motor) - 2);
+  TEST_ASSERT(motor_state.has_dc_power, "Captured motor reply includes DC power");
+  TEST_ASSERT_FLOAT_EQ(motor_state.dc_power_w, 10.075836f, 0.0001f, "DC power remains raw watts");
+
+  uint8_t synthetic[56] = {};
+  put_float(synthetic, 29, 18.5f);
+  motor_state = decode_motor_state_response(synthetic, sizeof(synthetic) - 2);
+  TEST_ASSERT(motor_state.has_dc_power && motor_state.dc_power_w == 18.5f,
+              "DC power is decoded independently of motor power");
+  TEST_ASSERT(!decode_motor_state_response(synthetic, 32).has_dc_power,
+              "DC power cannot extend beyond the validated object window");
+  TEST_ASSERT(decode_motor_state_response(synthetic, 33).has_dc_power,
+              "Complete DC power is accepted before later motor fields");
+  for (float invalid : {INFINITY, NAN, -1.0f, 1001.0f}) {
+    put_float(synthetic, 29, invalid);
+    motor_state = decode_motor_state_response(synthetic, sizeof(synthetic) - 2);
+    TEST_ASSERT(!motor_state.has_dc_power && motor_state.has_power,
+                "Invalid DC power does not invalidate motor power");
+  }
+}
+
+static void test_motor_fields_respect_the_object_window() {
+  struct Field {
+    size_t offset;
+    bool MotorStateTelemetry::*present;
+  };
+  const Field fields[] = {
+      {13, &MotorStateTelemetry::has_voltage_ac},    {17, &MotorStateTelemetry::has_voltage_dc},
+      {21, &MotorStateTelemetry::has_current},       {25, &MotorStateTelemetry::has_power},
+      {29, &MotorStateTelemetry::has_dc_power},      {33, &MotorStateTelemetry::has_speed},
+      {37, &MotorStateTelemetry::has_converter_temp}};
+  const uint8_t frame[43] = {};
+  for (const auto &field : fields) {
+    for (size_t missing = 1; missing <= 2; missing++) {
+      auto motor = decode_motor_state_response(frame, field.offset + 4 - missing);
+      TEST_ASSERT(!(motor.*field.present), "A motor field cannot consume bytes outside the declared object");
+    }
+    auto motor = decode_motor_state_response(frame, field.offset + 4);
+    TEST_ASSERT(motor.*field.present, "A complete motor field within the object window is accepted");
+  }
+  TEST_ASSERT(!decode_motor_state_response(frame, 0).has_voltage_ac &&
+                  !decode_motor_state_response(frame, 1).has_voltage_ac,
+              "Runt object windows contain no motor fields");
+}
+
 int main() {
   std::cout << "Running Telemetry Units Tests..." << std::endl;
   test_motor_state_units();
+  test_motor_fields_respect_the_object_window();
+  test_dc_power_from_captured_frame();
   test_flow_head_units();
   test_inlet_pressure_units();
   test_temperature_units();

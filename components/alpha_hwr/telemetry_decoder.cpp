@@ -7,10 +7,46 @@
 #include "telemetry_decoder.h"
 #include "codec.h"
 #include <cmath>
+#include <limits>
 
 namespace esphome {
 namespace alpha_hwr {
 namespace protocol {
+
+EnergyTelemetry decode_energy_payload(const uint8_t* payload, size_t len) {
+  EnergyTelemetry result;
+
+  // GENI Class 10 type 232 v1: [object size u24 BE][system_energy f64 BE][system_power f32 BE]...
+  // power_and_energy_info_obj (87/1), unitIndex 87 = Ws (joules).
+  if (payload == nullptr || len < 3) {
+    return result;
+  }
+  const uint32_t object_size = decode_uint24_be(payload);
+  if (object_size > len - 3) {
+    return result;
+  }
+
+  // System energy (offset 3, double): convert joules to kWh.
+  if (object_size >= 8) {
+    const double joules = decode_double_be(payload, 3);
+    const double kwh = joules / 3600000.0;
+    if (std::isfinite(kwh) && kwh >= 0 && kwh <= std::numeric_limits<float>::max()) {
+      result.has_energy = true;
+      result.energy_kwh = static_cast<float>(kwh);
+    }
+  }
+
+  // System power (offset 11, float): use the same bounds as motor-state power.
+  if (object_size >= 12) {
+    float power = decode_float_be(payload, 11);
+    if (std::isfinite(power) && power >= 0 && power <= 1000) {
+      result.has_power = true;
+      result.power_w = power;
+    }
+  }
+
+  return result;
+}
 
 MotorStateTelemetry decode_motor_state_response(const uint8_t* data, size_t len) {
   MotorStateTelemetry result;
@@ -21,9 +57,10 @@ MotorStateTelemetry decode_motor_state_response(const uint8_t* data, size_t len)
   // [1] = Voltage DC (V) at offset 17
   // [2] = Current (A) at offset 21
   // [3] = Power (W) at offset 25
-  // [4] = Unknown/reserved at offset 29
+  // [4] = DC power (W) at offset 29
   // [5] = Speed (RPM) at offset 33
-  // [6] = Converter temp (°C) at offset 37
+  // [6] = Converter temp (°C) at offset 37; NaN in the captured HWR replies
+  // [7-8] = Inverter/aux temp at offsets 41/45; NaN/zero in all 42 HWR replies, not exposed
   
   // AC voltage (offset 13, float[0])
   if (len >= 17) {
@@ -61,6 +98,15 @@ MotorStateTelemetry decode_motor_state_response(const uint8_t* data, size_t len)
     }
   }
   
+  // DC power (offset 29, float[4])
+  if (len >= 33) {
+    float power = decode_float_be(data, 29);
+    if (std::isfinite(power) && power >= 0 && power <= 1000) {
+      result.has_dc_power = true;
+      result.dc_power_w = power;
+    }
+  }
+
   // Speed/RPM (offset 33, float[5])
   if (len >= 37) {
     float rpm = decode_float_be(data, 33);
@@ -88,7 +134,8 @@ FlowPressureTelemetry decode_flow_pressure_response(const uint8_t* data, size_t 
   
   // Flow/pressure response: floats start at offset 13
   // Float array layout:
-  // [0-5] = Reserved/unknown
+  // [0-4] = Reserved/unknown
+  // [5] = Differential temperature at offset 33; NaN in all 112 HWR replies, not exposed
   // [6] = Flow rate (m³/h) at offset 37
   // [7] = Head pressure (m) at offset 41
   // [8] = Inlet pressure (bar) at offset 45 - often NaN
@@ -178,13 +225,12 @@ bool decode_faults_payload(const uint8_t* payload, size_t len, AlarmWarningTelem
   if (payload == nullptr || len < 5) {
     return false;
   }
-  const uint32_t object_size = (uint32_t(payload[0]) << 16) |
-                              (uint32_t(payload[1]) << 8) | payload[2];
+  const uint32_t object_size = decode_uint24_be(payload);
   if (object_size != len - 3) {
     return false;
   }
   const uint16_t count = decode_uint16_be(payload, 3);
-  if (object_size != 2 + size_t(count) * 4) {
+  if (object_size != 2 + static_cast<size_t>(count) * 4) {
     return false;
   }
 

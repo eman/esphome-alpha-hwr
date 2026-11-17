@@ -39,9 +39,9 @@ void AlphaHwrApiBridge::setup(AlphaHwrComponent *component) {
   // call site, rather than at a user's event listener.
   //
   // Every command string that is registered below is therefore public API on
-  // two counts, and test_write_operations.cpp::test_command_strings() pins all
-  // sixteen: editing one of those strings in write_command_to_string() renames
-  // a Home Assistant service along with the event field. Two commands have no
+  // two counts, and test_write_operations.cpp::test_command_strings() pins the
+  // command strings: editing one in write_command_to_string() renames a Home
+  // Assistant service along with the event field. Two commands have no
   // service here — SET_REMOTE_MODE (the Remote Mode switch is entity-only) and
   // SET_CLOCK (the RTC sync is autonomous, submitted by the periodic check with
   // origin INTERNAL) — so their strings move the event field alone.
@@ -55,6 +55,10 @@ void AlphaHwrApiBridge::setup(AlphaHwrComponent *component) {
   // service listing from a real node is the check.
   const auto name = services::write_command_to_string;
 
+  register_service(&AlphaHwrApiBridge::on_set_panel_lock, name(WriteCommand::SET_PANEL_LOCK),
+                   {"enabled", "op_id"});
+  register_service(&AlphaHwrApiBridge::on_set_prevent_display_sleep,
+                   name(WriteCommand::SET_PREVENT_DISPLAY_SLEEP), {"enabled", "op_id"});
   register_service(&AlphaHwrApiBridge::on_set_enabled, name(WriteCommand::SET_PUMP_ENABLED),
                    {"enabled", "op_id"});
   register_service(&AlphaHwrApiBridge::on_set_mode, name(WriteCommand::SET_MODE),
@@ -400,6 +404,12 @@ void AlphaHwrApiBridge::fire_write_settled(const WriteResult &result) {
       put_bool("requested_limiter_enabled", result.requested_limiter_enabled);
       put_float("requested_limit_gpm", result.requested_limiter_limit_gpm, "%.2f");
       break;
+    case WriteCommand::SET_PANEL_LOCK:
+      put_bool("panel_locked", result.enabled);
+      break;
+    case WriteCommand::SET_PREVENT_DISPLAY_SLEEP:
+      put_bool("prevent_display_sleep", result.enabled);
+      break;
     case WriteCommand::SET_REMOTE_MODE:
       // `remote_enabled`, not `enabled`: that key already carries two
       // meanings -- the pump's run state on the control commands, the
@@ -474,6 +484,14 @@ void AlphaHwrApiBridge::reject_(WriteCommand command, const std::string &op_id,
   result.status = WriteStatus::INVALID;
   result.detail = detail;
   fire_write_settled(result);
+}
+
+void AlphaHwrApiBridge::on_set_panel_lock(bool enabled, std::string op_id) {
+  component_->submit_set_panel_lock(enabled, op_id);
+}
+
+void AlphaHwrApiBridge::on_set_prevent_display_sleep(bool enabled, std::string op_id) {
+  component_->submit_set_prevent_display_sleep(enabled, op_id);
 }
 
 void AlphaHwrApiBridge::on_set_enabled(bool enabled, std::string op_id) {

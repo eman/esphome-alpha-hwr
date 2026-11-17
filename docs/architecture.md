@@ -57,7 +57,9 @@ composes; it no longer owns any multi-step write sequencing.
 ## Key Design Notes
 
 - **Non-blocking transport**: 50ms pacing between commands; only one command in flight at a time.
-- **Response matching**: Flexible Object/Sub-ID matching handles pump firmware quirks (SubID 0 wildcard responses).
+- **Response matching**: a reply carries no request identity, only its object's type and version, so correlation is positional: one request outstanding, and its reply is whatever answers it. A command that names a type matches only that exact type and version. A zero high type byte is part of the type, not a wildcard: type 232 v1 (energy, `00 00 E8 01`) and type 1000 v1 (cycle timestamps, `00 03 E8 01`) differ only there, and both occur in the captures.
+- **Owned object reads**: `Transport::send_class10_object_read()` awaits an exact type and validates the whole object (CRC, both acknowledges, APDU bounds, declared size) before delivering it. Its type is then *owned*: a reply of that type with no matching read in flight is discarded, so it can never answer a wildcard command (the DST read) or leak to passive telemetry. The cumulative energy read uses this path.
+- **Reply debt (issue #248)**: a command that times out leaves a reply owed, and the next short Class 10 frame within 500 ms pays that debt rather than answering whatever command is now waiting. A late short frame cannot be attributed to its request any other way. The one late reply that *can* be attributed is a discarded owned-type reply, so it pays the debt its own read's timeout recorded, and only that debt. Telemetry reads are still sent fire-and-forget, so a refusal one of them provokes cannot be told apart from anything else's.
 - **Time sync**: Automatic daily RTC synchronization via SNTP; initial sync fires 2 seconds after the session becomes ready.
 - **Namespace organization**: ESPHome requires a flat file structure, so layering is achieved via C++ namespaces (`esphome::alpha_hwr::core`, `::protocol`, `::services`) rather than subdirectories.
 - **Units & scaling**: live telemetry arrives as raw IEEE-754 floats already in physical units; only setpoints, trends, and statistics apply conversion factors. Every entity's unit and factor is catalogued, cross-referenced to the GENI unit tables, and regression-tested — see [Units audit](units-audit.md). Confirm any new entity's factor there before adding it.
@@ -215,6 +217,7 @@ entity a reply belongs to. Each counted record contains an error code and a
 subcode; only the primary codes feed the existing text sensors. After a failed
 fault read, fault polling pauses until the BLE session is restarted, so late
 same-type replies cannot be attributed to the wrong entity. Other telemetry
-continues. The transport's opt-in `require_object_reply` guard applies the same
-object validation to these matched reads without changing existing write/ACK
-contracts.
+continues. The shared `send_class10_object_read()` helper applies the same
+object validation to these matched reads and owns their response type, so late
+fault replies cannot satisfy unrelated wildcard commands. No transport changes
+are required.

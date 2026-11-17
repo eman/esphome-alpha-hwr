@@ -8,6 +8,7 @@
  */
 
 #include "sensor_publisher.h"
+#include "publish_gate.h"
 #include "esphome/core/hal.h"
 #include <cmath>
 
@@ -47,9 +48,32 @@ void SensorPublisher::setup_head_rate_callback() {
   });
 }
 
+void SensorPublisher::publish_energy(const protocol::EnergyTelemetry& energy) {
+  // Validate that the counter is present before using its value.
+  if (!energy.has_energy) {
+    ESP_LOGD(TAG, "Energy has no valid counter, skipping publish");
+    return;
+  }
+
+  const float energy_kwh = energy.energy_kwh;
+  if (!std::isfinite(energy_kwh) || energy_kwh < 0) {
+    ESP_LOGW(TAG, "Energy out of range: %.6f kWh", energy_kwh);
+    return;
+  }
+
+  // Log summary; system power is diagnostic, not the motor-power sensor source.
+  ESP_LOGD(TAG, "Energy: %.6f kWh, system power=%.1f W", energy_kwh,
+           energy.has_power ? energy.power_w : NAN);
+
+  // Publish energy, preserving the raw-state change gate and force_update.
+  if (energy_sensor_ != nullptr) {
+    publish_sensor_if_changed(energy_sensor_, energy_kwh);
+  }
+}
+
 void SensorPublisher::publish_motor_state(const protocol::MotorStateTelemetry& motor) {
   // Validate that we have at least some valid data
-  if (!motor.has_power && !motor.has_speed) {
+  if (!motor.has_power && !motor.has_speed && !motor.has_dc_power) {
     ESP_LOGD(TAG, "Motor state has no valid data, skipping publish");
     return;
   }
@@ -81,6 +105,11 @@ void SensorPublisher::publish_motor_state(const protocol::MotorStateTelemetry& m
     power_sensor_->publish_state(motor.power_w);
   }
   
+  // Publish DC power with raw-state change gating.
+  if (motor.has_dc_power && power_dc_sensor_ != nullptr) {
+    publish_sensor_if_changed(power_dc_sensor_, motor.dc_power_w);
+  }
+
   // Publish RPM
   if (motor.has_speed && rpm_sensor_ != nullptr) {
     rpm_sensor_->publish_state(motor.speed_rpm);

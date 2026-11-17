@@ -28,12 +28,97 @@ events fire.
 | `time_id` | ID | none | A `time:` component to sync the pump's clock from. Optional in the schema, but see below — without it the pump's clock is never set. |
 | `initiate_pairing` | boolean | `true` | Whether **this node** initiates BLE pairing and configures security parameters. Leave it on; `false` does *not* prevent bonding — see below. (Formerly `enable_pairing`, still accepted.) |
 | `reconnect_settle_time` | time | `2s` | Delay after disconnect before reconnecting |
+| `statistics_update_interval` | time | `60s` | Refresh operating statistics while any of `start_count`, `operating_hours`, or `power_on_hours` is configured. `0s` keeps only the initial read. |
+| `panel_settings_poll_interval` | time | `0s` | Optional HMI settings readback. The controls package sets `60s`; `0s` disables background panel reads. |
+| `energy_update_interval` | time | `60s` | Minimum interval between awaited energy reads; see `energy` below. |
 | `control_state_poll_interval` | time | `30s` | Interval for periodic control state polling. Set to `0s` to disable. |
 | `data_timeout` | time | `60s` | Tear the BLE link down after this long with no data from the pump, so the normal reconnect runs. Set to `0s` to disable. |
 | `ready_timeout` | time | `300s` | Report a fault if the pump has not become usable this long after connecting. Naming only; see `ready_recycle`. `0s` disables. |
 | `ready_recycle` | count (0–100) | `0` | How many times to also tear the link down when `ready_timeout` expires, so the normal reconnect runs; `0` never does. A boolean is still accepted: `true` means without limit, `false` means `0`. **Opt-in** — see below. |
 | `frame_logging` | boolean | `false` | Log every GENI frame sent and received, whole, at INFO. Diagnostic capture only, and it reaches every API subscriber — see below before turning it on. |
 | `connect_after_boot_delay` | time | `0s` | Hold the **first** BLE connection this long after boot, so a log client is attached before the link opens. Troubleshooting only — see below. |
+
+### Panel settings and additional diagnostics
+
+The controls package exposes **Panel Lock** and **Prevent Display Sleep**.
+Writes use a fresh read, change only the requested field, and confirm the
+result with a second read. Panel Lock locks settings (level 1), preserves a
+stronger existing settings-and-operation lock (level 2), and unlocks to level 0.
+PIN fields are preserved. Prevent Display Sleep preserves the display timeout
+and reverses the pump's hidden-mode flag: hidden mode enabled means the display
+sleeps.
+Neither switch publishes a requested value optimistically or writes a setting
+at boot; both explicitly disable ESPHome switch restore actions.
+
+The background panel read interval defaults to zero without the controls
+package. Unsupported Class/Data Item replies disable that setting's background
+reads until reconnect; transient failures retain the last observed state.
+Unknown versions and malformed records are not written.
+
+Additional optional sensors:
+
+| Key | Meaning | Source |
+| --- | --- | --- |
+| `power_dc` | DC-link power consumption, W | Motor-state reply, 87/69 |
+| `power_on_hours` | Time powered, including periods with the motor stopped, h | Statistics reply, 93/1 |
+
+DC power reuses the existing telemetry replies. Power-on hours
+shares the statistics read with Start Count and Operating Hours; its interval
+is limited by the component's update cadence, and only one statistics read can
+be pending. Any of the three counters enables periodic reads; both statistics
+and panel polling wait for the initial reads and cache synchronization to complete.
+The statistics read uses the same awaited object helper as energy,
+including complete object validation and ownership of late replies. A short older
+statistics record leaves power-on hours unavailable.
+DC power and all statistics counters use raw-state change gating. Start Count,
+Operating Hours,
+and Power-on Hours use `state_class: total_increasing` for their cumulative totals.
+
+### `energy`
+
+Optional numeric sensor for the pump's cumulative energy counter, in kWh
+(`device_class: energy`, `state_class: total_increasing`, three decimals).
+Reads Object 87/1 using an awaited type-232/version-1 request only when configured. The pump
+supplies the counter; this is not an integration of sampled power. Invalid or
+unsupported replies leave the last reading unchanged. ESPHome sensor states
+use float precision, so very large totals may have less than 0.001 kWh resolution.
+
+```yaml
+alpha_hwr:
+  energy:
+    name: "Pump Cumulative Energy"
+```
+
+The pump package includes this sensor. `energy_update_interval` defaults to `60s`;
+reads are initiated from the telemetry poll and cannot run faster than that poll.
+The first eligible poll after connection reads immediately, and only one energy
+request can be queued or outstanding.
+
+```yaml
+alpha_hwr:
+  energy_update_interval: 60s
+  energy:
+    name: "Pump Cumulative Energy"
+```
+
+An Unknown Class/Unknown Data Item refusal disables energy polling for the
+current connection and logs one unsupported-counter warning. Reconnect probes
+again. BUSY, generic operation failure, malformed data and no response preserve
+the last value and allow another attempt on the configured cadence. No failed
+read publishes zero or changes the counter. Valid zero/decreased values from a
+validated counter reply are trusted; no speculative reset filter is applied.
+Home Assistant reads any decrease of a `total_increasing` sensor as a meter
+reset, so if the pump ever reported a transient low value and then recovered,
+the Energy dashboard would count the recovery as new consumption. No such
+reading has been observed: on the bench the counter came back unchanged across
+a node reboot.
+The decoded system-power field remains in `EnergyTelemetry`, while the exposed
+`power` sensor continues to use motor telemetry. How the read is matched to its
+reply is in [Architecture](architecture.md#key-design-notes).
+
+Publication compares pre-filter raw values and honors `force_update`.
+`accuracy_decimals: 3` affects display precision, not rounding of the counter
+used by the change gate.
 
 ### `time_id`
 

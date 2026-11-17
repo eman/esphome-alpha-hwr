@@ -119,6 +119,21 @@ public:
   void set_power_sensor(sensor::Sensor *sensor) {
     sensor_publisher_.set_power_sensor(sensor);
   }
+  void set_energy_update_interval(uint32_t interval_ms) {
+    telemetry_service_.set_energy_update_interval(interval_ms);
+  }
+  void set_power_dc_sensor(sensor::Sensor *sensor) {
+    sensor_publisher_.set_power_dc_sensor(sensor);
+  }
+  void set_statistics_update_interval(uint32_t interval_ms) {
+    statistics_update_interval_ms_ = interval_ms;
+  }
+  void set_power_on_hours_sensor(sensor::Sensor *sensor) {
+    power_on_hours_sensor_ = sensor;
+  }
+  void set_energy_sensor(sensor::Sensor *sensor) {
+    sensor_publisher_.set_energy_sensor(sensor);
+  }
   void set_rpm_sensor(sensor::Sensor *sensor) {
     sensor_publisher_.set_rpm_sensor(sensor);
   }
@@ -763,6 +778,7 @@ private:
   }
 
   sensor::Sensor *start_count_sensor_{nullptr};
+  sensor::Sensor *power_on_hours_sensor_{nullptr};
   sensor::Sensor *operating_hours_sensor_{nullptr};
   sensor::Sensor *clock_diff_sensor_{nullptr};
 #ifdef USE_TEXT_SENSOR
@@ -1045,6 +1061,12 @@ private:
   /// has already been warned about, and whether the "not ready" poll skip has.
   uint32_t control_sync_warned_gen_{UINT32_MAX};
   bool not_ready_warned_{false};
+  uint32_t statistics_update_interval_ms_{60000};
+  uint32_t last_statistics_read_ms_{0};
+  bool statistics_read_pending_{false};
+  uint32_t panel_settings_poll_interval_ms_{0};
+  uint32_t last_panel_settings_poll_ms_{0};
+
   /// Diagnostic suspend (issue #243): the link is down because someone asked for
   /// it, not because anything failed.
   ///
@@ -1088,6 +1110,33 @@ public:
   // esphome.alpha_hwr_write_settled Home Assistant event).
   void set_write_result_callback(std::function<void(const services::WriteResult &)> cb) {
     write_op_service_.set_result_callback(std::move(cb));
+  }
+  void set_panel_settings_poll_interval(uint32_t interval_ms) {
+    panel_settings_poll_interval_ms_ = interval_ms;
+  }
+  bool get_panel_lock_state(bool *result) const {
+    const int8_t value = control_service_.get_panel_setting(2);
+    if (value < 0) return false;
+    if (result) *result = value != 0;
+    return true;
+  }
+  bool get_prevent_display_sleep_state(bool *result) const {
+    const int8_t value = control_service_.get_panel_setting(114);
+    if (value < 0) return false;
+    if (result) *result = value == 0;
+    return true;
+  }
+  void submit_set_panel_lock(bool enabled, const std::string &op_id) {
+    write_op_service_.submit_set_panel_setting(true, enabled, op_id);
+  }
+  void submit_set_prevent_display_sleep(bool enabled, const std::string &op_id) {
+    write_op_service_.submit_set_panel_setting(false, enabled, op_id);
+  }
+  void set_panel_lock(bool enabled) {
+    write_op_service_.submit_set_panel_setting(true, enabled, "", nullptr, services::WriteOrigin::ENTITY);
+  }
+  void set_prevent_display_sleep(bool enabled) {
+    write_op_service_.submit_set_panel_setting(false, enabled, "", nullptr, services::WriteOrigin::ENTITY);
   }
   void submit_set_enabled(bool enabled, const std::string &op_id) {
     write_op_service_.submit_set_enabled(enabled, op_id);
