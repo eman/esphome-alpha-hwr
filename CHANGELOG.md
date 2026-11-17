@@ -47,6 +47,17 @@
   and the failed-layers `ESP_LOGW` in `schedule_service.cpp`. All four are
   braced now. Behaviour and binary size are unchanged.
 
+- **`-Wformat` warnings at `DEBUG` and `VERBOSE` log levels.** On the
+  ESP32-C3 `uint32_t` is `long unsigned int`, so `%u` / `%X` are the wrong
+  conversions for it. Two `ESP_LOGD` pump-edge lines in `dhw_demand.cpp` and an
+  `ESP_LOGV` in `telemetry_service.cpp` used them. Anyone raising
+  `logger: level` got the warnings, and the arguments were formally undefined.
+  They now use `PRIu32` / `PRIX32`. The CI firmware build now compiles every log
+  level and fails on any warning from this repo's components. Before this, no
+  CI build type-checked a `DEBUG` or `VERBOSE` format string: the default
+  `INFO` level compiles those lines out, and the host mocks discard log
+  arguments.
+
 ## [0.17.0] - 2026-10-28
 
 ### Migration

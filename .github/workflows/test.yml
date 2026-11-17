@@ -314,7 +314,20 @@ jobs:
         run: pip install esphome
 
       - name: Compile firmware
-        run: esphome compile tests/ci-compile.yaml
+        run: |
+          set -o pipefail
+          esphome compile tests/ci-compile.yaml 2>&1 | tee firmware-build.log
+
+      # Our components only: ESPHome core and ESP-IDF are not ours to fix. The
+      # config compiles every log level, so this is also the only check that
+      # type-checks LOGD/LOGV format strings against the device's integer
+      # widths (see tests/ci-compile.yaml).
+      - name: Fail on compiler warnings in our components
+        run: |
+          if tr '\r' '\n' < firmware-build.log | grep -E "components/(alpha_hwr|dhw_demand)/.*warning:"; then
+            echo "::error::Firmware build produced warnings in this repo's components"
+            exit 1
+          fi
 
       - name: Report image size
         if: always()

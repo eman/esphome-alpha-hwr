@@ -94,5 +94,12 @@ ota:
   - platform: esphome
     password: "ci-ota"
 
+# Every log statement compiled in, unlike production (INFO). A log line below
+# the configured level is compiled out entirely, so at INFO no build anywhere
+# type-checks a LOGD/LOGV format string: the host mocks discard their
+# arguments, and on the ESP32-C3 `uint32_t` is `long unsigned int`, so a `%u`
+# that is fine on a host is wrong on the device. Three such lines reached the
+# tree unnoticed (and #337's empty-body warning hid the same way). The build
+# step below fails on any warning from our components.
 logger:
-  level: INFO
+  level: VERY_VERBOSE

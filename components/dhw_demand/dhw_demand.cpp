@@ -2,6 +2,7 @@
 #include "publish_gate.h"
 #include "esphome/core/hal.h"
 #include "esphome/core/log.h"
+#include <cinttypes>
 #include <cstring>
 
 namespace esphome {
@@ -467,12 +468,12 @@ void DhwDemandComponent::update() {
   // guaranteed to be read against a loop the meter already saw moving.
   if (prev_known_on && pump_confirmed_off) {
     pump_off_since_ms_ = now;
-    ESP_LOGD(TAG, "Pump off edge at %u ms; flow latch disarmed for %d s", now,
+    ESP_LOGD(TAG, "Pump off edge at %" PRIu32 " ms; flow latch disarmed for %d s", now,
              latch_pump_off_suppression_seconds_);
   }
   if (!prev_known_on && pump_on && pump_state_known) {
     pump_on_since_ms_ = now;
-    ESP_LOGD(TAG, "Pump on edge at %u ms; loop-flow readings before it are "
+    ESP_LOGD(TAG, "Pump on edge at %" PRIu32 " ms; loop-flow readings before it are "
                   "not subtractable",
              now);
   }
