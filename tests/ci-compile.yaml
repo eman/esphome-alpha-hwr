@@ -27,6 +27,8 @@ substitutions:
   # not do it: the tag's entry survives the merge, gets cloned, and only loses
   # the component by an ordering accident in ESPHome's loader.
   component_source: ../components
+  # Overridden on the command line for the second CI build; see `logger:`.
+  log_level: VERY_VERBOSE
 
 packages:
   alpha_hwr: !include ../packages/alpha_hwr.yaml
@@ -94,12 +96,20 @@ ota:
   - platform: esphome
     password: "ci-ota"
 
-# Every log statement compiled in, unlike production (INFO). A log line below
-# the configured level is compiled out entirely, so at INFO no build anywhere
-# type-checks a LOGD/LOGV format string: the host mocks discard their
-# arguments, and on the ESP32-C3 `uint32_t` is `long unsigned int`, so a `%u`
-# that is fine on a host is wrong on the device. Three such lines reached the
-# tree unnoticed (and #337's empty-body warning hid the same way). The build
-# step below fails on any warning from our components.
+# CI compiles this config twice, at both ends of the log range (see the
+# firmware-build job in .github/workflows/test.yml), because each end hides a
+# warning the other shows:
+#
+# - VERY_VERBOSE compiles every log statement in. Below the configured level an
+#   ESP_LOGx line is compiled out entirely, and the host mocks never check
+#   format strings, so at production's INFO nothing type-checks a LOGD/LOGV
+#   format against the device's integer widths. On the ESP32-C3 `uint32_t` is
+#   `long unsigned int`, so a `%u` that is fine on a host is wrong here.
+# - NONE compiles every log statement out. A compiled-out ESP_LOGx expands to
+#   nothing, so an unbraced `if (x) ESP_LOGD(...);` becomes `if (x);` and GCC
+#   warns -Wempty-body (#337). At VERY_VERBOSE that shape compiles cleanly.
+#
+# VERY_VERBOSE is the default here; the job passes `-s log_level NONE` for the
+# other build.
 logger:
-  level: VERY_VERBOSE
+  level: ${log_level}

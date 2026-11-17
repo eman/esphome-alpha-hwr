@@ -52,11 +52,16 @@
   conversions for it. Two `ESP_LOGD` pump-edge lines in `dhw_demand.cpp` and an
   `ESP_LOGV` in `telemetry_service.cpp` used them. Anyone raising
   `logger: level` got the warnings, and the arguments were formally undefined.
-  They now use `PRIu32` / `PRIX32`. The CI firmware build now compiles every log
-  level and fails on any warning from this repo's components. Before this, no
-  CI build type-checked a `DEBUG` or `VERBOSE` format string: the default
-  `INFO` level compiles those lines out, and the host mocks discard log
-  arguments.
+  They now use `PRIu32` / `PRIX32`. Before this, no CI build type-checked a
+  `DEBUG` or `VERBOSE` format string: the default `INFO` level compiles those
+  lines out, and the host mocks discard log arguments.
+
+  The CI firmware job now compiles twice, once at `VERY_VERBOSE` and once at
+  `NONE`, and fails on any warning from this repo's components. Each level hides
+  something the other shows. `VERY_VERBOSE` compiles every log line in, so its
+  format string is type-checked. `NONE` compiles every log line out, which is
+  the only way the unbraced `if` bodies fixed above produce a `-Wempty-body`
+  warning.
 
 ## [0.17.0] - 2026-10-28
 
